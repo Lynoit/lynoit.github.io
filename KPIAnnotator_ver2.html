@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KPI -- Annotator</title>
+    <style>
+        table { width: 100%; border-collapse: collapse; }
+        td { text-align: center; padding: 10px; }
+        #leftColumn1, #leftColumn2, #leftColumn3, #leftColumn4 { text-align: center; vertical-align: top; }
+        #rightColumn { text-align: center; }
+        .bigButton { display: block; width: 50%; padding: 1px; font-size: 12px; border-radius: 1px; cursor: pointer; }
+        .orangeButton { background-color: orange; color: white; }
+        .redButton { background-color: red; color: white; }
+        .blueButton { background-color: blue; color: white; }
+        .greyButton { background-color: grey; color: white; }
+        .greenButton { background-color: green; color: white; }
+        #radioButtonContainer { text-align: center; }
+        #textBox { width: 30%; margin: 0 auto; padding: 10px; font-size: 12px; resize: vertical; }
+    </style>
+    <script>
+        var logTable = [];
+        var lastPosition = null;
+        var totalDistance = 0; // in meters
+
+        // Haversine formula to calculate distance between two points (in meters)
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000; // Earth radius in meters
+            const toRad = Math.PI / 180;
+            const dLat = (lat2 - lat1) * toRad;
+            const dLon = (lon2 - lon1) * toRad;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        function showPosition(position) {
+            var latitude = position.coords.latitude;
+            var longitude = position.coords.longitude;
+            var timestamp = position.timestamp;
+
+            document.getElementById("location").innerHTML =
+                "Latitude: " + latitude + "<br>Longitude: " + longitude;
+
+            // compute distance & speed based on lat/lon
+            if (lastPosition) {
+                var dist = calculateDistance(
+                    lastPosition.latitude,
+                    lastPosition.longitude,
+                    latitude,
+                    longitude
+                );
+                var timeDiff = (timestamp - lastPosition.timestamp) / 1000; // in seconds
+                if (timeDiff > 0) {
+                    var calcSpeed = (dist / timeDiff) * 3.6; // m/s to km/h
+                    document.getElementById("speed").innerHTML =
+                        "Speed: " + calcSpeed.toFixed(2) + " km/h";
+                }
+                totalDistance += dist;
+                document.getElementById("totalDistance").innerHTML =
+                    "Distance: " + (totalDistance/1000).toFixed(3) + " km";
+            }
+            // store last position
+            lastPosition = { latitude, longitude, timestamp };
+
+            // reverse geocode for city & weather
+            var url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat="
+                      + latitude + "&lon=" + longitude;
+            fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    var city = data.address.city || data.address.town || data.address.village;
+                    if (city) {
+                        document.getElementById('city').innerHTML = 'City: ' + city;
+                        getWeather(city);
+                    } else {
+                        document.getElementById('city').innerHTML = 'City not found';
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('city').innerHTML = 'Error: ' + error.message;
+                });
+        }
+
+        function showError(error) {
+            document.getElementById("location").innerHTML = "Error: " + error.message;
+            document.getElementById("speed").innerHTML = "Speed: N/A";
+        }
+
+        function updateLocation() {
+            navigator.geolocation.getCurrentPosition(showPosition, showError);
+        }
+
+        setInterval(updateLocation, 1000); // update every second
+
+        function getWeather(city) {
+            var weatherAPIUrl = 'https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q='
+                                + encodeURIComponent(city);
+            fetch(weatherAPIUrl)
+                .then(response => response.json())
+                .then(data => {
+                    var weatherIcon = data.current.condition.icon;
+                    var weatherImg = document.createElement("img");
+                    weatherImg.src = "https:" + weatherIcon;
+                    var weatherContainer = document.getElementById("weatherContainer");
+                    weatherContainer.innerHTML = '';
+                    weatherContainer.appendChild(weatherImg);
+                });
+        }
+
+        function handleMotion(event) {
+            var speed = event.accelerationIncludingGravity && event.accelerationIncludingGravity.z || 0;
+            document.getElementById("speed").innerHTML = "Speed: " + speed + " m/s";
+        }
+        window.addEventListener('devicemotion', handleMotion, true);
+
+        function updateDateTime() {
+            document.getElementById("dateTime").innerHTML = new Date().toLocaleString();
+        }
+        setInterval(updateDateTime, 1000);
+
+        function handleLocationTypeChange() {
+            var locationType = document.querySelector('input[name="locationType"]:checked').value;
+        }
+
+        function logButton(buttonName) {
+            var date = new Date().toLocaleDateString();
+            var time = new Date().toLocaleTimeString();
+            var latitude = document.getElementById("location").innerHTML.split("<br>")[0].split(": ")[1];
+            var longitude = document.getElementById("location").innerHTML.split("<br>")[1].split(": ")[1];
+            var speed = document.getElementById("speed").innerHTML.split(": ")[1].split(" ")[0];
+            var textBoxValue = document.getElementById("textBox").value;
+            var logEntry = [buttonName, date, time, latitude, longitude, speed, textBoxValue];
+            logTable.push(logEntry);
+            displayLogTable();
+        }
+
+        function displayLogTable() {
+            var html = "<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Latitude</th><th>Longitude</th><th>Speed</th><th>Comment</th></tr>";
+            for (var i = logTable.length - 1; i >= 0; i--) {
+                html += "<tr><td>" + (i+1) + "</td>";
+                logTable[i].forEach(function(item){ html += "<td>"+ item +"</td>"; });
+                html += "</tr>";
+            }
+            html += "</table>";
+            document.getElementById("logTableContainer").innerHTML = html;
+        }
+
+        window.addEventListener('DOMContentLoaded', function () {
+            document.querySelectorAll('input[name="locationType"]').forEach(r =>
+                r.addEventListener('change', handleLocationTypeChange)
+            );
+        });
+    </script>
+</head>
+<body>
+    <table>
+        <tr>
+            <td><p id="dateTime"></p></td>
+            <td><p id="city">Locating...</p></td>
+            <td><p id="location"></p></td>
+            <td><p id="speed">Speed: N/A</p></td>
+            <td><p id="totalDistance">Distance: 0 km</p></td>
+        </tr>
+        <tr>
+            <td><textarea id="textBox" rows="1" placeholder="Enter your annotation here..."></textarea></td>
+            <td><button class="bigButton blueButton" onclick="logButton('Manual annotation')">Manual annotation</button></td>
+        </tr>
+        <tr>
+            <td id="leftColumn1"> ... ACC buttons ... </td>
+            <td id="leftColumn2"> ... ALCA buttons ... </td>
+            <td id="leftColumn3"> ... LCC buttons ... </td>
+            <td id="leftColumn4"> ... TSI buttons ... </td>
+        </tr>
+    </table>
+    <div id="weatherContainer"></div>
+    <div id="logTableContainer"></div>
+</body>
+</html>
