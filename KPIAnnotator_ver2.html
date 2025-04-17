@@ -11,13 +11,13 @@
         .blueButton { background-color: blue; color: white; }
         .greyButton { background-color: grey; color: white; }
         .greenButton { background-color: green; color: white; }
-        #textBox { width: 60%; margin: 0 auto; padding: 10px; font-size: 12px; resize: vertical; }
+        #textBox { width: 80%; margin: 0 auto; padding: 10px; font-size: 12px; resize: vertical; }
         .distanceContainer { display: flex; justify-content: space-between; align-items: center; }
     </style>
     <script>
         var logTable = [];
         var lastPosition = null;
-        var totalDistance = 0; // in meters
+        var totalDistance = 0;
         var speedHistory = [];
         const HISTORY_SIZE = 5;
 
@@ -34,38 +34,47 @@
         }
 
         function showPosition(position) {
-            var latitude = position.coords.latitude;
-            var longitude = position.coords.longitude;
-            var timestamp = position.timestamp;
+            var lat = position.coords.latitude;
+            var lon = position.coords.longitude;
+            var t = position.timestamp;
 
             document.getElementById("location").innerHTML =
-                "Latitude: " + latitude + "<br>Longitude: " + longitude;
+                "Latitude: " + lat + "<br>Longitude: " + lon;
 
             if (lastPosition) {
-                var dist = calculateDistance(lastPosition.latitude, lastPosition.longitude, latitude, longitude);
-                var timeDiff = (timestamp - lastPosition.timestamp) / 1000;
-                if (timeDiff > 0) {
-                    var rawSpeed = (dist / timeDiff) * 3.6;
+                var dist = calculateDistance(lastPosition.latitude, lastPosition.longitude, lat, lon);
+                var dt = (t - lastPosition.timestamp) / 1000;
+                if (dt > 0) {
+                    var rawSpeed = (dist / dt) * 3.6;
                     speedHistory.push(rawSpeed);
                     if (speedHistory.length > HISTORY_SIZE) speedHistory.shift();
-                    var sum = speedHistory.reduce((a, b) => a + b, 0);
-                    var filteredSpeed = Math.round(sum / speedHistory.length);
-                    document.getElementById("speed").innerHTML = "Speed: " + filteredSpeed + " km/h";
+                    var avg = speedHistory.reduce((a, b) => a + b, 0) / speedHistory.length;
+                    document.getElementById("speed").innerHTML = "Speed: " + Math.round(avg) + " km/h";
                 }
                 totalDistance += dist;
                 document.getElementById("totalDistance").innerHTML = "Distance: " + (totalDistance/1000).toFixed(1) + " km";
             }
-            lastPosition = { latitude, longitude, timestamp };
+            lastPosition = { latitude: lat, longitude: lon, timestamp: t };
 
-            var url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=" + latitude + "&lon=" + longitude;
+            // reverse geocode with extratags to fetch road type
+            var url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=" + lat + "&lon=" + lon;
             fetch(url)
-                .then(response => response.json())
+                .then(res => res.json())
                 .then(data => {
                     var city = data.address.city || data.address.town || data.address.village;
                     document.getElementById('city').innerHTML = city ? 'City: ' + city : 'City not found';
+
+                    var roadType = 'Unknown';
+                    if (data.extratags && data.extratags.highway) {
+                        roadType = data.extratags.highway;
+                    } else if (data.address.road) {
+                        roadType = 'road: ' + data.address.road;
+                    }
+                    document.getElementById('roadType').innerHTML = 'Road type: ' + roadType;
+
                     if (city) getWeather(city);
                 })
-                .catch(error => document.getElementById('city').innerHTML = 'Error: ' + error.message);
+                .catch(err => document.getElementById('city').innerHTML = 'Error: ' + err.message);
         }
 
         function resetDistance() {
@@ -76,8 +85,8 @@
             document.getElementById("speed").innerHTML = "Speed: N/A";
         }
 
-        function showError(error) {
-            document.getElementById("location").innerHTML = "Error: " + error.message;
+        function showError(err) {
+            document.getElementById("location").innerHTML = "Error: " + err.message;
             document.getElementById("speed").innerHTML = "Speed: N/A";
         }
 
@@ -87,15 +96,15 @@
         setInterval(updateLocation, 1000);
 
         function getWeather(city) {
-            var url = 'https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=' + encodeURIComponent(city);
-            fetch(url)
-                .then(response => response.json())
-                .then(data => {
+            var wurl = 'https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=' + encodeURIComponent(city);
+            fetch(wurl)
+                .then(r => r.json())
+                .then(d => {
                     var img = document.createElement("img");
-                    img.src = "https:" + data.current.condition.icon;
-                    var container = document.getElementById("weatherContainer");
-                    container.innerHTML = '';
-                    container.appendChild(img);
+                    img.src = "https:" + d.current.condition.icon;
+                    var c = document.getElementById("weatherContainer");
+                    c.innerHTML = '';
+                    c.appendChild(img);
                 });
         }
 
@@ -104,16 +113,16 @@
         }
         setInterval(updateDateTime, 1000);
 
-        function logButton(buttonName) {
+        function logButton(name) {
             var date = new Date().toLocaleDateString();
             var time = new Date().toLocaleTimeString();
             var loc = document.getElementById("location").innerHTML.split("<br>");
-            var latitude = loc[0].split(": ")[1];
-            var longitude = loc[1].split(": ")[1];
-            var distance = (totalDistance/1000).toFixed(1);
-            var speed = document.getElementById("speed").innerHTML.split(": ")[1].split(" ")[0];
+            var lat = loc[0].split(": ")[1];
+            var lon = loc[1].split(": ")[1];
+            var dist = (totalDistance/1000).toFixed(1);
+            var spd = document.getElementById("speed").innerHTML.split(": ")[1].split(" ")[0];
             var comment = document.getElementById("textBox").value;
-            logTable.push([buttonName, date, time, latitude, longitude, distance, speed, comment]);
+            logTable.push([name, date, time, lat, lon, dist, spd, comment]);
             displayLogTable();
         }
 
@@ -121,7 +130,7 @@
             var html = "<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Latitude</th><th>Longitude</th><th>Distance (km)</th><th>Speed (km/h)</th><th>Comment</th></tr>";
             for (var i = logTable.length - 1; i >= 0; i--) {
                 html += "<tr><td>" + (i+1) + "</td>";
-                logTable[i].forEach(item => html += "<td>" + item + "</td>");
+                logTable[i].forEach(it => html += "<td>" + it + "</td>");
                 html += "</tr>";
             }
             html += "</table>";
@@ -135,6 +144,7 @@
             <td><p id="dateTime"></p></td>
             <td><p id="city">Locating...</p></td>
             <td><p id="location"></p></td>
+            <td><p id="roadType">Road type: N/A</p></td>
             <td><p id="speed">Speed: N/A</p></td>
             <td>
                 <div class="distanceContainer">
@@ -146,13 +156,14 @@
         <tr>
             <td><textarea id="textBox" rows="1" placeholder="Enter your annotation here..."></textarea></td>
             <td><button class="bigButton blueButton" onclick="logButton('Manual annotation')">Manual annotation</button></td>
-            <td></td><td></td><td></td>
+            <td></td><td></td><td></td><td></td>
         </tr>
         <tr>
             <td id="leftColumn1"> ... ACC buttons ... </td>
             <td id="leftColumn2"> ... ALCA buttons ... </td>
             <td id="leftColumn3"> ... LCC buttons ... </td>
             <td id="leftColumn4"> ... TSI buttons ... </td>
+            <td></td><td></td>
         </tr>
     </table>
     <div id="weatherContainer"></div>
