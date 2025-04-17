@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KPI -- Annotator</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        table { width: 100%; border-collapse: collapse; }
+        td, th { text-align: center; padding: 10px; }
+        #leftColumn1, #leftColumn2, #leftColumn3, #leftColumn4 { vertical-align: top; }
+        .bigButton { display: block; width: 50%; padding: 1px; font-size: 12px; border-radius: 1px; cursor: pointer; margin: 5px auto; }
+        .orangeButton { background-color: orange; color: white; }
+        .blueButton { background-color: blue; color: white; }
+        .greyButton { background-color: grey; color: white; }
+        .greenButton { background-color: green; color: white; }
+        .redButton { background-color: red; color: white; }
+        #textBox { width: 90%; margin: 0 auto; padding: 10px; font-size: 12px; resize: vertical; }
+        .distanceContainer { display: flex; justify-content: space-between; align-items: center; }
+        .weatherSection { display: flex; align-items: center; justify-content: center; }
+        .weatherSection img { width: 24px; height: 24px; margin-right: 5px; }
+        #map { width: 200px; height: 200px; margin: 10px auto; }
+    </style>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        var logTable = [];
+        var lastPosition = null;
+        var totalDistance = 0;
+        var speedHistory = [];
+        var currentTemp = 'N/A';
+        var currentCondition = 'N/A';
+        const HISTORY_SIZE = 5;
+        var map, marker, polyline, latlngs = [];
+
+        function initMap() {
+            map = L.map('map').setView([0, 0], 2);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+            polyline = L.polyline(latlngs, {color: 'blue'}).addTo(map);
+        }
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000, toRad = Math.PI/180;
+            const dLat = (lat2-lat1)*toRad, dLon = (lon2-lon1)*toRad;
+            const a = Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function showPosition(position) {
+            var lat = position.coords.latitude, lon = position.coords.longitude;
+            var t = position.timestamp;
+            document.getElementById("location").innerHTML = `Latitude: ${lat}<br>Longitude: ${lon}`;
+
+            // Update map
+            var ll = [lat, lon];
+            latlngs.push(ll);
+            if (!marker) {
+                marker = L.marker(ll).addTo(map);
+                map.setView(ll, 15);
+            } else {
+                marker.setLatLng(ll);
+                map.panTo(ll);
+            }
+            polyline.setLatLngs(latlngs);
+
+            if (lastPosition) {
+                var dist = calculateDistance(lastPosition.latitude, lastPosition.longitude, lat, lon);
+                var dt = (t - lastPosition.timestamp)/1000;
+                if (dt>0) {
+                    var rawSpeed = (dist/dt)*3.6;
+                    speedHistory.push(rawSpeed);
+                    if(speedHistory.length>HISTORY_SIZE) speedHistory.shift();
+                    var avg = speedHistory.reduce((a,b)=>a+b,0)/speedHistory.length;
+                    document.getElementById("speed").innerHTML = `Speed: ${Math.round(avg)} km/h`;
+                }
+                totalDistance += dist;
+                document.getElementById("totalDistance").innerHTML = `Distance: ${(totalDistance/1000).toFixed(1)} km`;
+            }
+            lastPosition = {latitude: lat, longitude: lon, timestamp: t};
+
+            fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
+                .then(r=>r.json()).then(data=>{
+                    document.getElementById('streetCity').innerHTML = `Street: ${data.address.road||'N/A'}<br>City: ${data.address.city||data.address.town||data.address.village||'N/A'}`;
+                    var roadType = data.extratags&&data.extratags.highway?data.extratags.highway:'Unknown';
+                    document.getElementById('roadType').innerHTML = `Road type: ${roadType}`;
+                    if(data.address.city||data.address.town||data.address.village) getWeather(data.address.city||data.address.town||data.address.village);
+                }).catch(e=>document.getElementById('streetCity').innerHTML='Error:'+e);
+        }
+
+        window.onload = function() {
+            initMap();
+            updateDateTime();
+            updateLocation();
+            setInterval(updateDateTime,1000);
+            setInterval(updateLocation,1000);
+        };
+
+        function resetDistance() {
+            totalDistance=0; speedHistory=[]; lastPosition=null;
+            document.getElementById("totalDistance").innerHTML = 'Distance: 0.0 km';
+            document.getElementById("speed").innerHTML = 'Speed: N/A';
+            // clear map
+            latlngs = [];
+            polyline.setLatLngs(latlngs);
+            if (marker) { map.removeLayer(marker); marker = null; }
+        }
+
+        function showError(err) {
+            document.getElementById("location").innerHTML = 'Error: '+err.message;
+            document.getElementById("speed").innerHTML = 'Speed: N/A';
+        }
+
+        function getWeather(city) {
+            fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
+                .then(r=>r.json()).then(d=>{
+                    document.getElementById("weatherIcon").src = 'https:'+d.current.condition.icon;
+                    currentTemp = d.current.temp_c + '°C';
+                    currentCondition = d.current.condition.text;
+                    document.getElementById("temperature").innerHTML = 'Temp: '+currentTemp;
+                });
+        }
+
+        function logButton(name) {
+            var date=new Date().toLocaleDateString(), time=new Date().toLocaleTimeString();
+            var loc=document.getElementById("location").innerHTML.split('<br>');
+            var lat=loc[0].split(': ')[1], lon=loc[1].split(': ')[1];
+            var dist=(totalDistance/1000).toFixed(1);
+            var spd=document.getElementById("speed").innerHTML.split(': ')[1].split(' ')[0];
+            var rt=document.getElementById("roadType").innerHTML.split(': ')[1];
+            var comment=document.getElementById("textBox").value;
+            logTable.push([name, date, time, currentTemp, currentCondition, lat, lon, dist, spd, rt, comment]);
+            displayLogTable();
+        }
+
+        function displayLogTable() {
+            var html="<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Latitude</th><th>Longitude</th><th>Distance (km)</th><th>Speed (km/h)</th><th>Road type</th><th>Comment</th></tr>";
+            logTable.slice().reverse().forEach((row,i)=>{
+                html+=`<tr><td>${i+1}</td>`;
+                row.forEach(v=>html+=`<td>${v}</td>`);
+                html+='</tr>';
+            });
+            html+='</table>';
+            document.getElementById("logTableContainer").innerHTML=html;
+        }
+    </script>
+</head>
+<body>
+    <table>
+        <tr>
+            <td>
+                <p id="dateTime"></p>
+                <div class="weatherSection">
+                    <img id="weatherIcon" src="" alt="Weather icon">
+                    <p id="temperature">Temp: N/A</p>
+                </div>
+            </td>
+            <td><p id="streetCity">Street: N/A<br>City: N/A</p></td>
+            <td><p id="location"></p></td>
+            <td><p id="roadType">Road type: N/A</p></td>
+            <td><p id="speed">Speed: N/A</p></td>
+            <td>
+                <div class="distanceContainer">
+                    <p id="totalDistance">Distance: 0.0 km</p>
+                    <button class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
+                </div>
+            </td>
+        </tr>
+        <tr>
+            <td colspan="6">
+                <!-- Map container -->
+                <div id="map"></div>
+            </td>
+        </tr>
+        <tr>
+            <td><textarea id="textBox" rows="1" placeholder="Enter your annotation here..."></textarea></td>
+            <td><button class="bigButton blueButton" onclick="logButton('Manual annotation')">Manual annotation</button></td>
+            <td colspan="4"></td>
+        </tr>
+        <tr>
+            <td id="leftColumn1">
+                <button class="bigButton greyButton">ACC</button>
+                <button class="bigButton redButton" onclick="logButton('ACC False brake')">False brake</button>
+                <button class="bigButton blueButton" onclick="logButton('ACC Target drop')">Target drop</button>
+                <button class="bigButton blueButton" onclick="logButton('ACC Longitudinal jerk')">Longitudinal jerk</button>
+                <button class="bigButton blueButton" onclick="logButton('ACC Accuracy in speed adaption w/o lead vehicle not within 1-2 kph')">Accuracy in speed adaption</button>
+                <button class="bigButton blueButton" onclick="logButton('ACC Accuracy in distance adaption to lead vehicle not within 0.25 s')">Accuracy in distance adaption</button>
+            </td>
+            <td id="leftColumn2"><button class="bigButton greyButton">ALCA</button></td>
+            <td id="leftColumn3"><button class="bigButton greyButton">LCC</button></td>
+            <td id="leftColumn4"><button class="bigButton greyButton">TSI Speed</button></td>
+            <td colspan="2"></td>
+        </tr>
+    </table>
+    <div id="weatherContainer"></div>
+    <div id="logTableContainer"></div>
+</body>
+</html>
