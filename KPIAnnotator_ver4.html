@@ -5,6 +5,8 @@
 
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <style>
         html, body { height: 100%; margin: 0; padding: 0; }
@@ -21,12 +23,16 @@
         .distanceContainer { display: flex; justify-content: space-between; align-items: center; }
         .weatherSection { display: flex; align-items: center; justify-content: center; }
         .weatherSection img { width: 24px; height: 24px; margin-right: 5px; }
-        #map { height: 300px; width: 80%; max-width: 800px; margin: 10px auto; }
+        #map { height: 300px; width: 100%; }
         @media print { .bigButton, #textBox { display: none !important; } }
         .issue-label { background: rgba(255,255,255,0.8); padding: 2px 4px; border-radius: 3px; font-size: 12px; color: #333; white-space: nowrap; pointer-events: none; }
         #countContainer { width: 80%; max-width: 800px; margin: 20px auto; text-align: center; }
         #countTable { width: 100%; border: 1px solid #333; border-collapse: collapse; margin: 0 auto; }
         #countTable td, #countTable th { border: 1px solid #333; }
+        /* Layout for map and chart */
+        #mainContainer { display: flex; justify-content: center; align-items: flex-start; width: 100%; }
+        #mapContainer, #chartContainer { width: 50%; padding: 0 10px; box-sizing: border-box; }
+        #chartContainer canvas { width: 100%; height: 300px; }
     </style>
 </head>
 <body>
@@ -76,8 +82,16 @@
     <div id="logTableContainer"></div>
 
     <br><hr><br>
-    <h3 style="text-align: center;">Route</h3>
-    <div id="map"></div>
+    <div id="mainContainer">
+        <div id="mapContainer">
+            <h3 style="text-align:center;">Route</h3>
+            <div id="map"></div>
+        </div>
+        <div id="chartContainer">
+            <h3 style="text-align:center;">Distance vs Time</h3>
+            <canvas id="distanceChart"></canvas>
+        </div>
+    </div>
     <br><hr><br>
 
     <div id="countContainer">
@@ -91,6 +105,7 @@
     <!-- Dependencies -->
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
+        // --- Globals ---
         var logTable = [];
         var redCounts = {};
         var lastPosition = null;
@@ -98,11 +113,39 @@
         var currentTemp = 'N/A', currentCondition = 'N/A';
         var positions = [];
         var map, trackLine;
+        var timeData = [], distData = [];
+        var distanceChart;
 
         function initMap() {
             map = L.map('map').setView([0,0],2);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors'}).addTo(map);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ attribution:'© OpenStreetMap contributors'}).addTo(map);
             trackLine = L.polyline([], { weight: 4 }).addTo(map);
+        }
+
+        function initChart() {
+            var ctx = document.getElementById('distanceChart').getContext('2d');
+            distanceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timeData,
+                    datasets: [{
+                        label: 'Distance (km)',
+                        data: distData,
+                        fill: false,
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { tooltipFormat: 'HH:mm:ss', unit: 'minute' }
+                        },
+                        y: { beginAtZero: true }
+                    }
+                }
+            });
         }
 
         function updateMap() {
@@ -111,69 +154,79 @@
             else if (positions.length > 1) map.fitBounds(trackLine.getBounds().pad(0.2));
         }
 
-        function calculateDistance(lat1,lon1,lat2,lon2) {
-            const R=6371000, toRad=Math.PI/180;
-            const dLat=(lat2-lat1)*toRad, dLon=(lon2-lon1)*toRad;
-            const a=Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
-            return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000, toRad = Math.PI/180;
+            const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
+            const a = Math.sin(dLat/2) ** 2 + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon/2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         }
 
         function showPosition(position) {
-            var lat=position.coords.latitude, lon=position.coords.longitude, t=position.timestamp;
-            document.getElementById('location').innerHTML=`Latitude: ${lat}<br>Longitude: ${lon}`;
-            positions.push([lat,lon]); updateMap();
+            var lat = position.coords.latitude, lon = position.coords.longitude, t = position.timestamp;
+            document.getElementById('location').innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
+            positions.push([lat, lon]); updateMap();
             if (lastPosition) {
-                var d=calculateDistance(lastPosition.latitude,lastPosition.longitude,lat,lon);
-                var dt=(t-lastPosition.timestamp)/1000;
-                if(dt>0) document.getElementById('speed').innerHTML=`Speed: ${((d/dt)*3.6).toFixed(1)} km/h`;
-                totalDistance+=d;
-                document.getElementById('totalDistance').innerHTML=`Distance: ${(totalDistance/1000).toFixed(1)} km`;
+                var d = calculateDistance(lastPosition.latitude, lastPosition.longitude, lat, lon);
+                var dt = (t - lastPosition.timestamp) / 1000;
+                if (dt > 0) document.getElementById('speed').innerHTML = `Speed: ${((d/dt)*3.6).toFixed(1)} km/h`;
+                totalDistance += d;
+                document.getElementById('totalDistance').innerHTML = `Distance: ${(totalDistance/1000).toFixed(1)} km`;
+                timeData.push(new Date(t));
+                distData.push((totalDistance/1000).toFixed(3));
+                if (distanceChart) distanceChart.update();
             }
-            lastPosition={latitude:lat,longitude:lon,timestamp:t};
+            lastPosition = { latitude: lat, longitude: lon, timestamp: t };
             fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
-              .then(r=>r.json()).then(data=>{
-                document.getElementById('streetCity').innerHTML=`Street: ${data.address.road||'N/A'}<br>City: ${data.address.city||data.address.town||data.address.village||'N/A'}`;
-                document.getElementById('roadType').innerHTML=`Road type: ${data.extratags&&data.extratags.highway?data.extratags.highway:'Unknown'}`;
-                var c=data.address.city||data.address.town||data.address.village; if(c) getWeather(c);
-              }).catch(e=>document.getElementById('streetCity').innerHTML='Error: '+e.message);
+                .then(r => r.json()).then(data => {
+                    document.getElementById('streetCity').innerHTML = `Street: ${data.address.road || 'N/A'}<br>City: ${data.address.city || data.address.town || data.address.village || 'N/A'}`;
+                    document.getElementById('roadType').innerHTML = `Road type: ${data.extratags && data.extratags.highway ? data.extratags.highway : 'Unknown'}`;
+                    var city = data.address.city || data.address.town || data.address.village;
+                    if (city) getWeather(city);
+                }).catch(e => document.getElementById('streetCity').innerHTML = 'Error: ' + e.message);
         }
 
-        function resetDistance(){ totalDistance=0; lastPosition=null; document.getElementById('totalDistance').innerHTML='Distance: 0.0 km'; document.getElementById('speed').innerHTML='Speed: N/A'; }
-        function saveAndPrint(){ logButton('Save report to PDF',false); window.print(); }
-        function showError(e){ document.getElementById('location').innerHTML='Error: '+e.message; document.getElementById('speed').innerHTML='Speed: N/A'; }
-        function updateLocation(){ navigator.geolocation.getCurrentPosition(showPosition,showError); }
-        setInterval(updateLocation,1000);
+        function resetDistance() { totalDistance=0; lastPosition=null; document.getElementById('totalDistance').innerHTML='Distance: 0.0 km'; document.getElementById('speed').innerHTML='Speed: N/A'; timeData=[]; distData=[]; if(distanceChart) distanceChart.update(); }
+        function saveAndPrint() { logButton('Save report to PDF', false); window.print(); }
+        function showError(e) { document.getElementById('location').innerHTML = 'Error: ' + e.message; document.getElementById('speed').innerHTML='Speed: N/A'; }
+        function updateLocation() { navigator.geolocation.getCurrentPosition(showPosition, showError); }
+        setInterval(updateLocation, 1000);
 
-        function getWeather(city){ fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
-            .then(r=>r.json()).then(d=>{ document.getElementById('weatherIcon').src='https:'+d.current.condition.icon;
-                currentTemp=d.current.temp_c+'°C'; currentCondition=d.current.condition.text;
-                document.getElementById('temperature').innerHTML='Temp: '+currentTemp;
-            }); }
+        function getWeather(city) {
+            fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
+                .then(r => r.json()).then(d => {
+                    document.getElementById('weatherIcon').src = 'https:' + d.current.condition.icon;
+                    currentTemp = d.current.temp_c + '°C'; currentCondition = d.current.condition.text;
+                    document.getElementById('temperature').innerHTML = 'Temp: ' + currentTemp;
+                });
+        }
 
-        function updateDateTime(){ document.getElementById('dateTime').innerHTML=new Date().toLocaleString(); }
-        setInterval(updateDateTime,1000);
+        function updateDateTime() { document.getElementById('dateTime').innerHTML = new Date().toLocaleString(); }
+        setInterval(updateDateTime, 1000);
 
-        function logButton(name,isRed){
-            var dt=new Date(),date=dt.toLocaleDateString(),time=dt.toLocaleTimeString();
-            var loc=document.getElementById('location').innerHTML.split('<br>'),lat=loc[0].split(': ')[1],lon=loc[1].split(': ')[1];
-            var dist=(totalDistance/1000).toFixed(1),spd=document.getElementById('speed').innerHTML.split(': ')[1].split(' ')[0],rt=document.getElementById('roadType').innerHTML.split(': ')[1],comment=document.getElementById('textBox').value;
-            logTable.push([name,date,time,currentTemp,currentCondition,lat,lon,dist,spd,rt,comment]);
-            displayLogTable();
-            var icon=L.divIcon({className:'issue-label',html:`<strong>${name}</strong>`,iconSize:null});
+        function logButton(name, isRed) {
+            var dt = new Date(), date = dt.toLocaleDateString(), time = dt.toLocaleTimeString();
+            var loc = document.getElementById('location').innerHTML.split('<br>'), lat = loc[0].split(': ')[1], lon = loc[1].split(': ')[1];
+            var dist = (totalDistance/1000).toFixed(1), spd = document.getElementById('speed').innerHTML.split(': ')[1].split(' ')[0], rt = document.getElementById('roadType').innerHTML.split(': ')[1], comment=document.getElementById('textBox').value;
+            logTable.push([name,date,time,currentTemp,currentCondition,lat,lon,dist,spd,rt,comment]); displayLogTable();
+            var icon = L.divIcon({className:'issue-label',html:`<strong>${name}</strong>`,iconSize:null});
             L.marker([parseFloat(lat),parseFloat(lon)],{icon:icon}).addTo(map);
             if(isRed){ redCounts[name]=(redCounts[name]||0)+1; updateCountTable(); }
             document.getElementById('textBox').value='';
         }
 
-        function displayLogTable(){ var html=`<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Latitude</th><th>Longitude</th><th>Distance (km)</th><th>Speed (km/h)</th><th>Road type</th><th>Comment</th></tr>`;
+        function displayLogTable() {
+            var html = `<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Latitude</th><th>Longitude</th><th>Distance (km)</th><th>Speed (km/h)</th><th>Road type</th><th>Comment</th></tr>`;
             logTable.forEach((row,i)=>{ html+=`<tr><td>${i+1}</td>`; row.forEach(v=>html+=`<td>${v}</td>`); html+='</tr>'; }); html+='</table>';
-            document.getElementById('logTableContainer').innerHTML=html; }
+            document.getElementById('logTableContainer').innerHTML = html;
+        }
 
-        function updateCountTable(){ var tbl=document.getElementById('countTable'),rows='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>',dkm=totalDistance/1000;
-            for(var issue in redCounts){ var c=redCounts[issue],r=''; if(dkm>10) r=(c/dkm*1000).toFixed(1); rows+=`<tr><td>${issue}</td><td>${c}</td><td>${r}</td></tr>`; }
-            tbl.innerHTML=rows; }
+        function updateCountTable() {
+            var tbl = document.getElementById('countTable'), rows = '<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>', dkm = totalDistance/1000;
+            for(var issue in redCounts){ var c=redCounts[issue], r=''; if(dkm>10) r=(c/dkm*1000).toFixed(1); rows+=`<tr><td>${issue}</td><td>${c}</td><td>${r}</td></tr>`; }
+            tbl.innerHTML = rows;
+        }
 
-        window.onload=initMap;
+        window.onload = function() { initMap(); initChart(); };
     </script>
 </body>
 </html>
