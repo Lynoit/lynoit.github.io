@@ -8,7 +8,7 @@
 
     <style>
         html, body { height: 100%; margin: 0; padding: 0; }
-        table { width: 100%; border-collapse: collapse; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
         td, th { text-align: center; padding: 10px; }
         #leftColumn1, #leftColumn2 { vertical-align: top; }
         .bigButton { display: block; width: 50%; padding: 1px; font-size: 12px; border-radius: 1px; cursor: pointer; margin: 5px auto; }
@@ -21,9 +21,10 @@
         .distanceContainer { display: flex; justify-content: space-between; align-items: center; }
         .weatherSection { display: flex; align-items: center; justify-content: center; }
         .weatherSection img { width: 24px; height: 24px; margin-right: 5px; }
-        #map { height: 300px; width: 80%; max-width: 800px; margin: 10px auto 0; }
-        @media print { .bigButton, #textBox, textarea { display: none !important; } }
+        #map { height: 300px; width: 80%; max-width: 800px; margin: 10px auto; }
+        @media print { .bigButton, #textBox { display: none !important; } }
         .issue-label { background: rgba(255,255,255,0.8); padding: 2px 4px; border-radius: 3px; font-size: 12px; color: #333; white-space: nowrap; pointer-events: none; }
+        #countContainer { width: 80%; max-width: 800px; margin: 10px auto; }
     </style>
 </head>
 <body>
@@ -49,33 +50,38 @@
         </tr>
         <tr>
             <td><textarea id="textBox" rows="1" placeholder="Enter your annotation here..."></textarea></td>
-            <td><button class="bigButton blueButton" onclick="logButton('Manual annotation')">Manual annotation</button></td>
+            <td><button class="bigButton blueButton" onclick="logButton('Manual annotation', false)">Manual annotation</button></td>
             <td><button class="bigButton greenButton" onclick="saveAndPrint()">Save as PDF</button></td>
             <td colspan="3"></td>
         </tr>
         <tr>
             <td id="leftColumn1">
                 <button class="bigButton greyButton">ACC</button>
-                <button class="bigButton redButton" onclick="logButton('ACC False brake')">False brake</button>
-                <button class="bigButton redButton" onclick="logButton('ACC Target drop')">Target drop</button>
-                <button class="bigButton redButton" onclick="logButton('ACC Longitudinal jerk')">Longitudinal jerk</button>
-                <button class="bigButton redButton" onclick="logButton('ACC Accuracy in speed adaption')">Accuracy in speed adaption</button>
+                <button class="bigButton redButton" onclick="logButton('ACC False brake', true)">False brake</button>
+                <button class="bigButton redButton" onclick="logButton('ACC Target drop', true)">Target drop</button>
+                <button class="bigButton redButton" onclick="logButton('ACC Longitudinal jerk', true)">Longitudinal jerk</button>
+                <button class="bigButton redButton" onclick="logButton('ACC Accuracy in speed adaption', true)">Accuracy in speed adaption</button>
             </td>
             <td colspan="5"></td>
             <td id="leftColumn2">
                 <button class="bigButton greyButton">TSI Speed</button>
-                <button class="bigButton greenButton" onclick="logButton('TSI Explicit correct speed detected')">Correct explicit speed detected</button>
-                <button class="bigButton redButton" onclick="logButton('TSI Explicit incorrect speed detected')">Incorrect explicit speed detected</button>
+                <button class="bigButton greenButton" onclick="logButton('TSI Explicit correct speed detected', false)">Correct explicit speed detected</button>
+                <button class="bigButton redButton" onclick="logButton('TSI Explicit incorrect speed detected', true)">Incorrect explicit speed detected</button>
             </td>
         </tr>
     </table>
 
     <div id="logTableContainer"></div>
     <div id="map"></div>
+    <div id="countContainer">
+        <h3>Red Button Counts</h3>
+        <table id="countTable"><tr><th>Issue</th><th>Count</th></tr></table>
+    </div>
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
         var logTable = [];
+        var redCounts = {};
         var lastPosition = null;
         var totalDistance = 0;
         var currentTemp = 'N/A';
@@ -111,9 +117,7 @@
             if (lastPosition) {
                 var dist = calculateDistance(lastPosition.latitude, lastPosition.longitude, lat, lon);
                 var dt = (t - lastPosition.timestamp) / 1000;
-                if (dt > 0) {
-                    document.getElementById("speed").innerHTML = `Speed: ${((dist/dt)*3.6).toFixed(1)} km/h`;
-                }
+                if (dt > 0) document.getElementById("speed").innerHTML = `Speed: ${((dist/dt)*3.6).toFixed(1)} km/h`;
                 totalDistance += dist;
                 document.getElementById("totalDistance").innerHTML = `Distance: ${(totalDistance/1000).toFixed(1)} km`;
             }
@@ -135,7 +139,8 @@
         }
 
         function saveAndPrint() {
-            logButton('Save report as PDF'); window.print();
+            logButton('Save report as PDF', false);
+            window.print();
         }
 
         function showError(err) {
@@ -159,7 +164,7 @@
         function updateDateTime() { document.getElementById("dateTime").innerHTML = new Date().toLocaleString(); }
         setInterval(updateDateTime, 1000);
 
-        function logButton(name) {
+        function logButton(name, isRed) {
             var dt = new Date();
             var date = dt.toLocaleDateString(), time = dt.toLocaleTimeString();
             var loc = document.getElementById("location").innerHTML.split('<br>');
@@ -168,27 +173,35 @@
             var spd = document.getElementById("speed").innerHTML.split(': ')[1].split(' ')[0];
             var rt = document.getElementById("roadType").innerHTML.split(': ')[1];
             var comment = document.getElementById("textBox").value;
-            // add new entry
+            // add log entry
             logTable.push([name, date, time, currentTemp, currentCondition, lat, lon, dist, spd, rt, comment]);
-            // refresh table display
             displayLogTable();
-            // add map marker
+            // add marker
             var labelIcon = L.divIcon({ className: 'issue-label', html: `<strong>${name}</strong>`, iconSize: null });
             L.marker([parseFloat(lat), parseFloat(lon)], { icon: labelIcon }).addTo(map);
-            // clear annotation field
-            var tb = document.getElementById("textBox");
-            tb.value = "";
+            // update red counts
+            if (isRed) {
+                redCounts[name] = (redCounts[name] || 0) + 1;
+                updateCountTable();
+            }
+            // clear textarea
+            var tb = document.getElementById("textBox"); tb.value = "";
         }
 
         function displayLogTable() {
             var html = `<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Latitude</th><th>Longitude</th><th>Distance (km)</th><th>Speed (km/h)</th><th>Road type</th><th>Comment</th></tr>`;
-            logTable.forEach((row, i) => {
-                html += `<tr><td>${i+1}</td>`;
-                row.forEach(v => html += `<td>${v}</td>`);
-                html += `</tr>`;
-            });
+            logTable.forEach((row, i) => { html += `<tr><td>${i+1}</td>`; row.forEach(v => html += `<td>${v}</td>`); html += `</tr>`; });
             html += `</table>`;
             document.getElementById("logTableContainer").innerHTML = html;
+        }
+
+        function updateCountTable() {
+            var tbl = document.getElementById("countTable");
+            var rows = '<tr><th>Issue</th><th>Count</th></tr>';
+            for (var issue in redCounts) {
+                rows += `<tr><td>${issue}</td><td>${redCounts[issue]}</td></tr>`;
+            }
+            tbl.innerHTML = rows;
         }
 
         window.onload = initMap;
