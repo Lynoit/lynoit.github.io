@@ -74,12 +74,12 @@
                 <button type="button" class="bigButton redButton" onclick="logButton('ACC Longitudinal jerk', true)">Longitudinal jerk</button>
                 <button type="button" class="bigButton redButton" onclick="logButton('ACC Accuracy in speed adaption', true)">Accuracy in speed adaption</button>
             </td>
+            <td colspan="5"></td>
             <td id="leftColumn2">
                 <button type="button" class="bigButton greyButton">TSI Speed</button>
                 <button type="button" class="bigButton greenButton" onclick="logButton('TSI Explicit correct speed detected', false)">Correct explicit speed detected</button>
                 <button type="button" class="bigButton redButton" onclick="logButton('TSI Explicit incorrect speed detected', true)">Incorrect explicit speed detected</button>
             </td>
-            <td colspan="4"></td>
         </tr>
     </table>
 
@@ -152,46 +152,66 @@
 
         function updateMap() {
             trackLine.setLatLngs(positions);
-            if (positions.length===1) map.setView(positions[0],15);
-            else if (positions.length>1) map.fitBounds(trackLine.getBounds().pad(0.2));
+            if (positions.length === 1) map.setView(positions[0], 15);
+            else if (positions.length > 1) map.fitBounds(trackLine.getBounds().pad(0.2));
         }
 
-        function calculateDistance(lat1,lon1,lat2,lon2) {
-            const R=6371000, toRad=Math.PI/180;
-            const dLat=(lat2-lat1)*toRad, dLon=(lon2-lon1)*toRad;
-            const a=Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
-            return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371000, toRad = Math.PI/180;
+            const dLat = (lat2 - lat1) * toRad;
+            const dLon = (lon2 - lon1) * toRad;
+            const a = Math.sin(dLat/2)**2 +
+                      Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+                      Math.sin(dLon/2)**2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         }
 
         function showPosition(position) {
             var lat = position.coords.latitude,
                 lon = position.coords.longitude,
                 t   = position.timestamp;
+
             document.getElementById('location').innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
 
-            var prev = lastPosition;
-            var d = prev ? calculateDistance(prev.latitude, prev.longitude, lat, lon) : 0;
+            if (lastPosition) {
+                // 1) distance in meters
+                var d = calculateDistance(
+                    lastPosition.latitude,
+                    lastPosition.longitude,
+                    lat, lon
+                );
 
+                // 2) time delta in seconds
+                var dt = (t - lastPosition.timestamp) / 1000;
+
+                if (dt > 0) {
+                    // 3) speed in km/h
+                    var speedKmh = (d / dt) * 3.6;
+                    document.getElementById('speed').innerHTML = `Speed: ${speedKmh.toFixed(1)} km/h`;
+
+                    // 4) update total distance
+                    totalDistance += d;
+                    document.getElementById('totalDistance').innerHTML =
+                        `Distance: ${(totalDistance/1000).toFixed(1)} km`;
+
+                    // update charts
+                    timeData.push(new Date(t));
+                    distData.push((totalDistance/1000).toFixed(3));
+                    speedData.push(speedKmh.toFixed(1));
+                    if (distanceChart) distanceChart.update();
+                    if (speedChart)    speedChart.update();
+
+                    // recalc KPI rates
+                    updateCountTable();
+                }
+            }
+
+            // store for next tick
+            lastPosition = { latitude: lat, longitude: lon, timestamp: t };
             positions.push([lat, lon]);
             updateMap();
 
-            if (prev && d >= 0) {
-                var dt = (t - prev.timestamp)/1000;
-                if (dt > 0) {
-                    var ispd = (d/dt)*3.6;
-                    document.getElementById('speed').innerHTML = `Speed: ${ispd.toFixed(1)} km/h`;
-                    timeData.push(new Date(t));
-                    distData.push((totalDistance/1000).toFixed(3));
-                    speedData.push(ispd.toFixed(1));
-                    if (distanceChart) distanceChart.update();
-                    if (speedChart) speedChart.update();
-                }
-                totalDistance += d;
-                document.getElementById('totalDistance').innerHTML = `Distance: ${(totalDistance/1000).toFixed(1)} km`;
-            }
-
-            lastPosition = { latitude: lat, longitude: lon, timestamp: t };
-
+            // reverse-geocode & weather
             fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
                 .then(r=>r.json()).then(data => {
                     var road = data.address.road || 'N/A';
@@ -201,22 +221,21 @@
                     }
                     document.getElementById('streetCity').innerHTML =
                         `Street: ${road}<br>City: ${data.address.city||data.address.town||data.address.village||'N/A'}`;
-                    var rt = (data.extratags && data.extratags.highway)? data.extratags.highway : data.type || 'Unknown';
+                    var rt = (data.extratags && data.extratags.highway)
+                             ? data.extratags.highway
+                             : data.type || 'Unknown';
                     document.getElementById('roadType').innerHTML = `Road type: ${rt}`;
                     var c = data.address.city||data.address.town||data.address.village;
                     if (c) getWeather(c);
                 })
                 .catch(e => {
-                    document.getElementById('streetCity').innerHTML = 'Error: '+e.message;
+                    document.getElementById('streetCity').innerHTML = 'Error: ' + e.message;
                 });
         }
 
         function updateStreetTable() {
-            var tbl = document.getElementById('streetTable'),
-                rows = '';
-            streetSet.forEach(st => {
-                rows += `<tr><td>${st}</td></tr>`;
-            });
+            var tbl = document.getElementById('streetTable'), rows = '';
+            streetSet.forEach(st => rows += `<tr><td>${st}</td></tr>`);
             tbl.innerHTML = rows;
         }
 
@@ -228,7 +247,8 @@
             timeData = []; distData = []; speedData = [];
             streetSet.clear(); updateStreetTable();
             if (distanceChart) distanceChart.update();
-            if (speedChart) speedChart.update();
+            if (speedChart)    speedChart.update();
+            updateCountTable();
         }
 
         function saveAndPrint() {
@@ -237,30 +257,29 @@
         }
 
         function showError(e) {
-            document.getElementById('location').innerHTML = 'Error: '+e.message;
+            document.getElementById('location').innerHTML = 'Error: ' + e.message;
             document.getElementById('speed').innerHTML = 'Speed: N/A';
         }
 
         function updateLocation() {
             navigator.geolocation.getCurrentPosition(showPosition, showError);
         }
-        setInterval(updateLocation,1000);
+        setInterval(updateLocation, 1000);
 
         function getWeather(city) {
             fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
-                .then(r=>r.json())
-                .then(d => {
+                .then(r=>r.json()).then(d=>{
                     document.getElementById('weatherIcon').src = 'https:' + d.current.condition.icon;
                     currentTemp      = d.current.temp_c + '°C';
                     currentCondition = d.current.condition.text;
-                    document.getElementById('temperature').innerHTML = 'Temp: '+currentTemp;
+                    document.getElementById('temperature').innerHTML = 'Temp: ' + currentTemp;
                 });
         }
 
         function updateDateTime() {
             document.getElementById('dateTime').innerHTML = new Date().toLocaleString();
         }
-        setInterval(updateDateTime,1000);
+        setInterval(updateDateTime, 1000);
 
         function logButton(name,isRed) {
             var dt      = new Date(),
@@ -307,15 +326,11 @@
             var tbl  = document.getElementById('countTable'),
                 rows = `<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>`,
                 dkm  = totalDistance / 1000;
-
             for (var issue in redCounts) {
                 var c = redCounts[issue],
-                    r = dkm > 0
-                      ? ((c / dkm) * 1000).toFixed(1)
-                      : '—';
+                    r = dkm > 0 ? ((c / dkm) * 1000).toFixed(1) : '—';
                 rows += `<tr><td>${issue}</td><td>${c}</td><td>${r}</td></tr>`;
             }
-
             tbl.innerHTML = rows;
         }
 
