@@ -59,14 +59,14 @@
             <td>
                 <div class="distanceContainer">
                     <p id="totalDistance">Distance: 0.0 km</p>
-                    <button type="button" class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
+                    <button class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
                 </div>
             </td>
         </tr>
         <tr>
             <td><textarea id="textBox" rows="1" placeholder="Enter your annotation here..."></textarea></td>
-            <td><button type="button" class="bigButton blueButton" onclick="logButton('Manual annotation', false)">Manual annotation</button></td>
-            <td><button type="button" class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button></td>
+            <td><button class="bigButton blueButton" onclick="logButton('Manual annotation', false)">Manual annotation</button></td>
+            <td><button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button></td>
             <td colspan="3"></td>
         </tr>
         <tr>
@@ -129,16 +129,16 @@
     <!-- Dependencies -->
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
-        var logTable        = [];
-        var redCounts       = {};
-        var lastPosition    = null;
-        var totalDistance   = 0;
-        var currentTemp     = 'N/A', currentCondition = 'N/A';
-        var positions       = [];
+        var logTable      = [];
+        var redCounts     = {};
+        var lastPosition  = null;
+        var totalDistance = 0;
+        var currentTemp   = 'N/A', currentCondition = 'N/A';
+        var positions     = [];
         var map, trackLine;
-        var timeData        = [], distData = [], speedData = [];
-        var roadTypeSet     = new Set();
-        var roadDistance    = {}; // { roadType: cumulativeKm }
+        var timeData      = [], distData = [], speedData = [];
+        var roadTypeSet   = new Set();
+        var roadDistance  = {}; // cumulative km per road type
         var distanceChart, speedChart;
 
         function initMap() {
@@ -176,12 +176,6 @@
             });
         }
 
-        function updateMap() {
-            trackLine.setLatLngs(positions);
-            if (positions.length === 1) map.setView(positions[0], 15);
-            else if (positions.length > 1) map.fitBounds(trackLine.getBounds().pad(0.2));
-        }
-
         function calculateDistance(lat1, lon1, lat2, lon2) {
             const R = 6371000, toRad = Math.PI/180;
             const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
@@ -190,28 +184,20 @@
             return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         }
 
-        function showPosition(position) {
-            var lat = position.coords.latitude,
-                lon = position.coords.longitude,
-                t   = position.timestamp;
+        function showPosition(pos) {
+            const lat = pos.coords.latitude, lon = pos.coords.longitude, t = pos.timestamp;
+            let segmentKm = 0, moved = false;
 
-            // compute this leg's distance
-            let segmentKm = 0, hasSegment = false;
             if (lastPosition) {
-                const d = calculateDistance(
-                    lastPosition.latitude, lastPosition.longitude,
-                    lat, lon
-                );
-                const dt = (t - lastPosition.timestamp) / 1000;
-                if (dt > 0) {
-                    hasSegment = true;
-                    segmentKm = d / 1000;
-                    // update speed + total
+                const d = calculateDistance(lastPosition.latitude, lastPosition.longitude, lat, lon),
+                      dt = (t - lastPosition.timestamp)/1000;
+                if (dt>0) {
+                    moved = true;
+                    segmentKm = d/1000;
                     const speedKmh = (d/dt)*3.6;
                     document.getElementById('speed').innerHTML = `Speed: ${speedKmh.toFixed(1)} km/h`;
                     totalDistance += d;
                     document.getElementById('totalDistance').innerHTML = `Distance: ${(totalDistance/1000).toFixed(1)} km`;
-                    // charts
                     timeData.push(new Date(t));
                     distData.push((totalDistance/1000).toFixed(3));
                     speedData.push(speedKmh.toFixed(1));
@@ -223,37 +209,29 @@
 
             lastPosition = { latitude: lat, longitude: lon, timestamp: t };
             positions.push([lat, lon]);
-            updateMap();
+            trackLine.setLatLngs(positions);
+            if (positions.length>1) map.fitBounds(trackLine.getBounds().pad(0.2));
 
-            // reverse geocode and attribute to road type
             fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
-                .then(r => r.json())
-                .then(data => {
-                    const rt = (data.extratags && data.extratags.highway)
-                               ? data.extratags.highway
-                               : data.type || 'Unknown';
+                .then(r=>r.json())
+                .then(data=>{
+                    const rt = (data.extratags&&data.extratags.highway)?data.extratags.highway:data.type||'Unknown';
                     document.getElementById('roadType').innerHTML = `Road type: ${rt}`;
                     roadTypeSet.add(rt);
-                    if (hasSegment) {
-                        roadDistance[rt] = (roadDistance[rt] || 0) + segmentKm;
-                    }
+                    if (moved) roadDistance[rt] = (roadDistance[rt]||0)+segmentKm;
                     updateStreetTable();
                     const city = data.address.city||data.address.town||data.address.village;
                     if (city) getWeather(city);
                 })
-                .catch(e => {
-                    document.getElementById('streetCity').innerHTML = 'Error: ' + e.message;
-                });
+                .catch(e=> document.getElementById('streetCity').innerText = 'Error: '+e.message);
         }
 
         function updateStreetTable() {
             const tbl = document.getElementById('streetTable'),
-                  types = Array.from(roadTypeSet),
-                  header = '<tr><th>Road type</th><th>Cumulative distance (km)</th></tr>';
-            let rows = types.map(rt => {
-                const dist = (roadDistance[rt] || 0).toFixed(3);
-                return `<tr><td>${rt}</td><td>${dist}</td></tr>`;
-            }).join('');
+                  header = '<tr><th>Road type</th><th>Cumulative distance (km)</th></tr>',
+                  rows = Array.from(roadTypeSet).map(rt=>{
+                    return `<tr><td>${rt}</td><td>${(roadDistance[rt]||0).toFixed(3)}</td></tr>`;
+                  }).join('');
             tbl.innerHTML = header + rows;
         }
 
@@ -262,13 +240,13 @@
             lastPosition  = null;
             document.getElementById('totalDistance').innerHTML = 'Distance: 0.0 km';
             document.getElementById('speed').innerHTML = 'Speed: N/A';
-            timeData = []; distData = []; speedData = [];
+            timeData.length = distData.length = speedData.length = 0;
             roadTypeSet.clear();
             roadDistance = {};
             distanceChart.update();
             speedChart.update();
-            updateStreetTable();
             updateCountTable();
+            updateStreetTable();
         }
 
         function saveAndPrint() {
@@ -276,37 +254,81 @@
             window.print();
         }
 
-        function showError(e) {
-            document.getElementById('location').innerHTML = 'Error: ' + e.message;
-            document.getElementById('speed').innerHTML = 'Speed: N/A';
+        function logButton(name, isRed) {
+            const dt = new Date(),
+                  date = dt.toLocaleDateString(),
+                  time = dt.toLocaleTimeString(),
+                  loc = document.getElementById('location').innerHTML.split('<br>'),
+                  lat = loc[0].split(': ')[1],
+                  lon = loc[1].split(': ')[1],
+                  dist = (totalDistance/1000).toFixed(1),
+                  spd = document.getElementById('speed').innerText.split(' ')[1],
+                  rt  = document.getElementById('roadType').innerText.split(': ')[1],
+                  comment = document.getElementById('textBox').value;
+            logTable.push([name,date,time,currentTemp,currentCondition,lat,lon,dist,spd,rt,comment]);
+            displayLogTable();
+            L.marker([+lat,+lon],{icon:L.divIcon({className:'issue-label',html:`<strong>${name}</strong>`})}).addTo(map);
+            if (isRed) {
+                redCounts[name] = (redCounts[name]||0)+1;
+                updateCountTable();
+            }
+            document.getElementById('textBox').value = '';
         }
 
-        function updateLocation() {
-            navigator.geolocation.getCurrentPosition(showPosition, showError);
+        function displayLogTable() {
+            let html = `<table><tr>
+                <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
+                <th>Temp</th><th>Weather</th><th>Latitude</th><th>Longitude</th>
+                <th>Distance (km)</th><th>Speed (km/h)</th><th>Road type</th><th>Comment</th>
+            </tr>`;
+            logTable.forEach((row,i)=>{
+                html += `<tr><td>${i+1}</td>${row.map(v=>`<td>${v}</td>`).join('')}</tr>`;
+            });
+            html += '</table>';
+            document.getElementById('logTableContainer').innerHTML = html;
         }
-        setInterval(updateLocation, 1000);
+
+        function updateCountTable() {
+            const tbl = document.getElementById('countTable'),
+                  dkm = totalDistance/1000;
+            let rows = `<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>`;
+            for (let issue in redCounts) {
+                const c = redCounts[issue],
+                      r = dkm>0 ? ((c/dkm)*1000).toFixed(1) : '—';
+                rows += `<tr><td>${issue}</td><td>${c}</td><td>${r}</td></tr>`;
+            }
+            tbl.innerHTML = rows;
+        }
+
+        function showError(e) {
+            document.getElementById('location').innerText = 'Error: ' + e.message;
+            document.getElementById('speed').innerText = 'Speed: N/A';
+        }
 
         function getWeather(city) {
             fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181930407&q=${encodeURIComponent(city)}`)
-                .then(r => r.json()).then(d => {
+                .then(r=>r.json()).then(d=>{
                     document.getElementById('weatherIcon').src = 'https:' + d.current.condition.icon;
                     currentTemp      = d.current.temp_c + '°C';
                     currentCondition = d.current.condition.text;
-                    document.getElementById('temperature').innerHTML = 'Temp: ' + currentTemp;
+                    document.getElementById('temperature').innerText = 'Temp: ' + currentTemp;
                 });
         }
 
         function updateDateTime() {
-            document.getElementById('dateTime').innerHTML = new Date().toLocaleString();
+            document.getElementById('dateTime').innerText = new Date().toLocaleString();
         }
-        setInterval(updateDateTime, 1000);
-
-        // logButton, displayLogTable, updateCountTable remain unchanged...
 
         window.onload = function() {
             initMap();
             initCharts();
+            setInterval(updateLocation, 1000);
+            setInterval(updateDateTime, 1000);
         };
+
+        function updateLocation() {
+            navigator.geolocation.getCurrentPosition(showPosition, showError);
+        }
     </script>
 
     <footer>
