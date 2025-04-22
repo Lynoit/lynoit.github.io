@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Annotator</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <!-- Chart.js core + Luxon adapter -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+    #sidebar { position: fixed; top: 0; left: 0; height: 100%; width: 260px; transform: translateX(-230px);
+      transition: transform .3s ease; background: #fff; box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+      overflow-y: auto; padding: 50px 10px 10px; z-index: 1000;
+    }
+    #sidebar.collapsed { transform: translateX(-230px); }
+    #sidebar.expanded  { transform: translateX(0); }
+    #toggleSidebar {
+      position: fixed; top: 10px; left: 10px;
+      background: #007bff; border: none; color: #fff;
+      font-size: 1.5em; padding: 4px 8px; cursor: pointer;
+      border-radius: 4px; z-index: 1100;
+    }
+
+    .spinner {
+      border: 2px solid rgba(0,0,0,0.1);
+      border-left-color: #333;
+      border-radius: 50%; width: 16px; height: 16px;
+      animation: spin .8s linear infinite; display: inline-block;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #totalDistance.updated { transition: background .5s; background: yellow; }
+
+    .bigButton { display: block; width: 80%; min-width: 80px; padding: 12px; font-size: 14px; border-radius: 4px; cursor: pointer; margin: 8px auto; }
+    .orangeButton { background-color: orange; color: white; }
+    .blueButton   { background-color: blue;   color: white; }
+    .greyButton   { background-color: grey;   color: white; }
+    .greenButton  { background-color: green;  color: white; }
+    .redButton    { background-color: red;    color: white; }
+    #textBox { width: 90%; margin: 0 auto; padding: 10px; font-size: 14px; resize: vertical; }
+
+    #mainContent { margin-left: 280px; padding: 20px; box-sizing: border-box; }
+    table { width: 100%; margin: 10px 0; border-collapse: collapse; }
+    td, th { text-align: center; padding: 10px; }
+    .center-groups { display: flex; justify-content: center; align-items: flex-start; }
+
+    .section { margin-bottom: 30px; }
+    .page-break { page-break-after: always; }
+
+    @media print {
+      #sidebar, #toggleSidebar { display: none !important; }
+      .page-break { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <button id="toggleSidebar" aria-expanded="false">☰</button>
+  <div id="sidebar" class="collapsed">
+    <p id="dateTime"></p>
+    <div class="weatherSection">
+      <img id="weatherIcon" src="" alt="Weather">
+      <p id="temperature">Temp: N/A</p>
+    </div>
+    <p id="streetCity">Street: N/A<br>City: N/A</p>
+    <p id="location"></p>
+    <p id="roadType">Road type: N/A</p>
+    <p id="speed">Speed: N/A</p>
+    <div class="distanceContainer">
+      <p id="totalDistance">Distance: 0.0 km</p>
+      <button class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
+    </div>
+    <textarea id="textBox" rows="2" placeholder="Enter your annotation here..."></textarea>
+    <button class="bigButton blueButton" onclick="logButton('Manual annotation', false)">Manual annotation</button>
+    <button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button>
+    <div class="center-groups">
+      <div>
+        <button class="bigButton greyButton">ACC</button>
+        <button class="bigButton redButton" onclick="logButton('ACC False brake', true)">False brake</button>
+        <button class="bigButton redButton" onclick="logButton('ACC Target drop', true)">Target drop</button>
+        <button class="bigButton redButton" onclick="logButton('ACC Longitudinal jerk', true)">Longitudinal jerk</button>
+        <button class="bigButton redButton" onclick="logButton('ACC Accuracy in speed adaption', true)">Accuracy in speed adaption</button>
+      </div>
+      <div>
+        <button class="bigButton greyButton">TSI Speed</button>
+        <button class="bigButton greenButton" onclick="logButton('TSI Explicit correct speed detected', false)">Correct speed</button>
+        <button class="bigButton redButton" onclick="logButton('TSI Explicit incorrect speed detected', true)">Incorrect speed</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mainContent">
+    <div id="logTableContainer" class="section"></div>
+    <div class="page-break"></div>
+
+    <div id="mapContainer" class="section">
+      <h3>Route</h3>
+      <div id="map" style="height:300px;width:100%;"></div>
+    </div>
+    <div class="page-break"></div>
+
+    <div id="countContainer" class="section">
+      <h3>KPI Calculation</h3>
+      <table id="countTable">
+        <tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>
+        <tr><td colspan="3">&nbsp;</td></tr>
+      </table>
+    </div>
+    <div class="page-break"></div>
+
+    <div id="chartsContainer" class="section" style="display:flex; gap:10px;">
+      <div class="chartBox" style="flex:1;">
+        <h3>Distance vs Time</h3>
+        <canvas id="distanceChart"></canvas>
+      </div>
+      <div class="chartBox" style="flex:1;">
+        <h3>Speed vs Distance</h3>
+        <canvas id="speedChart"></canvas>
+      </div>
+    </div>
+    <div class="page-break"></div>
+
+    <div id="streetsContainer" class="section">
+      <h3>Road Types Encountered</h3>
+      <table id="streetTable"><tr><th>Road type</th></tr></table>
+    </div>
+
+    <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
+      © Lynoit Tech 2025
+    </footer>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // Cache DOM refs
+    const toggleBtn    = document.getElementById('toggleSidebar');
+    const sidebar      = document.getElementById('sidebar');
+    const locEl        = document.getElementById('location');
+    const roadTypeEl   = document.getElementById('roadType');
+    const streetCityEl = document.getElementById('streetCity');
+    const tempEl       = document.getElementById('temperature');
+    const iconEl       = document.getElementById('weatherIcon');
+    const distEl       = document.getElementById('totalDistance');
+    const speedEl      = document.getElementById('speed');
+    const countTbl     = document.getElementById('countTable');
+    const streetTbl    = document.getElementById('streetTable');
+    const logContainer = document.getElementById('logTableContainer');
+
+    // State & data buffers
+    let logTable    = [], redCounts = {};
+    let lastPos     = null, totalDist = 0;
+    let positions   = [], timeData = [], distData = [], speedData = [];
+    let map, trackLine, distanceChart, speedChart;
+    let roadTypes   = new Set();
+    let lastChartTs = 0, posCount = 0;
+    let lastCity    = null;
+
+    // Sidebar toggle
+    toggleBtn.onclick = () => {
+      const exp = sidebar.classList.toggle('expanded');
+      sidebar.classList.toggle('collapsed', !exp);
+      toggleBtn.setAttribute('aria-expanded', exp);
+    };
+
+    // Initialize map & charts on load
+    window.onload = () => {
+      initMap();
+      initCharts();
+      updateDateTime();
+      setInterval(updateDateTime, 1000);
+
+      // Start watching position
+      navigator.geolocation.watchPosition(showPosition, showError, {
+        enableHighAccuracy: true,
+        maximumAge:      5000,
+        timeout:         10000
+      });
+    };
+
+    function initMap() {
+      map = L.map('map').setView([0,0],2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(map);
+      trackLine = L.polyline([], { weight: 4 }).addTo(map);
+    }
+
+    function initCharts() {
+      const ctx1 = document.getElementById('distanceChart').getContext('2d');
+      distanceChart = new Chart(ctx1, {
+        type:'line',
+        data:{ labels: timeData, datasets:[{ label:'Distance (km)', data: distData, fill:false, tension:0.1 }] },
+        options:{ responsive:true, scales:{
+          x:{ type:'time', time:{ unit:'minute', tooltipFormat:'HH:mm:ss' }},
+          y:{ beginAtZero:true }
+        }}
+      });
+      const ctx2 = document.getElementById('speedChart').getContext('2d');
+      speedChart = new Chart(ctx2, {
+        type:'line',
+        data:{ labels: distData, datasets:[{ label:'Speed (km/h)', data: speedData, fill:false, tension:0.1 }] },
+        options:{ responsive:true, scales:{
+          x:{ type:'linear', title:{ display:true, text:'Distance (km)' }},
+          y:{ beginAtZero:true, title:{ display:true, text:'Speed (km/h)' }}
+        }}
+      });
+    }
+
+    function showPosition(pos) {
+      const { latitude: lat, longitude: lon } = pos.coords;
+      const ts = pos.timestamp;
+
+      // Skip if moved <10 m
+      if (lastPos) {
+        const d = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
+        if (d < 10) return;
+        totalDist += d;
+      }
+
+      lastPos = { lat, lon, ts };
+      posCount++;
+
+      // Update map
+      trackLine.addLatLng([lat, lon]);
+      if (positions.length===0) map.setView([lat, lon],15);
+      else if (posCount % 20 === 0)
+        map.fitBounds(trackLine.getBounds().pad(0.2));
+      positions.push([lat, lon]);
+
+      // Update speed & distance display
+      if (lastPos && positions.length>1) {
+        const dt = (ts - lastPos.ts)/1000;
+        const speedKmh = dt>0 ? ((totalDist)/dt)*3.6 : 0;
+        speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+      }
+      distEl.textContent = `Distance: ${(totalDist/1000).toFixed(1)} km`;
+      distEl.classList.add('updated');
+      setTimeout(()=> distEl.classList.remove('updated'), 500);
+
+      // Throttle chart updates (5 s)
+      if (Date.now() - lastChartTs > 5000) {
+        timeData.push(new Date(ts));
+        distData.push((totalDist/1000).toFixed(3));
+        speedData.push(speedEl.textContent.split(' ')[1]);
+        requestAnimationFrame(()=>{ distanceChart.update(); speedChart.update(); });
+        lastChartTs = Date.now();
+      }
+
+      // Show raw coords
+      locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
+
+      // Reverse‑geocode & street/city
+      fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
+        .then(r=>r.json())
+        .then(data=>{
+          const rt = (data.extratags?.highway)||data.type||'Unknown';
+          roadTypeEl.textContent = `Road type: ${rt}`;
+          roadTypes.add(rt);
+          updateStreetTable();
+
+          const street = data.address.road||data.address.pedestrian||data.address.footway||'Unknown street';
+          const city   = data.address.city||data.address.town||data.address.village||'Unknown city';
+          streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}`;
+
+          if (city!== lastCity) {
+            lastCity = city;
+            getWeather(city);
+          }
+        })
+        .catch(err=>{
+          streetCityEl.textContent = 'Error: '+err.message;
+        });
+    }
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371000, toRad=Math.PI/180;
+      const dLat=(lat2-lat1)*toRad, dLon=(lon2-lon1)*toRad;
+      const a = Math.sin(dLat/2)**2 +
+                Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*
+                Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function updateStreetTable() {
+      let html = '<tr><th>Road type</th></tr>';
+      [...roadTypes].forEach(rt=> html += `<tr><td>${rt}</td></tr>`);
+      streetTbl.innerHTML = html;
+    }
+
+    function resetDistance() {
+      totalDist = 0; lastPos = null; positions=[]; roadTypes.clear();
+      distEl.textContent = 'Distance: 0.0 km';
+      speedEl.textContent = 'Speed: N/A';
+      timeData=[]; distData=[]; speedData=[];
+      trackLine.setLatLngs([]); map.setView([0,0],2);
+      updateStreetTable(); updateCountTable();
+    }
+
+    function saveAndPrint() {
+      const btn = event.currentTarget;
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.innerHTML = '<span class="spinner"></span> Generating…';
+      logButton('Save report to PDF', false);
+      setTimeout(()=>{
+        window.print();
+        btn.disabled = false;
+        btn.textContent = orig;
+      }, 500);
+    }
+
+    function showError(e) {
+      locEl.textContent = 'Error: '+e.message;
+      speedEl.textContent = 'Speed: N/A';
+    }
+
+    function getWeather(city) {
+      fetch(`https://api.weatherapi.com/v1/current.json?key=YOUR_VALID_KEY&q=${encodeURIComponent(city)}`)
+        .then(r=>r.json())
+        .then(d=>{
+          const iconPath = d.current.condition.icon || '';
+          const iconUrl  = iconPath.startsWith('//') ? 'https:'+iconPath : iconPath;
+          iconEl.src     = iconUrl;
+          iconEl.alt     = d.current.condition.text || 'weather';
+          tempEl.textContent = `Temp: ${d.current.temp_c}°C`;
+        })
+        .catch(err=>{
+          tempEl.textContent = 'Temp: N/A';
+          console.error('Weather error', err);
+        });
+    }
+
+    function updateDateTime() {
+      document.getElementById('dateTime').textContent = new Date().toLocaleString();
+    }
+
+    function logButton(name, isRed) {
+      const dt = new Date();
+      const date = dt.toLocaleDateString(), time = dt.toLocaleTimeString();
+      const [lat, lon] = locEl.innerHTML.split('<br>').map(l=>l.split(': ')[1]);
+      const dist = (totalDist/1000).toFixed(1);
+      const spd  = speedEl.textContent.split(' ')[1];
+      const rt   = roadTypeEl.textContent.split(': ')[1];
+      const weather = tempEl.textContent;
+      const comment = document.getElementById('textBox').value;
+
+      logTable.push([name, date, time, weather, iconEl.alt, lat, lon, dist, spd, rt, comment]);
+      displayLogTable();
+
+      const markerIcon = L.divIcon({ className:'issue-label', html:`<strong>${name}</strong>` });
+      L.marker([+lat, +lon],{ icon:markerIcon }).addTo(map);
+
+      if (isRed) {
+        redCounts[name] = (redCounts[name]||0) + 1;
+        updateCountTable();
+      }
+      document.getElementById('textBox').value = '';
+    }
+
+    function displayLogTable() {
+      let html = `<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Lat</th><th>Lon</th><th>Dist (km)</th><th>Speed</th><th>Road</th><th>Comment</th></tr>`;
+      logTable.forEach((row,i)=>{
+        html += `<tr><td>${i+1}</td>` +
+                row.map(v=>`<td>${v}</td>`).join('') +
+                `</tr>`;
+      });
+      html += `</table>`;
+      logContainer.innerHTML = html;
+    }
+
+    function updateCountTable() {
+      let html = `<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>`;
+      const km = totalDist/1000;
+      for (let issue in redCounts) {
+        const c = redCounts[issue];
+        const per = km>0 ? ((c/km)*1000).toFixed(1) : '—';
+        html += `<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;
+      }
+      countTbl.innerHTML = html;
+    }
+
+    // Keyboard shortcut for manual annotation
+    document.addEventListener('keydown', e => {
+      if (e.key.toLowerCase()==='m') logButton('Manual annotation', false);
+    });
+  </script>
+</body>
+</html>
