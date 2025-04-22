@@ -93,7 +93,7 @@
   <div id="sidebar" class="collapsed">
     <p id="dateTime"></p>
     <div class="weatherSection">
-      <img id="weatherIcon" src="" alt="Weather icon">
+      <img id="weatherIcon" src="" alt="Weather">
       <p id="temperature">Temp: N/A</p>
     </div>
     <p id="streetCity">Street: N/A<br>City: N/A</p>
@@ -125,7 +125,6 @@
 
   <!-- Main Content -->
   <div id="mainContent">
-
     <div id="logTableContainer" class="section"></div>
     <div class="page-break"></div>
 
@@ -248,16 +247,36 @@
       lastPosition = { latitude: lat, longitude: lon, timestamp: t };
       positions.push([lat, lon]); updateMap();
 
+      // Reverse geocode + street & city update
       fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
         .then(r => r.json())
         .then(data => {
-          const rt = (data.extratags && data.extratags.highway) ? data.extratags.highway : data.type || 'Unknown';
+          // Road type
+          const rt = (data.extratags && data.extratags.highway)
+                    ? data.extratags.highway
+                    : data.type || 'Unknown';
           document.getElementById('roadType').innerHTML = `Road type: ${rt}`;
-          roadTypeSet.add(rt); updateStreetTable();
-          const city = data.address.city||data.address.town||data.address.village;
-          if (city) getWeather(city);
+          roadTypeSet.add(rt);
+          updateStreetTable();
+
+          // Street & City
+          const street = data.address.road
+                        || data.address.pedestrian
+                        || data.address.footway
+                        || 'Unknown street';
+          const city   = data.address.city
+                        || data.address.town
+                        || data.address.village
+                        || 'Unknown city';
+          document.getElementById('streetCity').innerHTML =
+            `Street: ${street}<br>City: ${city}`;
+
+          // Weather lookup
+          getWeather(city);
         })
-        .catch(e => { document.getElementById('streetCity').innerHTML = 'Error: '+e.message; });
+        .catch(e => {
+          document.getElementById('streetCity').innerHTML = 'Error: ' + e.message;
+        });
     }
 
     function updateStreetTable() {
@@ -297,13 +316,28 @@
     }
     setInterval(updateLocation, 1000);
 
+    // Updated weather fetch
     function getWeather(city) {
-      fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181930407&q=${encodeURIComponent(city)}`)
-        .then(r => r.json())
-        .then(d => {
-          document.getElementById('weatherIcon').src = 'https:'+d.current.condition.icon;
-          document.getElementById('temperature').innerHTML = 'Temp: '+d.current.temp_c+'°C';
-        });
+      fetch(
+        `https://api.weatherapi.com/v1/current.json?key=YOUR_VALID_KEY&q=${encodeURIComponent(city)}`
+      )
+      .then(r => r.json())
+      .then(d => {
+        const iconPath = d.current.condition.icon;
+        const iconUrl = iconPath.startsWith('//')
+          ? 'https:' + iconPath
+          : iconPath;
+        const iconEl = document.getElementById('weatherIcon');
+        iconEl.src = iconUrl;
+        iconEl.alt = d.current.condition.text || 'weather';
+
+        document.getElementById('temperature').innerHTML =
+          `Temp: ${d.current.temp_c}°C`;
+      })
+      .catch(err => {
+        console.error('Weather fetch error:', err);
+        document.getElementById('temperature').innerHTML = 'Temp: N/A';
+      });
     }
 
     function updateDateTime() {
@@ -313,9 +347,11 @@
 
     function logButton(name, isRed) {
       const dt = new Date(), date = dt.toLocaleDateString(), time = dt.toLocaleTimeString();
-      const loc = document.getElementById('location').innerHTML.split('<br>'), lat = loc[0].split(': ')[1], lon = loc[1].split(': ')[1];
-      const dist = (totalDistance/1000).toFixed(1), spd = document.getElementById('speed').innerHTML.split(': ')[1].split(' ')[0];
-      const rt = document.getElementById('roadType').innerHTML.split(': ')[1];
+      const loc = document.getElementById('location').innerHTML.split('<br>'),
+            lat = loc[0].split(': ')[1], lon = loc[1].split(': ')[1];
+      const dist = (totalDistance/1000).toFixed(1),
+            spd  = document.getElementById('speed').innerHTML.split(': ')[1].split(' ')[0];
+      const rt   = document.getElementById('roadType').innerHTML.split(': ')[1];
       const comment = document.getElementById('textBox').value;
       logTable.push([name,date,time,document.getElementById('temperature').innerText,document.getElementById('weatherIcon').alt,lat,lon,dist,spd,rt,comment]);
       displayLogTable();
@@ -339,7 +375,7 @@
       tbl.innerHTML=rows;
     }
 
-    // Keyboard shortcut
+    // Keyboard shortcut for manual annotation
     document.addEventListener('keydown', e => {
       if(e.key.toLowerCase()==='m') logButton('Manual annotation', false);
     });
