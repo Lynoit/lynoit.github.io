@@ -264,6 +264,7 @@
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
     let roadTypes=new Set(), lastChartTs=0, posCount=0, lastCity=null;
+    let roadDistances = {};  // { roadType: totalMeters }
 
     toggleBtn.onclick = () => {
       const exp = sidebar.classList.toggle('expanded');
@@ -287,70 +288,103 @@
       speedChart=new Chart(document.getElementById('speedChart').getContext('2d'),{type:'line',data:{labels:distData,datasets:[{label:'Speed (km/h)',data:speedData,fill:false,tension:0.1}]},options:{responsive:true,scales:{x:{type:'linear',title:{display:true,text:'Distance (km)'}},y:{beginAtZero:true,title:{display:true,text:'Speed (km/h)'}}}}});
     }
 
-    function showPosition(pos){
-      const {latitude:lat,longitude:lon}=pos.coords,ts=pos.timestamp;
-        let segDist = 0;  // in meters
+    function showPosition(pos) {
+  const { latitude: lat, longitude: lon } = pos.coords;
+  const ts = pos.timestamp;
+  let segDist = 0; // in meters
+
+  // 1) Calculate segment distance & apply noise threshold
   if (lastPos) {
     segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
-    // you can keep your noise threshold, e.g. 10 m
-    if (segDist < 10) return;
+    if (segDist < 10) return; // ignore tiny jitters
     totalDist += segDist;
   }
-      const prev=lastPos; lastPos={lat,lon,ts}; posCount++;
-      trackLine.addLatLng([lat,lon]); if(positions.length===0)map.setView([lat,lon],15);else if(posCount%20===0)map.fitBounds(trackLine.getBounds().pad(0.2)); positions.push([lat,lon]);
-      if(prev){const dt=(ts-prev.ts)/1000;
-      const speedKmh = dt > 0
-      ? (segDist / dt) * 3.6
-      : 0;speedEl.textContent=`Speed: ${speedKmh.toFixed(1)} km/h`;}
-      distEl.textContent=`Distance: ${(totalDist/1000).toFixed(1)} km`;distEl.classList.add('updated');setTimeout(()=>distEl.classList.remove('updated'),500);
-      if(Date.now()-lastChartTs>5000){timeData.push(new Date(ts));distData.push((totalDist/1000).toFixed(3));speedData.push(speedEl.textContent.split(' ')[1]);requestAnimationFrame(()=>{distanceChart.update();speedChart.update();updateCountTable();});lastChartTs=Date.now();}
-      locEl.innerHTML=`Lat: ${lat}<br>Lon: ${lon}`;
-      fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
-  .then(response => response.json())
-  .then(data => {
-    // raw road type from OSM
-    const rawRt = data.extratags?.highway || data.type || 'unknown';
 
-    // determine what to display
-    const displayRt = allowedRoadTypes.has(rawRt)
-      ? rawRt
-      : 'Other';
+  // 2) Update position state & map
+  const prevPos = lastPos;
+  lastPos = { lat, lon, ts };
+  posCount++;
+  trackLine.addLatLng([lat, lon]);
+  if (positions.length === 0) {
+    map.setView([lat, lon], 15);
+  } else if (posCount % 20 === 0) {
+    map.fitBounds(trackLine.getBounds().pad(0.2));
+  }
+  positions.push([lat, lon]);
 
-    // update the sidebar text
-    roadTypeEl.textContent = `Road type: ${displayRt}`;
+  // 3) Update speed display
+  if (prevPos) {
+    const dt = (ts - prevPos.ts) / 1000; // seconds
+    const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
+    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+  }
 
-    // only add whitelisted types to the set (optional: add 'Other' if you want)
-    if (allowedRoadTypes.has(rawRt)) {
-      roadTypes.add(rawRt);
-    }
-    // (if you want to see "Other" in your table, uncomment the next line)
-    // else { roadTypes.add('Other'); }
+  // 4) Update distance display & charts
+  distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
+  distEl.classList.add('updated');
+  setTimeout(() => distEl.classList.remove('updated'), 500);
 
-    // update street name + city
-    const street = data.address.road
-      || data.address.pedestrian
-      || data.address.footway
-      || 'Unknown street';
-    const city = data.address.city
-      || data.address.town
-      || data.address.village
-      || 'Unknown city';
-    streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}`;
+  if (Date.now() - lastChartTs > 5000) {
+    timeData.push(new Date(ts));
+    distData.push((totalDist / 1000).toFixed(3));
+    speedData.push(speedEl.textContent.split(' ')[1]);
+    requestAnimationFrame(() => {
+      distanceChart.update();
+      speedChart.update();
+      updateCountTable();
+    });
+    lastChartTs = Date.now();
+  }
 
-    // if city changed, fetch weather
-    if (city !== lastCity) {
-      lastCity = city;
-      getWeather(city);
-    }
+  // 5) Update raw lat/lon display
+  locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
 
-    // refresh the table of seen road types
-    updateStreetTable();
-  })
-  .catch(err => {
-    streetCityEl.textContent = 'Error: ' + err.message;
-    console.error('Reverse geocode error', err);
-  });
-    }
+  // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
+  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
+    .then(r => r.json())
+    .then(data => {
+      const rawRt = data.extratags?.highway || data.type || 'unknown';
+      const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
+
+      // accumulate this segment to the proper road‐type bucket
+      if (segDist > 0) {
+        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+      }
+
+      // update sidebar
+      roadTypeEl.textContent = `Road type: ${displayRt}`;
+      if (allowedRoadTypes.has(rawRt)) {
+        roadTypes.add(rawRt);
+      }
+      // if you want “Other” in the table, uncomment:
+      // else { roadTypes.add('Other'); }
+
+      // street & city display
+      const street = data.address.road
+        || data.address.pedestrian
+        || data.address.footway
+        || 'Unknown street';
+      const city = data.address.city
+        || data.address.town
+        || data.address.village
+        || 'Unknown city';
+      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}`;
+
+      // fetch weather on city change
+      if (city !== lastCity) {
+        lastCity = city;
+        getWeather(city);
+      }
+
+      // refresh tables
+      updateStreetTable();
+      updateCountTable();
+    })
+    .catch(err => {
+      streetCityEl.textContent = 'Error: ' + err.message;
+      console.error('Reverse geocode error', err);
+    });
+}
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
       const R = 6_371_000;          // earth’s radius in meters
@@ -370,7 +404,27 @@
       return R * c;  // distance in meters
     }
     
-    function updateStreetTable(){let html='<tr><th>Road type</th></tr>';[...roadTypes].forEach(rt=>html+=`<tr><td>${rt}</td></tr>`);streetTbl.innerHTML=html;}
+function updateStreetTable() {
+  // build header row
+  let html = `
+    <tr>
+      <th>Road type</th>
+      <th>Distance (km)</th>
+    </tr>`;
+
+  // one row per seen road type
+  for (const rt of roadTypes) {
+    const meters = roadDistances[rt] || 0;
+    html += `
+      <tr>
+        <td>${rt}</td>
+        <td>${(meters / 1000).toFixed(2)}</td>
+      </tr>`;
+  }
+
+  // inject into the table
+  streetTbl.innerHTML = html;
+}
     function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
     function saveAndPrint(){const btn=event.currentTarget;btn.disabled=true;const orig=btn.textContent;btn.innerHTML='<span class="spinner"></span> Generating…';logButton('Save report to PDF',false);setTimeout(()=>{window.print();btn.disabled=false;btn.textContent=orig;},500);}
     function showError(e){locEl.textContent='Error: '+e.message;speedEl.textContent='Speed: N/A';}
