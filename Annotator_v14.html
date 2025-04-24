@@ -237,6 +237,13 @@
       <table id="streetTable"><tr><th>Road type</th></tr></table>
     </div>
 
+    <div id="weatherContainer" class="section">
+      <h3>Weather Summary</h3>
+      <table id="weatherTable">
+          <!-- rows injected by JS -->
+      </table>
+    </div>
+
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
       © Lynoit Tech 2025
     </footer>
@@ -258,6 +265,7 @@
     const streetTbl = document.getElementById('streetTable');
     const logContainer = document.getElementById('logTableContainer');
     const buttonGroups = document.getElementById('buttonGroups');
+    const weatherTbl   = document.getElementById('weatherTable');
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -275,7 +283,8 @@
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
     let roadTypes=new Set(), lastChartTs=0, posCount=0, lastCity=null;
-    let roadDistances = {};  // { roadType: totalMeters }
+    let roadDistances = {};
+    let weatherData = {}; 
 
     toggleBtn.onclick = () => {
       const exp = sidebar.classList.toggle('expanded');
@@ -439,8 +448,44 @@ function updateStreetTable() {
     function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
     function saveAndPrint(){const btn=event.currentTarget;btn.disabled=true;const orig=btn.textContent;btn.innerHTML='<span class="spinner"></span> Generating…';logButton('Save report to PDF',false);setTimeout(()=>{window.print();btn.disabled=false;btn.textContent=orig;},500);}
     function showError(e){locEl.textContent='Error: '+e.message;speedEl.textContent='Speed: N/A';}
-    function getWeather(city){fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
-        .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
+    function getWeather(city) {
+  fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
+    .then(response => {
+      if (!response.ok) throw new Error(`Weather API error: ${response.status}`);
+      return response.json();
+    })
+    .then(data => {
+      // Extract icon URL and condition text
+      const iconPath = data.current.condition.icon || '';
+      const iconUrl  = iconPath.startsWith('//') ? 'https:' + iconPath : iconPath;
+      
+      // Update the sidebar elements
+      iconEl.src         = iconUrl;
+      iconEl.alt         = data.current.condition.text || 'Weather';
+      tempEl.textContent = `Temp: ${data.current.temp_c.toFixed(1)}°C`;
+      
+      // Store into our summary object keyed by city
+      weatherData[city] = {
+        temp:      data.current.temp_c.toFixed(1),
+        condition: data.current.condition.text
+      };
+      
+      // Refresh the weather summary table
+      updateWeatherTable();
+    })
+    .catch(err => {
+      console.error('Weather error', err);
+      // Fallback display on error
+      tempEl.textContent = 'Temp: N/A';
+      iconEl.alt         = 'N/A';
+      // Still update the table to reflect the failure if desired:
+      weatherData[city] = {
+        temp:      'N/A',
+        condition: 'Error'
+      };
+      updateWeatherTable();
+    });
+}
     function logButton(name,isRed){const dt=new Date(),date=dt.toLocaleDateString(),time=dt.toLocaleTimeString();const [lat,lon]=locEl.innerHTML.split('<br>').map(l=>l.split(': ')[1]);const dist=(totalDist/1000).toFixed(1),spd=speedEl.textContent.split(' ')[1];const rt=roadTypeEl.textContent.split(': ')[1];const comment=document.getElementById('textBox').value;logTable.push([name,date,time,tempEl.textContent,iconEl.alt,lat,lon,dist,spd,rt,comment]);displayLogTable();L.marker([+lat,+lon],{icon:L.divIcon({className:'issue-label',html:`<strong>${name}</strong>`})}).addTo(map);if(isRed){redCounts[name]=(redCounts[name]||0)+1;updateCountTable();}document.getElementById('textBox').value='';}
     function displayLogTable(){let html=`<table><tr><th>No.</th><th>Issue</th><th>Date</th><th>Time</th><th>Temp</th><th>Weather</th><th>Lat</th><th>Lon</th><th>Dist (km)</th><th>Speed</th><th>Road</th><th>Comment</th></tr>`;logTable.forEach((row,i)=>{html+=`<tr><td>${i+1}</td>`+row.map(v=>`<td>${v}</td>`).join('')+'</tr>';});html+='</table>';logContainer.innerHTML=html;}
     function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
@@ -475,6 +520,30 @@ function updateStreetTable() {
     }
 
     function updateDateTime() { document.getElementById('dateTime').textContent = new Date().toLocaleString(); }
+
+    function updateWeatherTable() {
+  // header row
+  let html = `
+    <tr>
+      <th>City</th>
+      <th>Temp (°C)</th>
+      <th>Condition</th>
+    </tr>`;
+
+  // one row per city we’ve fetched
+  for (const city in weatherData) {
+    const { temp, condition } = weatherData[city];
+    html += `
+      <tr>
+        <td>${city}</td>
+        <td>${temp}</td>
+        <td>${condition}</td>
+      </tr>`;
+  }
+
+  weatherTbl.innerHTML = html;
+}
+    
   </script>
 </body>
 </html>
