@@ -587,23 +587,18 @@ function updateStreetTable() {
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
     function logButton(name, isRed) {
-  const dt = new Date(),
-        date = dt.toLocaleDateString(),
-        time = dt.toLocaleTimeString();
+  const dt        = new Date(),
+        date      = dt.toLocaleDateString(),
+        time      = dt.toLocaleTimeString(),
+        fullPhase = document.getElementById('dayPhase').textContent,
+        phase     = fullPhase.split(': ')[1] || fullPhase,
+        [lat, lon] = locEl.innerHTML.split('<br>').map(l => l.split(': ')[1]),
+        dist      = (totalDist / 1000).toFixed(1),
+        spd       = speedEl.textContent.split(' ')[1],
+        rt        = roadTypeEl.textContent.split(': ')[1],
+        comment   = document.getElementById('textBox').value;
 
-  const fullPhase = document.getElementById('dayPhase').textContent;
-  const phase = fullPhase.split(': ')[1] || fullPhase;
-
-  const [lat, lon] = locEl.innerHTML
-    .split('<br>')
-    .map(l => l.split(': ')[1]);
-
-  const dist = (totalDist / 1000).toFixed(1),
-        spd  = speedEl.textContent.split(' ')[1],
-        rt   = roadTypeEl.textContent.split(': ')[1],
-        comment = document.getElementById('textBox').value;
-
-  // Prepare the base row data (no image yet)
+  // 1) Build & push the row _without_ image placeholder
   const baseRow = [
     name,
     date,
@@ -616,24 +611,31 @@ function updateStreetTable() {
     dist,
     spd,
     rt,
-    comment
+    comment,
+    null   // placeholder for the Map column
   ];
+  logTable.push(baseRow);
 
-  // Now grab the current map view as a canvas → data-URL
-  leafletImage(map, function(err, canvas) {
-    let imgData = null;
-    if (err) {
-      console.error('leafletImage error', err);
-    } else {
-      imgData = canvas.toDataURL('image/png');
+  // 2) Render the table immediately (with “–” in the Map column)
+  displayLogTable();
+
+  // 3) Now grab the map snapshot and patch that last row’s cell
+  leafletImage(map, (err, canvas) => {
+    if (!err && canvas) {
+      const imgData = canvas.toDataURL('image/png');
+      const lastIdx = logTable.length - 1;
+      // Update data model
+      logTable[lastIdx][logTable[lastIdx].length - 1] = imgData;
+
+      // Update DOM for that single cell
+      const table     = logContainer.querySelector('table');
+      const rowNode   = table.querySelectorAll('tr')[ lastIdx + 1 ]; // +1 skips header
+      const cellNode  = rowNode.querySelectorAll('td')[ table.rows[0].cells.length - 1 ];
+      cellNode.innerHTML = `<img src="${imgData}" style="width:100px; height:auto; display:block; margin:0 auto;">`;
     }
-
-    // Push full row (with image data or null)
-    logTable.push([...baseRow, imgData]);
-    displayLogTable();
   });
 
-  // Place a marker for this issue
+  // --- rest of your existing logic ---
   L.marker([+lat, +lon], {
     icon: L.divIcon({
       className: 'issue-label',
@@ -641,46 +643,47 @@ function updateStreetTable() {
     })
   }).addTo(map);
 
-  // Update red-event counts
   if (isRed) {
     redCounts[name] = (redCounts[name] || 0) + 1;
     updateCountTable();
   }
 
-  // Clear the annotation box
   document.getElementById('textBox').value = '';
 }
+
 
 function displayLogTable() {
   let html = `
     <table>
-      <tr>
-        <th>No.</th>
-        <th>Issue</th>
-        <th>Date</th>
-        <th>Time</th>
-        <th>Phase</th>
-        <th>Temp</th>
-        <th>Weather</th>
-        <th>Lat</th>
-        <th>Lon</th>
-        <th>Dist (km)</th>
-        <th>Speed</th>
-        <th>Road</th>
-        <th>Comment</th>
-        <th>Map</th>
-      </tr>`;
+      <thead>
+        <tr>
+          <th>No.</th>
+          <th>Issue</th>
+          <th>Date</th>
+          <th>Time</th>
+          <th>Phase</th>
+          <th>Temp</th>
+          <th>Weather</th>
+          <th>Lat</th>
+          <th>Lon</th>
+          <th>Dist (km)</th>
+          <th>Speed</th>
+          <th>Road</th>
+          <th>Comment</th>
+          <th>Map</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
 
   logTable.forEach((row, i) => {
     html += `<tr><td>${i + 1}</td>`;
     row.forEach((cell, j) => {
-      // Last column is the map snapshot data-URL
+      // Last column = map snapshot
       if (j === row.length - 1) {
-        if (cell) {
-          html += `<td><img src="${cell}" style="width:100px; height:auto; display:block; margin:0 auto;"></td>`;
-        } else {
-          html += `<td>–</td>`;
-        }
+        html += cell
+          ? `<td><img src="${cell}" style="width:100px; height:auto; display:block; margin:0 auto;"></td>`
+          : `<td>–</td>`;
       } else {
         html += `<td>${cell}</td>`;
       }
@@ -688,10 +691,12 @@ function displayLogTable() {
     html += `</tr>`;
   });
 
-  html += `</table>`;
+  html += `
+      </tbody>
+    </table>
+  `;
   logContainer.innerHTML = html;
 }
-
     function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
