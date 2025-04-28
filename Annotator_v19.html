@@ -620,39 +620,55 @@ function updateStreetTable() {
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
     function logButton(name, isRed) {
+  // 1) Timestamp, phase, coords, etc.
   const dt = new Date(),
         date = dt.toLocaleDateString(),
         time = dt.toLocaleTimeString();
 
   const fullPhase = document.getElementById('dayPhase').textContent;
-  const phase = fullPhase.split(': ')[1] || fullPhase;
+  const phase     = fullPhase.split(': ')[1] || fullPhase;
 
-  const [lat, lon] = locEl.innerHTML
+  const [lat, lon] = document.getElementById('location').innerHTML
     .split('<br>')
     .map(l => l.split(': ')[1]);
 
   const dist = (totalDist / 1000).toFixed(1),
-        spd  = speedEl.textContent.split(' ')[1],
-        rt   = roadTypeEl.textContent.split(': ')[1],
+        spd  = document.getElementById('speed').textContent.split(' ')[1],
+        rt   = document.getElementById('roadType').textContent.split(': ')[1],
         comment = document.getElementById('textBox').value;
 
+  // 2) Capture photo from camera preview
+  let photoData = null;
+  const video  = document.getElementById('videoPreview');
+  const canvas = document.getElementById('photoCanvas');
+  if (video && video.readyState === 4) {
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    photoData = canvas.toDataURL('image/png');
+  }
+
+  // 3) Push everything (including photoData) into logTable
   logTable.push([
     name,
     date,
     time,
-    phase,  
-    tempEl.textContent,
-    iconEl.alt,
+    phase,
+    document.getElementById('temperature').textContent,
+    document.getElementById('weatherIcon').alt,
     lat,
     lon,
     dist,
     spd,
     rt,
-    comment
+    comment,
+    photoData    // ← new column
   ]);
 
+  // 4) Refresh UI
   displayLogTable();
+  updateCountTable();
 
+  // 5) Add map marker
   L.marker([+lat, +lon], {
     icon: L.divIcon({
       className: 'issue-label',
@@ -660,95 +676,71 @@ function updateStreetTable() {
     })
   }).addTo(map);
 
+  // 6) If red‐flagged, increment counts
   if (isRed) {
     redCounts[name] = (redCounts[name] || 0) + 1;
     updateCountTable();
   }
 
+  // 7) Clear annotation box
   document.getElementById('textBox').value = '';
 }
-    
+
 function displayLogTable() {
-  // 1) Build & inject main log table
+  // 1) Build table header, now with a Photo column
   let html = `
     <table>
       <tr>
-        <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
-        <th>Phase</th><th>Temp</th><th>Weather</th>
-        <th>Lat</th><th>Lon</th><th>Dist (km)</th>
-        <th>Speed</th><th>Road</th><th>Comment</th>
+        <th>No.</th>
+        <th>Issue</th>
+        <th>Date</th>
+        <th>Time</th>
+        <th>Phase</th>
+        <th>Temp</th>
+        <th>Weather</th>
+        <th>Lat</th>
+        <th>Lon</th>
+        <th>Dist (km)</th>
+        <th>Speed</th>
+        <th>Road</th>
+        <th>Comment</th>
+        <th>Photo</th>
       </tr>`;
+
+  // 2) Add one row per log entry
   logTable.forEach((row, i) => {
-    html += `<tr><td>${i+1}</td>` +
-            row.map(v => `<td>${v}</td>`).join('') +
-            `</tr>`;
+    html += `<tr><td>${i + 1}</td>`;
+
+    row.forEach((cell, j) => {
+      if (j === row.length - 1) {
+        // Last column = photoData
+        if (cell) {
+          html += `
+            <td>
+              <img
+                src="${cell}"
+                width="100"
+                style="object-fit:cover; border:1px solid #ccc;"
+                alt="Snapshot ${i + 1}"
+              />
+            </td>`;
+        } else {
+          html += `<td>No photo</td>`;
+        }
+      } else {
+        // All other columns
+        html += `<td>${cell}</td>`;
+      }
+    });
+
+    html += `</tr>`;
   });
+
   html += `</table>`;
+
+  // 3) Inject into the container
   logContainer.innerHTML = html;
-
-  // 2) Build & inject snapshot-table with 'Issue' before 'Snapshot'
-  let snapHtml = `
-    <table id="snapshotTable"
-           style="width:100%;border-collapse:collapse;
-                  border:1px solid #444;margin-bottom:80px;">
-      <tr>
-        <th style="border:1px solid #444;padding:6px 8px;">No.</th>
-        <th style="border:1px solid #444;padding:6px 8px;">Issue</th>
-        <th style="border:1px solid #444;padding:6px 8px;">Snapshot</th>
-      </tr>`;
-  logTable.forEach((row, i) => {
-    snapHtml += `
-      <tr>
-        <td style="border:1px solid #444;padding:6px 8px;">${i+1}</td>
-        <td style="border:1px solid #444;padding:6px 8px;">${row[0]}</td>
-        <td id="snapshot-${i}"
-            style="border:1px solid #444;padding:6px 8px;">Loading…</td>
-      </tr>`;
-  });
-  snapHtml += `</table>`;
-  document.getElementById('snapshotTableContainer').innerHTML = snapHtml;
-
-  // 3) Turn each "Loading…" cell into a mini Leaflet map
-  logTable.forEach((row, i) => {
-    const lat = parseFloat(row[6]), lon = parseFloat(row[7]);
-    const cell = document.getElementById(`snapshot-${i}`);
-    cell.innerHTML = '';
-
-    // create div for mini-map
-    const div = document.createElement('div');
-    div.id = `snapmap-${i}`;
-    div.style.width  = '300px';
-    div.style.height = '200px';
-    cell.appendChild(div);
-
-    // init an off-DOM Leaflet map
-    const snapMap = L.map(div.id, {
-      zoomControl: false,
-      attributionControl: false,
-      dragging: false,
-      scrollWheelZoom: false,
-      doubleClickZoom: false,
-      boxZoom: false,
-      keyboard: false,
-      tap: false
-    }).setView([lat, lon], 17);
-
-    // add OSM tiles and red circle marker
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors'
-    }).addTo(snapMap);
-
-    L.circleMarker([lat, lon], {
-      radius: 6,
-      color: 'red',
-      fillColor: 'red',
-      fillOpacity: 1
-    }).addTo(snapMap);
-
-    snapMap.invalidateSize();
-  });
 }
-
 
     function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
@@ -845,6 +837,27 @@ function displayLogTable() {
 
     function updateDateTime() { document.getElementById('dateTime').textContent = new Date().toLocaleString();
     }
+
+    function initCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => {
+      const video = document.getElementById('videoPreview');
+      video.srcObject = stream;
+    })
+    .catch(err => console.warn('Camera init failed:', err));
+}
+
+window.onload = () => {
+  initMap();
+  initMap2();
+  initCharts();
+  initCamera();    
+  updateDateTime();
+  setInterval(updateDateTime,1000);
+  navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
+  buildButtons();
+};
 
     function updateSnapshotTable() {
   const container = document.getElementById('snapshotTableContainer');
