@@ -209,6 +209,8 @@
   </style>
 </head>
 <body>
+  <video id="cameraVideo" autoplay playsinline style="display:none"></video>
+  <canvas id="cameraCanvas" width="300" height="200" style="display:none"></canvas>
   <button id="toggleSidebar" aria-expanded="false">☰</button>
   <div id="sidebar" class="collapsed">
     <p id="dateTime"></p>
@@ -377,6 +379,13 @@
       initMap(); initMap2(); initCharts(); updateDateTime(); setInterval(updateDateTime,1000);
       navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
       buildButtons();
+      const videoEl  = document.getElementById('cameraVideo');
+      const canvasEl = document.getElementById('cameraCanvas');
+
+     navigator.mediaDevices
+       .getUserMedia({ video: { facingMode: 'environment' } })
+       .then(stream => { videoEl.srcObject = stream; })
+       .catch(err   => { console.warn('Camera init failed', err); });
     };
 
     function initMap(){
@@ -586,142 +595,169 @@ function updateStreetTable() {
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
     function logButton(name, isRed) {
+  // 1) Timestamp
   const dt = new Date(),
         date = dt.toLocaleDateString(),
-        time = dt.toLocaleTimeString(),
-        fullPhase = document.getElementById('dayPhase').textContent,
-        phase = fullPhase.split(': ')[1] || fullPhase,
-        [lat, lon] = document.getElementById('location')
-                       .innerHTML
-                       .split('<br>')
-                       .map(l => l.split(': ')[1]),
-        dist = (totalDist / 1000).toFixed(1),
-        spd  = speedEl.textContent.split(' ')[1],
-        rt   = roadTypeEl.textContent.split(': ')[1],
+        time = dt.toLocaleTimeString();
+
+  // 2) Current phase
+  const fullPhase = document.getElementById('dayPhase').textContent;
+  const phase     = fullPhase.split(': ')[1] || fullPhase;
+
+  // 3) Lat / Lon
+  const [lat, lon] = document
+    .getElementById('location')
+    .innerHTML
+    .split('<br>')
+    .map(l => l.split(': ')[1]);
+
+  // 4) Other metrics
+  const dist    = (totalDist / 1000).toFixed(1),
+        spd     = speedEl.textContent.split(' ')[1],
+        rt      = roadTypeEl.textContent.split(': ')[1],
         comment = document.getElementById('textBox').value;
 
-  // Capture a snapshot of the zoomed-in map2
-  html2canvas(document.getElementById('map2')).then(canvas => {
-    const snapshotUrl = canvas.toDataURL();  // PNG data URL
+  // 5) Camera snapshot
+  const ctx = canvasEl.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+  const photoDataUrl = canvasEl.toDataURL('image/jpeg');
 
-    // Push all fields + snapshot URL into logTable
-    logTable.push([
-      name,
-      date,
-      time,
-      phase,
-      tempEl.textContent,
-      iconEl.alt,
-      lat,
-      lon,
-      dist,
-      spd,
-      rt,
-      comment,
-      snapshotUrl
-    ]);
+  // 6) Push into logTable (note photoDataUrl is last column)
+  logTable.push([
+    name,
+    date,
+    time,
+    phase,
+    tempEl.textContent,
+    iconEl.alt,
+    lat,
+    lon,
+    dist,
+    spd,
+    rt,
+    comment,
+    photoDataUrl
+  ]);
 
-    displayLogTable();
+  // 7) Re-render tables & snapshots
+  displayLogTable();
 
-    // Place marker on main map
-    L.marker([+lat, +lon], {
-      icon: L.divIcon({
-        className: 'issue-label',
-        html: `<strong>${name}</strong>`
-      })
-    }).addTo(map);
+  // 8) Add a marker on the main map
+  L.marker([+lat, +lon], {
+    icon: L.divIcon({
+      className: 'issue-label',
+      html: `<strong>${name}</strong>`
+    })
+  }).addTo(map);
 
-    // Update red-event counts if needed
-    if (isRed) {
-      redCounts[name] = (redCounts[name] || 0) + 1;
-      updateCountTable();
-    }
+  // 9) If it's a "red" event, update counts
+  if (isRed) {
+    redCounts[name] = (redCounts[name] || 0) + 1;
+    updateCountTable();
+  }
 
-    // Clear the annotation box
-    document.getElementById('textBox').value = '';
-  }).catch(err => {
-    console.error('Snapshot failed:', err);
-
-    // Fallback: log entry without snapshot
-    logTable.push([
-      name,
-      date,
-      time,
-      phase,
-      tempEl.textContent,
-      iconEl.alt,
-      lat,
-      lon,
-      dist,
-      spd,
-      rt,
-      comment,
-      ''  // no snapshot
-    ]);
-
-    displayLogTable();
-
-    L.marker([+lat, +lon], {
-      icon: L.divIcon({
-        className: 'issue-label',
-        html: `<strong>${name}</strong>`
-      })
-    }).addTo(map);
-
-    if (isRed) {
-      redCounts[name] = (redCounts[name] || 0) + 1;
-      updateCountTable();
-    }
-
-    document.getElementById('textBox').value = '';
-  });
+  // 10) Clear the manual comment box
+  document.getElementById('textBox').value = '';
 }
+
     function displayLogTable() {
-  // build table header with Snapshot column
+  // 1) Render main log table (including Photo column)
   let html = `
     <table>
       <tr>
-        <th>No.</th>
-        <th>Issue</th>
-        <th>Date</th>
-        <th>Time</th>
-        <th>Phase</th>
-        <th>Temp</th>
-        <th>Weather</th>
-        <th>Lat</th>
-        <th>Lon</th>
-        <th>Dist (km)</th>
-        <th>Speed</th>
-        <th>Road</th>
-        <th>Comment</th>
-        <th>Snapshot</th>
-      </tr>
-  `;
-
+        <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
+        <th>Phase</th><th>Temp</th><th>Weather</th>
+        <th>Lat</th><th>Lon</th><th>Dist (km)</th>
+        <th>Speed</th><th>Road</th><th>Comment</th>
+        <th>Photo</th>
+      </tr>`;
   logTable.forEach((row, i) => {
-    // row is [...issueFields, snapshotUrl]
-    const fieldsHtml = row
-      .slice(0, -1)                       // all original fields
-      .map(v => `<td>${v}</td>`)
-      .join('');
-
-    const snapshotUrl = row[row.length - 1];
-    const snapshotHtml = snapshotUrl
-      ? `<td><img src="${snapshotUrl}" style="width:120px;"/></td>`
-      : `<td>(no snapshot)</td>`;
-
-    html += `
-      <tr>
-        <td>${i + 1}</td>
-        ${fieldsHtml}
-        ${snapshotHtml}
-      </tr>
-    `;
+    // row[12] is the data-URL of the camera snapshot
+    html += `<tr><td>${i+1}</td>`
+          + row.slice(0, 12).map(v => `<td>${v}</td>`).join('')
+          + `<td>
+               <img 
+                 src="${row[12]}" 
+                 style="width:100px;
+                        height:66px;
+                        object-fit:cover;
+                        border:1px solid #444;"
+               >
+             </td>`
+          + `</tr>`;
   });
-
   html += `</table>`;
   logContainer.innerHTML = html;
+
+  // 2) Render snapshot table skeleton (Issue before Snapshot)
+  let snapHtml = `
+    <table id="snapshotTable" 
+           style="width:100%;
+                  border-collapse:collapse;
+                  border:1px solid #444;
+                  margin:20px 0;">
+      <tr>
+        <th style="border:1px solid #444;padding:6px;">No.</th>
+        <th style="border:1px solid #444;padding:6px;">Issue</th>
+        <th style="border:1px solid #444;padding:6px;">Snapshot</th>
+      </tr>`;
+  logTable.forEach((row, i) => {
+    snapHtml += `
+      <tr>
+        <td style="border:1px solid #444;padding:6px;">${i+1}</td>
+        <td style="border:1px solid #444;padding:6px;">${row[0]}</td>
+        <td id="snapshot-${i}" 
+            style="border:1px solid #444;padding:6px;">
+          Loading…
+        </td>
+      </tr>`;
+  });
+  snapHtml += `</table>`;
+  document.getElementById('snapshotTableContainer').innerHTML = snapHtml;
+
+  // 3) Populate each "Loading…" cell with a mini Leaflet map
+  logTable.forEach((row, i) => {
+    const lat = parseFloat(row[6]),
+          lon = parseFloat(row[7]);
+    const cell = document.getElementById(`snapshot-${i}`);
+    cell.innerHTML = '';
+
+    // create a div for the mini-map
+    const div = document.createElement('div');
+    div.id = `snapmap-${i}`;
+    div.style.width  = '300px';
+    div.style.height = '200px';
+    cell.appendChild(div);
+
+    // initialize Leaflet map in that div
+    const snapMap = L.map(div.id, {
+      zoomControl: false,
+      attributionControl: false,
+      dragging: false,
+      scrollWheelZoom: false,
+      doubleClickZoom: false,
+      boxZoom: false,
+      keyboard: false,
+      tap: false
+    }).setView([lat, lon], 17);
+
+    // add tile layer and a red circle marker
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(snapMap);
+
+    L.circleMarker([lat, lon], {
+      radius: 6,
+      color: 'red',
+      fillColor: 'red',
+      fillOpacity: 1
+    }).addTo(snapMap);
+
+    snapMap.invalidateSize();
+  });
 }
+
+    
     function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
