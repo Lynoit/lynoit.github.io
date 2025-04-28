@@ -230,6 +230,9 @@
     style="display:none"
   />
 
+  <video id="cameraVideo" autoplay playsinline style="display:none;"></video>
+  <canvas id="cameraCanvas" style="display:none;"></canvas>
+
   <button id="toggleSidebar" aria-expanded="false">☰</button>
   <div id="sidebar" class="collapsed">
     <p id="dateTime"></p>
@@ -629,8 +632,18 @@ function updateStreetTable() {
     function getWeather(city){fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
-    function logButton(name, isRed) {
-  // 1) gather all the metadata you already have:
+    async function logButton(name, isRed) {
+  // --- 1) Capture a single frame from the hidden video ---
+  const video  = document.getElementById('cameraVideo');
+  const canvas = document.getElementById('cameraCanvas');
+  const ctx    = canvas.getContext('2d');
+  // make canvas match video size
+  canvas.width  = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const photoDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+
+  // --- 2) Gather your other metadata ---
   const dt        = new Date(),
         date      = dt.toLocaleDateString(),
         time      = dt.toLocaleTimeString(),
@@ -642,46 +655,35 @@ function updateStreetTable() {
         rt        = roadTypeEl.textContent.split(': ')[1],
         comment   = document.getElementById('textBox').value;
 
-  // 2) set up the camera input callback:
-  const input = document.getElementById('cameraInput');
-  input.onchange = e => {
-    const file = e.target.files[0];
-    if (!file) return;  
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const photoDataUrl = ev.target.result;
+  // --- 3) Push into your logTable, adding photoDataUrl as the last column ---
+  logTable.push([
+    name, date, time, phase,
+    tempEl.textContent, iconEl.alt,
+    lat, lon, dist, spd, rt,
+    comment,
+    photoDataUrl   // ← automatic snapshot
+  ]);
 
-      // 3) now push into logTable *including* the photo URL
-      logTable.push([
-        name, date, time, phase,
-        tempEl.textContent, iconEl.alt,
-        lat, lon, dist, spd, rt,
-        comment,      // old columns
-        photoDataUrl  // ← new column at the end
-      ]);
+  // --- 4) Update all of your UI tables & map marker ---
+  displayLogTable();
+  displaySnapshotTable();
+  displayPhotoTable();
 
-      // 4) refresh all your tables
-      displayLogTable();
-      displaySnapshotTable();   // your map snapshots
-      displayPhotoTable();      // the new photo snapshots
+  L.marker([+lat, +lon], {
+    icon: L.divIcon({ html: `<strong>${name}</strong>` })
+  }).addTo(map);
 
-      // 5) marker on the map if you want
-      L.marker([+lat, +lon], {
-        icon: L.divIcon({ html: `<strong>${name}</strong>` })
-      }).addTo(map);
+  if (isRed) {
+    redCounts[name] = (redCounts[name] || 0) + 1;
+    updateCountTable();
+  }
 
-      // 6) clear the file input so next time it triggers
-      input.value = '';
-      document.getElementById('textBox').value = '';
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // 7) finally, fire the camera
-  input.click();
+  // --- 5) Clear the annotation box for the next entry ---
+  document.getElementById('textBox').value = '';
 }
 
-    function displayPhotoTable() {
+
+function displayPhotoTable() {
   let html = `
     <table>
       <tr>
@@ -691,8 +693,8 @@ function updateStreetTable() {
       </tr>`;
 
   logTable.forEach((row, i) => {
-    const name       = row[0];
-    const photoData  = row[row.length - 1]; // last column
+    const name      = row[0];
+    const photoData = row[row.length - 1];
     html += `
       <tr>
         <td>${i+1}</td>
@@ -709,6 +711,7 @@ function updateStreetTable() {
   html += `</table>`;
   document.getElementById('photoSnapshotTableContainer').innerHTML = html;
 }
+
     
 function displayLogTable() {
   // 1) Build & inject main log table
