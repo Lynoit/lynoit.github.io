@@ -551,15 +551,23 @@
   updateDayPhase(lat, lon);
 
   // 6) Reverse-geocode + whitelist + accumulate per-type distance
+/* ──────────────────────────────────────────────────────────
+   6) Reverse-geocode + per-type distances + auto country log
+─────────────────────────────────────────────────────────── */
 fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
   .then(r => r.json())
   .then(data => {
-    const rawRt = data.extratags?.highway || data.type || 'unknown';
+    /* ── Road-type bookkeeping ─────────────────────────── */
+    const rawRt     = data.extratags?.highway || data.type || 'unknown';
     const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
 
-    // … distance bookkeeping for road types (unchanged) …
+    if (segDist > 0) {                   // add this segment to mileage
+      roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+    }
+    roadTypeEl.textContent = `Road type: ${displayRt}`;
+    if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
-    /* ───── Sidebar location line ───── */
+    /* ── Sidebar location text ─────────────────────────── */
     const street  = data.address.road
                  || data.address.pedestrian
                  || data.address.footway
@@ -571,27 +579,33 @@ fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=
                  || 'Unknown city';
 
     const country = data.address.country || 'Unknown country';
-streetCityEl.innerHTML =
-  `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-/* ── auto-log when we cross a border ── */
-if (country !== lastCountry && lastCountry !== null) {
-  logButton(`Entered ${country}`, false);   // false ⇒ no KPI count
-}
-lastCountry = country;
+    streetCityEl.innerHTML =
+      `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-    /* ───── weather refresh only on CITY change (kept as-is) ───── */
+    /* ── Auto-log when crossing a border ───────────────── */
+    if (country !== lastCountry && lastCountry !== null) {
+      logButton(`Entered ${country}`, false);   // false → no KPI count
+    }
+    lastCountry = country;
+
+    /* ── Refresh weather only when the CITY changes ────── */
     if (city !== lastCity) {
       lastCity = city;
       getWeather(city);
     }
 
-    // … refresh tables (street / count / weather / phase) …
+    /* ── Update mileage / KPI / weather / phase tables ── */
+    updateStreetTable();
+    updateCountTable();
+    updateWeatherTable();
+    updatePhaseTable();
   })
   .catch(err => {
     streetCityEl.textContent = 'Error: ' + err.message;
     console.error('Reverse geocode error', err);
   });
+
 
     if (map2) {
       map2.setView([lat, lon], 20);  // zoom level 20 ≃ 100 m across
