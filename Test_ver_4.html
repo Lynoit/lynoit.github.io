@@ -254,12 +254,18 @@
 
   <div id="mainContent">
     <!-- ── Manual Annotation Section (moved & resized) ── -->
-    <div id="manualAnnotation" class="section">
-      <textarea id="textBox" rows="2" placeholder="Enter your annotation here…"></textarea>
-      <button class="blueButton" onclick="logButton('Manual annotation', false)">
-        Manual annotation
-      </button>
-    </div>
+<div id="manualAnnotation" class="section">
+  <span id="micLamp"
+        title="Voice control ready"
+        style="display:inline-block;width:10px;height:10px;
+               margin-right:6px;border-radius:50%;background:#888;"></span>
+  <textarea id="textBox" rows="2"
+            placeholder="Speak after you say “Annotator”…"></textarea>
+  <button class="blueButton"
+          onclick="logButton('Manual annotation', false)">
+    Manual annotation
+  </button>
+</div>
 
     <style>
       /* start hidden */
@@ -1012,6 +1018,72 @@ function displayLogTable() {
   html += `</table>`;
   container.innerHTML = html;
 }
+
+  (() => {
+      const SpeechRecognition =
+            window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        console.warn('SpeechRecognition not supported in this browser');
+        return;
+      }
+
+      const micLamp      = document.getElementById('micLamp');
+      const textBox      = document.getElementById('textBox');
+      let   listeningNow = false;
+
+      /* Wake-word recogniser (“annotator”) */
+      const wakeRec = new SpeechRecognition();
+      wakeRec.continuous     = true;
+      wakeRec.interimResults = false;
+      wakeRec.lang           = 'en-US';
+
+      wakeRec.onstart = () => micLamp.style.background = '#4caf50'; // green
+      wakeRec.onend   = () => !listeningNow && wakeRec.start();     // keep alive
+      wakeRec.onresult = e => {
+        const phrase = e.results[e.resultIndex][0].transcript
+                          .trim().toLowerCase();
+        if (phrase.includes('annotator')) {
+          wakeRec.stop();
+          startDictation();
+        }
+      };
+      wakeRec.start();
+
+      /* Dictation recogniser (fills #textBox) */
+      function startDictation () {
+        listeningNow = true;
+        micLamp.style.background = '#f44336';                       // red
+
+        const dictRec = new SpeechRecognition();
+        dictRec.continuous     = false;   // stop on ½-second silence
+        dictRec.interimResults = true;
+        dictRec.lang           = 'en-US';
+
+        let interim = '';
+
+        dictRec.onresult = e => {
+          let finalised = '';
+          for (let i = e.resultIndex; i < e.results.length; ++i) {
+            const chunk = e.results[i][0].transcript;
+            if (e.results[i].isFinal) finalised += chunk;
+            else                      interim   = chunk;
+          }
+          textBox.value =
+            (textBox.value + ' ' + finalised + interim).trim();
+          interim = '';
+        };
+
+        dictRec.onerror = console.error;
+
+        dictRec.onend = () => {
+          listeningNow = false;
+          micLamp.style.background = '#4caf50';   // back to green
+          wakeRec.start();                        // re-arm wake-word
+        };
+
+        dictRec.start();
+      }
+    })();  
     
   </script>
 </body>
