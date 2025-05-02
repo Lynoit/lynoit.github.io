@@ -432,12 +432,60 @@
 
     let recognizer;  // Azure continuous recogniser
 
-  function initAzureSpeech () {
-  // 1) Wait until the SDK script is present
-  if (!window.SpeechSDK) {
-    console.error('Speech SDK not loaded yet – retrying…');
-    return setTimeout(initAzureSpeech, 500);
+  function stripHotWord(text) {
+  // Matches “annotator”, “Annotator,” “annotator:”, …
+  return text.replace(/^annotator[,:]?\s*/i, '');
   }
+    
+function initAzureSpeech () {
+  // 1) Build configs
+  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+    AZURE_KEY, AZURE_REGION
+  );
+  speechConfig.speechRecognitionLanguage = 'en-US';
+  speechConfig.setProperty(
+    SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
+    'TrueText'
+  );
+
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+
+  // 2) Create recognizer
+  recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+
+  /* ── Lamp colours ───────────────────────── */
+  recognizer.sessionStarted = () => micLamp.style.background = '#f44336'; // 🔴 listening
+  recognizer.sessionStopped = () => micLamp.style.background = '#4caf50'; // 🟢 idle
+
+  /* ── Hot‑word filter (“Annotator …”) ────── */
+
+  // Helper lives outside this function – make sure it's declared!
+  // function stripHotWord(text) {return text.replace(/^annotator[,:]?\s*/i,'');}
+
+  // Show interim text while user is speaking
+  recognizer.recognizing = (_, e) => {
+    const draft = stripHotWord(e.result.text);
+    if (draft) textBox.value = draft + ' [draft]';
+  };
+
+  // Final result when user pauses
+  recognizer.recognized = (_, e) => {
+    if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
+
+    const cleaned = stripHotWord(e.result.text);
+    if (!cleaned) return;            // hot‑word missing → ignore
+
+    textBox.value = cleaned;
+    logButton('Manual annotation', false);
+  };
+
+  /* ───────────────────────────────────────── */
+
+  recognizer.canceled = (_, e) =>
+    console.warn('Azure canceled:', e.errorDetails);
+
+  recognizer.startContinuousRecognitionAsync();
+}
 
   // 2) Quick sanity‑check for key/region
   if (!AZURE_KEY || AZURE_KEY.length < 30) {
