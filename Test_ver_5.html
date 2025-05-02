@@ -16,6 +16,8 @@
   <!-- PapaParse for CSV parsing -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
+  <script src="https://unpkg.com/vosk-browser/dist/worker-browser.js"></script>
+  <script src="https://unpkg.com/vosk-browser/dist/worker-communicator.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; padding: 0; font-family: Arial, sans-serif; }
@@ -1066,60 +1068,82 @@ function displayLogTable() {
   container.innerHTML = html;
 }
 
-  (() => {
-      const SpeechRecognition =
-            window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        console.warn('SpeechRecognition not supported in this browser');
-        return;
+  /* ────────── OFF‑LINE SPEECH WITH VOSK ────────── */
+
+/* STEP 2 – choose which model ZIP to download the first time */
+const VOSK_MODEL_URL =
+  'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip';
+
+(() => {
+  /* DOM handles */
+  const micLamp = document.getElementById('micLamp');
+  const textBox = document.getElementById('textBox');
+
+  /* State */
+  let wakeMode = true;          // true ⇒ waiting for “annotator”
+  let idleSaveTimer = null;     // 3‑second auto‑save timer
+
+  /* 1.  Start the worker and load the model (runs once) */
+  const worker = new Worker('https://unpkg.com/vosk-browser/dist/worker-browser.js');
+  const comm   = new VoskBrowserWorkerCommunicator(worker);
+
+  (async () => {
+    await comm.init({ modelUrl: VOSK_MODEL_URL, log: false });
+    console.log('Vosk ready – offline speech enabled');
+    micLamp.style.background = '#4caf50';        // green = “armed”
+    openMicrophone();
+  })();
+
+  /* 2.  Stream microphone PCM → worker */
+  function openMicrophone () {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        const ctx    = new AudioContext({ sampleRate: 48000 });
+        const source = ctx.createMediaStreamSource(stream);
+        const proc   = ctx.createScriptProcessor(4096, 1, 1);
+
+        proc.onaudioprocess = ({ inputBuffer }) =>
+          comm.sendAudio(inputBuffer.getChannelData(0));
+
+        source.connect(proc);
+        proc.connect(ctx.destination);
+      })
+      .catch(err => console.error('Mic error:', err));
+  }
+
+  /* 3.  Handle recogniser callbacks */
+  comm.on('result',   ({ text })   => handleTranscript(text));
+  comm.on('partial',  ({ partial })=> handleTranscript(partial, true));
+
+  function handleTranscript (phrase, isPartial = false) {
+    if (!phrase) return;
+    const lower = phrase.trim().toLowerCase();
+
+    /* Wake word */
+    if (wakeMode) {
+      if (lower.includes('annotator')) {
+        wakeMode = false;
+        micLamp.style.background = '#f44336';   // red = dictating
       }
-
-      const micLamp      = document.getElementById('micLamp');
-      const textBox      = document.getElementById('textBox');
-      let   listeningNow = false;
-
-      function startDictation () {
-  listeningNow = true;
-  micLamp.style.background = '#f44336';            // red → actively recording
-
-  const dictRec = new SpeechRecognition();
-  dictRec.continuous     = false;  // stop after ½-second of silence
-  dictRec.interimResults = true;   // show words as they come in
-  dictRec.lang           = 'en-US';
-
-  let interim = '';
-
-  dictRec.onresult = e => {
-    let finalised = '';
-    for (let i = e.resultIndex; i < e.results.length; ++i) {
-      const chunk = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalised += chunk;
-      else                      interim   = chunk;
+      return;
     }
-    // Display live text for user review
-    textBox.value = (textBox.value + ' ' + finalised + interim).trim();
-    interim = '';
-  };
 
-  dictRec.onerror = console.error;
+    /* Dictation mode */
+    textBox.value = (textBox.value + ' ' + phrase).trim();
 
-  dictRec.onend = () => {
-    listeningNow = false;
-    micLamp.style.background = '#4caf50';   // green → “armed” again
-    wakeRec.start();                        // re-enable wake-word loop
+    /* Restart the 3‑second silence timer */
+    clearTimeout(idleSaveTimer);
+    idleSaveTimer = setTimeout(() => {
+      micLamp.style.background = '#4caf50';     // back to green
+      wakeMode = true;
 
-    /* ── Auto-save after a 3-second grace period ── */
-    setTimeout(() => {
-      // If the user hasn’t cleared or changed the text, commit it
       if (textBox.value.trim()) {
-        logButton('Manual annotation', false);
+        logButton('Manual annotation', false);  // ← your existing save routine
       }
-    }, 3000);  // 3 000 ms = 3 s
-  };
-
-  dictRec.start();
-}
-    })();  
+    }, 3000);
+  }
+})();
+ 
     
   </script>
 </body>
