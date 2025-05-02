@@ -433,43 +433,63 @@
     let recognizer;  // Azure continuous recogniser
 
   function initAzureSpeech () {
-    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-      AZURE_KEY, AZURE_REGION
-    );
-    speechConfig.speechRecognitionLanguage = 'en-US';
-    speechConfig.setProperty(
-      SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
-      'TrueText'
-    );
-
-    const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
-
-    // lamp colours
-    recognizer.sessionStarted = () => micLamp.style.background = '#f44336';
-    recognizer.sessionStopped = () => micLamp.style.background = '#4caf50';
-
-    let interim = '';
-    recognizer.recognizing = (_, e) => {
-      interim = e.result.text;
-      textBox.value = textBox.value.replace(/\[draft\]$/, '')   + interim + ' [draft]';
-    };
-    recognizer.recognized = (_, e) => {
-      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-        textBox.value = textBox.value.replace(/\s*\[draft\]$/, '')    + ' ' + e.result.text;
-        logButton('Manual annotation', false);
-      }
-    };
-
-    recognizer.startContinuousRecognitionAsync();
-
-    recognizer.canceled = (_,e)=>console.warn('Azure canceled:',e.errorDetails);
-    recognizer.sessionStopped = () => {
-    micLamp.style.background = '#4caf50';
-    console.log('session stopped – will auto‑restart');
-};
-    
+  // 1) Wait until the SDK script is present
+  if (!window.SpeechSDK) {
+    console.error('Speech SDK not loaded yet – retrying…');
+    return setTimeout(initAzureSpeech, 500);
   }
+
+  // 2) Quick sanity‑check for key/region
+  if (!AZURE_KEY || AZURE_KEY.length < 30) {
+    alert('⚠️  Set your Azure Speech key first!');
+    return;
+  }
+
+  // 3) Ask for mic permission up front – helps Chrome autoplay policy
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .catch(err => {
+      alert('Microphone access is required:\n' + err.message);
+      throw err;
+    })
+    .then(startRecognizer);
+}
+
+function startRecognizer() {
+  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+    AZURE_KEY, AZURE_REGION
+  );
+  speechConfig.speechRecognitionLanguage = 'en-US';
+  speechConfig.setProperty(
+    SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
+    'TrueText'
+  );
+
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+  recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+
+  recognizer.sessionStarted = () =>
+    micLamp.style.background = '#f44336';          // 🔴 listening
+  recognizer.sessionStopped =
+  recognizer.canceled       = () =>
+    micLamp.style.background = '#4caf50';          // 🟢 idle
+
+  recognizer.recognizing = (_, e) => {
+    textBox.value = e.result.text + ' [draft]';
+  };
+  recognizer.recognized = (_, e) => {
+    textBox.value = e.result.text;
+    logButton('Manual annotation', false);
+  };
+
+  recognizer.canceled = (_, e) => {
+    console.warn('Speech canceled:', e.errorDetails);
+    // Auto‑restart 2 s later
+    setTimeout(() => recognizer.startContinuousRecognitionAsync(), 2000);
+  };
+
+  recognizer.startContinuousRecognitionAsync();
+}
+
 
   function initMap () {
     map = L.map('map', {
