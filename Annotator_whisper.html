@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Annotator – Whisper‑WASM Edition</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <!-- Chart.js core + Luxon adapter -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
+
+  <!-- PapaParse for CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
+
+  <!-- NEW – whisper‑wasm loader (tiny wrapper for whisper.cpp) -->
+  <script src="https://cdn.jsdelivr.net/npm/whisper-wasm@2/dist/whisper.js"></script>
+
+  <style>
+    /* …   ALL YOUR ORIGINAL <style> CONTENT UNCHANGED … */
+  </style>
+</head>
+<body>
+  <!-- SIDEBAR, MAIN CONTENT, BUTTONS …  UNCHANGED  -->
+
+  <!-- … existing HTML layout trimmed for brevity … -->
+
+  <!-- Leaflet core JS  -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script>
+/*
+  ────────────────────────────────────────────────────────────
+    1.  GLOBAL STATE & REFERENCES (unchanged)
+  ────────────────────────────────────────────────────────────*/
+const toggleBtn = document.getElementById('toggleSidebar');
+const sidebar   = document.getElementById('sidebar');
+const micLamp   = document.getElementById('micLamp');
+const textBox   = document.getElementById('textBox');
+/* … ALL OTHER DOM refs from your original code … */
+
+/*
+  ────────────────────────────────────────────────────────────
+      2.  WHISPER‑WASM INITIALISATION
+  ────────────────────────────────────────────────────────────*/
+let whisper;                          // Whisper instance
+const MODEL_URL = '/models/ggml-small.en.bin'; // put ~47 MB model here
+
+async function initWhisper () {
+  micLamp.style.background = '#888';  // neutral until ready
+  whisper = await window.whisper.WhisperFactory.create(MODEL_URL, {
+    log: false      // change to true to see model load log in console
+  });
+  micLamp.title = 'Voice control ready (Whisper)';
+  micLamp.style.background = '#4caf50';           // green → ready
+}
+
+/*
+  ────────────────────────────────────────────────────────────
+      3.  MICROPHONE CAPTURE  →  WHISPER TRANSCRIBE
+  ────────────────────────────────────────────────────────────*/
+const SEGMENT_MS = 10_000;            // 10 s chunks keeps latency OK
+let mediaRecorder, recorderStream;
+
+async function startMicrophone () {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.warn('getUserMedia not supported');
+    return;
+  }
+  recorderStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+  mediaRecorder  = new MediaRecorder(recorderStream, {
+    mimeType: 'audio/webm'
+  });
+
+  mediaRecorder.ondataavailable = e => processChunk(e.data);
+  mediaRecorder.onstart = () => micLamp.style.background = '#f44336'; // red
+  mediaRecorder.onstop  = () => micLamp.style.background = '#4caf50'; // green
+
+  mediaRecorder.start(SEGMENT_MS);    // emit data every SEGMENT_MS
+}
+
+async function processChunk (blob) {
+  // 1) decode → PCM float32
+  const arrayBuf = await blob.arrayBuffer();
+  const pcm = await decodeAndResample(arrayBuf, 16_000); // Float32Array 16 kHz
+
+  // 2) run whisper – returns segments array & full text
+  const { text } = await whisper.transcribe(pcm, {
+    language: 'en',  // set null to auto‑detect
+    translate: false
+  });
+
+  if (text.trim()) {
+    textBox.value = (textBox.value + ' ' + text).trim();
+    // Immediately store as an annotation
+    logButton('Manual annotation', false);
+  }
+}
+
+/*
+   Helper: decode audio/webm → Float32Array 16 kHz mono
+*/
+async function decodeAndResample (arrayBuf, targetRate) {
+  const ctx = new AudioContext();
+  const src = await ctx.decodeAudioData(arrayBuf);
+  if (src.sampleRate === targetRate) {
+    return src.getChannelData(0);      // take left channel
+  }
+  // offline resample
+  const length      = Math.round(src.length * targetRate / src.sampleRate);
+  const offlineCtx  = new OfflineAudioContext(1, length, targetRate);
+  const bufferSrc   = offlineCtx.createBufferSource();
+  bufferSrc.buffer  = src;
+  bufferSrc.connect(offlineCtx.destination);
+  bufferSrc.start();
+  const rendered    = await offlineCtx.startRendering();
+  return rendered.getChannelData(0);
+}
+
+/*
+  ────────────────────────────────────────────────────────────
+      4.  ORIGINAL APP INITIALISATION (maps, charts, GPS…)
+  ────────────────────────────────────────────────────────────*/
+async function main () {
+  await initWhisper();   // load model first (~1‑5 s after caching)
+  await startMicrophone();
+
+  initMap();              // your existing functions – unchanged
+  initMap2();
+  initCharts();
+  updateDateTime();
+  setInterval(updateDateTime, 1000);
+  navigator.geolocation.watchPosition(showPosition, showError, {
+    enableHighAccuracy:true, maximumAge:5000, timeout:10_000
+  });
+  buildButtons();
+  startCamera();
+}
+
+window.addEventListener('load', main);
+
+/*
+  ────────────────────────────────────────────────────────────
+      5.  REMOVE / REPLACE OLD SpeechRecognition BLOCK
+  ────────────────────────────────────────────────────────────*/
+// The entire IIFE that used SpeechRecognition (wake‑word and dictation)
+// has been deleted, because Whisper takes over continuous recognition.
+// Any UI references (micLamp, textBox) stay, driven by recorder events.
+
+/*
+  ────────────────────────────────────────────────────────────
+      6.  … REST OF YOUR ORIGINAL JS (maps, tables, KPI logic) …
+  ────────────────────────────────────────────────────────────*/
+// >>>  paste your unchanged functions showPosition, calculateDistance,
+//      updateStreetTable, resetDistance, saveAndPrint, etc.  <<<
+
+  </script>
+</body>
+</html>
