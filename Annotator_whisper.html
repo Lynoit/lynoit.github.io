@@ -439,50 +439,61 @@ function stripHotWord(text) {
   return text.replace(/^annotator[,:]?\s*/i, '');
 }
 
-/* ── 2. initAzureSpeech()  ───────────────────── */
-function initAzureSpeech () {
-  // Build Speech SDK configs
-  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-    AZURE_KEY, AZURE_REGION
-  );
-  speechConfig.speechRecognitionLanguage = 'en-US';
-  speechConfig.setProperty(
-    SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
-    'TrueText'
-  );
+async function initAzureSpeech() {
+  const warn = msg => console.warn('Speech init:', msg);
 
-  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-  recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+  if (!window.SpeechSDK) {
+    warn('SpeechSDK global missing – script failed to load?');
+    micLamp.style.background = '#ffc107';   // 🟡  error
+    return;
+  }
 
-  /* Lamp colours on start/stop */
-  recognizer.sessionStarted = () =>  micLamp.style.background = '#f44336'; // 🔴
-  recognizer.sessionStopped = () =>  micLamp.style.background = '#4caf50'; // 🟢
+  let recognizer;
+  try {
+    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+      AZURE_KEY, AZURE_REGION
+    );
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    speechConfig.setProperty(
+      SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
+      'TrueText'
+    );
 
-  /* ── Hot‑word gate (“Annotator …”) ─────────── */
-  // Show interim text while speaking
-  recognizer.recognizing = (_, e) => {
+    const audioConfig  = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    recognizer         = new SpeechSDK.SpeechRecognizer(
+      speechConfig, audioConfig
+    );
+  } catch (e) {
+    warn(e);
+    micLamp.style.background = '#ffc107';   // 🟡
+    return;
+  }
+
+  /* Lamp colours */
+  recognizer.sessionStarted = ()  => micLamp.style.background = '#f44336'; // 🔴 listening
+  recognizer.sessionStopped = ()  => micLamp.style.background = '#4caf50'; // 🟢 ready
+  recognizer.canceled       = (_,e)=> {
+    warn('Canceled: ' + e.errorDetails);
+    micLamp.style.background = '#ffc107';   // 🟡 error
+  };
+
+  /* Hot‑word gate */
+  recognizer.recognizing = (_,e)=> {
     const draft = stripHotWord(e.result.text);
     if (draft) textBox.value = draft + ' [draft]';
   };
-
-  // Final result after pause
-  recognizer.recognized = (_, e) => {
+  recognizer.recognized  = (_,e)=> {
     if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
-
     const cleaned = stripHotWord(e.result.text);
-    if (!cleaned) return;                 // hot‑word missing → ignore
-
-    textBox.value = cleaned;
-    logButton('Manual annotation', false);
+    if (cleaned) {
+      textBox.value = cleaned;
+      logButton('Manual annotation', false);
+    }
   };
-
-  /* Optional: log cancellations */
-  recognizer.canceled = (_, e) =>
-    console.warn('Speech canceled:', e.errorDetails);
 
   recognizer.startContinuousRecognitionAsync();
 }
-
+    
   function initMap () {
     map = L.map('map', {
     zoomControl:       false,
