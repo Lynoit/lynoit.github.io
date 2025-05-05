@@ -17,6 +17,8 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
 
+<script defer src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@1.31.0/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle.js"></script>
+
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; padding: 0; font-family: Arial, sans-serif; }
     #sidebar {
@@ -259,6 +261,9 @@
         title="Voice control ready"
         style="display:inline-block;width:10px;height:10px;
                margin-right:6px;border-radius:50%;background:#888;"></span>
+  <button id="micToggle" class="greyButton" style="width:auto;">
+       Start voice control
+  </button>
   <textarea id="textBox" rows="2"
             placeholder="Speak after you say “Annotator”…"></textarea>
   <button class="blueButton"
@@ -371,7 +376,11 @@
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
   <script>
+
+    console.log('main script executing');
+    
     // DOM refs
     const toggleBtn = document.getElementById('toggleSidebar');
     const sidebar   = document.getElementById('sidebar');
@@ -386,8 +395,12 @@
     const streetTbl = document.getElementById('streetTable');
     const logContainer = document.getElementById('logTableContainer');
     const buttonGroups = document.getElementById('buttonGroups');
+    const micLamp   = document.getElementById('micLamp');
+    const textBox   = document.getElementById('textBox');
     const weatherDistances = {};
     const phaseDistances = {};
+    const AZURE_KEY    = '3T1KzqWzaLVhz37OFOOvGJy6xwndsk5NCiI6hIEpqWDvHVffObirJQQJ99BEACi5YpzXJ3w3AAAYACOGKvFo';
+    const AZURE_REGION = 'northeurope';
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -423,6 +436,96 @@
       startCamera();
     };
 
+    let recognizer;  // Azure continuous recogniser
+    let recogniserReady   = false;   // built at least once?
+    let recogniserRunning = false;   // currently listening?
+
+    // ─── Voice‑control start/stop ───────────────────────────
+document.getElementById('micToggle').onclick = async event => {
+  // 1. Build recogniser only the first time the button is pressed
+  if (!recogniserReady) {
+    await initAzureSpeech();           // creates the recogniser object
+    recogniserReady = true;
+  }
+
+  // 2. Toggle listening state
+  if (recogniserRunning) {
+    recognizer.stopContinuousRecognitionAsync();
+    recogniserRunning = false;
+    micLamp.style.background = '#4caf50';          // 🟢 idle
+    event.target.textContent = 'Start voice control';
+  } else {
+    recognizer.startContinuousRecognitionAsync();
+    recogniserRunning = true;
+    micLamp.style.background = '#f44336';          // 🔴 listening
+    event.target.textContent = 'Stop voice control';
+  }
+};
+
+
+  /* ── 1. Hot‑word helper  ─────────────────────── */
+function stripHotWord(text) {
+  // Removes a leading “annotator”, case‑insensitive,
+  // with optional comma/colon and following space(s)
+  return text.replace(/^annotator[,:]?\s*/i, '');
+}
+
+async function initAzureSpeech() {
+  console.log('initAzureSpeech started');    //  ← already added last time?
+  const warn = msg => console.warn('Speech init:', msg);
+
+  if (!window.SpeechSDK) {
+    warn('SpeechSDK global missing – script failed to load?');
+    micLamp.style.background = '#ffc107';   // 🟡  error
+    return;
+  }
+
+  let recognizer;
+  try {
+    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+      AZURE_KEY, AZURE_REGION
+    );
+    speechConfig.speechRecognitionLanguage = 'en-US';
+    speechConfig.setProperty(
+      SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
+      'TrueText'
+    );
+
+    const audioConfig  = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    recognizer         = new SpeechSDK.SpeechRecognizer(
+      speechConfig, audioConfig
+    );
+  } catch (e) {
+    warn(e);
+    micLamp.style.background = '#ffc107';   // 🟡
+    return;
+  }
+
+  /* Lamp colours */
+  recognizer.sessionStarted = ()  => micLamp.style.background = '#f44336'; // 🔴 listening
+  recognizer.sessionStopped = ()  => micLamp.style.background = '#4caf50'; // 🟢 ready
+  recognizer.canceled       = (_,e)=> {
+    warn('Canceled: ' + e.errorDetails);
+    micLamp.style.background = '#ffc107';   // 🟡 error
+  };
+
+  /* Hot‑word gate */
+  recognizer.recognizing = (_,e)=> {
+    const draft = stripHotWord(e.result.text);
+    if (draft) textBox.value = draft + ' [draft]';
+  };
+  recognizer.recognized  = (_,e)=> {
+    if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
+    const cleaned = stripHotWord(e.result.text);
+    if (cleaned) {
+      textBox.value = cleaned;
+      logButton('Manual annotation', false);
+    }
+  };
+
+  recognizer.startContinuousRecognitionAsync();
+}
+    
   function initMap () {
     map = L.map('map', {
     zoomControl:       false,
@@ -1027,78 +1130,7 @@ function displayLogTable() {
   container.innerHTML = html;
 }
 
-  (() => {
-      const SpeechRecognition =
-            window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        console.warn('SpeechRecognition not supported in this browser');
-        return;
-      }
-
-      const micLamp      = document.getElementById('micLamp');
-      const textBox      = document.getElementById('textBox');
-      let   listeningNow = false;
-
-      /* Wake-word recogniser (“annotator”) */
-      const wakeRec = new SpeechRecognition();
-      wakeRec.continuous     = true;
-      wakeRec.interimResults = false;
-      wakeRec.lang           = 'en-US';
-
-      wakeRec.onstart = () => micLamp.style.background = '#4caf50'; // green
-      wakeRec.onend   = () => !listeningNow && wakeRec.start();     // keep alive
-      wakeRec.onresult = e => {
-        const phrase = e.results[e.resultIndex][0].transcript
-                          .trim().toLowerCase();
-        if (phrase.includes('annotator')) {
-          wakeRec.stop();
-          startDictation();
-        }
-      };
-      wakeRec.start();
-
-      function startDictation () {
-  listeningNow = true;
-  micLamp.style.background = '#f44336';            // red → actively recording
-
-  const dictRec = new SpeechRecognition();
-  dictRec.continuous     = false;  // stop after ½-second of silence
-  dictRec.interimResults = true;   // show words as they come in
-  dictRec.lang           = 'en-US';
-
-  let interim = '';
-
-  dictRec.onresult = e => {
-    let finalised = '';
-    for (let i = e.resultIndex; i < e.results.length; ++i) {
-      const chunk = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalised += chunk;
-      else                      interim   = chunk;
-    }
-    // Display live text for user review
-    textBox.value = (textBox.value + ' ' + finalised + interim).trim();
-    interim = '';
-  };
-
-  dictRec.onerror = console.error;
-
-  dictRec.onend = () => {
-    listeningNow = false;
-    micLamp.style.background = '#4caf50';   // green → “armed” again
-    wakeRec.start();                        // re-enable wake-word loop
-
-    /* ── Auto-save after a 3-second grace period ── */
-    setTimeout(() => {
-      // If the user hasn’t cleared or changed the text, commit it
-      if (textBox.value.trim()) {
-        logButton('Manual annotation', false);
-      }
-    }, 3000);  // 3 000 ms = 3 s
-  };
-
-  dictRec.start();
-}
-    })();  
+ 
     
   </script>
 </body>
