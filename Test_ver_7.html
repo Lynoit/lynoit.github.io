@@ -402,7 +402,6 @@
     const AZURE_KEY    = '3T1KzqWzaLVhz37OFOOvGJy6xwndsk5NCiI6hIEpqWDvHVffObirJQQJ99BEACi5YpzXJ3w3AAAYACOGKvFo';
     const AZURE_REGION = 'northeurope';
     const PHASE_THROTTLE = 5 * 60 * 1000;
-    const GEOCODE_THROTTLE = 1000;
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -416,7 +415,6 @@
       'service',
     ]);
 
-    let lastGeocodeTime = 0;
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
@@ -600,38 +598,56 @@ async function initAzureSpeech() {
     segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
     if (segDist < 10) return; // ignore tiny jitters
 
-    // accumulate total and per‐weather/phase
+    // accumulate total and per‐weather
     totalDist += segDist;
     const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
     phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
     const condition = iconEl.alt || 'Unknown';
     weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
 
-    // update moving‐distance marker
-    const distKm = (totalDist / 1000).toFixed(2);
+        const distKm = (totalDist / 1000).toFixed(2);
     const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+
     if (!currentDistMarker) {
       currentDistMarker = L.marker([lat, lon], {
-        icon: L.divIcon({ html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] })
+        icon: L.divIcon({
+          className: '',        // styling lives in .distance-label
+          html: labelHtml,
+          iconSize: [0, 0],     // let the inner div size itself
+          iconAnchor: [0, -10]  // float just above the point
+        })
       }).addTo(map);
     } else {
-      currentDistMarker.setLatLng([lat, lon])
-                       .setIcon(L.divIcon({ html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] }));
-    }
+      currentDistMarker.setLatLng([lat, lon]);
+      currentDistMarker.setIcon(L.divIcon({
+        className: '',
+        html: labelHtml,
+        iconSize: [0, 0],
+        iconAnchor: [0, -10]
+      }));
+    }    
   }
 
-  // 2) Update lastPos & polyline sampling (e.g. 100 m logic if you have it)
+  // 2) Update position state & map
+  const prevPos = lastPos;
   lastPos = { lat, lon, ts };
-  // … your 100 m‐sampling code here if applied …
+  posCount++;
+  trackLine.addLatLng([lat, lon]);
+  if (positions.length === 0) {
+    map.setView([lat, lon], 15);
+  } else if (posCount % 20 === 0) {
+    map.fitBounds(trackLine.getBounds().pad(0.2));
+  }
+  positions.push([lat, lon]);
 
   // 3) Update speed display
-  if (positions.length > 0) {
-    const dt = (ts - positions[positions.length - 1].ts) / 1000;
+  if (prevPos) {
+    const dt = (ts - prevPos.ts) / 1000; // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
     speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
   }
 
-  // 4) Update distance text & charts (throttled)
+  // 4) Update distance display & charts
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
@@ -643,7 +659,7 @@ async function initAzureSpeech() {
     requestAnimationFrame(() => {
       distanceChart.update();
       speedChart.update();
-      maybeUpdateTables();  // your 30 s table throttle
+      maybeUpdateTables();
     });
     lastChartTs = Date.now();
   }
@@ -651,62 +667,67 @@ async function initAzureSpeech() {
   // 5) Update raw lat/lon display
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
 
-  updateDayPhase(lat, lon);
-
-  // 6) Reverse‐geocode – throttle to 1 Hz
   const now = Date.now();
-  if (now - lastGeocodeTime >= GEOCODE_THROTTLE) {
-    lastGeocodeTime = now;
-
-    fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
-      .then(r => r.json())
-      .then(data => {
-        const rawRt = data.extratags?.highway || data.type || 'unknown';
-        const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
-        if (segDist > 0) {
-          roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
-        }
-        roadTypeEl.textContent = `Road type: ${displayRt}`;
-        if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
-
-        const street = data.address.road
-                     || data.address.pedestrian
-                     || data.address.footway
-                     || 'Unknown street';
-        const city = data.address.city
-                   || data.address.town
-                   || data.address.village
-                   || 'Unknown city';
-        const country = data.address.country || 'Unknown country';
-
-        streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
-
-        // auto‐log country changes
-        if (country !== lastCountry && lastCountry !== null) {
-          logButton(`Entered ${country}`, false);
-        }
-        lastCountry = country;
-
-        // fetch weather on city change
-        if (city !== lastCity) {
-          lastCity = city;
-          getWeather(city);
-        }
-
-        // refresh tables (throttled via maybeUpdateTables)
-        maybeUpdateTables();
-      })
-      .catch(err => {
-        streetCityEl.textContent = 'Error: ' + err.message;
-        console.error('Reverse geocode error', err);
-      });
+  if (now - lastPhaseUpdate > PHASE_THROTTLE) {
+    updateDayPhase(lat, lon);
+    lastPhaseUpdate = now;
   }
 
-  // 7) Update mini‐map (map2)
-  if (map2) {
-    map2.setView([lat, lon], 20);
-    currentPosMarker2.setLatLng([lat, lon]);
-  }
+  // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
+  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
+    .then(r => r.json())
+    .then(data => {
+      const rawRt = data.extratags?.highway || data.type || 'unknown';
+      const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
+
+      // accumulate this segment to the proper road‐type bucket
+      if (segDist > 0) {
+        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+      }
+
+      // update sidebar & sets
+      roadTypeEl.textContent = `Road type: ${displayRt}`;
+      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
+
+      // street & city display
+      const street = data.address.road
+        || data.address.pedestrian
+        || data.address.footway
+        || 'Unknown street';
+      const city = data.address.city
+        || data.address.town
+        || data.address.village
+        || 'Unknown city';
+
+      const country = data.address.country || 'Unknown country';
+      
+      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
+
+      // ── NEW: auto‑log when the country changes ──
+      if (country !== lastCountry && lastCountry !== null) {
+      // Re‑use the regular logger so it shows up everywhere
+      logButton(`Entered ${country}`, false);   // false ⇒ not a KPI “red” event
+      }
+      lastCountry = country;
+
+      // fetch weather on city change
+      if (city !== lastCity) {
+        lastCity = city;
+        getWeather(city);
+      }
+
+      // refresh all tables
+      maybeUpdateTables();
+    })
+    .catch(err => {
+      streetCityEl.textContent = 'Error: ' + err.message;
+      console.error('Reverse geocode error', err);
+    });
+
+    if (map2) {
+      map2.setView([lat, lon], 20);  // zoom level 20 ≃ 100 m across
+      currentPosMarker2.setLatLng([lat, lon]);
+    }     
 }
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -1153,6 +1174,8 @@ function displayLogTable() {
   html += `</table>`;
   container.innerHTML = html;
 }
+
+ 
     
   </script>
 </body>
