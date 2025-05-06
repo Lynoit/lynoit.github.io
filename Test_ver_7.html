@@ -590,7 +590,7 @@ async function initAzureSpeech() {
       .catch(err   => { console.error('Camera error', err); });
    }
     
-  function showPosition(pos) {
+ function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
   const ts = pos.timestamp;
   let segDist = 0; // in meters
@@ -607,31 +607,32 @@ async function initAzureSpeech() {
     const condition = iconEl.alt || 'Unknown';
     weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
 
-    // update moving‐distance marker
-    const distKm = (totalDist / 1000).toFixed(2);
+    // update the moving‐distance marker
+    const distKm   = (totalDist / 1000).toFixed(2);
     const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+
     if (!currentDistMarker) {
       currentDistMarker = L.marker([lat, lon], {
         icon: L.divIcon({ html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] })
       }).addTo(map);
     } else {
-      currentDistMarker.setLatLng([lat, lon])
-                       .setIcon(L.divIcon({ html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] }));
+      currentDistMarker
+        .setLatLng([lat, lon])
+        .setIcon(L.divIcon({ html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] }));
     }
   }
 
-  // 2) Update lastPos & polyline sampling (e.g. 100 m logic if you have it)
+  // 2) Update lastPos (and you could insert your 100 m sampling logic here)
   lastPos = { lat, lon, ts };
-  // … your 100 m‐sampling code here if applied …
 
   // 3) Update speed display
-  if (positions.length > 0) {
-    const dt = (ts - positions[positions.length - 1].ts) / 1000;
+  if (lastPos && typeof lastPos.ts === 'number') {
+    const dt = (ts - lastPos.ts) / 1000; // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
     speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
   }
 
-  // 4) Update distance text & charts (throttled)
+  // 4) Update distance label & charts (throttled)
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
@@ -640,32 +641,36 @@ async function initAzureSpeech() {
     timeData.push(new Date(ts));
     distData.push((totalDist / 1000).toFixed(3));
     speedData.push(speedEl.textContent.split(' ')[1]);
+
     requestAnimationFrame(() => {
-      distanceChart.update();
-      speedChart.update();
-      maybeUpdateTables();  // your 30 s table throttle
+      distanceChart.update('none');
+      speedChart.update('none');
+      maybeUpdateTables();  // your 30 s table‐throttle
     });
+
     lastChartTs = Date.now();
   }
 
-  // 5) Update raw lat/lon display
+  // 5) Show raw lat/lon
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
 
-  const now = Date.now();
-  if (now - lastPhaseUpdate >= PHASE_THROTTLE) {
+  // single timestamp for both phase‐ and geocode‐throttles
+  const t = Date.now();
+
+  // 6a) Throttle day‐phase updates to every 5 min
+  if (t - lastPhaseUpdate >= PHASE_THROTTLE) {
     updateDayPhase(lat, lon);
-    lastPhaseUpdate = now;
+    lastPhaseUpdate = t;
   }
 
-  // 6) Reverse‐geocode – throttle to 1 Hz
-  const now = Date.now();
-  if (now - lastGeocodeTime >= GEOCODE_THROTTLE) {
-    lastGeocodeTime = now;
+  // 6b) Throttle reverse‐geocoding to 1 Hz
+  if (t - lastGeocodeTime >= GEOCODE_THROTTLE) {
+    lastGeocodeTime = t;
 
     fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
       .then(r => r.json())
       .then(data => {
-        const rawRt = data.extratags?.highway || data.type || 'unknown';
+        const rawRt     = data.extratags?.highway || data.type || 'unknown';
         const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
         if (segDist > 0) {
           roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
@@ -677,27 +682,24 @@ async function initAzureSpeech() {
                      || data.address.pedestrian
                      || data.address.footway
                      || 'Unknown street';
-        const city = data.address.city
-                   || data.address.town
-                   || data.address.village
-                   || 'Unknown city';
+        const city    = data.address.city
+                     || data.address.town
+                     || data.address.village
+                     || 'Unknown city';
         const country = data.address.country || 'Unknown country';
 
         streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-        // auto‐log country changes
         if (country !== lastCountry && lastCountry !== null) {
           logButton(`Entered ${country}`, false);
         }
         lastCountry = country;
 
-        // fetch weather on city change
         if (city !== lastCity) {
           lastCity = city;
           getWeather(city);
         }
 
-        // refresh tables (throttled via maybeUpdateTables)
         maybeUpdateTables();
       })
       .catch(err => {
@@ -706,7 +708,7 @@ async function initAzureSpeech() {
       });
   }
 
-  // 7) Update mini‐map (map2)
+  // 7) Update the mini‐map (map2)
   if (map2) {
     map2.setView([lat, lon], 20);
     currentPosMarker2.setLatLng([lat, lon]);
