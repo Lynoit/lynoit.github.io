@@ -422,6 +422,9 @@
     let roadDistances = {};
     let currentDistMarker = null;
     let map2, circle2;
+    let roadRedCounts = {};
+    let weatherRedCounts   = {};    // red presses per weather condition
+    let phaseRedCounts     = {};    // (optional) red presses per day phase
 
     toggleBtn.onclick = () => {
       const exp = sidebar.classList.toggle('expanded');
@@ -742,28 +745,31 @@ async function initAzureSpeech() {
     }
     
 function updateStreetTable() {
-  // build header row
   let html = `
     <tr>
       <th>Road type</th>
       <th>Distance (km)</th>
+      <th>No of issues</th>
     </tr>`;
 
-  // one row per seen road type
   for (const rt of roadTypes) {
     const meters = roadDistances[rt] || 0;
+    const km     = (meters / 1000).toFixed(2);
+    const count  = roadRedCounts[rt] || 0;
+
     html += `
       <tr>
         <td>${rt}</td>
-        <td>${(meters / 1000).toFixed(2)}</td>
+        <td>${km}</td>
+        <td>${count}</td>
       </tr>`;
   }
 
-  // inject into the table
   streetTbl.innerHTML = html;
 }
-    function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
-function saveAndPrint () {
+    
+ function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
+ function saveAndPrint () {
   const btn  = event.currentTarget;
   btn.disabled = true;
 
@@ -783,65 +789,79 @@ function saveAndPrint () {
     function getWeather(city){fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
-    function logButton(name, isRed) {
-  const dt = new Date(),
-        date = dt.toLocaleDateString(),
-        time = dt.toLocaleTimeString();
+  function logButton(name, isRed) {
+  const dt    = new Date(),
+        date  = dt.toLocaleDateString(),
+        time  = dt.toLocaleTimeString();
 
+  // ── read phase & weather from the sidebar DOM ──
   const fullPhase = document.getElementById('dayPhase').textContent;
-  const phase = fullPhase.split(': ')[1] || fullPhase;
+  const phase     = fullPhase.split(': ')[1] || fullPhase;
+  const condition = iconEl.alt || 'Unknown';    // ← must do this!
 
+  // parse lat/lon from sidebar
   const [lat, lon] = locEl.innerHTML
     .split('<br>')
     .map(l => l.split(': ')[1]);
 
-  const dist = (totalDist / 1000).toFixed(1),
-        spd  = speedEl.textContent.split(' ')[1],
-        rt   = roadTypeEl.textContent.split(': ')[1],
+  // current distance, speed, road type, comment
+  const dist    = (totalDist / 1000).toFixed(1),
+        spd     = speedEl.textContent.split(' ')[1],
+        rt      = roadTypeEl.textContent.split(': ')[1],
         comment = document.getElementById('textBox').value;
 
-      let camDataUrl = null;
-try {
-  const video  = document.getElementById('camera');
-  const canvas = document.getElementById('cameraCanvas');
-  const ctx    = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  camDataUrl = canvas.toDataURL('image/jpeg', 0.8);   // ~100 KB per shot
-} catch(e) {
-  console.warn('Camera frame failed', e);
-}
-      
+  // optional camera snapshot…
+  let camDataUrl = null;
+  try {
+    const video  = document.getElementById('camera');
+    const canvas = document.getElementById('cameraCanvas');
+    const ctx    = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    camDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+  } catch (e) {
+    console.warn('Camera frame failed', e);
+  }
+
+  // push to the log
   logTable.push([
-    name,
-    date,
-    time,
-    phase,  
-    tempEl.textContent,
-    iconEl.alt,
-    lat,
-    lon,
-    dist,
-    spd,
-    rt,
-    comment, 
-    camDataUrl
+    name, date, time, phase,
+    tempEl.textContent, condition,
+    lat, lon, dist, spd, rt,
+    comment, camDataUrl
   ]);
 
+  // redraw logs & map marker
   displayLogTable();
   displayCameraTable();
-
   L.marker([+lat, +lon], {
-    icon: L.divIcon({
-      className: 'issue-label',
-      html: `<strong>${name}</strong>`
-    })
+    icon: L.divIcon({ className: 'issue-label', html: `<strong>${name}</strong>` })
   }).addTo(map);
 
   if (isRed) {
+    // per-issue
     redCounts[name] = (redCounts[name] || 0) + 1;
+
+    // per-road-type
+    roadRedCounts[rt] = (roadRedCounts[rt] || 0) + 1;
+
+    // per-weather-condition
+    weatherRedCounts[condition] = (weatherRedCounts[condition] || 0) + 1;
+    // ← pre-seed the distance bucket so updateWeatherTable will include it
+    weatherDistances[condition] = weatherDistances[condition] || 0;
+
+    // per-day-phase
+    phaseRedCounts[phase]    = (phaseRedCounts[phase] || 0) + 1;
+    // ← pre-seed the distance bucket so updatePhaseTable will include it
+    phaseDistances[phase]    = phaseDistances[phase]   || 0;
+
+    // now redraw all three KPI tables immediately
+    updateStreetTable();
+    updateWeatherTable();
+    updatePhaseTable();
     updateCountTable();
   }
 
+  // clear the text box
   document.getElementById('textBox').value = '';
 }
 
@@ -1054,29 +1074,41 @@ function displayLogTable() {
     <tr>
       <th>Condition</th>
       <th>Distance (km)</th>
+      <th>No of issues</th>
     </tr>`;
+
   for (const cond in weatherDistances) {
+    const km    = (weatherDistances[cond] / 1000).toFixed(2);
+    const count = weatherRedCounts[cond] || 0;
+
     html += `
       <tr>
         <td>${cond}</td>
-        <td>${(weatherDistances[cond] / 1000).toFixed(2)}</td>
+        <td>${km}</td>
+        <td>${count}</td>
       </tr>`;
   }
+
   document.getElementById('weatherTable').innerHTML = html;
 }
 
-    function updatePhaseTable() {
+ function updatePhaseTable() {
   let html = `
     <tr>
       <th>Phase</th>
       <th>Distance (km)</th>
+      <th>No of issues</th>
     </tr>`;
 
-  for (const phase in phaseDistances) {
+  for (const ph in phaseDistances) {
+    const km    = (phaseDistances[ph] / 1000).toFixed(2);
+    const count = phaseRedCounts[ph] || 0;
+
     html += `
       <tr>
-        <td>${phase}</td>
-        <td>${(phaseDistances[phase] / 1000).toFixed(2)}</td>
+        <td>${ph}</td>
+        <td>${km}</td>
+        <td>${count}</td>
       </tr>`;
   }
 
