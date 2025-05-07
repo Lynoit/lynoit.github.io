@@ -352,19 +352,19 @@
     <div class="page-break"></div>
 
     <div id="streetsContainer" class="section">
-      <h3>Road Types Mileage</h3>
+      <h3>Road Types</h3>
       <table id="streetTable"><tr><th>Road type</th></tr></table>
     </div>
 
     <div id="weatherContainer" class="section">
-      <h3>Weather Conditions Mileage</h3>
+      <h3>Weather Conditions</h3>
       <table id="weatherTable">
          <tr><th>Condition</th><th>Distance (km)</th></tr>
       </table>
     </div>
 
     <div id="phaseContainer" class="section">
-      <h3>Phase Mileage</h3>
+      <h3>Phase</h3>
       <table id="phaseTable">
          <tr><th>Phase</th><th>Distance (km)</th></tr>
       </table>
@@ -401,6 +401,8 @@
     const phaseDistances = {};
     const AZURE_KEY    = '3T1KzqWzaLVhz37OFOOvGJy6xwndsk5NCiI6hIEpqWDvHVffObirJQQJ99BEACi5YpzXJ3w3AAAYACOGKvFo';
     const AZURE_REGION = 'northeurope';
+    const PHASE_THROTTLE = 5 * 60 * 1000;
+    const TABLE_THROTTLE = 30 * 1000;
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -414,6 +416,8 @@
       'service',
     ]);
 
+    let lastTableUpdate = 0;
+    let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
@@ -425,7 +429,17 @@
     let roadRedCounts = {};
     let weatherRedCounts   = {};    // red presses per weather condition
     let phaseRedCounts     = {};    // (optional) red presses per day phase
+    let isDirty = false;
 
+    function markDirty() { isDirty = true; }
+    function markClean()  { isDirty = false; }
+
+    window.addEventListener('beforeunload', e => {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+    
     toggleBtn.onclick = () => {
       const exp = sidebar.classList.toggle('expanded');
       sidebar.classList.toggle('collapsed', !exp);
@@ -655,8 +669,7 @@ async function initAzureSpeech() {
     requestAnimationFrame(() => {
       distanceChart.update();
       speedChart.update();
-      updateCountTable();
-      updateWeatherTable();
+      maybeUpdateTables();
     });
     lastChartTs = Date.now();
   }
@@ -664,7 +677,11 @@ async function initAzureSpeech() {
   // 5) Update raw lat/lon display
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
 
-  updateDayPhase(lat, lon);
+  const now = Date.now();
+  if (now - lastPhaseUpdate > PHASE_THROTTLE) {
+    updateDayPhase(lat, lon);
+    lastPhaseUpdate = now;
+  }
 
   // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
   fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`)
@@ -710,10 +727,7 @@ async function initAzureSpeech() {
       }
 
       // refresh all tables
-      updateStreetTable();
-      updateCountTable();
-      updateWeatherTable();
-      updatePhaseTable();
+      maybeUpdateTables();
     })
     .catch(err => {
       streetCityEl.textContent = 'Error: ' + err.message;
@@ -829,6 +843,8 @@ function updateStreetTable() {
     lat, lon, dist, spd, rt,
     comment, camDataUrl
   ]);
+
+  markDirty();  
 
   // redraw logs & map marker
   displayLogTable();
@@ -1092,6 +1108,17 @@ function displayLogTable() {
   document.getElementById('weatherTable').innerHTML = html;
 }
 
+ function maybeUpdateTables() {
+  const now = Date.now();
+  if (now - lastTableUpdate > TABLE_THROTTLE) {
+    updateStreetTable();
+    updateCountTable();
+    updateWeatherTable();
+    updatePhaseTable();
+    lastTableUpdate = now;
+  }
+}
+
  function updatePhaseTable() {
   let html = `
     <tr>
@@ -1159,8 +1186,6 @@ function displayLogTable() {
   html += `</table>`;
   container.innerHTML = html;
 }
-
- 
     
   </script>
 </body>
