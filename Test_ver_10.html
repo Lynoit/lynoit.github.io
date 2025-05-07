@@ -344,6 +344,14 @@
     </div>
     <div class="page-break"></div>
 
+    <div id="statsContainer" class="section">
+      <h3>Statistics</h3>
+      <table id="statsTable">
+        <tr><th>Metric</th><th>Value</th></tr>
+        <tr><td colspan="2">&nbsp;</td></tr>
+      </table>
+    </div>
+
     <div id="countContainer" class="section">
       <h3>KPI Calculation</h3>
       <table id="countTable">
@@ -430,6 +438,7 @@
     const AZURE_REGION = 'northeurope';
     const PHASE_THROTTLE = 5 * 60 * 1000;
     const TABLE_THROTTLE = 30 * 1000;
+    const citySet = new Set();   // unique city names encountered
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -441,6 +450,8 @@
      'unclassified','residential','service','construction'
     ]);
 
+    let startTime = null;        // timestamp of the first GPS fix (ms)
+    let maxSpeed  = 0;           // km/h
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
@@ -650,6 +661,8 @@ async function initAzureSpeech() {
   const ts = pos.timestamp;
   let segDist = 0; // in meters
 
+  if (!startTime) startTime = ts;
+    
   // 1) Calculate segment distance & apply noise threshold
   if (lastPos) {
     segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
@@ -701,6 +714,9 @@ async function initAzureSpeech() {
   if (prevPos) {
     const dt = (ts - prevPos.ts) / 1000; // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
+
+    maxSpeed = Math.max(maxSpeed, speedKmh);
+    
     speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
   }
 
@@ -774,6 +790,7 @@ async function initAzureSpeech() {
       // fetch weather on city change
       if (city !== lastCity) {
         lastCity = city;
+        citySet.add(city);
         getWeather(city);
       }
 
@@ -831,6 +848,30 @@ function updateStreetTable() {
   }
 
   streetTbl.innerHTML = html;
+}
+
+  function updateStatsTable () {
+  // ① readable total time hh:mm:ss
+  const totalMs  = startTime ? (lastPos.ts - startTime) : 0;
+  const timeStr  = new Date(totalMs).toISOString().substring(11, 19);
+
+  // ② distance & speeds
+  const km       = (totalDist / 1000).toFixed(1);
+  const hrs      = totalMs / 3_600_000;
+  const meanSpd  = hrs > 0 ? (km / hrs).toFixed(1) : '—';
+
+  // ③ counts
+  const cityCnt  = citySet.size;
+  const ctryCnt  = Object.keys(countryDistances).length;
+
+  document.getElementById('statsTable').innerHTML = `
+    <tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>Total time</td>          <td>${timeStr}</td></tr>
+    <tr><td>Total distance</td>      <td>${km} km</td></tr>
+    <tr><td>Max speed</td>           <td>${maxSpeed.toFixed(1)} km/h</td></tr>
+    <tr><td>Mean speed</td>          <td>${meanSpd} km/h</td></tr>
+    <tr><td>Cities passed</td>       <td>${cityCnt}</td></tr>
+    <tr><td>Countries encountered</td><td>${ctryCnt}</td></tr>`;
 }
     
  function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
@@ -1170,6 +1211,7 @@ function displayLogTable() {
     updateCountTable();
     updateWeatherTable();
     updatePhaseTable();
+    updateStatsTable();
     lastTableUpdate = now;
   }
 }
