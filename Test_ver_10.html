@@ -440,14 +440,6 @@
      'tertiary','tertiary_link',
      'unclassified','residential','service','construction'
     ]);
-    const allowedWeather = new Set([
-      'Clear', 'Partly cloudy', 'Cloudy',
-      'Rain', 'Snow', 'Fog'
-    ]);
-
-    const allowedPhases = new Set([
-      'Night', 'Dawn', 'Daylight', 'Dusk'
-    ]);
 
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
@@ -665,14 +657,12 @@ async function initAzureSpeech() {
 
     // accumulate total and per‐weather
     totalDist += segDist;
-    const rawPhase = phaseText;                             // e.g. "Dusk"
-    const displayPhase = allowedPhases.has(rawPhase) ? rawPhase : 'Other';
-    phaseDistances[displayPhase] = (phaseDistances[displayPhase] || 0) + segDist;
-    const rawCond = iconEl.alt || 'Unknown';
-    const displayCond = allowedWeather.has(rawCond) ? rawCond : 'Other';
-    weatherDistances[displayCond] = (weatherDistances[displayCond] || 0) + segDist;
+    const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
+    phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
+    const condition = iconEl.alt || 'Unknown';
+    weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
 
-    const distKm = (totalDist / 1000).toFixed(2);
+        const distKm = (totalDist / 1000).toFixed(2);
     const labelHtml = `<div class="distance-label">${distKm} km</div>`;
 
     if (!currentDistMarker) {
@@ -923,13 +913,13 @@ function updateStreetTable() {
 
     countryRedCounts[lastCountry] = (countryRedCounts[lastCountry] || 0) + 1;
 
-    const redCond = allowedWeather.has(rawCond) ? rawCond : 'Other';
-    weatherRedCounts[redCond] = (weatherRedCounts[redCond] || 0) + 1;
+    // per-weather-condition
+    weatherRedCounts[condition] = (weatherRedCounts[condition] || 0) + 1;
     // ← pre-seed the distance bucket so updateWeatherTable will include it
     weatherDistances[condition] = weatherDistances[condition] || 0;
 
-    const redPhase = allowedPhases.has(rawPhase) ? rawPhase : 'Other';
-    phaseRedCounts[redPhase] = (phaseRedCounts[redPhase] || 0) + 1;
+    // per-day-phase
+    phaseRedCounts[phase]    = (phaseRedCounts[phase] || 0) + 1;
     // ← pre-seed the distance bucket so updatePhaseTable will include it
     phaseDistances[phase]    = phaseDistances[phase]   || 0;
 
@@ -1121,37 +1111,54 @@ function displayLogTable() {
     })
     .catch(err => console.error(err));
 }
-    
-   function updatePhaseTable() {
-  let html = `
-    <tr><th>Phase</th><th>Distance (km)</th><th>No of issues</th></tr>`;
+    function updateDayPhase(lat, lon) {
+    fetch(`https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&formatted=0`)
+    .then(r => r.json())
+    .then(data => {
+      const now   = new Date();
+      const dawn  = new Date(data.results.civil_twilight_begin);
+      const sunrise = new Date(data.results.sunrise);
+      const sunset  = new Date(data.results.sunset);
+      const dusk    = new Date(data.results.civil_twilight_end);
 
-  allowedPhases.forEach(ph => addRow(ph));
-  if (phaseDistances.Other) addRow('Other');
+      let phase;
+      if (now < dawn) {
+        phase = 'Night';
+      } else if (now < sunrise) {
+        phase = 'Dawn';
+      } else if (now < sunset) {
+        phase = 'Daylight';
+      } else if (now < dusk) {
+        phase = 'Dusk';
+      } else {
+        phase = 'Night';
+      }
 
-  function addRow(ph) {
-    const km  = (phaseDistances[ph] / 1000 || 0).toFixed(1);
-    const cnt = phaseRedCounts[ph] || 0;
-    html += `<tr><td>${ph}</td><td>${km}</td><td>${cnt}</td></tr>`;
-  }
-  document.getElementById('phaseTable').innerHTML = html;
+      document.getElementById('dayPhase').textContent = `Phase: ${phase}`;
+    })
+    .catch(err => console.error('Sun API error', err));
 }
 
-function updateWeatherTable() {
+    function updateWeatherTable() {
   let html = `
-    <tr><th>Condition</th><th>Distance (km)</th><th>No of issues</th></tr>`;
+    <tr>
+      <th>Condition</th>
+      <th>Distance (km)</th>
+      <th>No of issues</th>
+    </tr>`;
 
-  /* 1) whitelisted rows in fixed order */
-  allowedWeather.forEach(cond => addRow(cond));
+  for (const cond in weatherDistances) {
+    const km    = (weatherDistances[cond] / 1000).toFixed(1);
+    const count = weatherRedCounts[cond] || 0;
 
-  /* 2) catch‑all “Other” if it exists */
-  if (weatherDistances.Other) addRow('Other');
-
-  function addRow(cond) {
-    const km = (weatherDistances[cond] / 1000 || 0).toFixed(1);
-    const cnt = weatherRedCounts[cond] || 0;
-    html += `<tr><td>${cond}</td><td>${km}</td><td>${cnt}</td></tr>`;
+    html += `
+      <tr>
+        <td>${cond}</td>
+        <td>${km}</td>
+        <td>${count}</td>
+      </tr>`;
   }
+
   document.getElementById('weatherTable').innerHTML = html;
 }
 
