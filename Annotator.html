@@ -128,6 +128,33 @@
      padding: 6px 8px;
      text-align: center;
    }
+
+  #statsTable {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #444;
+  margin-bottom: 80px;
+}
+#statsTable th,
+#statsTable td {
+  border: 1px solid #444;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+#countryTable {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #444;
+  margin-bottom: 80px;
+}
+#countryTable th,
+#countryTable td {
+  border: 1px solid #444;
+  padding: 6px 8px;
+  text-align: center;
+}
+    
     #weatherTable {
       width: 100%;
       border-collapse: collapse;
@@ -170,6 +197,32 @@
 
     .section { margin-bottom: 30px; }
     .page-break { page-break-after: always; }
+
+    /* circular speed-limit sign */
+.speedSign{
+  width: 46px;
+  height: 46px;
+  border: 4px solid red;   /* red rim */
+  border-radius: 50%;
+  background: #fff;        /* white face */
+  color: #000;             /* black digits */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: bold 14px/1 Arial, sans-serif;
+  margin: 6px 0;
+}
+
+.speedLimitRow{
+  display:flex;
+  align-items:center;   /* vertical centring */
+  gap:6px;              /* space between label and sign */
+}
+
+.speedLabel{
+  font-weight: normal;
+  font-size: inherit;
+}
     
 @media print {
   /* reset page‐sizing so we don’t clip */
@@ -247,6 +300,10 @@
     <p id="location"></p>
     <p id="roadType">Road type: N/A</p>
     <p id="speed">Speed: N/A</p>
+    <div class="speedLimitRow">
+      <span class="speedLabel">Speed&nbsp;limit:</span>
+      <div id="legalSpeed" class="speedSign">–</div>
+    </div>   
     <div class="distanceContainer">
       <p id="totalDistance">Distance: 0.0 km</p>
       <button class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
@@ -309,7 +366,7 @@
        <h3>Issue Snapshots</h3>
        <div id="snapshotTableContainer"></div>
      </div>
-
+    
     <div id="cameraContainer" class="section">
       <h3 style="display:none">Camera preview</h3>
       <video id="camera" autoplay playsinline
@@ -318,6 +375,15 @@
       </div>
     <canvas id="cameraCanvas" width="320" height="240" style="display:none;"></canvas>
 
+    <div id="countContainer" class="section">
+      <h3>KPI Calculation</h3>
+      <table id="countTable">
+        <tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>
+        <tr><td colspan="3">&nbsp;</td></tr>
+      </table>
+    </div>
+    <div class="page-break"></div>
+    
     <div id="map2Container" class="section">
       <h3>Street View</h3>
       <div id="map2" style="height:300px;width:100%;"></div>
@@ -330,14 +396,13 @@
     </div>
     <div class="page-break"></div>
 
-    <div id="countContainer" class="section">
-      <h3>KPI Calculation</h3>
-      <table id="countTable">
-        <tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>
-        <tr><td colspan="3">&nbsp;</td></tr>
+    <div id="statsContainer" class="section">
+      <h3>Statistics</h3>
+      <table id="statsTable">
+        <tr><th>Metric</th><th>Value</th></tr>
+        <tr><td colspan="2">&nbsp;</td></tr>
       </table>
     </div>
-    <div class="page-break"></div>
 
     <div id="chartsContainer" class="section">
       <div class="chartBox">
@@ -355,6 +420,17 @@
       <h3>Road Types</h3>
       <table id="streetTable"><tr><th>Road type</th></tr></table>
     </div>
+
+    <div id="countryContainer" class="section">
+       <h3>Countries</h3>
+       <table id="countryTable">
+       <tr>
+         <th>Country</th>
+         <th>Distance&nbsp;(km)</th>
+         <th>No&nbsp;of&nbsp;issues</th>
+       </tr>
+       </table>
+     </div>
 
     <div id="weatherContainer" class="section">
       <h3>Weather</h3>
@@ -393,16 +469,31 @@
     const speedEl   = document.getElementById('speed');
     const countTbl  = document.getElementById('countTable');
     const streetTbl = document.getElementById('streetTable');
+    const countryTable = document.getElementById('countryTable');
     const logContainer = document.getElementById('logTableContainer');
     const buttonGroups = document.getElementById('buttonGroups');
     const micLamp   = document.getElementById('micLamp');
     const textBox   = document.getElementById('textBox');
+    const countryDistances  = {};
     const weatherDistances = {};
     const phaseDistances = {};
     const AZURE_KEY    = '3T1KzqWzaLVhz37OFOOvGJy6xwndsk5NCiI6hIEpqWDvHVffObirJQQJ99BEACi5YpzXJ3w3AAAYACOGKvFo';
     const AZURE_REGION = 'northeurope';
     const PHASE_THROTTLE = 5 * 60 * 1000;
     const TABLE_THROTTLE = 30 * 1000;
+    const citySet = new Set();   // unique city names encountered
+    const legalSpeedEl = document.getElementById('legalSpeed');
+
+    let lastLimit = null;
+    let limitChanges = 0;
+    let roundaboutCount     = 0;
+    let trafficLightCount   = 0;
+    let lastWasRoundabout   = false;   // debounce flags
+    let lastWasTrafficLight = false;
+    let bridgeCount   = 0;
+    let tunnelCount   = 0;
+    let lastWasBridge = false;   // debounce flags
+    let lastWasTunnel = false;
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -414,6 +505,10 @@
      'unclassified','residential','service','construction'
     ]);
 
+    let startTime = null;        // timestamp of the first GPS fix (ms)
+    const topSpeeds = [];   // running list of the 10 highest samples
+    
+    let maxSpeed  = 0;    // value that ends up in the Statistics table
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
@@ -425,6 +520,7 @@
     let currentDistMarker = null;
     let map2, circle2;
     let roadRedCounts = {};
+    let countryRedCounts   = {};
     let weatherRedCounts   = {};    // red presses per weather condition
     let phaseRedCounts     = {};    // (optional) red presses per day phase
     let isDirty = false;
@@ -476,6 +572,27 @@ document.getElementById('micToggle').onclick = async event => {
     event.target.textContent = 'Stop voice control';
   }
 };
+
+ function updateCountryTable() {
+  let html = `
+    <tr>
+      <th>Country</th>
+      <th>Distance&nbsp;(km)</th>
+      <th>No&nbsp;of&nbsp;issues</th>
+    </tr>`;
+
+  for (const c in countryDistances) {
+    const km    = (countryDistances[c] / 1000).toFixed(1);
+    const count = countryRedCounts[c] || 0;
+    html += `
+      <tr>
+        <td>${c}</td>
+        <td>${km}</td>
+        <td>${count}</td>
+      </tr>`;
+  }
+  countryTable.innerHTML = html;
+}
 
 function stripHotWord(text) {
   const match = text.match(/^\s*annotator[,:]?\s*/i);   // any leading spaces
@@ -537,6 +654,11 @@ async function initAzureSpeech() {
   };
 
   recognizer.startContinuousRecognitionAsync();
+}
+
+ function parseMaxSpeed(tag){
+  const m = /(\d+)/.exec(tag);        // first number in the tag
+  return m ? m[1] : null;             // e.g. "80"  (null if none)
 }
     
   function initMap () {
@@ -601,6 +723,8 @@ async function initAzureSpeech() {
   const ts = pos.timestamp;
   let segDist = 0; // in meters
 
+  if (!startTime) startTime = ts;
+    
   // 1) Calculate segment distance & apply noise threshold
   if (lastPos) {
     segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
@@ -652,6 +776,42 @@ async function initAzureSpeech() {
   if (prevPos) {
     const dt = (ts - prevPos.ts) / 1000; // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
+
+      /* ── reject implausible spikes ───────────────────────── */
+  if (speedKmh > 250) {
+    console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
+    speedEl.textContent = 'Speed: N/A';
+    // skip max-speed bookkeeping and chart push for this sample
+  } else {
+    /* existing “valid sample” logic — keep exactly as you have it */
+
+    // 1. maintain the top-10 speeds list
+    topSpeeds.push(speedKmh);
+    topSpeeds.sort((a, b) => b - a);
+    if (topSpeeds.length > 10) topSpeeds.pop();
+    maxSpeed = topSpeeds.length === 10 ? topSpeeds[9] : topSpeeds[0];
+
+    // 2. show live speed read-out
+    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+
+    // 3. later (in the chart-update section) you already push
+    //    speedData.push(speedKmh);  ← keep that line; it now runs only here
+  }
+
+    if (speedKmh > 0) {                    // ignore the very first 0 km/h
+  topSpeeds.push(speedKmh);
+
+  // keep the array sorted descending and trimmed to 10 values
+  topSpeeds.sort((a, b) => b - a);
+  if (topSpeeds.length > 10) topSpeeds.pop();
+
+  // once we have 10 samples, maxSpeed = the lowest of them
+  // (otherwise just use the current highest seen so far)
+  maxSpeed = topSpeeds.length === 10
+               ? topSpeeds[9]                 // index 9 = smallest of the top 10
+               : topSpeeds[0];                // highest sample so far
+}
+    
     speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
   }
 
@@ -688,10 +848,39 @@ async function initAzureSpeech() {
       const rawRt = data.extratags?.highway || data.type || 'unknown';
       const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
 
-      // accumulate this segment to the proper road‐type bucket
-      if (segDist > 0) {
-        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
-      }
+      const isRoundabout   = data.extratags?.junction === 'roundabout';
+      const isTrafficLight = data.extratags?.highway === 'traffic_signals' || data.type === 'traffic_signals';
+      const isBridge = data.extratags?.bridge === 'yes' || data.type === 'bridge';
+      const isTunnel = data.extratags?.tunnel === 'yes' || data.type === 'tunnel';
+
+      if (isRoundabout && !lastWasRoundabout)   roundaboutCount++;
+      if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
+      if (isBridge && !lastWasBridge) bridgeCount++;
+      if (isTunnel && !lastWasTunnel) tunnelCount++;
+
+      lastWasRoundabout   = isRoundabout;
+      lastWasTrafficLight = isTrafficLight;
+      lastWasBridge = isBridge;
+      lastWasTunnel = isTunnel;
+      
+      const maxTag =
+      data.extratags?.maxspeed
+   || data.extratags?.['maxspeed:forward']
+   || data.extratags?.['maxspeed:backward'];
+
+const limit = maxTag ? parseMaxSpeed(maxTag) : null;
+legalSpeedEl.textContent = limit ?? '–';
+
+/* ── count speed-limit transitions ─────────────── */
+if (limit !== null && limit !== lastLimit) {
+  if (lastLimit !== null) limitChanges++;   // skip the very first limit
+  lastLimit = limit;
+}
+
+     if (segDist > 0) {    
+       roadDistances[displayRt] =
+      (roadDistances[displayRt] || 0) + segDist;
+     }
 
       // update sidebar & sets
       roadTypeEl.textContent = `Road type: ${displayRt}`;
@@ -708,6 +897,10 @@ async function initAzureSpeech() {
         || 'Unknown city';
 
       const country = data.address.country || 'Unknown country';
+
+      if (segDist > 0) {
+         countryDistances[country] = (countryDistances[country] || 0) + segDist;
+      }
       
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
@@ -721,6 +914,7 @@ async function initAzureSpeech() {
       // fetch weather on city change
       if (city !== lastCity) {
         lastCity = city;
+        citySet.add(city);
         getWeather(city);
       }
 
@@ -737,6 +931,13 @@ async function initAzureSpeech() {
       currentPosMarker2.setLatLng([lat, lon]);
     }     
 }
+
+    function parseMaxSpeed(tag) {
+      // handles “50”, “50 km/h”, “30 mph”, “signals”, etc.
+      const n = parseFloat(tag);
+      if (Number.isFinite(n)) return `${n} km/h`;
+        return tag;                              // signals / none / variable …
+    }
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
       const R = 6_371_000;          // earth’s radius in meters
@@ -778,6 +979,35 @@ function updateStreetTable() {
   }
 
   streetTbl.innerHTML = html;
+}
+
+  function updateStatsTable () {
+  // ① readable total time hh:mm:ss
+  const totalMs  = startTime ? (lastPos.ts - startTime) : 0;
+  const timeStr  = new Date(totalMs).toISOString().substring(11, 19);
+
+  // ② distance & speeds
+  const km       = (totalDist / 1000).toFixed(1);
+  const hrs      = totalMs / 3_600_000;
+  const meanSpd  = hrs > 0 ? (km / hrs).toFixed(1) : '—';
+
+  // ③ counts
+  const cityCnt  = citySet.size;
+  const ctryCnt  = Object.keys(countryDistances).length;
+
+  document.getElementById('statsTable').innerHTML = `
+    <tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>Total test time</td>          <td>${timeStr}</td></tr>
+    <tr><td>Total test distance</td>      <td>${km} km</td></tr>
+    <tr><td>Max speed</td>           <td>${maxSpeed.toFixed(1)} km/h</td></tr>
+    <tr><td>Mean speed</td>          <td>${meanSpd} km/h</td></tr>
+    <tr><td>Speed limit changes</td><td>${limitChanges}</td></tr>
+    <tr><td>Roundabouts</td> <td>${roundaboutCount}</td></tr>
+    <tr><td>Traffic-light junctions</td><td>${trafficLightCount}</td></tr>
+    <tr><td>Bridges</td><td>${bridgeCount}</td></tr>
+    <tr><td>Tunnels</td><td>${tunnelCount}</td></tr>
+    <tr><td>Cities</td>       <td>${cityCnt}</td></tr>
+    <tr><td>Countries</td><td>${ctryCnt}</td></tr>`;
 }
     
  function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
@@ -858,6 +1088,8 @@ function updateStreetTable() {
     // per-road-type
     roadRedCounts[rt] = (roadRedCounts[rt] || 0) + 1;
 
+    countryRedCounts[lastCountry] = (countryRedCounts[lastCountry] || 0) + 1;
+
     // per-weather-condition
     weatherRedCounts[condition] = (weatherRedCounts[condition] || 0) + 1;
     // ← pre-seed the distance bucket so updateWeatherTable will include it
@@ -870,6 +1102,7 @@ function updateStreetTable() {
 
     // now redraw all three KPI tables immediately
     updateStreetTable();
+    updateCountryTable(); 
     updateWeatherTable();
     updatePhaseTable();
     updateCountTable();
@@ -1110,9 +1343,11 @@ function displayLogTable() {
   const now = Date.now();
   if (now - lastTableUpdate > TABLE_THROTTLE) {
     updateStreetTable();
+    updateCountryTable();
     updateCountTable();
     updateWeatherTable();
     updatePhaseTable();
+    updateStatsTable();
     lastTableUpdate = now;
   }
 }
