@@ -492,7 +492,8 @@
     let lastWasTrafficLight = false;
     let bridgeCount   = 0;
     let tunnelCount   = 0;
-    let lastWasBridge = false;   // debounce flags
+    let lastWasBridge = false;
+    let bridgeSegmentStartDist = null;
     let lastWasTunnel = false;
     
     // ── Whitelist of road types we care about ──
@@ -624,11 +625,10 @@ function stripHotWord(text) {
   }
 }
 
-    async function checkBridge(lat, lon) {
-  const radius = 10; // meters
+ async function checkBridge(lat, lon) {
+  const radius = 10;  // meters
   const query = `
     [out:json];
-    // find any way or node tagged bridge=yes
     (
       way(around:${radius},${lat},${lon})[bridge=yes];
       node(around:${radius},${lat},${lon})[bridge=yes];
@@ -641,13 +641,30 @@ function stripHotWord(text) {
   try {
     const res = await fetch(url);
     const obj = await res.json();
-    const found = obj.elements && obj.elements.length > 0;
-    if (found && !lastWasBridge) {
-      bridgeCount++;
+    const found = Array.isArray(obj.elements) && obj.elements.length > 0;
+
+    if (found) {
+      // we’re currently on (or above) a bridge element
+      if (!lastWasBridge) {
+        // just entered—mark the distance baseline
+        bridgeSegmentStartDist = totalDist;  
+      }
+      // have we gone at least 100 m since that baseline?
+      if (
+        bridgeSegmentStartDist !== null &&
+        totalDist - bridgeSegmentStartDist >= 100
+      ) {
+        bridgeCount++;
+        lastWasBridge = true;
+        bridgeSegmentStartDist = null;    // reset so we only count once
+      }
+    } else {
+      // not on a bridge → reset everything
+      lastWasBridge = false;
+      bridgeSegmentStartDist = null;
     }
-    lastWasBridge = found;
-  } catch (e) {
-    console.error('Overpass bridge error', e);
+  } catch (err) {
+    console.error('Overpass bridge error', err);
   }
 }
 
