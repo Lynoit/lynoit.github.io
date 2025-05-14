@@ -738,65 +738,71 @@ function updateCountryTable() {
   }
 }
 
+let keywordRecognizer, speechRecognizer, keywordModel;
+
 async function initAzureSpeech() {
-  console.log('initAzureSpeech started');    //  ← already added last time?
-  const warn = msg => console.warn('Speech init:', msg);
-
   if (!window.SpeechSDK) {
-    warn('SpeechSDK global missing – script failed to load?');
-    micLamp.style.background = '#ffc107';   // 🟡  error
+    console.error("Speech SDK not loaded");
     return;
   }
 
-  try {
-    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-      AZURE_KEY, AZURE_REGION
-    );
-    speechConfig.speechRecognitionLanguage = 'en-US';
-    
-    speechConfig.setProperty(                     // ① add this
-      SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
-      "3000"            // 2 s → tweak to taste (1500-5000 common)
-    );
+  // ── 1) config & audio ────────────────────────────────
+  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+    AZURE_KEY, AZURE_REGION
+  );
+  speechConfig.speechRecognitionLanguage = 'en-US';
 
-    speechConfig.setProperty(
-      SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
-      'TrueText'
-    );
+  // tweak end-silence so “Annotator” actually fires
+  speechConfig.setProperty(
+    SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+    "3000"
+  );
 
-    const audioConfig  = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    recognizer         = new SpeechSDK.SpeechRecognizer(
-      speechConfig, audioConfig
-    );
-  } catch (e) {
-    warn(e);
-    micLamp.style.background = '#ffc107';   // 🟡
-    return;
-  }
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
 
-  /* Lamp colours */
-  recognizer.sessionStarted = ()  => micLamp.style.background = '#f44336'; // 🔴 listening
-  recognizer.sessionStopped = ()  => micLamp.style.background = '#4caf50'; // 🟢 ready
-  recognizer.canceled       = (_,e)=> {
-    warn('Canceled: ' + e.errorDetails);
-    micLamp.style.background = '#ffc107';   // 🟡 error
-  };
+  // ── 2) load your keyword model ───────────────────────
+  // make sure /models/annotator.table is served by your server
+  keywordModel = await SpeechSDK.KeywordRecognitionModel.fromFileAsync(
+    "/models/annotator.table"
+  );
 
-  /* Hot‑word gate */
-  recognizer.recognizing = (_,e)=> {
-    const draft = stripHotWord(e.result.text);
-    if (draft) textBox.value = draft + ' [draft]';
-  };
-  recognizer.recognized  = (_,e)=> {
-    if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
-    const cleaned = stripHotWord(e.result.text);
-    if (cleaned) {
-      textBox.value = cleaned;
-      logButton('Manual annotation', false);
+  // ── 3) create the two recognizers ────────────────────
+  keywordRecognizer = new SpeechSDK.KeywordRecognizer(audioConfig);
+  speechRecognizer  = new SpeechSDK.SpeechRecognizer(
+    speechConfig, audioConfig
+  );
+
+  // ── 4) when wake-word is spotted, start the speech recognizer ──
+  keywordRecognizer.recognized = (s, e) => {
+    if (e.result.reason === SpeechSDK.ResultReason.RecognizedKeyword) {
+      console.log("🔥 Detected ‘Annotator’ – now listening for command");
+      // stop looking for the wake-word until we're done
+      keywordRecognizer.stopKeywordRecognitionAsync();
+
+      // hook up your normal “recognized” logic
+      speechRecognizer.recognized = (_, evt) => {
+        if (evt.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+          const cmd = evt.result.text.trim();
+          if (cmd) {
+            textBox.value = cmd;
+            logButton('Manual annotation', false);
+          }
+        }
+      };
+
+      // when command session ends, go back to waiting for the hot-word
+      speechRecognizer.sessionStopped = () => {
+        speechRecognizer.stopContinuousRecognitionAsync();
+        keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
+      };
+
+      // kick off the full recognizer
+      speechRecognizer.startContinuousRecognitionAsync();
     }
   };
 
-  recognizer.startContinuousRecognitionAsync();
+  // ── 5) start listening for “Annotator” ────────────────
+  keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
 }
 
  function parseMaxSpeed(tag){
