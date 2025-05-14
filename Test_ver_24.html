@@ -462,11 +462,6 @@
       )
       .trim();
   }
-</script>
-
-  console.log('main script executing');
-
-  </script>
   
   <script>
 
@@ -564,28 +559,48 @@
       toggleBtn.setAttribute('aria-expanded', exp);
     };
 
-    window.onload = () => {
-      initMap(); initMap2(); initCharts(); updateDateTime(); setInterval(updateDateTime,1000);
-      navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
-      buildButtons();
-      startCamera();
-      initAzureSpeech()
+      window.onload = () => {
+    // 1) Core app setup
+    initMap();
+    initMap2();
+    initCharts();
+    updateDateTime();
+    setInterval(updateDateTime, 1000);
+    navigator.geolocation.watchPosition(
+      showPosition,
+      showError,
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+    );
+    buildButtons();
+    startCamera();
+
+    // 2) Start the wake-word flow
+    initAzureSpeech();
+
+    // 3) Wire the mic button now that keywordRecognizer exists
+    let listening = false;
+    const micBtn = document.getElementById('micToggle');
+    micBtn.textContent = 'Start voice control';
+
+    micBtn.onclick = () => {
+      if (listening) {
+        keywordRecognizer.stopKeywordRecognitionAsync(
+          () => console.log('🛑 Wake-word listener stopped'),
+          err => console.error('❌ Stop failed', err)
+        );
+      } else {
+        keywordRecognizer.startKeywordRecognitionAsync(
+          keywordModel,
+          () => console.log('🌟 Wake-word listener restarted'),
+          err => console.error('❌ Restart failed', err)
+        );
+      }
+      // actual `listening` flag, lamp & button text get updated
+      // in your sessionStarted/sessionStopped handlers on keywordRecognizer
     };
+  };
 
- let listening = true;
- const micBtn = document.getElementById('micToggle');
- micBtn.textContent = 'Stop voice control';
- micBtn.onclick = () => {
-   if (listening) {
-     keywordRecognizer.stopKeywordRecognitionAsync();
-     micBtn.textContent = 'Start voice control';
-   } else {
-     keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
-     micBtn.textContent = 'Stop voice control';
-   }
-   listening = !listening;
- };
-
+ 
 function reverseGeocode(lat, lon) {
   const now = Date.now();
   if (now - lastGeocodeTime < GEOCODE_MIN_PERIOD) return;   // too soon
@@ -752,6 +767,33 @@ async function initAzureSpeech() {
   keywordRecognizer = new SpeechSDK.KeywordRecognizer(audioConfig);
   speechRecognizer  = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
 
+    // ─── lamp & button feedback for the wake-word recognizer ─────────
+  keywordRecognizer.sessionStarted = () => {
+    listening = true;
+    micLamp.style.background = '#f44336';   // 🔴 actively listening
+    micBtn.textContent    = 'Stop voice control';
+  };
+
+  keywordRecognizer.sessionStopped = () => {
+    listening = false;
+    micLamp.style.background = '#4caf50';   // 🟢 ready/idling
+    micBtn.textContent    = 'Start voice control';
+  };
+
+  keywordRecognizer.canceled = (_, e) => {
+    console.warn('KeywordRecognizer canceled:', e.errorDetails);
+    micLamp.style.background = '#ffc107';   // 🟡 error
+  };
+
+    keywordRecognizer.startKeywordRecognitionAsync(
+    keywordModel,
+    () => console.log('✅ Wake-word listener started'),
+    err => {
+      console.error('❌ Wake-word start failed', err);
+      micLamp.style.background = '#ffc107';
+    }
+  );
+
   // 4) when hot-word fires, switch to full STT
   keywordRecognizer.recognized = (s, e) => {
     if (e.result.reason === SpeechSDK.ResultReason.RecognizedKeyword) {
@@ -768,20 +810,23 @@ async function initAzureSpeech() {
           }
         }
       };
-      // when done, restart hot-word
-      speechRecognizer.sessionStopped = () => {
-        speechRecognizer.stopContinuousRecognitionAsync();
-        keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
-      };
 
+      speechRecognizer.sessionStopped = () => {
+  // stop the command recognizer
+  speechRecognizer.stopContinuousRecognitionAsync();
+  // then go back to waiting for “Annotator”
+  keywordRecognizer.startKeywordRecognitionAsync(
+    keywordModel,
+    () => console.log('🌟 Wake-word listener restarted'),
+    err => console.error('❌ Wake-word restart failed', err)
+  );
+};
+      
       speechRecognizer.startContinuousRecognitionAsync();
     }
   };
 
-  // 5) kickoff hot-word listening
-  keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
 }
-
 
  function parseMaxSpeed(tag){
   const m = /(\d+)/.exec(tag);        // first number in the tag
