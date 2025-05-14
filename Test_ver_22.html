@@ -483,6 +483,7 @@
     const TABLE_THROTTLE = 30 * 1000;
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
+    const GEOCODE_MIN_PERIOD = 1100;
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -501,6 +502,7 @@
     let currentCity = null;
     let cityList    = [];
     let countryList = [];
+    let lastGeocodeTime    = 0;
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -579,6 +581,27 @@ document.getElementById('micToggle').onclick = async event => {
     event.target.textContent = 'Stop voice control';
   }
 };
+
+function reverseGeocode(lat, lon) {
+  const now = Date.now();
+  if (now - lastGeocodeTime < GEOCODE_MIN_PERIOD) return;   // too soon
+  lastGeocodeTime = now;
+
+  const url = `https://nominatim.openstreetmap.org/reverse` +
+              `?format=jsonv2&extratags=1&email=me@example.com` +
+              `&lat=${lat}&lon=${lon}`;
+
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(updateAddressUI)
+    .catch(err => {
+      streetCityEl.textContent = `Geocoder error: ${err.message}`;
+      console.error('Reverse-geocode failed', err);
+    });
+}   
 
 function updateCountryTable() {
   const totalKm = totalDist / 1000;
@@ -821,50 +844,41 @@ async function initAzureSpeech() {
   function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
   const ts = pos.timestamp;
-  let segDist = 0; // in meters
+  let segDist = 0;                               // metres
 
+  /* ── 1) segment distance & noise filter ───────────────────── */
   if (!startTime) startTime = ts;
-    
-  // 1) Calculate segment distance & apply noise threshold
   if (lastPos) {
     segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
-    if (segDist < 10) return; // ignore tiny jitters
+    if (segDist < 10) return;                    // ignore <10 m GPS jitter
 
-    // accumulate total and per‐weather
+    /* … distance / weather / phase accumulators (unchanged) … */
     totalDist += segDist;
+
     const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
     phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
     const condition = iconEl.alt || 'Unknown';
     weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
 
-        const distKm = (totalDist / 1000).toFixed(2);
+    /* live distance label on the map */
+    const distKm = (totalDist / 1000).toFixed(2);
     const labelHtml = `<div class="distance-label">${distKm} km</div>`;
-
     if (!currentDistMarker) {
       currentDistMarker = L.marker([lat, lon], {
-        icon: L.divIcon({
-          className: '',        // styling lives in .distance-label
-          html: labelHtml,
-          iconSize: [0, 0],     // let the inner div size itself
-          iconAnchor: [0, -10]  // float just above the point
-        })
+        icon: L.divIcon({ className: '', html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] })
       }).addTo(map);
     } else {
       currentDistMarker.setLatLng([lat, lon]);
-      currentDistMarker.setIcon(L.divIcon({
-        className: '',
-        html: labelHtml,
-        iconSize: [0, 0],
-        iconAnchor: [0, -10]
-      }));
-    }    
+      currentDistMarker.setIcon(L.divIcon({ className: '', html: labelHtml, iconSize: [0,0], iconAnchor: [0,-10] }));
+    }
   }
 
-  // 2) Update position state & map
+  /* ── 2) update position state & main map ──────────────────── */
   const prevPos = lastPos;
   lastPos = { lat, lon, ts };
   posCount++;
   trackLine.addLatLng([lat, lon]);
+
   if (positions.length === 0) {
     map.setView([lat, lon], 15);
   } else if (posCount % 20 === 0) {
@@ -872,50 +886,25 @@ async function initAzureSpeech() {
   }
   positions.push([lat, lon]);
 
-  // 3) Update speed display
+  /* ── 3) speed display (+ spike rejection) ─────────────────── */
   if (prevPos) {
-    const dt = (ts - prevPos.ts) / 1000; // seconds
+    const dt = (ts - prevPos.ts) / 1000;         // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
 
-      /* ── reject implausible spikes ───────────────────────── */
-  if (speedKmh > 250) {
-    console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
-    speedEl.textContent = 'Speed: N/A';
-    // skip max-speed bookkeeping and chart push for this sample
-  } else {
-    /* existing “valid sample” logic — keep exactly as you have it */
+    if (speedKmh > 250) {
+      console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
+      speedEl.textContent = 'Speed: N/A';
+    } else {
+      topSpeeds.push(speedKmh);
+      topSpeeds.sort((a,b) => b - a);
+      if (topSpeeds.length > 10) topSpeeds.pop();
+      maxSpeed = topSpeeds.length === 10 ? topSpeeds[9] : topSpeeds[0];
 
-    // 1. maintain the top-10 speeds list
-    topSpeeds.push(speedKmh);
-    topSpeeds.sort((a, b) => b - a);
-    if (topSpeeds.length > 10) topSpeeds.pop();
-    maxSpeed = topSpeeds.length === 10 ? topSpeeds[9] : topSpeeds[0];
-
-    // 2. show live speed read-out
-    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
-
-    // 3. later (in the chart-update section) you already push
-    //    speedData.push(speedKmh);  ← keep that line; it now runs only here
+      speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+    }
   }
 
-    if (speedKmh > 0) {                    // ignore the very first 0 km/h
-  topSpeeds.push(speedKmh);
-
-  // keep the array sorted descending and trimmed to 10 values
-  topSpeeds.sort((a, b) => b - a);
-  if (topSpeeds.length > 10) topSpeeds.pop();
-
-  // once we have 10 samples, maxSpeed = the lowest of them
-  // (otherwise just use the current highest seen so far)
-  maxSpeed = topSpeeds.length === 10
-               ? topSpeeds[9]                 // index 9 = smallest of the top 10
-               : topSpeeds[0];                // highest sample so far
-}
-    
-    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
-  }
-
-  // 4) Update distance display & charts
+  /* ── 4) distance read-out & charts ─────────────────────────── */
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
@@ -924,130 +913,114 @@ async function initAzureSpeech() {
     timeData.push(new Date(ts));
     distData.push((totalDist / 1000).toFixed(3));
     speedData.push(speedEl.textContent.split(' ')[1]);
-    requestAnimationFrame(() => {
-      distanceChart.update();
-      speedChart.update();
-      maybeUpdateTables();
-    });
+    requestAnimationFrame(() => { distanceChart.update(); speedChart.update(); maybeUpdateTables(); });
     lastChartTs = Date.now();
   }
 
-  // 5) Update raw lat/lon display
+  /* ── 5) raw coordinate display & day-phase refresh ─────────── */
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
-
-  const now = Date.now();
-  if (now - lastPhaseUpdate > PHASE_THROTTLE) {
+  if (Date.now() - lastPhaseUpdate > PHASE_THROTTLE) {
     updateDayPhase(lat, lon);
-    lastPhaseUpdate = now;
+    lastPhaseUpdate = Date.now();
   }
 
-  // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
-  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
-    .then(r => r.json())
-    .then(data => {
-      const rawRt = data.extratags?.highway || data.type || 'unknown';
-      const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
-      const tags = data.extratags || {};
+  /* ── 6) **THROTTLED** reverse-geocode + road bookkeeping ──── */
+  const now = Date.now();
+  if (now - lastGeocodeTime >= GEOCODE_MIN_PERIOD) {
+    lastGeocodeTime = now;
 
-        const isRoundabout =
-       tags.junction === 'roundabout'
-    || tags.highway  === 'mini_roundabout';
+    const url = `https://nominatim.openstreetmap.org/reverse`
+              + `?format=jsonv2&extratags=1`
+              + `&email=me@example.com`          // <-- identify your app
+              + `&lat=${lat}&lon=${lon}`;
 
-const isTunnel = tags.tunnel === 'yes';
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then(data => {
+        /* ── everything that was already here stays unchanged ── */
+        const rawRt     = data.extratags?.highway || data.type || 'unknown';
+        const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
+        const tags      = data.extratags || {};
 
-// existing debounce/count logic…
-if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
-if (isTunnel     && !lastWasTunnel)     tunnelCount++;
+        /* roundabout / tunnel debounce */
+        const isRoundabout = tags.junction === 'roundabout' || tags.highway === 'mini_roundabout';
+        const isTunnel     = tags.tunnel === 'yes';
+        if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
+        if (isTunnel     && !lastWasTunnel)     tunnelCount++;
+        lastWasRoundabout = isRoundabout;
+        lastWasTunnel     = isTunnel;
 
-lastWasRoundabout = isRoundabout;
-lastWasTunnel     = isTunnel;
-      
-      const maxTag =
-      data.extratags?.maxspeed
-   || data.extratags?.['maxspeed:forward']
-   || data.extratags?.['maxspeed:backward'];
+        const maxTag =
+          data.extratags?.maxspeed ||
+          data.extratags?.['maxspeed:forward'] ||
+          data.extratags?.['maxspeed:backward'];
+        const limit = maxTag ? parseMaxSpeed(maxTag) : null;
+        legalSpeedEl.textContent = limit ?? '–';
+        if (limit !== null && limit !== lastLimit) {
+          if (lastLimit !== null) limitChanges++;
+          lastLimit = limit;
+        }
 
-const limit = maxTag ? parseMaxSpeed(maxTag) : null;
-legalSpeedEl.textContent = limit ?? '–';
+        if (segDist > 0) {
+          roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+        }
+        roadTypeEl.textContent = `Road type: ${displayRt}`;
+        if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
-/* ── count speed-limit transitions ─────────────── */
-if (limit !== null && limit !== lastLimit) {
-  if (lastLimit !== null) limitChanges++;   // skip the very first limit
-  lastLimit = limit;
+        const street  = data.address.road      || data.address.pedestrian
+                     || data.address.footway   || 'Unknown street';
+        const city    = data.address.city      || data.address.town
+                     || data.address.village   || 'Unknown city';
+        const country = data.address.country   || 'Unknown country';
+
+        if (!startCity) startCity = city;
+        currentCity = city;
+
+        if (city !== lastCity) {
+          cityList.push(city);
+          lastCity  = city;
+          citySet.add(city);
+          getWeather(city);
+        }
+        if (country !== lastCountry) {
+          countryList.push(country);
+          lastCountry = country;
+        }
+        if (segDist > 0) {
+          countryDistances[country] = (countryDistances[country] || 0) + segDist;
+        }
+
+        streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
+
+        if (country !== lastCountry && lastCountry !== null) {
+          logButton(`Entered ${country}`, false);
+        }
+        lastCountry = country;
+
+        /* refresh derived tables */
+        maybeUpdateTables();
+
+        /* Overpass feature checks */
+        checkTrafficLight(lat, lon);
+        checkBridge(lat, lon);
+        checkStopSign(lat, lon);
+      })
+      .catch(err => {
+        streetCityEl.textContent = `Geocoder error: ${err.message}`;
+        console.error('Reverse geocode error', err);
+      });
+  }
+
+  /* ── 7) mini street-view map ──────────────────────────────── */
+  if (map2) {
+    map2.setView([lat, lon], 20);
+    currentPosMarker2.setLatLng([lat, lon]);
+  }
 }
 
-     if (segDist > 0) {    
-       roadDistances[displayRt] =
-      (roadDistances[displayRt] || 0) + segDist;
-     }
-
-      // update sidebar & sets
-      roadTypeEl.textContent = `Road type: ${displayRt}`;
-      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
-
-      // street & city display
-      const street = data.address.road
-        || data.address.pedestrian
-        || data.address.footway
-        || 'Unknown street';
-      const city = data.address.city
-        || data.address.town
-        || data.address.village
-        || 'Unknown city';
-
-      if (!startCity) startCity = city;
-      currentCity = city;
-      
-      const country = data.address.country || 'Unknown country';
-
-     if (city !== lastCity) {
-       cityList.push(city);
-       lastCity = city;
-       citySet.add(city);
-       getWeather(city);
-     }
-       if (country !== lastCountry) {
-         countryList.push(country);
-         lastCountry = country;
-       }
-
-      if (segDist > 0) {
-         countryDistances[country] = (countryDistances[country] || 0) + segDist;
-      }
-      
-      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
-
-      // ── NEW: auto‑log when the country changes ──
-      if (country !== lastCountry && lastCountry !== null) {
-      // Re‑use the regular logger so it shows up everywhere
-      logButton(`Entered ${country}`, false);   // false ⇒ not a KPI “red” event
-      }
-      lastCountry = country;
-
-      // fetch weather on city change
-      if (city !== lastCity) {
-        lastCity = city;
-        citySet.add(city);
-        getWeather(city);
-      }
-
-      // refresh all tables
-      maybeUpdateTables();
-      checkTrafficLight(lat, lon);
-      checkBridge(lat, lon);
-      checkStopSign(lat, lon);
-    })
-    .catch(err => {
-      streetCityEl.textContent = 'Error: ' + err.message;
-      console.error('Reverse geocode error', err);
-    });
-
-    if (map2) {
-      map2.setView([lat, lon], 20);  // zoom level 20 ≃ 100 m across
-      currentPosMarker2.setLatLng([lat, lon]);
-    } 
-        
-}
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
       const R = 6_371_000;          // earth’s radius in meters
