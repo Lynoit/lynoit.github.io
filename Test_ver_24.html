@@ -569,33 +569,22 @@
       navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
       buildButtons();
       startCamera();
+      initAzureSpeech()
     };
 
-    let recognizer;  // Azure continuous recogniser
-    let recogniserReady   = false;   // built at least once?
-    let recogniserRunning = false;   // currently listening?
-
-    // ─── Voice‑control start/stop ───────────────────────────
-document.getElementById('micToggle').onclick = async event => {
-  // 1. Build recogniser only the first time the button is pressed
-  if (!recogniserReady) {
-    await initAzureSpeech();           // creates the recogniser object
-    recogniserReady = true;
-  }
-
-  // 2. Toggle listening state
-  if (recogniserRunning) {
-    recognizer.stopContinuousRecognitionAsync();
-    recogniserRunning = false;
-    micLamp.style.background = '#4caf50';          // 🟢 idle
-    event.target.textContent = 'Start voice control';
-  } else {
-    recognizer.startContinuousRecognitionAsync();
-    recogniserRunning = true;
-    micLamp.style.background = '#f44336';          // 🔴 listening
-    event.target.textContent = 'Stop voice control';
-  }
-};
+ let listening = true;
+ const micBtn = document.getElementById('micToggle');
+ micBtn.textContent = 'Stop voice control';
+ micBtn.onclick = () => {
+   if (listening) {
+     keywordRecognizer.stopKeywordRecognitionAsync();
+     micBtn.textContent = 'Start voice control';
+   } else {
+     keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
+     micBtn.textContent = 'Stop voice control';
+   }
+   listening = !listening;
+ };
 
 function reverseGeocode(lat, lon) {
   const now = Date.now();
@@ -739,65 +728,62 @@ function updateCountryTable() {
 }
 
 async function initAzureSpeech() {
-  console.log('initAzureSpeech started');    //  ← already added last time?
-  const warn = msg => console.warn('Speech init:', msg);
-
   if (!window.SpeechSDK) {
-    warn('SpeechSDK global missing – script failed to load?');
-    micLamp.style.background = '#ffc107';   // 🟡  error
+    console.error("Speech SDK not loaded");
+    micLamp.style.background = '#ffc107';
     return;
   }
 
-  try {
-    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-      AZURE_KEY, AZURE_REGION
-    );
-    speechConfig.speechRecognitionLanguage = 'en-US';
-    
-    speechConfig.setProperty(                     // ① add this
-      SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
-      "3000"            // 2 s → tweak to taste (1500-5000 common)
-    );
+  // 1) shared config + audio
+  const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+    AZURE_KEY, AZURE_REGION
+  );
+  speechConfig.speechRecognitionLanguage = 'en-US';
+  speechConfig.setProperty(
+    SpeechSDK.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+    "3000"
+  );
+  const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
 
-    speechConfig.setProperty(
-      SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
-      'TrueText'
-    );
+  // 2) load your trained hot-word model
+  keywordModel = await SpeechSDK.KeywordRecognitionModel.fromFileAsync(
+    "/models/annotator.table"
+  );
 
-    const audioConfig  = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    recognizer         = new SpeechSDK.SpeechRecognizer(
-      speechConfig, audioConfig
-    );
-  } catch (e) {
-    warn(e);
-    micLamp.style.background = '#ffc107';   // 🟡
-    return;
-  }
+  // 3) create both recognizers
+  keywordRecognizer = new SpeechSDK.KeywordRecognizer(audioConfig);
+  speechRecognizer  = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
 
-  /* Lamp colours */
-  recognizer.sessionStarted = ()  => micLamp.style.background = '#f44336'; // 🔴 listening
-  recognizer.sessionStopped = ()  => micLamp.style.background = '#4caf50'; // 🟢 ready
-  recognizer.canceled       = (_,e)=> {
-    warn('Canceled: ' + e.errorDetails);
-    micLamp.style.background = '#ffc107';   // 🟡 error
-  };
+  // 4) when hot-word fires, switch to full STT
+  keywordRecognizer.recognized = (s, e) => {
+    if (e.result.reason === SpeechSDK.ResultReason.RecognizedKeyword) {
+      console.log("🔑 Detected ‘Annotator’");
+      keywordRecognizer.stopKeywordRecognitionAsync();
 
-  /* Hot‑word gate */
-  recognizer.recognizing = (_,e)=> {
-    const draft = stripHotWord(e.result.text);
-    if (draft) textBox.value = draft + ' [draft]';
-  };
-  recognizer.recognized  = (_,e)=> {
-    if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
-    const cleaned = stripHotWord(e.result.text);
-    if (cleaned) {
-      textBox.value = cleaned;
-      logButton('Manual annotation', false);
+      // capture the actual command
+      speechRecognizer.recognized = (_, evt) => {
+        if (evt.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+          const cmd = evt.result.text.trim();
+          if (cmd) {
+            textBox.value = cmd;
+            logButton('Manual annotation', false);
+          }
+        }
+      };
+      // when done, restart hot-word
+      speechRecognizer.sessionStopped = () => {
+        speechRecognizer.stopContinuousRecognitionAsync();
+        keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
+      };
+
+      speechRecognizer.startContinuousRecognitionAsync();
     }
   };
 
-  recognizer.startContinuousRecognitionAsync();
+  // 5) kickoff hot-word listening
+  keywordRecognizer.startKeywordRecognitionAsync(keywordModel);
 }
+
 
  function parseMaxSpeed(tag){
   const m = /(\d+)/.exec(tag);        // first number in the tag
