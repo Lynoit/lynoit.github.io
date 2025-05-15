@@ -140,6 +140,10 @@
   border: 1px solid #444;
   padding: 6px 8px;
   text-align: center;
+  overflow-wrap: anywhere;   /* modern spec */
+  word-wrap: break-word;     /* legacy name */
+  word-break: break-word;    /* ensure break if no natural wrap point */
+  hyphens: auto;             /* enable hyphenation at hyphens */
 }
 
 #countryTable {
@@ -288,8 +292,8 @@
   </style>
 </head>
 <body>
-  <button id="toggleSidebar" aria-expanded="false">☰</button>
-  <div id="sidebar" class="collapsed">
+  <button id="toggleSidebar" aria-expanded="true">☰</button>
+  <div id="sidebar" class="expanded">
     <p id="dateTime"></p>
     <p id="dayPhase">Phase: N/A</p>
     <div class="weatherSection">
@@ -306,7 +310,6 @@
     </div>   
     <div class="distanceContainer">
       <p id="totalDistance">Distance: 0.0 km</p>
-      <button class="bigButton orangeButton" onclick="resetDistance()">Reset distance</button>
     </div>
     <button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button>
   </div>
@@ -477,7 +480,7 @@
     const countryDistances  = {};
     const weatherDistances = {};
     const phaseDistances = {};
-    const AZURE_KEY    = '3T1KzqWzaLVhz37OFOOvGJy6xwndsk5NCiI6hIEpqWDvHVffObirJQQJ99BEACi5YpzXJ3w3AAAYACOGKvFo';
+    const AZURE_KEY    = '31mglZQASLS9g4mcaTvMpznyzYYJyFr7I3ERTm84jeQrPNOlp5tXJQQJ99BEACi5YpzXJ3w3AAAYACOGJuNe';
     const AZURE_REGION = 'northeurope';
     const PHASE_THROTTLE = 5 * 60 * 1000;
     const TABLE_THROTTLE = 30 * 1000;
@@ -573,24 +576,32 @@ document.getElementById('micToggle').onclick = async event => {
   }
 };
 
- function updateCountryTable() {
+function updateCountryTable() {
   let html = `
     <tr>
       <th>Country</th>
-      <th>Distance&nbsp;(km)</th>
-      <th>No&nbsp;of&nbsp;issues</th>
+      <th>Distance (km)</th>
+      <th>Distance (%)</th>
+      <th>No of issues</th>
     </tr>`;
 
   for (const c in countryDistances) {
-    const km    = (countryDistances[c] / 1000).toFixed(1);
-    const count = countryRedCounts[c] || 0;
+    const meters = countryDistances[c] || 0;
+    const km     = (meters / 1000).toFixed(1);
+    const pct    = totalDist > 0
+      ? ((meters / totalDist) * 100).toFixed(1)
+      : '0.0';
+    const count  = countryRedCounts[c] || 0;
+
     html += `
       <tr>
         <td>${c}</td>
         <td>${km}</td>
+        <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
   }
+
   countryTable.innerHTML = html;
 }
 
@@ -961,22 +972,32 @@ if (limit !== null && limit !== lastLimit) {
     }
     
 function updateStreetTable() {
+  // 1) header now has an extra column
   let html = `
     <tr>
       <th>Road type</th>
       <th>Distance (km)</th>
+      <th>Distance (%)</th>
       <th>No of issues</th>
     </tr>`;
 
+  // 2) loop each road type
   for (const rt of roadTypes) {
     const meters = roadDistances[rt] || 0;
     const km     = (meters / 1000).toFixed(1);
+    // guard against division by zero
+    const pct    = totalDist > 0
+      ? ((meters / totalDist) * 100).toFixed(1)
+      : '0.0';
+
     const count  = roadRedCounts[rt] || 0;
 
+    // 3) inject the new <td> for pct
     html += `
       <tr>
         <td>${rt}</td>
         <td>${km}</td>
+        <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
   }
@@ -984,33 +1005,36 @@ function updateStreetTable() {
   streetTbl.innerHTML = html;
 }
 
-  function updateStatsTable () {
-  // ① readable total time hh:mm:ss
-  const totalMs  = startTime ? (lastPos.ts - startTime) : 0;
-  const timeStr  = new Date(totalMs).toISOString().substring(11, 19);
+function updateStatsTable () {
+  // ① total test time hh:mm:ss
+  const totalMs   = startTime ? (lastPos.ts - startTime) : 0;
+  const timeStr   = new Date(totalMs).toISOString().substring(11, 19);
 
-  // ② distance & speeds
-  const km       = (totalDist / 1000).toFixed(1);
-  const hrs      = totalMs / 3_600_000;
-  const meanSpd  = hrs > 0 ? (km / hrs).toFixed(1) : '—';
+  // ② total distance & mean speed
+  const km        = (totalDist / 1000).toFixed(1);
+  const hrs       = totalMs / 3_600_000;
+  const meanSpd   = hrs > 0 ? (km / hrs).toFixed(1) : '—';
 
-  // ③ counts
-  const cityCnt  = citySet.size;
-  const ctryCnt  = Object.keys(countryDistances).length;
+  // ③ build a “City1 - City2 - …” list
+  const citiesList    = Array.from(citySet).join(' - ') || '—';
 
+  // ④ build a “Country1 - Country2 - …” list
+  const countriesList = Object.keys(countryDistances).join(' - ') || '—';
+
+  // render the table
   document.getElementById('statsTable').innerHTML = `
     <tr><th>Metric</th><th>Value</th></tr>
-    <tr><td>Total test time</td>          <td>${timeStr}</td></tr>
-    <tr><td>Total test distance</td>      <td>${km} km</td></tr>
-    <tr><td>Max speed</td>           <td>${maxSpeed.toFixed(1)} km/h</td></tr>
-    <tr><td>Mean speed</td>          <td>${meanSpd} km/h</td></tr>
-    <tr><td>Speed limit changes</td><td>${limitChanges}</td></tr>
-    <tr><td>Roundabouts</td> <td>${roundaboutCount}</td></tr>
-    <tr><td>Traffic-light junctions</td><td>${trafficLightCount}</td></tr>
-    <tr><td>Bridges</td><td>${bridgeCount}</td></tr>
-    <tr><td>Tunnels</td><td>${tunnelCount}</td></tr>
-    <tr><td>Cities</td>       <td>${cityCnt}</td></tr>
-    <tr><td>Countries</td><td>${ctryCnt}</td></tr>`;
+    <tr><td>Total test time</td>            <td>${timeStr}</td></tr>
+    <tr><td>Total test distance</td>        <td>${km} km</td></tr>
+    <tr><td>Max speed</td>                  <td>${maxSpeed.toFixed(1)} km/h</td></tr>
+    <tr><td>Mean speed</td>                 <td>${meanSpd} km/h</td></tr>
+    <tr><td>Speed limit changes</td>        <td>${limitChanges}</td></tr>
+    <tr><td>Roundabouts</td>                <td>${roundaboutCount}</td></tr>
+    <tr><td>Traffic-light junctions</td>     <td>${trafficLightCount}</td></tr>
+    <tr><td>Bridges</td>                    <td>${bridgeCount}</td></tr>
+    <tr><td>Tunnels</td>                    <td>${tunnelCount}</td></tr>
+    <tr><td>Cities</td>                     <td>${citiesList}</td></tr>
+    <tr><td>Countries</td>                  <td>${countriesList}</td></tr>`;
 }
     
  function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
@@ -1319,22 +1343,28 @@ function displayLogTable() {
     .catch(err => console.error('Sun API error', err));
 }
 
-    function updateWeatherTable() {
+function updateWeatherTable() {
   let html = `
     <tr>
       <th>Condition</th>
       <th>Distance (km)</th>
+      <th>Distance (%)</th>
       <th>No of issues</th>
     </tr>`;
 
   for (const cond in weatherDistances) {
-    const km    = (weatherDistances[cond] / 1000).toFixed(1);
-    const count = weatherRedCounts[cond] || 0;
+    const meters = weatherDistances[cond] || 0;
+    const km     = (meters / 1000).toFixed(1);
+    const pct    = totalDist > 0
+      ? ((meters / totalDist) * 100).toFixed(1)
+      : '0.0';
+    const count  = weatherRedCounts[cond] || 0;
 
     html += `
       <tr>
         <td>${cond}</td>
         <td>${km}</td>
+        <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
   }
@@ -1355,22 +1385,28 @@ function displayLogTable() {
   }
 }
 
- function updatePhaseTable() {
+function updatePhaseTable() {
   let html = `
     <tr>
       <th>Phase</th>
       <th>Distance (km)</th>
+      <th>Distance (%)</th>
       <th>No of issues</th>
     </tr>`;
 
   for (const ph in phaseDistances) {
-    const km    = (phaseDistances[ph] / 1000).toFixed(1);
-    const count = phaseRedCounts[ph] || 0;
+    const meters = phaseDistances[ph] || 0;
+    const km     = (meters / 1000).toFixed(1);
+    const pct    = totalDist > 0
+      ? ((meters / totalDist) * 100).toFixed(1)
+      : '0.0';
+    const count  = phaseRedCounts[ph] || 0;
 
     html += `
       <tr>
         <td>${ph}</td>
         <td>${km}</td>
+        <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
   }
