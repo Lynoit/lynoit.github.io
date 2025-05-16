@@ -16,7 +16,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <h1>Live Road Feature Tracking</h1>
+  <h1>Live Road Feature Tracking (Throttled)</h1>
   <div id="info">Locating…</div>
   <div id="map"></div>
 
@@ -51,6 +51,10 @@
 
     // Route storage
     const routeCoords = [];
+
+    // Throttle control
+    let lastReverseTime = 0;
+    const minInterval = 1000; // ms
 
     // Setup map and layers
     const info = document.getElementById('info');
@@ -108,14 +112,17 @@
       update(countryChart, countries);
     }
 
-    // Reverse geocode with extra tags & add popup marker
+    // Reverse geocode with throttle and add popup marker
     function reverseGeocode(lat, lon) {
+      const now = Date.now();
+      if (now - lastReverseTime < minInterval) return;
+      lastReverseTime = now;
+
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1`)
         .then(res => res.json()).then(data => {
           const addr = data.address || {};
           const tags = data.extratags || {};
 
-          // Extract features
           const features = {
             roadType: tags.highway || 'Unknown',
             legalSpeed: tags.maxspeed || 'N/A',
@@ -128,7 +135,6 @@
             country: addr.country || 'Unknown'
           };
 
-          // Store data arrays
           distances.push(totalDistance);
           speeds.push(parseFloat(tags.maxspeed) || NaN);
           roundabouts.push(features.roundabout ? 1 : 0);
@@ -140,17 +146,13 @@
           cities.push(features.city);
           countries.push(features.country);
 
-          // Update display & charts
           info.innerHTML = `<p><strong>Distance:</strong> ${totalDistance.toFixed(1)} m</p>`;
           updateCharts();
 
-          // Add popup pin on map
           const popupContent = Object.entries(features)
             .map(([k,v]) => `<strong>${k}:</strong> ${v}`)
             .join('<br>');
-          L.marker([lat, lon])
-            .bindPopup(popupContent)
-            .addTo(map);
+          L.marker([lat, lon]).bindPopup(popupContent).addTo(map);
         })
         .catch(err => console.error('Reverse geocode error', err));
     }
@@ -164,15 +166,11 @@
       }
       lastPos = [lat, lon];
 
-      // Update route polyline
       routeCoords.push([lat, lon]);
       routeLine.setLatLngs(routeCoords);
-
-      // Move marker & view
       marker.setLatLng([lat, lon]);
       map.setView([lat, lon], 16);
 
-      // Reverse geocode and annotate
       reverseGeocode(lat, lon);
     }
 
@@ -180,7 +178,6 @@
       info.textContent = `Geolocation error: ${err.message}`;
     }
 
-    // Start geolocation watch
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(updatePosition, handleError, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
     } else {
