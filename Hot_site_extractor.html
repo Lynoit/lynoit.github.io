@@ -3,24 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Nearby Places Explorer (Top 5, stable)</title>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet/dist/leaflet.css"
-  />
+  <title>Nearby Places Explorer (Top 5, reliable)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { margin:0; font-family:Arial,sans-serif }
     #map { height:60vh; width:100% }
     table { width:100%; border-collapse:collapse; margin-top:1rem }
     th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
     th { background:#f4f4f4 }
-    .num-label {
-      display:inline-block;
-      width:1.8em; height:1.8em;
-      line-height:1.8em;
-      text-align:center;
-      color:#fff; font-weight:bold;
-      border-radius:50%;
+    .num-label { 
+      display:inline-block; width:1.8em; height:1.8em; 
+      line-height:1.8em; text-align:center; color:#fff; font-weight:bold; 
+      border-radius:50%; margin-right:4px;
     }
     .visited  { background:#d9534f }
     .reviewed { background:#5bc0de }
@@ -45,14 +39,23 @@
   <script>
     let map, userPos;
     const radii = [100, 500, 1000, 5000, 10000];
+    const FETCH_TIMEOUT = 8000; // ms
+
+    // Fetch wrapper with timeout
+    function fetchWithTimeout(input, opts = {}, timeout = FETCH_TIMEOUT) {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeout);
+      return fetch(input, { ...opts, signal: controller.signal })
+        .finally(() => clearTimeout(id));
+    }
 
     function init() {
       if (!navigator.geolocation) {
         return alert('Geolocation not supported');
       }
-      navigator.geolocation.getCurrentPosition(onPos, e =>
-        alert('Could not get location: ' + e.message)
-      );
+      navigator.geolocation.getCurrentPosition(onPos, e => {
+        alert('Could not get location: ' + e.message);
+      });
     }
 
     function onPos(pos) {
@@ -61,145 +64,120 @@
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
-      L.marker(userPos)
-        .addTo(map)
-        .bindPopup('You are here')
-        .openPopup();
+      L.marker(userPos).addTo(map).bindPopup('You are here').openPopup();
       processAllRadii();
     }
 
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
-
       for (let r of radii) {
         let visitedList = [], reviewedList = [], linkedList = [];
 
-        // Fetch OSM places
+        // 1) OSM
         try {
           [visitedList, reviewedList] = await getOSMPlaces(r);
-        } catch (e) {
-          console.error('OSM error @', r, e);
+        } catch (err) {
+          console.warn(`OSM @${r} m failed:`, err);
         }
 
-        // Fetch Wiki places
+        // 2) Wiki
         try {
           linkedList = await getMostLinkedWiki(r);
-        } catch (e) {
-          console.error('Wiki error @', r, e);
+        } catch (err) {
+          console.warn(`Wiki @${r} m failed:`, err);
         }
 
-        // Draw markers
+        // 3) Markers
         [
           [visitedList,  'visited' ],
           [reviewedList, 'reviewed'],
           [linkedList,   'linked'  ]
         ].forEach(([list, cls]) => {
-          list.forEach((place, i) => {
-            L.marker([place.lat, place.lng], {
+          list.forEach((p, i) => {
+            L.marker([p.lat, p.lng], {
               icon: L.divIcon({
                 className: `num-label ${cls}`,
-                html: String(i + 1)
+                html: String(i+1)
               })
             })
-              .addTo(map)
-              .bindPopup(`<strong>${i + 1}. ${place.name || place.title}</strong>`);
+            .addTo(map)
+            .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
           });
         });
 
-        // Helper to build cell HTML
-        const mkCell = (list) => {
-          if (!list.length) return 'N/A';
-          return list
-            .map((p, i) => `${i + 1}. ${p.name || p.title}`)
-            .join('<br>');
-        };
+        // 4) Table row
+        const mkCell = arr => 
+          arr.length ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>') : 'N/A';
 
-        // Append row
-        const row = document.createElement('tr');
-        row.innerHTML = `
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
           <td>${r} m</td>
           <td>${mkCell(visitedList)}</td>
           <td>${mkCell(reviewedList)}</td>
           <td>${mkCell(linkedList)}</td>
         `;
-        tbody.appendChild(row);
+        tbody.appendChild(tr);
       }
     }
 
     async function getOSMPlaces(radius) {
       const [lat, lon] = userPos;
-      // limit to 100 nodes server‐side
-      const query = `[out:json][timeout:25];
+      // ask Overpass for max 50 nodes, 8s timeout
+      const query = `[out:json][timeout:8];
         node(around:${radius},${lat},${lon})[amenity];
-        out body 100;`;
-      const res = await fetch(
+        out body 50;`;
+      const res = await fetchWithTimeout(
         'https://overpass-api.de/api/interpreter',
-        { method: 'POST', body: query }
+        { method:'POST', body: query }
       );
-      const data = await res.json();
-      // guard against huge arrays
-      const elems = (data.elements || []).slice(0, 200);
+      if (!res.ok) throw new Error(`OSM ${res.status}`);
+      const elems = (await res.json()).elements.slice(0,200);
 
-      const visitedList = elems
-        .slice(0, 5)
-        .map(n => ({
-          name: n.tags.name || n.tags.amenity,
-          lat: n.lat, lng: n.lon
-        }));
-
-      const reviewedList = elems
+      const visited = elems.slice(0,5).map(n=>({
+        name: n.tags?.name||n.tags?.amenity||'?', lat:n.lat, lng:n.lon
+      }));
+      const reviewed = elems
         .slice()
-        .sort((a, b) =>
-          ((b.tags && Object.keys(b.tags).length) || 0) -
-          ((a.tags && Object.keys(a.tags).length) || 0)
+        .sort((a,b)=>
+          ((b.tags?Object.keys(b.tags).length:0) -
+           (a.tags?Object.keys(a.tags).length:0))
         )
-        .slice(0, 5)
-        .map(n => ({
-          name: n.tags.name || n.tags.amenity,
-          lat: n.lat, lng: n.lon
+        .slice(0,5)
+        .map(n=>({
+          name: n.tags?.name||n.tags?.amenity||'?', lat:n.lat, lng:n.lon
         }));
-
-      return [visitedList, reviewedList];
+      return [visited, reviewed];
     }
 
     async function getMostLinkedWiki(radius) {
       const [lat, lon] = userPos;
-      const geoRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?origin=*&action=query` +
-        `&list=geosearch&gscoord=${lat}|${lon}` +
-        `&gsradius=${radius}&gslimit=10&format=json`
-      );
-      const geoJson = await geoRes.json();
-      let pages = geoJson.query.geosearch || [];
-      // no more than 10 pages
-      pages = pages.slice(0, 10);
+      const geoUrl = `https://en.wikipedia.org/w/api.php?origin=*&action=query
+        &list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}
+        &gslimit=10&format=json`.replace(/\s+/g,'');
+      const geoRes = await fetchWithTimeout(geoUrl);
+      if (!geoRes.ok) throw new Error(`Geo ${geoRes.status}`);
+      let pages = (await geoRes.json()).query.geosearch || [];
 
-      const counts = await Promise.all(pages.map(async p => {
+      const counts = await Promise.all(pages.map(async p=>{
+        const infoUrl = `https://en.wikipedia.org/w/api.php?origin=*&action=query
+          &prop=linkshere&titles=${encodeURIComponent(p.title)}
+          &lhlimit=max&format=json`.replace(/\s+/g,'');
         try {
-          const infoRes = await fetch(
-            `https://en.wikipedia.org/w/api.php?origin=*&action=query` +
-            `&prop=linkshere&titles=${encodeURIComponent(p.title)}` +
-            `&lhlimit=max&format=json`
+          const infoRes = await fetchWithTimeout(infoUrl);
+          const pcs = (await infoRes.json()).query.pages;
+          const links = Object.values(pcs).reduce(
+            (sum,p)=> sum + (Array.isArray(p.linkshere)?p.linkshere.length:0), 0
           );
-          const infoJson = await infoRes.json();
-          const pgObj = infoJson.query.pages;
-          let total = 0;
-          Object.values(pgObj).forEach(pg => {
-            if (Array.isArray(pg.linkshere)) {
-              total += pg.linkshere.length;
-            }
-          });
-          return { title: p.title, lat: p.lat, lng: p.lon, links: total };
-        } catch (e) {
-          console.error('linkshere fail for', p.title, e);
-          return { title: p.title, lat: p.lat, lng: p.lon, links: 0 };
+          return { ...p, links };
+        } catch {
+          return { ...p, links: 0 };
         }
       }));
 
       return counts
-        .sort((a, b) => b.links - a.links)
-        .slice(0, 5)
-        .map(p => ({ title: p.title, lat: p.lat, lng: p.lon }));
+        .sort((a,b)=>b.links - a.links)
+        .slice(0,5)
+        .map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
     }
 
     window.onload = init;
