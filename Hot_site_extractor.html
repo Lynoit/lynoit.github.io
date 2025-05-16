@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer</title>
+  <title>Nearby Places Explorer (Auto-update on Move)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -11,7 +11,6 @@
     table { width:100%; border-collapse:collapse; margin-top:1rem }
     th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
     th { background:#f4f4f4 }
-
     .num-label {
       display:inline-block; width:1.8em; height:1.8em;
       line-height:1.8em; text-align:center;
@@ -30,13 +29,14 @@
       stroke-opacity:1!important; stroke-width:4!important;
       fill-opacity:0.1!important;
     }
-    /* radius labels */
-.radius-label {
-  background: transparent;
-  border: none;
-  padding: 0;
-  white-space: nowrap;
-}
+    /* transparent labels */
+    .radius-label {
+      background: transparent !important;
+      border: none !important;
+      white-space: nowrap;
+      font-size: 1.1em;
+      padding: 0;
+    }
   </style>
 </head>
 <body>
@@ -56,49 +56,94 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // radii (+ circle colors)
+    // Configuration
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
 
-    // utilities
+    // Utils
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
         new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), t))
       ]);
     }
-    function formatDate(d) { return d.toISOString().slice(0,10).replace(/-/g,''); }
+    function formatDate(d){ return d.toISOString().slice(0,10).replace(/-/g,''); }
+    function distanceMeters(a, b) {
+      const toRad = x => x * Math.PI/180;
+      const dLat = toRad(b[0]-a[0]), dLon = toRad(b[1]-a[1]);
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const sinDlat = Math.sin(dLat/2)**2;
+      const sinDlon = Math.sin(dLon/2)**2;
+      const aHarv = sinDlat + Math.cos(lat1)*Math.cos(lat2)*sinDlon;
+      const c = 2*Math.atan2(Math.sqrt(aHarv), Math.sqrt(1-aHarv));
+      return 6371000 * c;
+    }
 
-    // avoid duplicates
+    // State
+    let map, userPos, circlesLayer, markersLayer;
     const plotted = new Set();
 
-    let map, userPos;
+    // Initialize map & layers on first position
     window.onload = () => {
       if (!navigator.geolocation) {
         alert('Geolocation not supported');
         return;
       }
-      navigator.geolocation.getCurrentPosition(onPos, e => {
-        alert('Could not get location: ' + e.message);
+      navigator.geolocation.getCurrentPosition(onInitialPosition, e => {
+        alert('Location error: ' + e.message);
       });
     };
 
-    function onPos(pos) {
+    function onInitialPosition(pos) {
       userPos = [pos.coords.latitude, pos.coords.longitude];
       map = L.map('map').setView(userPos, 14);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution:'&copy; OpenStreetMap contributors'
+        attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
 
-      // draw & label circles
-      radii.forEach((r,i) => {
+      circlesLayer = L.layerGroup().addTo(map);
+      markersLayer = L.layerGroup().addTo(map);
+
+      // draw user marker
+      L.marker(userPos).addTo(map);
+
+      // first draw
+      drawEverything();
+
+      // watch position changes
+      navigator.geolocation.watchPosition(onPositionUpdate, e => {
+        console.warn('WatchPosition error:', e);
+      }, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 8000
+      });
+    }
+
+    async function onPositionUpdate(pos) {
+      const newPos = [pos.coords.latitude, pos.coords.longitude];
+      if (distanceMeters(userPos, newPos) > 50) {
+        userPos = newPos;
+        drawEverything();
+      }
+    }
+
+    // Clear & redraw circles, labels, markers, and table
+    async function drawEverything() {
+      circlesLayer.clearLayers();
+      markersLayer.clearLayers();
+      plotted.clear();
+
+      // draw circles & radius labels
+      radii.forEach((r, i) => {
         L.circle(userPos, {
           radius: r,
           color: circleColors[i],
           className: 'radius-circle',
-          fill: true, fillColor: circleColors[i]
-        }).addTo(map);
+          fill: true,
+          fillColor: circleColors[i]
+        }).addTo(circlesLayer);
 
         const latOffset = r / 111111;
         L.marker(
@@ -111,18 +156,17 @@
             }),
             interactive: false
           }
-        ).addTo(map);
+        ).addTo(circlesLayer);
       });
 
-      L.marker(userPos).addTo(map); // plain user marker
-      processAllRadii();
+      // fetch & plot POIs, update table
+      await processAllRadii();
     }
 
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
       tbody.innerHTML = '';
       for (let r of radii) {
-        // parallel fetches
         const [reviewed, pages, tourism] = await Promise.all([
           getOSMReviewed(r),
           wikiGeoSearch(r),
@@ -131,13 +175,12 @@
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
 
-        // render markers
-        render(r, reviewed);
-        render(r, visited);
-        render(r, linked);
-        render(r, tourism);
+        renderPOIs(r, reviewed);
+        renderPOIs(r, visited);
+        renderPOIs(r, linked);
+        renderPOIs(r, tourism);
 
-        // build row
+        // update table
         const mk = arr => arr.length
           ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
           : 'N/A';
@@ -153,51 +196,54 @@
       }
     }
 
-    function render(r, list) {
-      list.forEach((p,i) => {
+    function renderPOIs(r, list) {
+      list.forEach((p, i) => {
         const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
         if (plotted.has(key)) return;
         plotted.add(key);
-        L.marker([p.lat,p.lng], {
+        L.marker([p.lat, p.lng], {
           icon: L.divIcon({
             className: `num-label radius-${r}`,
             html: String(i+1)
           })
-        }).addTo(map)
-          .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
+        })
+        .addTo(markersLayer)
+        .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
       });
     }
 
-    // 1) OSM: most-reviewed
+    // ------ Data fetchers ------
+
+    // 1) OSM most-reviewed
     async function getOSMReviewed(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
+      const [lat, lon] = userPos;
+      const query = `[out:json][timeout:8];
         node(around:${r},${lat},${lon})[amenity];
         out body 100;`.replace(/\s+/g,' ');
-      const elems = (await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
-      )).json()).elements || [];
+      const res = await fetchTimeout('https://overpass-api.de/api/interpreter', {
+        method:'POST', body: query
+      });
+      const elems = (await res.json()).elements || [];
       elems.sort((a,b)=>
-        (Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length)
+        Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length
       );
       return elems.slice(0,10).map(n=>({
-        name: n.tags?.name||n.tags?.amenity||'Unknown',
+        name: n.tags?.name || n.tags?.amenity || 'Unknown',
         lat: n.lat, lng: n.lon
       }));
     }
 
-    // 2) Wikipedia GeoSearch pool
+    // 2) Wikimedia GeoSearch
     async function wikiGeoSearch(r) {
-      const [lat,lon] = userPos;
+      const [lat, lon] = userPos;
       const url = [
         'https://en.wikipedia.org/w/api.php?origin=*&action=query',
         `&list=geosearch&gscoord=${lat}|${lon}`,
         `&gsradius=${r}&gslimit=20&format=json`
       ].join('');
       const data = await (await fetchTimeout(url)).json();
-      return (data.query?.geosearch||[]).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lon
+      return (data.query?.geosearch || []).map(p=>({
+        title: p.title, lat: p.lat, lng: p.lon
       }));
     }
 
@@ -208,19 +254,19 @@
       const sd = formatDate(start), ed = formatDate(end);
       const counts = await Promise.all(pages.map(async p=>{
         const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
-                    `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
-                    `/daily/${sd}/${ed}`;
+          `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
+          `/daily/${sd}/${ed}`;
         try {
           const body = await (await fetchTimeout(url)).json();
           const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
           return { ...p, views };
         } catch {
-          return { ...p, views:0 };
+          return { ...p, views: 0 };
         }
       }));
       counts.sort((a,b)=>b.views - a.views);
       return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
+        title: p.title, lat: p.lat, lng: p.lng
       }));
     }
 
@@ -234,7 +280,7 @@
         '&lhlimit=max&format=json'
       ].join('');
       const data = await (await fetchTimeout(url)).json();
-      const info = data.query?.pages||{};
+      const info = data.query?.pages || {};
       const counts = pages.map(p=>{
         const pg = Object.values(info).find(x=>x.title===p.title) || {};
         const links = Array.isArray(pg.linkshere)?pg.linkshere.length:0;
@@ -242,23 +288,22 @@
       });
       counts.sort((a,b)=>b.links - a.links);
       return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
+        title: p.title, lat: p.lat, lng: p.lng
       }));
     }
 
-    // 3) OSM tourism tags → deep tourism
+    // 3) OSM tourism deep search
     async function getOSMTourism(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
+      const [lat, lon] = userPos;
+      const query = `[out:json][timeout:8];
         (node(around:${r},${lat},${lon})[tourism];
          way(around:${r},${lat},${lon})[tourism];
          rel(around:${r},${lat},${lon})[tourism];);
         out center 50;`.replace(/\s+/g,' ');
       const data = await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
+        'https://overpass-api.de/api/interpreter', { method:'POST', body: query }
       )).json();
-      const elems = data.elements||[];
+      const elems = data.elements || [];
       return elems.slice(0,10).map(el=>{
         const name = el.tags?.name || el.tags?.tourism || 'Unknown';
         const latc = el.lat || el.center?.lat;
