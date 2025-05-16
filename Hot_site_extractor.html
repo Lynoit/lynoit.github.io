@@ -25,14 +25,10 @@
     .radius-5000  { background:#F9844A; }
     .radius-10000 { background:#F9C74F; }
     .radius-circle {
-      stroke-opacity:1!important; stroke-width:4!important;
+      stroke-opacity:1!important;
+      stroke-width:4!important;
       fill-opacity:0.1!important;
     }
-    /* category borders */
-    .cat-reviewed { border:2px solid #277da1; }
-    .cat-visited  { border:2px solid #43aa8b; }
-    .cat-linked   { border:2px solid #4d908e; }
-    .cat-otm      { border:2px solid #90be6d; }
   </style>
 </head>
 <body>
@@ -55,29 +51,26 @@
     // --- CONFIG ---
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#F94144','#F3722C','#F8961E','#F9844A','#F9C74F'];
-    const TIMEOUT = 8000; // ms
-    const OTM_API_KEY = 'YOUR_OPENTRIPMAP_API_KEY'; // get a free key at opentripmap.io
+    const TIMEOUT = 8000;
+    const OTM_API_KEY = 'YOUR_OPENTRIPMAP_API_KEY';
 
     // --- UTILS ---
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
-        new Promise((_, rej)=>setTimeout(()=>rej(new Error('Timeout')), t))
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), t))
       ]);
     }
-    function formatDate(d){ 
-      return d.toISOString().slice(0,10).replace(/-/g,''); 
-    }
+    function formatDate(d){ return d.toISOString().slice(0,10).replace(/-/g,''); }
 
-    // --- INITIALIZATION ---
+    // --- INIT ---
     let map, userPos;
     window.onload = () => {
       if (!navigator.geolocation) {
-        alert('Geolocation not supported');
-        return;
+        return alert('Geolocation not supported');
       }
-      navigator.geolocation.getCurrentPosition(onPos, e=>{
-        alert('Could not get location: '+e.message);
+      navigator.geolocation.getCurrentPosition(onPos, e => {
+        alert('Could not get location: ' + e.message);
       });
     };
 
@@ -88,15 +81,17 @@
         attribution:'&copy; OpenStreetMap contributors'
       }).addTo(map);
 
-      // draw bold circles
-      radii.forEach((r,i)=>{
+      // draw bold, visible concentric radii
+      radii.forEach((r,i) => {
         L.circle(userPos, {
           radius: r,
           color: circleColors[i],
           className: 'radius-circle',
-          fill:true, fillColor:circleColors[i]
+          fill: true, fillColor: circleColors[i]
         }).addTo(map);
       });
+
+      // simple user marker, no popup
       L.marker(userPos).addTo(map);
 
       processAllRadii();
@@ -107,23 +102,20 @@
       const tbody = document.querySelector('#places-table tbody');
       tbody.innerHTML = '';
       for (let r of radii) {
-        // Kick off all fetches in parallel
-        const osmP     = getOSMReviewed(r);
-        const wikiPgs  = wikiGeoSearch(r);
-        const otmP     = getOTMPlaces(r);
-
-        const [reviewed, pages, otm] = await Promise.all([osmP, wikiPgs, otmP]);
-        // pages: array of { title, lat, lon }
+        // fetch in parallel
+        const [reviewed, pages, otm] = await Promise.all([
+          getOSMReviewed(r),
+          wikiGeoSearch(r),
+          getOTMPlaces(r)
+        ]);
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
 
-        // render markers
-        renderMarkers(r, 'reviewed', reviewed);
-        renderMarkers(r, 'visited',  visited);
-        renderMarkers(r, 'linked',   linked);
-        renderMarkers(r, 'otm',      otm);
+        renderMarkers(r, reviewed);
+        renderMarkers(r, visited);
+        renderMarkers(r, linked);
+        renderMarkers(r, otm);
 
-        // append table row
         const mk = arr => arr.length
           ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
           : 'N/A';
@@ -139,13 +131,13 @@
       }
     }
 
-    // --- RENDERING ---
-    function renderMarkers(r, category, list) {
-      list.forEach((p,i)=>{
+    // --- RENDER ---
+    function renderMarkers(r, list) {
+      list.forEach((p,i) => {
         L.marker([p.lat,p.lng], {
           icon: L.divIcon({
-            className:`num-label radius-${r} cat-${category}`,
-            html:String(i+1)
+            className: `num-label radius-${r}`,
+            html: String(i+1)
           })
         }).addTo(map)
           .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
@@ -154,20 +146,17 @@
 
     // --- DATA FETCHERS ---
 
-    // 1) OSM: most-reviewed by tag count
+    // OSM: most-reviewed by tag count
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        node(around:${r},${lat},${lon})[amenity];
-        out body 100;`.replace(/\s+/g,' ');
-      const res = await fetchTimeout('https://overpass-api.de/api/interpreter',{
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`
+        .replace(/\s+/g,' ');
+      const res = await fetchTimeout('https://overpass-api.de/api/interpreter', {
         method:'POST', body:q
       });
-      if (!res.ok) throw new Error('OSM '+res.status);
-      const elems = (await res.json()).elements;
+      const elems = (await res.json()).elements || [];
       const sorted = elems.sort((a,b)=>
-        ((b.tags?Object.keys(b.tags).length:0) -
-         (a.tags?Object.keys(a.tags).length:0))
+        (Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length)
       );
       return sorted.slice(0,10).map(n=>({
         name: n.tags?.name||n.tags?.amenity||'Unknown',
@@ -175,7 +164,7 @@
       }));
     }
 
-    // 2) Wikimedia GeoSearch pool
+    // Wikimedia GeoSearch
     async function wikiGeoSearch(r) {
       const [lat,lon] = userPos;
       const url = [
@@ -190,12 +179,10 @@
       }));
     }
 
-    // 2a) pageviews → most-visited
+    // Wiki pageviews → most-visited
     async function getWikiVisited(pages) {
-      const end = new Date();
-      end.setDate(end.getDate()-1);
-      const start = new Date(end);
-      start.setDate(start.getDate()-30);
+      const end = new Date(); end.setDate(end.getDate()-1);
+      const start = new Date(end); start.setDate(start.getDate()-30);
       const sd = formatDate(start), ed = formatDate(end);
       const counts = await Promise.all(pages.map(async p=>{
         const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
@@ -204,10 +191,10 @@
         try {
           const res = await fetchTimeout(url);
           const body = await res.json();
-          const views = (body.items||[]).reduce((sum,i)=>sum+i.views,0);
+          const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
           return { ...p, views };
         } catch {
-          return { ...p, views:0 };
+          return { ...p, views: 0 };
         }
       }));
       return counts
@@ -216,7 +203,7 @@
         .map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
     }
 
-    // 2b) linkshere → most-linked
+    // Wiki linkshere → most-linked
     async function getWikiLinked(pages) {
       if (!pages.length) return [];
       const titles = pages.map(p=>p.title).join('|');
@@ -239,26 +226,25 @@
         .map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
     }
 
-    // 3) OpenTripMap → most-popular
+    // OpenTripMap → most-popular
     async function getOTMPlaces(r) {
       const [lat,lon] = userPos;
       const list = await fetchTimeout(
         `https://api.opentripmap.com/0.1/en/places/radius`+
-        `?radius=${r}&lon=${lon}&lat=${lat}&limit=50`+
-        `&apikey=${OTM_API_KEY}`
+        `?radius=${r}&lon=${lon}&lat=${lat}&limit=50&apikey=${OTM_API_KEY}`
       ).then(r=>r.json());
-      // each has `rate` (0–7)
-      const sorted = (list.features||[]).map(f=>({
+      const feats = list.features||[];
+      const sorted = feats.map(f=>({
         name: f.properties.name||'Unknown',
         lat: f.geometry.coordinates[1],
         lng: f.geometry.coordinates[0],
         rate: f.properties.rate||0
-      })).sort((a,b)=>b.rate - a.rate);
+      }))
+      .sort((a,b)=>b.rate - a.rate);
       return sorted.slice(0,10).map(p=>({
         name:p.name, lat:p.lat, lng:p.lng
       }));
     }
-
   </script>
 </body>
 </html>
