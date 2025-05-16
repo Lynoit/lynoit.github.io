@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer (With Upcoming Events)</title>
+  <title>Nearby Places Explorer (With Upcoming Events via CORS Proxy)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -58,7 +58,7 @@
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
-    const TM_API_KEY = 'Rq1qDipyjm6G1YNyV0OyIE89Dr5vaQcl'; // sign up at developer.ticketmaster.com
+    const TM_API_KEY = 'Rq1qDipyjm6G1YNyV0OyIE89Dr5vaQcl'; // replace with your key
 
     // Utilities
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
@@ -104,12 +104,13 @@
       markersLayer = L.layerGroup().addTo(map);
 
       L.marker(userPos).addTo(map);
-
       drawEverything();
 
-      navigator.geolocation.watchPosition(onPosUpdate, e => {
-        console.warn('watchPosition error', e);
-      }, { enableHighAccuracy:true, maximumAge:5000, timeout:8000 });
+      navigator.geolocation.watchPosition(onPosUpdate, null, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 8000
+      });
     }
 
     function onPosUpdate(pos) {
@@ -120,13 +121,12 @@
       }
     }
 
-    // Redraw map & table
+    // Redraw everything
     async function drawEverything() {
       circlesLayer.clearLayers();
       markersLayer.clearLayers();
       plotted.clear();
 
-      // Draw circles + labels
       radii.forEach((r,i) => {
         L.circle(userPos, {
           radius: r,
@@ -199,7 +199,8 @@
       });
     }
 
-    // 1) OSM most-reviewed
+    // --- Data fetchers ---
+
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
       const q = `[out:json][timeout:8];
@@ -218,7 +219,6 @@
       }));
     }
 
-    // 2) Wikimedia GeoSearch
     async function wikiGeoSearch(r) {
       const [lat,lon] = userPos;
       const url = [
@@ -232,7 +232,6 @@
       }));
     }
 
-    // 2a) pageviews → most-visited
     async function getWikiVisited(pages) {
       const end = new Date(); end.setDate(end.getDate()-1);
       const start = new Date(end); start.setDate(start.getDate()-30);
@@ -255,7 +254,6 @@
       }));
     }
 
-    // 2b) linkshere → most-linked
     async function getWikiLinked(pages) {
       if (!pages.length) return [];
       const titles = pages.map(p=>p.title).join('|');
@@ -277,7 +275,6 @@
       }));
     }
 
-    // 3) OSM tourism
     async function getOSMTourism(r) {
       const [lat,lon] = userPos;
       const q = `[out:json][timeout:8];
@@ -298,23 +295,31 @@
       });
     }
 
-    // 4) Ticketmaster upcoming events
+    // Use AllOrigins to bypass Ticketmaster CORS
     async function getUpcomingEvents(r) {
       const [lat,lon] = userPos;
       const miles = (r/1609.34).toFixed(2);
-      const url = `https://app.ticketmaster.com/discovery/v2/events.json` +
-        `?apikey=${TM_API_KEY}` +
-        `&latlong=${lat},${lon}` +
-        `&radius=${miles}&unit=miles&size=10&sort=date,asc`;
+      const params = new URLSearchParams({
+        apikey: TM_API_KEY,
+        latlong: `${lat},${lon}`,
+        radius: miles,
+        unit: 'miles',
+        size: '10',
+        sort: 'date,asc',
+        classificationName: 'music,arts,sports',
+        locale: '*'
+      });
+      const tmUrl = `https://app.ticketmaster.com/discovery/v2/events.json?${params}`;
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(tmUrl)}`;
       try {
-        const data = await (await fetchTimeout(url)).json();
-        const events = (data._embedded?.events || []).slice(0,10);
+        const data = await (await fetchTimeout(proxyUrl)).json();
+        const events = (data._embedded?.events||[]).slice(0,10);
         return events.map(e => {
-          const venue = e._embedded?.venues?.[0];
+          const v = e._embedded?.venues?.[0];
           return {
-            title: e.name,
-            lat: parseFloat(venue.location.latitude),
-            lng: parseFloat(venue.location.longitude)
+            name: e.name,
+            lat: parseFloat(v.location.latitude),
+            lng: parseFloat(v.location.longitude)
           };
         });
       } catch {
