@@ -12,18 +12,18 @@
     th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
     th { background:#f4f4f4 }
     .num-label {
-      display:inline-block;
-      width:1.8em; height:1.8em;
+      display:inline-block; width:1.8em; height:1.8em;
       line-height:1.8em; text-align:center;
       color:#fff; font-weight:bold; border-radius:50%;
       margin-right:4px;
     }
-    /* radius colors */
+    /* one color per radius */
     .radius-100   { background:#F94144; }
     .radius-500   { background:#F3722C; }
     .radius-1000  { background:#F8961E; }
     .radius-5000  { background:#F9844A; }
     .radius-10000 { background:#F9C74F; }
+    /* bold circles */
     .radius-circle {
       stroke-opacity:1!important;
       stroke-width:4!important;
@@ -48,13 +48,13 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // --- CONFIG ---
+    // CONFIG
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#F94144','#F3722C','#F8961E','#F9844A','#F9C74F'];
     const TIMEOUT = 8000;
     const OTM_API_KEY = 'YOUR_OPENTRIPMAP_API_KEY';
 
-    // --- UTILS ---
+    // UTILS
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
@@ -63,11 +63,15 @@
     }
     function formatDate(d){ return d.toISOString().slice(0,10).replace(/-/g,''); }
 
-    // --- INIT ---
+    // state to avoid duplicate plotting
+    const plottedPlaces = new Set();
+
+    // INIT
     let map, userPos;
     window.onload = () => {
       if (!navigator.geolocation) {
-        return alert('Geolocation not supported');
+        alert('Geolocation not supported');
+        return;
       }
       navigator.geolocation.getCurrentPosition(onPos, e => {
         alert('Could not get location: ' + e.message);
@@ -87,20 +91,22 @@
           radius: r,
           color: circleColors[i],
           className: 'radius-circle',
-          fill: true, fillColor: circleColors[i]
+          fill: true,
+          fillColor: circleColors[i]
         }).addTo(map);
       });
 
-      // simple user marker, no popup
+      // user marker without popup
       L.marker(userPos).addTo(map);
 
       processAllRadii();
     }
 
-    // --- MAIN WORKFLOW ---
+    // MAIN WORKFLOW
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
       tbody.innerHTML = '';
+      // iterate smallest radius first
       for (let r of radii) {
         // fetch in parallel
         const [reviewed, pages, otm] = await Promise.all([
@@ -111,11 +117,13 @@
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
 
+        // render markers, skipping any already plotted
         renderMarkers(r, reviewed);
         renderMarkers(r, visited);
         renderMarkers(r, linked);
         renderMarkers(r, otm);
 
+        // build table row
         const mk = arr => arr.length
           ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
           : 'N/A';
@@ -131,9 +139,12 @@
       }
     }
 
-    // --- RENDER ---
+    // RENDERING (skips duplicates)
     function renderMarkers(r, list) {
       list.forEach((p,i) => {
+        const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+        if (plottedPlaces.has(key)) return;
+        plottedPlaces.add(key);
         L.marker([p.lat,p.lng], {
           icon: L.divIcon({
             className: `num-label radius-${r}`,
@@ -144,9 +155,9 @@
       });
     }
 
-    // --- DATA FETCHERS ---
+    // DATA FETCHERS
 
-    // OSM: most-reviewed by tag count
+    // 1) OSM: most-reviewed by tag count
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
       const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`
@@ -164,7 +175,7 @@
       }));
     }
 
-    // Wikimedia GeoSearch
+    // 2) Wikimedia GeoSearch
     async function wikiGeoSearch(r) {
       const [lat,lon] = userPos;
       const url = [
@@ -179,7 +190,7 @@
       }));
     }
 
-    // Wiki pageviews → most-visited
+    // 2a) pageviews → most-visited
     async function getWikiVisited(pages) {
       const end = new Date(); end.setDate(end.getDate()-1);
       const start = new Date(end); start.setDate(start.getDate()-30);
@@ -203,7 +214,7 @@
         .map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
     }
 
-    // Wiki linkshere → most-linked
+    // 2b) linkshere → most-linked
     async function getWikiLinked(pages) {
       if (!pages.length) return [];
       const titles = pages.map(p=>p.title).join('|');
@@ -226,7 +237,7 @@
         .map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
     }
 
-    // OpenTripMap → most-popular
+    // 3) OpenTripMap → most-popular
     async function getOTMPlaces(r) {
       const [lat,lon] = userPos;
       const list = await fetchTimeout(
