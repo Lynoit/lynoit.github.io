@@ -197,7 +197,6 @@
     }
 
     // --- Data Fetchers ---
-
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
       const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`.replace(/\s+/g,' ');
@@ -205,110 +204,49 @@
         'https://overpass-api.de/api/interpreter',
         { method:'POST', body:q }
       )).json()).elements || [];
-      elems.sort((a,b)=> Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length);
-      return elems.slice(0,10).map(n=>({ name: n.tags?.name||n.tags?.amenity||'Unknown', lat: n.lat, lng: n.lon }));
+      elems.sort((a,b)=>Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length);
+      return elems.slice(0,10).map(n=>({name:n.tags?.name||n.tags?.amenity||'Unknown',lat:n.lat,lng:n.lon}));
     }
-
     async function wikiGeoSearch(r) {
       const [lat,lon] = userPos;
-      const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch`+
-                  `&gscoord=${lat}%7C${lon}&gsradius=${r}&gslimit=20&format=json`;
+      const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${r}&gslimit=20&format=json`;
       const data = await (await fetchTimeout(url)).json();
-      return (data.query?.geosearch||[]).map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
+      return (data.query?.geosearch||[]).map(p=>({title:p.title,lat:p.lat,lng:p.lon}));
     }
-
     async function getWikiVisited(pages) {
-      const end = new Date(); end.setDate(end.getDate()-1);
-      const start = new Date(end); start.setDate(start.getDate()-30);
-      const sd = formatDate(start), ed = formatDate(end);
-      const counts = await Promise.all(pages.map(async p=>{
-        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
-                    `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
-                    `/daily/${sd}/${ed}`;
-        try { const body = await (await fetchTimeout(url)).json();
-          const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
-          return { ...p, views };
-        } catch { return { ...p, views:0 }; }
-      }));
-      counts.sort((a,b)=>b.views - a.views);
-      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
+      const end=new Date();end.setDate(end.getDate()-1);
+      const start=new Date(end);start.setDate(start.getDate()-30);
+      const sd=formatDate(start),ed=formatDate(end);
+      const counts=await Promise.all(pages.map(async p=>{
+        const url=`https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/${encodeURIComponent(p.title)}/daily/${sd}/${ed}`;
+        try{const b=await(await fetchTimeout(url)).json();const views=(await b).items?.reduce((s,x)=>s+x.views,0)||0;return{...p,views};}catch{return{...p,views:0}}}));
+      counts.sort((a,b)=>b.views-a.views);
+      return counts.slice(0,10).map(p=>({title:p.title,lat:p.lat,lng:p.lng}));
     }
-
     async function getWikiLinked(pages) {
-      if (!pages.length) return [];
-      const titles = pages.map(p=>p.title).join('|');
-      const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere`+
-                  `&titles=${encodeURIComponent(titles)}&lhlimit=max&format=json`;
-      const data = await (await fetchTimeout(url)).json();
-      const info = data.query?.pages||{};
-      const counts = pages.map(p=>{
-        const pg = Object.values(info).find(x=>x.title===p.title)||{};
-        const links = Array.isArray(pg.linkshere)?pg.linkshere.length:0;
-        return { ...p, links };
-      });
-      counts.sort((a,b)=>b.links - a.links);
-      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
+      if(!pages.length) return[];
+      const titles=pages.map(p=>p.title).join('|');
+      const url=`https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(titles)}&lhlimit=max&format=json`;
+      const data=await(await fetchTimeout(url)).json();const info=data.query?.pages||{};
+      const counts=pages.map(p=>{const pg=Object.values(info).find(x=>x.title===p.title)||{};const links=Array.isArray(pg.linkshere)?pg.linkshere.length:0;return{...p,links};});
+      counts.sort((a,b)=>b.links-a.links);
+      return counts.slice(0,10).map(p=>({title:p.title,lat:p.lat,lng:p.lng}));
     }
-
     async function getOSMTourism(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8]; (node(around:${r},${lat},${lon})[tourism];`+
-                `way(around:${r},${lat},${lon})[tourism]; rel(around:${r},${lat},${lon})[tourism];);`+
-                `out center 50;`.replace(/\s+/g,' ');
-      const data = await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter', { method:'POST', body:q }
-      )).json();
-      return (data.elements||[]).slice(0,10).map(el=>{
-        const latc = el.lat || el.center?.lat;
-        const lonc = el.lon || el.center?.lon;
-        return { name: el.tags?.name || el.tags?.tourism || 'Unknown', lat: latc, lng: lonc };
-      });
+      const [lat,lon]=userPos;
+      const q=`[out:json][timeout:8];(node(around:${r},${lat},${lon})[tourism];way(around:${r},${lat},${lon})[tourism];rel(around:${r},${lat},${lon})[tourism];);out center 50;`.replace(/\s+/g,' ');
+      const data=await(await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
+      return(data.elements||[]).slice(0,10).map(el=>{const latc=el.lat||el.center?.lat;const lonc=el.lon||el.center?.lon;return{name:el.tags?.name||el.tags?.tourism||'Unknown',lat:latc,lng:lonc};});
     }
-
-    // --- Wikidata Upcoming Events ---
     async function getWikidataEvents(r) {
-      const [lat, lon] = userPos;
-      const km = (r / 1000).toFixed(3);
-      const sparql = `
-        PREFIX wd: <http://www.wikidata.org/entity/>
-        PREFIX wdt: <http://www.wikidata.org/prop/direct/>
-        PREFIX wikibase: <http://wikiba.se/ontology#>
-        PREFIX bd: <http://www.bigdata.com/rdf#>
-        SELECT ?event ?eventLabel ?coord WHERE {
-          SERVICE wikibase:around {
-            ?event wdt:P625 ?coord .
-            bd:serviceParam wikibase:center "Point(${lon} ${lat})"^^wikibase:WKT ;
-                             wikibase:radius "${km}" ;
-                             wikibase:distance ?dist .
-          }
-          ?event wdt:P31/wdt:P279* wd:Q1656682 ; wdt:P585 ?date .
-          FILTER(?date > NOW())
-          SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
-        }
-        ORDER BY ?date LIMIT 10
-      `;
-      const url = 'https://query.wikidata.org/sparql';
-      try {
-        const response = await fetchTimeout(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/sparql-query',
-            'Accept': 'application/sparql-results+json'
-          },
-          body: sparql
-        });
-        const data = await response.json();
-        return data.results.bindings.map(b => {
-          const coords = b.coord.value.replace('Point(', '').replace(')', '').split(' ').map(parseFloat);
-          return { name: b.eventLabel.value, lat: coords[1], lng: coords[0] };
-        });
-      } catch (err) {
-        console.error('Wikidata SPARQL error:', err);
-        return [];
-      }
+      const [lat,lon]=userPos;const km=(r/1000).toFixed(3);
+      const sparql=`PREFIX wd:<http://www.wikidata.org/entity/>PREFIX wdt:<http://www.wikidata.org/prop/direct/>PREFIX wikibase:<http://wikiba.se/ontology#>PREFIX bd:<http://www.bigdata.com/rdf#>SELECT?event?eventLabel?coord WHERE{SERVICE wikibase:around{?event wdt:P625?coord.bd:serviceParam wikibase:center"Point(${lon} ${lat})"^^wikibase:WKT;wikibase:radius"${km}";wikibase:distance?dist.}?event wdt:P31/wdt:P279* wd:Q1656682;wdt:P585?date.FILTER(?date>NOW())SERVICE wikibase:label{bd:serviceParam wikibase:language"en".}}ORDER BY?date LIMIT10`;
+      try{
+        const res=await fetchTimeout('https://query.wikidata.org/sparql',{method:'POST',headers:{'Content-Type':'application/sparql-query','Accept':'application/sparql-results+json'},body:sparql});
+        const json=await res.json();
+        return json.results.bindings.map(b=>{const c=b.coord.value.replace('Point(','').replace(')','').split(' ').map(parseFloat);return{name:b.eventLabel.value,lat:c[1],lng:c[0]};});
+      }catch(err){console.error('Wikidata SPARQL error:',err);return[];}
     }
   </script>
-</body>
-</html>
 </body>
 </html>
