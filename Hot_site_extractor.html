@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer (Labeled Radii, Full)</title>
+  <title>Nearby Places Explorer (Top 10 + OSM Tourism)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -19,7 +19,7 @@
       margin-right:4px; border:2px solid #000;
       font-size:0.9em;
     }
-    /* very distinct colors per radius */
+    /* distinct colors per radius */
     .radius-100   { background:#e6194b; }
     .radius-500   { background:#3cb44b; }
     .radius-1000  { background:#4363d8; }
@@ -30,15 +30,12 @@
       stroke-opacity:1!important; stroke-width:4!important;
       fill-opacity:0.1!important;
     }
-    /* improved label for each circle */
+    /* radius labels */
     .radius-label {
-      white-space: nowrap;
-      font-size: 1.1em;
+      white-space: nowrap; font-size:1.1em;
       background: rgba(255,255,255,0.9);
-      padding: 4px 8px;
-      border-radius: 4px;
-      border: 1px solid #666;
-      text-align: center;
+      padding:4px 8px; border-radius:4px;
+      border:1px solid #666; text-align:center;
     }
   </style>
 </head>
@@ -50,8 +47,8 @@
         <th>Radius</th>
         <th>Most Reviewed<br><small>1–10 (OSM tags)</small></th>
         <th>Most Visited<br><small>1–10 (Wiki pageviews)</small></th>
-        <th>Most Linked<br><small>1–10 (Wiki incoming links)</small></th>
-        <th>Most Popular<br><small>1–10 (OpenTripMap)</small></th>
+        <th>Most Linked<br><small>1–10 (Wiki links)</small></th>
+        <th>Tourism<br><small>1–10 (OSM tourism)</small></th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -59,25 +56,23 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // CONFIG
+    // radii (+ circle colors)
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
-    const OTM_API_KEY = 'YOUR_OPENTRIPMAP_API_KEY';
 
-    // UTILS
+    // utilities
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
         new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), t))
       ]);
     }
-    function formatDate(d){ return d.toISOString().slice(0,10).replace(/-/g,''); }
+    function formatDate(d) { return d.toISOString().slice(0,10).replace(/-/g,''); }
 
-    // avoid plotting same place twice
+    // avoid duplicates
     const plotted = new Set();
 
-    // MAP INIT
     let map, userPos;
     window.onload = () => {
       if (!navigator.geolocation) {
@@ -88,6 +83,7 @@
         alert('Could not get location: ' + e.message);
       });
     };
+
     function onPos(pos) {
       userPos = [pos.coords.latitude, pos.coords.longitude];
       map = L.map('map').setView(userPos, 14);
@@ -101,11 +97,10 @@
           radius: r,
           color: circleColors[i],
           className: 'radius-circle',
-          fill: true,
-          fillColor: circleColors[i]
+          fill: true, fillColor: circleColors[i]
         }).addTo(map);
 
-        const latOffset = r / 111111; // ~deg per meter
+        const latOffset = r / 111111;
         L.marker(
           [userPos[0] + latOffset, userPos[1]],
           {
@@ -119,32 +114,30 @@
         ).addTo(map);
       });
 
-      // user marker
-      L.marker(userPos).addTo(map);
-
+      L.marker(userPos).addTo(map); // plain user marker
       processAllRadii();
     }
 
-    // MAIN LOOP
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
       tbody.innerHTML = '';
       for (let r of radii) {
-        // fetch all data in parallel
-        const [reviewed, pages, otm] = await Promise.all([
+        // parallel fetches
+        const [reviewed, pages, tourism] = await Promise.all([
           getOSMReviewed(r),
           wikiGeoSearch(r),
-          getOTMPlaces(r)
+          getOSMTourism(r)
         ]);
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
 
+        // render markers
         render(r, reviewed);
         render(r, visited);
         render(r, linked);
-        render(r, otm);
+        render(r, tourism);
 
-        // table row
+        // build row
         const mk = arr => arr.length
           ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
           : 'N/A';
@@ -154,13 +147,12 @@
           <td>${mk(reviewed)}</td>
           <td>${mk(visited)}</td>
           <td>${mk(linked)}</td>
-          <td>${mk(otm)}</td>
+          <td>${mk(tourism)}</td>
         `;
         tbody.appendChild(tr);
       }
     }
 
-    // RENDERER (skips duplicates)
     function render(r, list) {
       list.forEach((p,i) => {
         const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
@@ -176,19 +168,18 @@
       });
     }
 
-    // DATA FETCHERS
-
     // 1) OSM: most-reviewed
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`
-        .replace(/\s+/g,' ');
-      const res = await fetchTimeout('https://overpass-api.de/api/interpreter', {
-        method:'POST', body: q
-      });
-      const elems = (await res.json()).elements || [];
+      const q = `[out:json][timeout:8];
+        node(around:${r},${lat},${lon})[amenity];
+        out body 100;`.replace(/\s+/g,' ');
+      const elems = (await (await fetchTimeout(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body:q }
+      )).json()).elements || [];
       elems.sort((a,b)=>
-        Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length
+        (Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length)
       );
       return elems.slice(0,10).map(n=>({
         name: n.tags?.name||n.tags?.amenity||'Unknown',
@@ -196,7 +187,7 @@
       }));
     }
 
-    // 2) GeoSearch pool
+    // 2) Wikipedia GeoSearch pool
     async function wikiGeoSearch(r) {
       const [lat,lon] = userPos;
       const url = [
@@ -210,32 +201,30 @@
       }));
     }
 
-    // 2a) pageviews → most-visited
+    // 2a) Wikimedia pageviews → most-visited
     async function getWikiVisited(pages) {
       const end = new Date(); end.setDate(end.getDate()-1);
       const start = new Date(end); start.setDate(start.getDate()-30);
       const sd = formatDate(start), ed = formatDate(end);
-      const counts = await Promise.all(
-        pages.map(async p => {
-          const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
-                      `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
-                      `/daily/${sd}/${ed}`;
-          try {
-            const body = await (await fetchTimeout(url)).json();
-            const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
-            return { ...p, views };
-          } catch {
-            return { ...p, views: 0 };
-          }
-        })
-      );
+      const counts = await Promise.all(pages.map(async p=>{
+        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
+                    `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
+                    `/daily/${sd}/${ed}`;
+        try {
+          const body = await (await fetchTimeout(url)).json();
+          const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
+          return { ...p, views };
+        } catch {
+          return { ...p, views:0 };
+        }
+      }));
       counts.sort((a,b)=>b.views - a.views);
       return counts.slice(0,10).map(p=>({
         title:p.title, lat:p.lat, lng:p.lng
       }));
     }
 
-    // 2b) linkshere → most-linked
+    // 2b) Wikimedia linkshere → most-linked
     async function getWikiLinked(pages) {
       if (!pages.length) return [];
       const titles = pages.map(p=>p.title).join('|');
@@ -248,7 +237,7 @@
       const info = data.query?.pages||{};
       const counts = pages.map(p=>{
         const pg = Object.values(info).find(x=>x.title===p.title) || {};
-        const links = Array.isArray(pg.linkshere) ? pg.linkshere.length : 0;
+        const links = Array.isArray(pg.linkshere)?pg.linkshere.length:0;
         return { ...p, links };
       });
       counts.sort((a,b)=>b.links - a.links);
@@ -257,20 +246,25 @@
       }));
     }
 
-    // 3) OpenTripMap → most-popular
-    async function getOTMPlaces(r) {
+    // 3) OSM tourism tags → deep tourism
+    async function getOSMTourism(r) {
       const [lat,lon] = userPos;
-      const list = await (await fetchTimeout(
-        `https://api.opentripmap.com/0.1/en/places/radius?radius=${r}`+
-        `&lon=${lon}&lat=${lat}&limit=50&apikey=${OTM_API_KEY}`
+      const q = `[out:json][timeout:8];
+        (node(around:${r},${lat},${lon})[tourism];
+         way(around:${r},${lat},${lon})[tourism];
+         rel(around:${r},${lat},${lon})[tourism];);
+        out center 50;`.replace(/\s+/g,' ');
+      const data = await (await fetchTimeout(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body:q }
       )).json();
-      const features = list.features || [];
-      features.sort((a,b)=>(b.properties.rate||0) - (a.properties.rate||0));
-      return features.slice(0,10).map(f=>({
-        name: f.properties.name || 'Unknown',
-        lat: f.geometry.coordinates[1],
-        lng: f.geometry.coordinates[0]
-      }));
+      const elems = data.elements||[];
+      return elems.slice(0,10).map(el=>{
+        const name = el.tags?.name || el.tags?.tourism || 'Unknown';
+        const latc = el.lat || el.center?.lat;
+        const lonc = el.lon || el.center?.lon;
+        return { name, lat: latc, lng: lonc };
+      });
     }
   </script>
 </body>
