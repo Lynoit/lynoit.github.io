@@ -95,6 +95,7 @@
         try {
           [visited, reviewed] = await getOSMPlaces(r);
         } catch(e) { console.warn('OSM failed @', r, e); }
+
         try {
           linked = await getMostLinkedWiki(r);
         } catch(e) { console.warn('Wiki failed @', r, e); }
@@ -130,7 +131,9 @@
 
     async function getOSMPlaces(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 50;`;
+      const q = `[out:json][timeout:8];
+        node(around:${r},${lat},${lon})[amenity];
+        out body 50;`.replace(/\s+/g,' ');
       const res = await fetchTimeout('https://overpass-api.de/api/interpreter', {
         method:'POST', body: q
       });
@@ -153,39 +156,46 @@
       return [visited, reviewed];
     }
 
-    /* ←-- this one is fixed: */
+    // ←— robust version with safe checks
     async function getMostLinkedWiki(r) {
-      const [lat, lon] = userPos;
-      const geoUrl = [
-        'https://en.wikipedia.org/w/api.php?origin=*&action=query',
-        `&list=geosearch&gscoord=${lat}|${lon}`,
-        `&gsradius=${r}&gslimit=10&format=json`
-      ].join('');
-      const geoRes = await fetchTimeout(geoUrl);
-      if (!geoRes.ok) throw new Error(`GeoSearch ${geoRes.status}`);
-      const pages = (await geoRes.json()).query.geosearch || [];
-      if (!pages.length) return [];
+      try {
+        const [lat, lon] = userPos;
+        const geoUrl = [
+          'https://en.wikipedia.org/w/api.php?origin=*&action=query',
+          `&list=geosearch&gscoord=${lat}|${lon}`,
+          `&gsradius=${r}&gslimit=10&format=json`
+        ].join('');
+        const geoRes = await fetchTimeout(geoUrl);
+        if (!geoRes.ok) throw new Error(`GeoSearch ${geoRes.status}`);
+        const geoJson = await geoRes.json();
+        const pages = geoJson.query?.geosearch || [];
+        if (!pages.length) return [];
 
-      const titles = pages.map(p => p.title).join('|');
-      const infoUrl = [
-        'https://en.wikipedia.org/w/api.php?origin=*&action=query',
-        `&prop=linkshere&titles=${encodeURIComponent(titles)}`,
-        '&lhlimit=max&format=json'
-      ].join('');
-      const infoRes = await fetchTimeout(infoUrl);
-      if (!infoRes.ok) throw new Error(`Linkshere ${infoRes.status}`);
-      const infoPages = (await infoRes.json()).query.pages;
+        const titles = pages.map(p => p.title).join('|');
+        const infoUrl = [
+          'https://en.wikipedia.org/w/api.php?origin=*&action=query',
+          `&prop=linkshere&titles=${encodeURIComponent(titles)}`,
+          '&lhlimit=max&format=json'
+        ].join('');
+        const infoRes = await fetchTimeout(infoUrl);
+        if (!infoRes.ok) throw new Error(`Linkshere ${infoRes.status}`);
+        const infoJson = await infoRes.json();
+        const infoPages = infoJson.query?.pages || {};
 
-      const counts = pages.map(p => {
-        const pg = Object.values(infoPages).find(x => x.title === p.title) || {};
-        const links = Array.isArray(pg.linkshere) ? pg.linkshere.length : 0;
-        return { title: p.title, lat: p.lat, lng: p.lon, links };
-      });
+        const counts = pages.map(p => {
+          const pg = Object.values(infoPages).find(x => x.title === p.title) || {};
+          const links = Array.isArray(pg.linkshere) ? pg.linkshere.length : 0;
+          return { title: p.title, lat: p.lat, lng: p.lon, links };
+        });
 
-      return counts
-        .sort((a,b)=>b.links - a.links)
-        .slice(0,5)
-        .map(p=>({ title:p.title, lat:p.lat, lng:p.lng })); // <-- use p.lng
+        return counts
+          .sort((a,b)=>b.links - a.links)
+          .slice(0,5)
+          .map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
+      } catch (err) {
+        console.warn('getMostLinkedWiki error @', r, err);
+        return [];
+      }
     }
 
     window.onload = init;
