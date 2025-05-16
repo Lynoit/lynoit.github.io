@@ -30,6 +30,10 @@
     <div class="chart-container"><canvas id="roadTypeChart"></canvas></div>
     <div class="chart-container"><canvas id="cityChart"></canvas></div>
     <div class="chart-container"><canvas id="countryChart"></canvas></div>
+    <!-- New charts -->
+    <div class="chart-container"><canvas id="tollChart"></canvas></div>
+    <div class="chart-container"><canvas id="laneChart"></canvas></div>
+    <div class="chart-container"><canvas id="surfaceChart"></canvas></div>
   </div>
 
   <!-- Leaflet JS -->
@@ -38,16 +42,20 @@
     // Data arrays
     let lastPos = null;
     let totalDistance = 0;
-    const distances = [];
-    const speeds = [];
-    const roundabouts = [];
-    const stopSigns = [];
-    const trafficLights = [];
-    const bridges = [];
-    const tunnels = [];
-    const roadTypes = [];
-    const cities = [];
-    const countries = [];
+    const distances    = [];
+    const speeds       = [];
+    const roundabouts  = [];
+    const stopSigns    = [];
+    const trafficLights= [];
+    const bridges      = [];
+    const tunnels      = [];
+    const roadTypes    = [];
+    const cities       = [];
+    const countries    = [];
+    // New data arrays
+    const tolls        = [];
+    const lanes        = [];
+    const surfaces     = [];
 
     // Route storage
     const routeCoords = [];
@@ -71,7 +79,9 @@
       const R = 6371000;
       const toRad = x => x * Math.PI / 180;
       const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2
+              + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))
+              * Math.sin(dLon/2)**2;
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
@@ -79,18 +89,30 @@
     const makeChart = (ctx, label, yLabel, yType='linear') => new Chart(ctx, {
       type: 'scatter',
       data: { datasets: [{ label, data: [] }] },
-      options: { scales: { x: { title: { display: true, text: 'Distance (m)' } }, y: { type: yType, title: { display: true, text: yLabel } } } }
+      options: {
+        scales: {
+          x: { title: { display: true, text: 'Distance (m)' } },
+          y: {
+            type: yType,
+            title: { display: true, text: yLabel }
+          }
+        }
+      }
     });
 
-    const speedChart = makeChart(document.getElementById('speedChart'), 'Legal Speed', 'Speed (km/h)');
-    const roundaboutChart = makeChart(document.getElementById('roundaboutChart'), 'Roundabout', 'Presence (1/0)');
-    const stopSignChart = makeChart(document.getElementById('stopSignChart'), 'Stop Sign', 'Presence (1/0)');
-    const trafficLightChart = makeChart(document.getElementById('trafficLightChart'), 'Traffic Light', 'Presence (1/0)');
-    const bridgeChart = makeChart(document.getElementById('bridgeChart'), 'Bridge', 'Presence (1/0)');
-    const tunnelChart = makeChart(document.getElementById('tunnelChart'), 'Tunnel', 'Presence (1/0)');
-    const roadTypeChart = makeChart(document.getElementById('roadTypeChart'), 'Road Type', 'Category', 'category');
-    const cityChart = makeChart(document.getElementById('cityChart'), 'City', 'Category', 'category');
-    const countryChart = makeChart(document.getElementById('countryChart'), 'Country', 'Category', 'category');
+    const speedChart        = makeChart(document.getElementById('speedChart'),      'Legal Speed',    'Speed (km/h)');
+    const roundaboutChart   = makeChart(document.getElementById('roundaboutChart'), 'Roundabout',     'Presence (1/0)');
+    const stopSignChart     = makeChart(document.getElementById('stopSignChart'),   'Stop Sign',      'Presence (1/0)');
+    const trafficLightChart = makeChart(document.getElementById('trafficLightChart'),'Traffic Light',  'Presence (1/0)');
+    const bridgeChart       = makeChart(document.getElementById('bridgeChart'),     'Bridge',         'Presence (1/0)');
+    const tunnelChart       = makeChart(document.getElementById('tunnelChart'),     'Tunnel',         'Presence (1/0)');
+    const roadTypeChart     = makeChart(document.getElementById('roadTypeChart'),   'Road Type',      'Category', 'category');
+    const cityChart         = makeChart(document.getElementById('cityChart'),       'City',           'Category', 'category');
+    const countryChart      = makeChart(document.getElementById('countryChart'),    'Country',        'Category', 'category');
+    // New charts
+    const tollChart         = makeChart(document.getElementById('tollChart'),       'Toll Station',   'Presence (1/0)');
+    const laneChart         = makeChart(document.getElementById('laneChart'),       'Number of Lanes','Lanes');
+    const surfaceChart      = makeChart(document.getElementById('surfaceChart'),    'Surface',        'Category', 'category');
 
     // Update charts
     function updateCharts() {
@@ -101,15 +123,20 @@
         }
         chart.update();
       };
-      update(speedChart, speeds);
-      update(roundaboutChart, roundabouts);
-      update(stopSignChart, stopSigns);
+
+      update(speedChart,        speeds);
+      update(roundaboutChart,   roundabouts);
+      update(stopSignChart,     stopSigns);
       update(trafficLightChart, trafficLights);
-      update(bridgeChart, bridges);
-      update(tunnelChart, tunnels);
-      update(roadTypeChart, roadTypes);
-      update(cityChart, cities);
-      update(countryChart, countries);
+      update(bridgeChart,       bridges);
+      update(tunnelChart,       tunnels);
+      update(roadTypeChart,     roadTypes);
+      update(cityChart,         cities);
+      update(countryChart,      countries);
+      // new updates
+      update(tollChart,         tolls);
+      update(laneChart,         lanes);
+      update(surfaceChart,      surfaces);
     }
 
     // Reverse geocode with throttle and add popup marker
@@ -119,22 +146,30 @@
       lastReverseTime = now;
 
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1`)
-        .then(res => res.json()).then(data => {
+        .then(res => res.json())
+        .then(data => {
           const addr = data.address || {};
           const tags = data.extratags || {};
 
+          // existing features
           const features = {
-            roadType: tags.highway || 'Unknown',
-            legalSpeed: tags.maxspeed || 'N/A',
-            roundabout: tags.junction === 'roundabout',
-            stopSign: tags.highway === 'stop',
-            trafficLight: tags.highway === 'traffic_signals',
-            bridge: tags.bridge === 'yes',
-            tunnel: tags.tunnel === 'yes',
-            city: addr.city || addr.town || addr.village || 'Unknown',
-            country: addr.country || 'Unknown'
+            roadType:      tags.highway || 'Unknown',
+            legalSpeed:    tags.maxspeed || 'N/A',
+            roundabout:    tags.junction === 'roundabout',
+            stopSign:      tags.highway === 'stop',
+            trafficLight:  tags.highway === 'traffic_signals',
+            bridge:        tags.bridge === 'yes',
+            tunnel:        tags.tunnel === 'yes',
+            city:          addr.city || addr.town || addr.village || 'Unknown',
+            country:       addr.country || 'Unknown'
           };
 
+          // new feature extractions
+          const hasToll  = tags.toll === 'yes';
+          const numLanes = parseInt(tags.lanes, 10) || NaN;
+          const surfType = tags.surface || 'Unknown';
+
+          // push into arrays
           distances.push(totalDistance);
           speeds.push(parseFloat(tags.maxspeed) || NaN);
           roundabouts.push(features.roundabout ? 1 : 0);
@@ -145,11 +180,22 @@
           roadTypes.push(features.roadType);
           cities.push(features.city);
           countries.push(features.country);
+          // new pushes
+          tolls.push(hasToll ? 1 : 0);
+          lanes.push(numLanes);
+          surfaces.push(surfType);
 
+          // update info & charts
           info.innerHTML = `<p><strong>Distance:</strong> ${totalDistance.toFixed(1)} m</p>`;
           updateCharts();
 
-          const popupContent = Object.entries(features)
+          // add popup marker
+          const popupContent = Object.entries({
+            ...features,
+            tollStation: hasToll,
+            lanes:       numLanes,
+            surface:     surfType
+          })
             .map(([k,v]) => `<strong>${k}:</strong> ${v}`)
             .join('<br>');
           L.marker([lat, lon]).bindPopup(popupContent).addTo(map);
@@ -179,7 +225,11 @@
     }
 
     if (navigator.geolocation) {
-      navigator.geolocation.watchPosition(updatePosition, handleError, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
+      navigator.geolocation.watchPosition(updatePosition, handleError, {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 5000
+      });
     } else {
       info.textContent = 'Geolocation not supported.';
     }
