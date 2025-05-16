@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer (Top 10 from Free Sources)</title>
+  <title>Nearby Places Explorer (Labeled Radii)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -11,25 +11,32 @@
     table { width:100%; border-collapse:collapse; margin-top:1rem }
     th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
     th { background:#f4f4f4 }
+
     .num-label {
-      display:inline-block;
-      width:1.8em; height:1.8em;
+      display:inline-block; width:1.8em; height:1.8em;
       line-height:1.8em; text-align:center;
       color:#fff; font-weight:bold; border-radius:50%;
-      margin-right:4px;
-      border:2px solid #000;
+      margin-right:4px; border:2px solid #000;
     }
     /* very distinct colors per radius */
-    .radius-100   { background:#e6194b; }  /* bright red */
-    .radius-500   { background:#3cb44b; }  /* vivid green */
-    .radius-1000  { background:#4363d8; }  /* strong blue */
-    .radius-5000  { background:#f58231; }  /* high-visibility orange */
-    .radius-10000 { background:#911eb4; }  /* bold purple */
+    .radius-100   { background:#e6194b; }
+    .radius-500   { background:#3cb44b; }
+    .radius-1000  { background:#4363d8; }
+    .radius-5000  { background:#f58231; }
+    .radius-10000 { background:#911eb4; }
     /* bold circles */
     .radius-circle {
-      stroke-opacity:1!important;
-      stroke-width:4!important;
+      stroke-opacity:1!important; stroke-width:4!important;
       fill-opacity:0.1!important;
+    }
+    /* label for each circle */
+    .radius-label {
+      background: rgba(255,255,255,0.8);
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-size: 0.9em;
+      font-weight: bold;
+      border: 1px solid #666;
     }
   </style>
 </head>
@@ -87,14 +94,29 @@
         attribution:'&copy; OpenStreetMap contributors'
       }).addTo(map);
 
-      // draw bold circles
+      // draw circles & labels
       radii.forEach((r,i) => {
+        // circle
         L.circle(userPos, {
           radius: r,
           color: circleColors[i],
           className: 'radius-circle',
-          fill: true, fillColor: circleColors[i]
+          fill: true,
+          fillColor: circleColors[i]
         }).addTo(map);
+        // label at top of circle
+        const latOffset = r / 111111;  // ~degrees per meter
+        L.marker(
+          [userPos[0] + latOffset, userPos[1]],
+          {
+            icon: L.divIcon({
+              className: 'radius-label',
+              html: `${r.toLocaleString()} m`,
+              iconAnchor: [ '50%', '100%' ]
+            }),
+            interactive: false
+          }
+        ).addTo(map);
       });
 
       // user marker plain
@@ -152,11 +174,11 @@
       });
     }
 
-    // DATA FETCHERS
-
+    // DATA FETCHERS (same as before)…
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`.replace(/\s+/g,' ');
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`
+        .replace(/\s+/g,' ');
       const res = await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q});
       const elems = (await res.json()).elements || [];
       elems.sort((a,b)=>Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length);
@@ -182,8 +204,7 @@
       const start = new Date(end); start.setDate(start.getDate()-30);
       const sd = formatDate(start), ed = formatDate(end);
       const counts = await Promise.all(pages.map(async p=>{
-        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/`+
-                    `${encodeURIComponent(p.title)}/daily/${sd}/${ed}`;
+        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/all-access/user/${encodeURIComponent(p.title)}/${sd}/${ed}`;
         try {
           const body = await (await fetchTimeout(url)).json();
           const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
@@ -222,13 +243,12 @@
         `&lon=${lon}&lat=${lat}&limit=50&apikey=${OTM_API_KEY}`
       )).json();
       const feats = list.features||[];
-      const sorted = feats.map(f=>({
+      feats.sort((a,b)=>(b.properties.rate||0) - (a.properties.rate||0));
+      return feats.slice(0,10).map(f=>({
         name: f.properties.name||'Unknown',
         lat: f.geometry.coordinates[1],
-        lng: f.geometry.coordinates[0],
-        rate: f.properties.rate||0
-      })).sort((a,b)=>b.rate - a.rate);
-      return sorted.slice(0,10).map(p=>({ name:p.name, lat:p.lat, lng:p.lng }));
+        lng: f.geometry.coordinates[0]
+      }));
     }
   </script>
 </body>
