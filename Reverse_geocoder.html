@@ -100,19 +100,22 @@
   <script>
     // Data arrays
     let lastPos = null, totalDistance = 0;
-    const distances    = [],
-          speeds       = [],
-          roundabouts  = [],
-          stopSigns    = [],
-          trafficLights= [],
-          bridges      = [],
-          tunnels      = [],
-          roadTypes    = [],
-          cities       = [],
-          countries    = [],
-          tolls        = [],
-          lanesArr     = [],
-          surfacesArr  = [];
+    const distances     = [],
+          speeds        = [],
+          roundabouts   = [],
+          stopSigns     = [],
+          trafficLights = [],
+          bridges       = [],
+          tunnels       = [],
+          roadTypes     = [],
+          cities        = [],
+          countries     = [],
+          tolls         = [],
+          lanesArr      = [],
+          surfacesArr   = [];
+
+    // Remember last feature set
+    let lastFeatures = null;
 
     // Icon maps
     const roadTypeIcons = {
@@ -133,21 +136,19 @@
     };
 
     // Grab display elements
-    const el = id => document.getElementById('icon-'+id) || document.getElementById('label-'+id);
-    const iconEl = key => document.getElementById('icon-'+key);
+    const iconEl  = key => document.getElementById('icon-'+key);
     const labelEl = key => document.getElementById('label-'+key);
-    const info = document.getElementById('info');
-    const mapElem = document.getElementById('map');
+    const info    = document.getElementById('info');
 
     // Setup map
-    const map = L.map(mapElem).setView([0,0],2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OSM contributors'
+    const map      = L.map('map').setView([0,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'&copy; OSM contributors'
     }).addTo(map);
-    const marker = L.marker([0,0]).addTo(map);
+    const marker    = L.marker([0,0]).addTo(map);
     const routeLine = L.polyline([], { color:'blue', weight:3 }).addTo(map);
 
-    // Distance formula
+    // Haversine distance
     function haversine([a1,a2],[b1,b2]) {
       const R=6371000, toRad=x=>x*Math.PI/180;
       const dLat=toRad(b1-a1), dLon=toRad(b2-a2);
@@ -161,7 +162,12 @@
     const makeChart = (ctx,label,yLabel,yType='linear') => new Chart(ctx,{
       type:'scatter',
       data:{datasets:[{label,data:[]}]},
-      options:{scales:{x:{title:{display:true,text:'Distance (m)'}},y:{type:yType,title:{display:true,text:yLabel}}}}
+      options:{
+        scales:{
+          x:{title:{display:true,text:'Distance (m)'}},
+          y:{type:yType,title:{display:true,text:yLabel}}
+        }
+      }
     });
 
     // Init charts
@@ -178,8 +184,8 @@
     const laneChart         = makeChart(document.getElementById('laneChart'),      'Number of Lanes', 'Lanes');
     const surfaceChart      = makeChart(document.getElementById('surfaceChart'),   'Surface',         'Category','category');
 
-    // Update charts
-    function updateCharts() {
+    // Update all charts
+    function updateCharts(){
       const upd = (c, arr) => {
         c.data.datasets[0].data = distances.map((d,i)=>({x:d,y:arr[i]}));
         if(c.options.scales.y.type==='category'){
@@ -201,39 +207,53 @@
       upd(surfaceChart,      surfacesArr);
     }
 
-    // Reverse geocode + UI update
-    let lastTime=0, minI=1000;
+    // Reverse geocode + conditional pinning
+    let lastTime = 0, minI = 1000;
     function reverseGeocode(lat,lon){
-      const now=Date.now();
-      if(now-lastTime<minI) return;
-      lastTime=now;
+      const now = Date.now();
+      if(now - lastTime < minI) return;
+      lastTime = now;
 
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1&zoom=16`)
         .then(r=>r.json())
         .then(data=>{
           const tags = data.extratags||{};
           const addr = data.address  || {};
+          const rt   = data.category==='highway' ? data.type : 'unknown';
+          const numLanes = parseInt(tags.lanes,10) || NaN;
+          const surf     = tags.surface || 'unknown';
+          const hasToll  = tags.toll === 'yes';
 
-          // road type from data.type when category==='highway'
-          const rt = data.category==='highway' ? data.type : 'unknown';
-
-          // features
+          // Build feature object
           const f = {
             roadType:     rt,
             legalSpeed:   tags.maxspeed   || 'N/A',
-            roundabout:   tags.junction   === 'roundabout',
-            stopSign:     tags.highway    === 'stop',
-            trafficLight: tags.highway    === 'traffic_signals',
-            bridge:       tags.bridge     === 'yes',
-            tunnel:       tags.tunnel     === 'yes',
+            roundabout:   (tags.junction   === 'roundabout'),
+            stopSign:     (tags.highway    === 'stop'),
+            trafficLight: (tags.highway    === 'traffic_signals'),
+            bridge:       (tags.bridge     === 'yes'),
+            tunnel:       (tags.tunnel     === 'yes'),
             city:         addr.city||addr.town||addr.village||'Unknown',
-            country:      addr.country    || 'Unknown'
+            country:      addr.country    || 'Unknown',
+            toll:         hasToll,
+            lanes:        isNaN(numLanes)? null : numLanes,
+            surface:      surf
           };
-          const hasToll  = tags.toll=== 'yes';
-          const numLanes = parseInt(tags.lanes,10)||NaN;
-          const surf     = tags.surface||'unknown';
 
-          // update icons & labels
+          // Only drop a new pin if something changed
+          const changed = !lastFeatures ||
+            Object.keys(f).some(k => f[k] !== lastFeatures[k]);
+
+          // Update lastFeatures
+          if(changed){
+            lastFeatures = { ...f };
+            const html = Object.entries(f)
+              .map(([k,v])=>`<strong>${k}:</strong> ${v}`)
+              .join('<br>');
+            L.marker([lat,lon]).bindPopup(html).addTo(map);
+          }
+
+          // Update icons & labels
           iconEl('roadType').textContent      = roadTypeIcons[rt]       || roadTypeIcons.unknown;
           labelEl('roadType').textContent     = rt.charAt(0).toUpperCase()+rt.slice(1);
           iconEl('speed').textContent         = '🏎️';
@@ -251,13 +271,13 @@
           iconEl('toll').textContent          = hasToll         ? '💰' : '⭕';
           labelEl('toll').textContent         = hasToll         ? 'Yes' : 'No';
           iconEl('lanes').textContent         = '🛣️';
-          labelEl('lanes').textContent        = isNaN(numLanes) ? 'N/A' : numLanes;
+          labelEl('lanes').textContent        = (f.lanes===null) ? 'N/A' : f.lanes;
           iconEl('surface').textContent       = surfaceIcons[surf]||surfaceIcons.unknown;
           labelEl('surface').textContent      = surf.charAt(0).toUpperCase()+surf.slice(1);
 
-          // push data
+          // Push data for charts
           distances.push(totalDistance);
-          speeds.push(parseFloat(tags.maxspeed)||NaN);
+          speeds.push(parseFloat(tags.maxspeed) || NaN);
           roundabouts.push(+f.roundabout);
           stopSigns.push(+f.stopSign);
           trafficLights.push(+f.trafficLight);
@@ -268,21 +288,16 @@
           countries.push(f.country);
           tolls.push(+hasToll);
           lanesArr.push(numLanes);
-          surfacesArr.push(surf);
+          surfacesArr.push(f.surface);
 
-          // update info & charts
+          // Update info & charts
           info.innerHTML = `<strong>Distance:</strong> ${totalDistance.toFixed(1)} m`;
           updateCharts();
-
-          // popup
-          const pop = { ...f, tollStation: hasToll, lanes: numLanes, surface: surf };
-          const html = Object.entries(pop).map(([k,v])=>`<strong>${k}:</strong> ${v}`).join('<br>');
-          L.marker([lat,lon]).bindPopup(html).addTo(map);
         })
         .catch(console.error);
     }
 
-    // track position
+    // Track position
     function updatePosition(p){
       const [lat,lon] = [p.coords.latitude,p.coords.longitude];
       if(lastPos) totalDistance += haversine(lastPos,[lat,lon]);
@@ -292,10 +307,14 @@
       routeLine.addLatLng([lat,lon]);
       reverseGeocode(lat,lon);
     }
-    function handleError(e){ info.textContent=`Geolocation error: ${e.message}`; }
+    function handleError(e){
+      info.textContent=`Geolocation error: ${e.message}`;
+    }
+
     if(navigator.geolocation){
-      navigator.geolocation.watchPosition(updatePosition,handleError,
-        { enableHighAccuracy:true,maximumAge:0,timeout:5000 });
+      navigator.geolocation.watchPosition(updatePosition, handleError, {
+        enableHighAccuracy:true, maximumAge:0, timeout:5000
+      });
     } else {
       info.textContent = 'Geolocation not supported.';
     }
