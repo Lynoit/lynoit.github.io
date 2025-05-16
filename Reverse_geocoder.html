@@ -29,7 +29,7 @@
   <h1>Live Road Feature Tracking</h1>
   <div id="info">Locating…</div>
 
-  <!-- NEW: Current feature display -->
+  <!-- Current feature display -->
   <div id="currentFeature">
     <span class="icon">❓</span>
     <span class="label">Unknown</span>
@@ -58,44 +58,50 @@
     // Data arrays
     let lastPos = null;
     let totalDistance = 0;
-    const distances    = [];
-    const speeds       = [];
-    const roundabouts  = [];
-    const stopSigns    = [];
-    const trafficLights= [];
-    const bridges      = [];
-    const tunnels      = [];
-    const roadTypes    = [];
-    const cities       = [];
-    const countries    = [];
-    const tolls        = [];
-    const lanes        = [];
-    const surfaces     = [];
+    const distances     = [];
+    const speeds        = [];
+    const roundabouts   = [];
+    const stopSigns     = [];
+    const trafficLights = [];
+    const bridges       = [];
+    const tunnels       = [];
+    const roadTypes     = [];
+    const cities        = [];
+    const countries     = [];
+    const tolls         = [];
+    const lanes         = [];
+    const surfaces      = [];
 
     // Mapping of highway tag → icon + label
     const featureIcons = {
-      motorway:    '🛣️',
-      trunk:       '🛤️',
-      primary:     '🚧',
-      secondary:   '🛣️',
-      tertiary:    '🚗',
-      residential: '🏠',
-      service:     '⚙️',
-      cycleway:    '🚲',
-      footway:     '🚶',
-      unknown:     '❓'
+      motorway:       '🛣️',
+      motorway_link:  '🛣️',
+      trunk:          '🛤️',
+      trunk_link:     '🛤️',
+      primary:        '🚧',
+      primary_link:   '🚧',
+      secondary:      '🛣️',
+      secondary_link: '🛣️',
+      tertiary:       '🚗',
+      tertiary_link:  '🚗',
+      residential:    '🏠',
+      service:        '⚙️',
+      service_link:   '⚙️',
+      cycleway:       '🚲',
+      footway:        '🚶',
+      unknown:        '❓'
     };
 
-    // Grab the display element
+    // Grab the display elements
     const currentFeature = document.getElementById('currentFeature');
     const featureIconEl  = currentFeature.querySelector('.icon');
     const featureLabelEl = currentFeature.querySelector('.label');
 
-    // Setup map
+    // Setup map and layers
     const info = document.getElementById('info');
     const mapElem = document.getElementById('map');
     const map = L.map(mapElem).setView([0, 0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OSM contributors'
     }).addTo(map);
     const marker    = L.marker([0,0]).addTo(map);
@@ -105,7 +111,9 @@
     function haversine([lat1,lon1],[lat2,lon2]) {
       const R = 6371000, toRad = x => x * Math.PI/180;
       const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon/2)**2;
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
@@ -138,11 +146,11 @@
     const laneChart         = makeChart(document.getElementById('laneChart'),       'Number of Lanes', 'Lanes');
     const surfaceChart      = makeChart(document.getElementById('surfaceChart'),    'Surface',         'Category', 'category');
 
-    // Redraw all charts
+    // Update all charts
     function updateCharts() {
       const update = (chart, arr) => {
-        chart.data.datasets[0].data = distances.map((d,i) => ({ x:d, y:arr[i] }));
-        if (chart.options.scales.y.type==='category') {
+        chart.data.datasets[0].data = distances.map((d,i) => ({ x: d, y: arr[i] }));
+        if (chart.options.scales.y.type === 'category') {
           chart.options.scales.y.labels = Array.from(new Set(arr));
         }
         chart.update();
@@ -170,36 +178,37 @@
       lastReverseTime = now;
 
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1`)
-        .then(r => r.json())
+        .then(res => res.json())
         .then(data => {
-          const addr = data.address || {};
           const tags = data.extratags || {};
+          const addr = data.address   || {};
 
-          // existing extractions
+          // Extract existing features
           const features = {
             roadType:     tags.highway     || 'unknown',
             legalSpeed:   tags.maxspeed    || 'N/A',
-            roundabout:   tags.junction==='roundabout',
-            stopSign:     tags.highway==='stop',
-            trafficLight: tags.highway==='traffic_signals',
-            bridge:       tags.bridge==='yes',
-            tunnel:       tags.tunnel==='yes',
+            roundabout:   tags.junction    === 'roundabout',
+            stopSign:     tags.highway     === 'stop',
+            trafficLight: tags.highway     === 'traffic_signals',
+            bridge:       tags.bridge      === 'yes',
+            tunnel:       tags.tunnel      === 'yes',
             city:         addr.city||addr.town||addr.village||'Unknown',
             country:      addr.country     || 'Unknown'
           };
 
-          // new extractions
-          const hasToll  = tags.toll === 'yes';
-          const numLanes = parseInt(tags.lanes,10) || NaN;
-          const surfType = tags.surface || 'Unknown';
+          // Extract new features
+          const hasToll  = tags.toll   === 'yes';
+          const numLanes = parseInt(tags.lanes, 10) || NaN;
+          const surfType = tags.surface        || 'Unknown';
 
-          // update “current feature” display
-          const rt = features.roadType.toLowerCase();
-          const icon = featureIcons[rt] || featureIcons.unknown;
+          // Update current feature display
+          const key   = features.roadType;
+          const icon  = featureIcons[key] || featureIcons.unknown;
+          const label = key.charAt(0).toUpperCase() + key.slice(1);
           featureIconEl.textContent  = icon;
-          featureLabelEl.textContent = rt.charAt(0).toUpperCase() + rt.slice(1);
+          featureLabelEl.textContent = label;
 
-          // push into arrays
+          // Push into arrays
           distances.push(totalDistance);
           speeds.push(parseFloat(tags.maxspeed) || NaN);
           roundabouts.push(+features.roundabout);
@@ -214,18 +223,18 @@
           lanes.push(numLanes);
           surfaces.push(surfType);
 
-          // update info & charts
+          // Update info & charts
           info.innerHTML = `<p><strong>Distance:</strong> ${totalDistance.toFixed(1)} m</p>`;
           updateCharts();
 
-          // add popup marker
+          // Add popup marker
           const popupContent = Object.entries({
             ...features,
             tollStation: hasToll,
             lanes:       numLanes,
             surface:     surfType
           }).map(([k,v]) => `<strong>${k}:</strong> ${v}`).join('<br>');
-          L.marker([lat,lon]).bindPopup(popupContent).addTo(map);
+          L.marker([lat, lon]).bindPopup(popupContent).addTo(map);
         })
         .catch(console.error);
     }
@@ -233,22 +242,26 @@
     // Watch position
     function updatePosition(pos) {
       const lat = pos.coords.latitude, lon = pos.coords.longitude;
-      if (lastPos) totalDistance += haversine(lastPos,[lat,lon]);
-      lastPos = [lat,lon];
+      if (lastPos) totalDistance += haversine(lastPos, [lat, lon]);
+      lastPos = [lat, lon];
 
-      routeCoords.push([lat,lon]);
+      routeCoords.push([lat, lon]);
       routeLine.setLatLngs(routeCoords);
-      marker.setLatLng([lat,lon]);
-      map.setView([lat,lon],16);
+      marker.setLatLng([lat, lon]);
+      map.setView([lat, lon], 16);
 
       reverseGeocode(lat, lon);
     }
-    function handleError(err){
+
+    function handleError(err) {
       info.textContent = `Geolocation error: ${err.message}`;
     }
+
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(updatePosition, handleError, {
-        enableHighAccuracy: true, maximumAge: 0, timeout: 5000
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 5000
       });
     } else {
       info.textContent = 'Geolocation not supported.';
