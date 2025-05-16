@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nearby Places Explorer (Leaflet + OSM)</title>
+  <title>Nearby Places Explorer (Leaflet + Free Data)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
@@ -20,8 +20,8 @@
     <thead>
       <tr>
         <th>Radius</th>
-        <th>Most Visited (first)</th>
-        <th>Most Reviewed (most tags)</th>
+        <th>Most Visited</th>
+        <th>Most Reviewed</th>
         <th>Most Linked (Wikipedia)</th>
       </tr>
     </thead>
@@ -30,6 +30,10 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
+    // --- CONFIG: insert your keys here ---
+    const YELP_API_KEY = 'YOUR_YELP_API_KEY';
+    // -------------------------------------
+
     let map;
     let userPos;
     const radii = [100, 500, 1000, 5000, 10000];
@@ -55,7 +59,7 @@
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
       for (const r of radii) {
-        const [visited, reviewed] = await getOSMPlaces(r);
+        const [visited, reviewed] = await fetchYelpPlaces(r);
         const linked = await getMostLinkedWiki(r);
 
         [visited, reviewed, linked].forEach((place, idx) => {
@@ -78,34 +82,36 @@
       }
     }
 
-    async function getOSMPlaces(radius) {
+    // Use Yelp Fusion API for "visited" and "reviewed"
+    async function fetchYelpPlaces(radius) {
       const [lat, lon] = userPos;
-      const query = `[out:json][timeout:25];node(around:${radius},${lat},${lon})[amenity];out;`;
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: query
+      const url = `https://api.yelp.com/v3/businesses/search?latitude=${lat}&longitude=${lon}&radius=${radius}&limit=50`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${YELP_API_KEY}` }
       });
+      if (!res.ok) {
+        console.error('Yelp API error', await res.text());
+        return [null, null];
+      }
       const data = await res.json();
-      const elems = data.elements;
-      if (!elems || elems.length === 0) return [null, null];
+      const results = data.businesses;
+      if (!results || results.length === 0) return [null, null];
 
-      // "Most visited": simply take the first returned
-      const visited = elems[0];
-      // "Most reviewed": node with most tags
-      const sorted = elems.slice().sort((a, b) =>
-        ((b.tags && Object.keys(b.tags).length) || 0) - ((a.tags && Object.keys(a.tags).length) || 0)
-      );
-      const reviewed = sorted[0];
+      // Most Visited: first result (best match)
+      const visited = results[0];
+
+      // Most Reviewed: sort by review_count
+      const reviewed = results.slice().sort((a, b) => b.review_count - a.review_count)[0];
 
       return [
-        { name: visited.tags.name || visited.tags.amenity, lat: visited.lat, lng: visited.lon },
-        { name: reviewed.tags.name || reviewed.tags.amenity, lat: reviewed.lat, lng: reviewed.lon }
+        { name: visited.name, lat: visited.coordinates.latitude, lng: visited.coordinates.longitude },
+        { name: reviewed.name, lat: reviewed.coordinates.latitude, lng: reviewed.coordinates.longitude }
       ];
     }
 
+    // Wikipedia for most linked
     async function getMostLinkedWiki(radius) {
       const [lat, lon] = userPos;
-      // Wiki GeoSearch
       const geoRes = await fetch(
         `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`
       );
@@ -113,7 +119,6 @@
       const pages = geoData.query.geosearch;
       if (!pages || pages.length === 0) return null;
 
-      // Count incoming links for each
       const counts = await Promise.all(
         pages.map(async p => {
           const infoRes = await fetch(
