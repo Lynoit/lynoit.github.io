@@ -3,13 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nearby Places Explorer</title>
+  <title>Nearby Places Explorer (Leaflet + OSM)</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
     #map { height: 60vh; width: 100%; }
     #places-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
     #places-table th, #places-table td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
     #places-table th { background: #f4f4f4; }
+    .num-label { background: #fff; border: 1px solid #000; border-radius: 3px; padding: 2px 5px; }
   </style>
 </head>
 <body>
@@ -18,59 +20,53 @@
     <thead>
       <tr>
         <th>Radius</th>
-        <th>Most Visited</th>
-        <th>Most Reviewed</th>
+        <th>Most Visited (first)</th>
+        <th>Most Reviewed (most tags)</th>
         <th>Most Linked (Wikipedia)</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
     let map;
     let userPos;
     const radii = [100, 500, 1000, 5000, 10000];
 
-    function initMap() {
-      map = new google.maps.Map(document.getElementById('map'), {
-        center: { lat: 0, lng: 0 },
-        zoom: 14
-      });
-      getLocation();
-    }
-
-    function getLocation() {
+    function init() {
       if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(pos => {
-          userPos = {
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude
-          };
-          map.setCenter(userPos);
-          processAllRadii();
-        }, err => alert('Error getting location: ' + err.message));
+        navigator.geolocation.getCurrentPosition(onPos, err => alert('Error getting location: ' + err.message));
       } else {
         alert('Geolocation not supported.');
       }
     }
 
+    function onPos(pos) {
+      userPos = [pos.coords.latitude, pos.coords.longitude];
+      map = L.map('map').setView(userPos, 14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+      }).addTo(map);
+      L.marker(userPos).addTo(map).bindPopup('You are here').openPopup();
+      processAllRadii();
+    }
+
     async function processAllRadii() {
-      const tableBody = document.querySelector('#places-table tbody');
+      const tbody = document.querySelector('#places-table tbody');
       for (const r of radii) {
-        const [visited, reviewed] = await getPlacesForRadius(r);
+        const [visited, reviewed] = await getOSMPlaces(r);
         const linked = await getMostLinkedWiki(r);
 
-        // Add markers
         [visited, reviewed, linked].forEach((place, idx) => {
           if (!place) return;
-          new google.maps.Marker({
-            position: { lat: place.lat, lng: place.lng },
-            map,
-            label: String(idx + 1)
-          });
+          L.marker([place.lat, place.lng], {
+            icon: L.divIcon({ className: 'num-label', html: String(idx + 1) })
+          })
+            .addTo(map)
+            .bindPopup(place.name || place.title);
         });
 
-        // Append row
         const row = document.createElement('tr');
         row.innerHTML = `
           <td>${r} m</td>
@@ -78,70 +74,69 @@
           <td>${reviewed?.name || 'N/A'}</td>
           <td>${linked?.title || 'N/A'}</td>
         `;
-        tableBody.appendChild(row);
+        tbody.appendChild(row);
       }
     }
 
-    function getPlacesForRadius(radius) {
-      const service = new google.maps.places.PlacesService(map);
-      return Promise.all([
-        new Promise((resolve) => {
-          service.nearbySearch({
-            location: userPos,
-            radius,
-            rankBy: undefined,
-            keyword: '',
-          }, (results) => {
-            const top = results && results[0];
-            resolve(top ? { name: top.name, lat: top.geometry.location.lat(), lng: top.geometry.location.lng() } : null);
-          });
-        }),
-        new Promise((resolve) => {
-          service.nearbySearch({
-            location: userPos,
-            radius,
-            rankBy: undefined,
-            keyword: '',
-          }, (results) => {
-            if (results && results.length) {
-              const sorted = results.slice().sort((a, b) => (b.user_ratings_total || 0) - (a.user_ratings_total || 0));
-              const top = sorted[0];
-              resolve(top ? { name: top.name, lat: top.geometry.location.lat(), lng: top.geometry.location.lng() } : null);
-            } else resolve(null);
-          });
-        })
-      ]);
+    async function getOSMPlaces(radius) {
+      const [lat, lon] = userPos;
+      const query = `[out:json][timeout:25];node(around:${radius},${lat},${lon})[amenity];out;`;
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: query
+      });
+      const data = await res.json();
+      const elems = data.elements;
+      if (!elems || elems.length === 0) return [null, null];
+
+      // "Most visited": simply take the first returned
+      const visited = elems[0];
+      // "Most reviewed": node with most tags
+      const sorted = elems.slice().sort((a, b) =>
+        ((b.tags && Object.keys(b.tags).length) || 0) - ((a.tags && Object.keys(a.tags).length) || 0)
+      );
+      const reviewed = sorted[0];
+
+      return [
+        { name: visited.tags.name || visited.tags.amenity, lat: visited.lat, lng: visited.lon },
+        { name: reviewed.tags.name || reviewed.tags.amenity, lat: reviewed.lat, lng: reviewed.lon }
+      ];
     }
 
     async function getMostLinkedWiki(radius) {
-      const lat = userPos.lat;
-      const lon = userPos.lng;
-      // 1. GeoSearch
-      const geoRes = await fetch(`https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`);
+      const [lat, lon] = userPos;
+      // Wiki GeoSearch
+      const geoRes = await fetch(
+        `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`
+      );
       const geoData = await geoRes.json();
       const pages = geoData.query.geosearch;
       if (!pages || pages.length === 0) return null;
 
-      // 2. For each page, fetch number of incoming links
-      const counts = await Promise.all(pages.map(async p => {
-        const infoRes = await fetch(`https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(p.title)}&lhlimit=max&format=json`);
-        const infoData = await infoRes.json();
-        let totalLinks = 0;
-        const pagesObj = infoData.query.pages;
-        for (const pid in pagesObj) {
-          const links = pagesObj[pid].linkshere;
-          totalLinks = Array.isArray(links) ? links.length : 0;
-        }
-        return { title: p.title, lat: p.lat, lng: p.lon, links: totalLinks };
-      }));
-
-      // 3. Find max
+      // Count incoming links for each
+      const counts = await Promise.all(
+        pages.map(async p => {
+          const infoRes = await fetch(
+            `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(
+              p.title
+            )}&lhlimit=max&format=json`
+          );
+          const infoData = await infoRes.json();
+          let totalLinks = 0;
+          const pagesObj = infoData.query.pages;
+          for (const pid in pagesObj) {
+            const links = pagesObj[pid].linkshere;
+            totalLinks = Array.isArray(links) ? links.length : 0;
+          }
+          return { title: p.title, lat: p.lat, lng: p.lon, links: totalLinks };
+        })
+      );
       counts.sort((a, b) => b.links - a.links);
-      return counts[0] || null;
+      const top = counts[0];
+      return top ? { title: top.title, lat: top.lat, lng: top.lng } : null;
     }
-  </script>
-  <script async defer
-    src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY&libraries=places&callback=initMap">
+
+    window.onload = init;
   </script>
 </body>
 </html>
