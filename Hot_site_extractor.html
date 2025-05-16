@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer (With Upcoming Events via Proxy)</title>
+  <title>Nearby Places Explorer (With Upcoming Events from Wikidata)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -46,7 +46,7 @@
         <th>Most Visited<br><small>1–10 (Wiki pageviews)</small></th>
         <th>Most Linked<br><small>1–10 (Wiki links)</small></th>
         <th>Tourism<br><small>1–10 (OSM tourism)</small></th>
-        <th>Upcoming Events<br><small>1–10</small></th>
+        <th>Upcoming Events<br><small>1–10 (Wikidata events)</small></th>
       </tr>
     </thead>
     <tbody id="places-table"></tbody>
@@ -58,7 +58,6 @@
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
-    const TM_API_KEY = 'Rq1qDipyjm6G1YNyV0OyIE89Dr5vaQcl'; // ← replace this
 
     // --- Utilities ---
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
@@ -155,7 +154,7 @@
           getOSMReviewed(r),
           wikiGeoSearch(r),
           getOSMTourism(r),
-          getUpcomingEvents(r)
+          getWikidataEvents(r)
         ]);
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
@@ -201,9 +200,7 @@
 
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        node(around:${r},${lat},${lon})[amenity];
-        out body 100;`.replace(/\s+/g,' ');
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`.replace(/\s+/g,' ');
       const elems = (await (await fetchTimeout(
         'https://overpass-api.de/api/interpreter',
         { method:'POST', body:q }
@@ -235,9 +232,9 @@
       const start = new Date(end); start.setDate(start.getDate()-30);
       const sd = formatDate(start), ed = formatDate(end);
       const counts = await Promise.all(pages.map(async p=>{
-        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
-          `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
-          `/daily/${sd}/${ed}`;
+        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`
+          + `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`
+          + `/daily/${sd}/${ed}`;
         try {
           const body = await (await fetchTimeout(url)).json();
           const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
@@ -247,9 +244,7 @@
         }
       }));
       counts.sort((a,b)=>b.views - a.views);
-      return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
-      }));
+      return counts.slice(0,10).map(p=>({title:p.title, lat:p.lat, lng:p.lng}));
     }
 
     async function getWikiLinked(pages) {
@@ -268,59 +263,44 @@
         return { ...p, links };
       });
       counts.sort((a,b)=>b.links - a.links);
-      return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
-      }));
+      return counts.slice(0,10).map(p=>({title:p.title, lat:p.lat, lng:p.lng}));
     }
 
-    async function getOSMTourism(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        (node(around:${r},${lat},${lon})[tourism];
-         way(around:${r},${lat},${lon})[tourism];
-         rel(around:${r},${lat},${lon})[tourism];);
-        out center 50;`.replace(/\s+/g,' ');
-      const data = await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
-      )).json();
-      const elems = data.elements||[];
-      return elems.slice(0,10).map(el=>{
-        const name = el.tags?.name || el.tags?.tourism || 'Unknown';
-        const latc = el.lat || el.center?.lat;
-        const lonc = el.lon || el.center?.lon;
-        return { name, lat:latc, lng:lonc };
-      });
-    }
+    // --- New: Wikidata Upcoming Events ---
+    async function getWikidataEvents(r) {
+      const [lat, lon] = userPos;
+      const km = (r / 1000).toFixed(3);
+      const sparql = `
+        PREFIX wd: <http://www.wikidata.org/entity/>
+        PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+        PREFIX wikibase: <http://wikiba.se/ontology#>
+        PREFIX bd: <http://www.bigdata.com/rdf#>
+        SELECT ?event ?eventLabel ?coord WHERE {
+          SERVICE wikibase:around {
+            ?event wdt:P625 ?coord .
+            bd:serviceParam wikibase:center "Point(${lon} ${lat})"^^wikibase:WKT ;
+                             wikibase:radius "${km}" ;
+                             wikibase:distance ?dist .
+          }
+          ?event wdt:P31/wdt:P279* wd:Q1656682 ;
+                 wdt:P585 ?date .
+          FILTER(?date > NOW())
+          SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+        }
+        ORDER BY ?date
+        LIMIT 10
+      `;
+      const url = 'https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(sparql);
 
-    async function getUpcomingEvents(r) {
-      const [lat,lon] = userPos;
-      const miles = (r/1609.34).toFixed(2);
-      const params = new URLSearchParams({
-        apikey: TM_API_KEY,
-        latlong: `${lat},${lon}`,
-        radius: miles,
-        unit: 'miles',
-        size: '10',
-        sort: 'date,asc',
-        classificationName: 'music,arts,sports',
-        locale: '*'
-      });
-      const tmUrl = `https://app.ticketmaster.com/discovery/v2/events.json?${params}`;
-      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(tmUrl);
       try {
-        const wrapped = await (await fetchTimeout(proxyUrl)).json();
-        const data = JSON.parse(wrapped.contents);
-        const events = (data._embedded?.events||[]).slice(0,10);
-        return events.map(e => {
-          const v = e._embedded?.venues?.[0];
-          return {
-            name: e.name,
-            lat: parseFloat(v.location.latitude),
-            lng: parseFloat(v.location.longitude)
-          };
+        const response = await fetchTimeout(url);
+        const data = await response.json();
+        return data.results.bindings.map(b => {
+          const coords = b.coord.value.replace('Point(', '').replace(')', '').split(' ').map(parseFloat);
+          return { name: b.eventLabel.value, lat: coords[1], lng: coords[0] };
         });
-      } catch {
+      } catch (err) {
+        console.error('Wikidata SPARQL error:', err);
         return [];
       }
     }
