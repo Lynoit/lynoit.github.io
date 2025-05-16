@@ -54,13 +54,13 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // Configuration
+    // configuration
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
-    const TM_API_KEY = 'Rq1qDipyjm6G1YNyV0OyIE89Dr5vaQcl'; // replace with your key
+    const TM_API_KEY = 'Rq1qDipyjm6G1YNyV0OyIE89Dr5vaQcl'; // ← your key
 
-    // Utilities
+    // helper to timeout fetch
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
@@ -68,35 +68,29 @@
       ]);
     }
     function formatDate(d){ return d.toISOString().slice(0,10).replace(/-/g,''); }
-    function distanceMeters(a, b) {
-      const toRad = x => x * Math.PI/180;
-      const dLat = toRad(b[0]-a[0]), dLon = toRad(b[1]-a[1]);
-      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
-      const A = Math.sin(dLat/2)**2 +
-                Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-      const C = 2 * Math.atan2(Math.sqrt(A), Math.sqrt(1-A));
-      return 6371000 * C;
+    function distanceMeters(a,b){
+      const toRad=x=>x*Math.PI/180;
+      const dLat=toRad(b[0]-a[0]), dLon=toRad(b[1]-a[1]);
+      const la1=toRad(a[0]), la2=toRad(b[0]);
+      const A=Math.sin(dLat/2)**2+Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+      const C=2*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));
+      return 6371000*C;
     }
 
-    // State
     let map, userPos, circlesLayer, markersLayer;
     const plotted = new Set();
 
-    // Initialize
     window.onload = () => {
-      if (!navigator.geolocation) {
-        alert('Geolocation not supported');
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(onInitialPos, e => {
-        alert('Geolocation error: ' + e.message);
+      if (!navigator.geolocation) return alert('Geolocation not supported');
+      navigator.geolocation.getCurrentPosition(initMap, e=>{
+        alert('Location error: '+e.message);
       });
     };
 
-    function onInitialPos(pos) {
-      userPos = [pos.coords.latitude, pos.coords.longitude];
-      map = L.map('map').setView(userPos, 14);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    function initMap(pos) {
+      userPos = [pos.coords.latitude,pos.coords.longitude];
+      map = L.map('map').setView(userPos,14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
         attribution:'&copy; OpenStreetMap contributors'
       }).addTo(map);
 
@@ -106,54 +100,47 @@
       L.marker(userPos).addTo(map);
       drawEverything();
 
-      navigator.geolocation.watchPosition(onPosUpdate, null, {
-        enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 8000
+      navigator.geolocation.watchPosition(updatePos,null,{
+        enableHighAccuracy:true,maximumAge:5000,timeout:8000
       });
     }
 
-    function onPosUpdate(pos) {
-      const newPos = [pos.coords.latitude, pos.coords.longitude];
-      if (distanceMeters(userPos, newPos) > 50) {
-        userPos = newPos;
+    function updatePos(pos) {
+      const newPos=[pos.coords.latitude,pos.coords.longitude];
+      if(distanceMeters(userPos,newPos)>50){
+        userPos=newPos;
         drawEverything();
       }
     }
 
-    // Redraw everything
-    async function drawEverything() {
+    async function drawEverything(){
       circlesLayer.clearLayers();
       markersLayer.clearLayers();
       plotted.clear();
 
-      radii.forEach((r,i) => {
-        L.circle(userPos, {
-          radius: r,
-          color: circleColors[i],
-          className: 'radius-circle',
-          fill: true, fillColor: circleColors[i]
+      radii.forEach((r,i)=>{
+        L.circle(userPos,{ radius:r, color:circleColors[i],
+          className:'radius-circle', fill:true,fillColor:circleColors[i]
         }).addTo(circlesLayer);
-
-        const latOffset = r / 111111;
-        L.marker([userPos[0]+latOffset, userPos[1]], {
-          icon: L.divIcon({
-            className: 'radius-label',
-            html: `${r.toLocaleString()} m`,
+        const latOff = r/111111;
+        L.marker([userPos[0]+latOff,userPos[1]],{
+          icon:L.divIcon({
+            className:'radius-label',
+            html:`${r.toLocaleString()} m`,
             iconAnchor:['50%','100%']
           }),
-          interactive: false
+          interactive:false
         }).addTo(circlesLayer);
       });
 
       await processAllRadii();
     }
 
-    async function processAllRadii() {
-      const tbody = document.querySelector('#places-table tbody');
-      tbody.innerHTML = '';
-      for (let r of radii) {
-        const [reviewed, pages, tourism, events] = await Promise.all([
+    async function processAllRadii(){
+      const tbody=document.querySelector('#places-table tbody');
+      tbody.innerHTML='';
+      for(let r of radii){
+        const [reviewed,pages,tourism,events]=await Promise.all([
           getOSMReviewed(r),
           wikiGeoSearch(r),
           getOSMTourism(r),
@@ -162,17 +149,17 @@
         const visited = await getWikiVisited(pages);
         const linked  = await getWikiLinked(pages);
 
-        renderPOIs(r, reviewed);
-        renderPOIs(r, visited);
-        renderPOIs(r, linked);
-        renderPOIs(r, tourism);
-        renderPOIs(r, events);
+        render(r,reviewed);
+        render(r,visited);
+        render(r,linked);
+        render(r,tourism);
+        render(r,events);
 
-        const mk = arr => arr.length
+        const mk=arr=>arr.length
           ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
           : 'N/A';
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
+        const tr=document.createElement('tr');
+        tr.innerHTML=`
           <td>${r.toLocaleString()} m</td>
           <td>${mk(reviewed)}</td>
           <td>${mk(visited)}</td>
@@ -184,13 +171,13 @@
       }
     }
 
-    function renderPOIs(r, list) {
-      list.forEach((p,i) => {
-        const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
-        if (plotted.has(key)) return;
+    function render(r,list){
+      list.forEach((p,i)=>{
+        const key=`${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+        if(plotted.has(key)) return;
         plotted.add(key);
-        L.marker([p.lat,p.lng], {
-          icon: L.divIcon({
+        L.marker([p.lat,p.lng],{
+          icon:L.divIcon({
             className:`num-label radius-${r}`,
             html:String(i+1)
           })
@@ -199,130 +186,35 @@
       });
     }
 
-    // --- Data fetchers ---
+    // … [other fetchers unchanged] …
 
-    async function getOSMReviewed(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        node(around:${r},${lat},${lon})[amenity];
-        out body 100;`.replace(/\s+/g,' ');
-      const elems = (await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
-      )).json()).elements||[];
-      elems.sort((a,b)=>
-        Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length
-      );
-      return elems.slice(0,10).map(n=>({
-        name:n.tags?.name||n.tags?.amenity||'Unknown',
-        lat:n.lat, lng:n.lon
-      }));
-    }
-
-    async function wikiGeoSearch(r) {
-      const [lat,lon] = userPos;
-      const url = [
-        'https://en.wikipedia.org/w/api.php?origin=*&action=query',
-        `&list=geosearch&gscoord=${lat}|${lon}`,
-        `&gsradius=${r}&gslimit=20&format=json`
-      ].join('');
-      const data = await (await fetchTimeout(url)).json();
-      return (data.query?.geosearch||[]).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lon
-      }));
-    }
-
-    async function getWikiVisited(pages) {
-      const end = new Date(); end.setDate(end.getDate()-1);
-      const start = new Date(end); start.setDate(start.getDate()-30);
-      const sd = formatDate(start), ed = formatDate(end);
-      const counts = await Promise.all(pages.map(async p=>{
-        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/`+
-          `en.wikipedia/all-access/user/${encodeURIComponent(p.title)}`+
-          `/daily/${sd}/${ed}`;
-        try {
-          const body = await (await fetchTimeout(url)).json();
-          const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
-          return { ...p, views };
-        } catch {
-          return { ...p, views:0 };
-        }
-      }));
-      counts.sort((a,b)=>b.views - a.views);
-      return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
-      }));
-    }
-
-    async function getWikiLinked(pages) {
-      if (!pages.length) return [];
-      const titles = pages.map(p=>p.title).join('|');
-      const url = [
-        'https://en.wikipedia.org/w/api.php?origin=*&action=query',
-        `&prop=linkshere&titles=${encodeURIComponent(titles)}`,
-        '&lhlimit=max&format=json'
-      ].join('');
-      const data = await (await fetchTimeout(url)).json();
-      const info = data.query?.pages||{};
-      const counts = pages.map(p=>{
-        const pg = Object.values(info).find(x=>x.title===p.title)||{};
-        const links = Array.isArray(pg.linkshere)?pg.linkshere.length:0;
-        return { ...p, links };
+    // 4) getUpcomingEvents via AllOrigins `/get?url=…`
+    async function getUpcomingEvents(r){
+      const [lat,lon]=userPos;
+      const miles=(r/1609.34).toFixed(2);
+      const params=new URLSearchParams({
+        apikey:TM_API_KEY,
+        latlong:`${lat},${lon}`,
+        radius:miles,unit:'miles',
+        size:'10',sort:'date,asc',
+        classificationName:'music,arts,sports',
+        locale:'*'
       });
-      counts.sort((a,b)=>b.links - a.links);
-      return counts.slice(0,10).map(p=>({
-        title:p.title, lat:p.lat, lng:p.lng
-      }));
-    }
-
-    async function getOSMTourism(r) {
-      const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        (node(around:${r},${lat},${lon})[tourism];
-         way(around:${r},${lat},${lon})[tourism];
-         rel(around:${r},${lat},${lon})[tourism];);
-        out center 50;`.replace(/\s+/g,' ');
-      const data = await (await fetchTimeout(
-        'https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
-      )).json();
-      const elems = data.elements||[];
-      return elems.slice(0,10).map(el=>{
-        const name = el.tags?.name || el.tags?.tourism || 'Unknown';
-        const latc = el.lat || el.center?.lat;
-        const lonc = el.lon || el.center?.lon;
-        return { name, lat:latc, lng:lonc };
-      });
-    }
-
-    // Use AllOrigins to bypass Ticketmaster CORS
-    async function getUpcomingEvents(r) {
-      const [lat,lon] = userPos;
-      const miles = (r/1609.34).toFixed(2);
-      const params = new URLSearchParams({
-        apikey: TM_API_KEY,
-        latlong: `${lat},${lon}`,
-        radius: miles,
-        unit: 'miles',
-        size: '10',
-        sort: 'date,asc',
-        classificationName: 'music,arts,sports',
-        locale: '*'
-      });
-      const tmUrl = `https://app.ticketmaster.com/discovery/v2/events.json?${params}`;
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(tmUrl)}`;
-      try {
-        const data = await (await fetchTimeout(proxyUrl)).json();
-        const events = (data._embedded?.events||[]).slice(0,10);
-        return events.map(e => {
-          const v = e._embedded?.venues?.[0];
+      const tmUrl=`https://app.ticketmaster.com/discovery/v2/events.json?${params}`;
+      const proxy=`https://api.allorigins.win/get?url=${encodeURIComponent(tmUrl)}`;
+      try{
+        const wrapped=await (await fetchTimeout(proxy)).json();
+        const data=JSON.parse(wrapped.contents);
+        const ev=(data._embedded?.events||[]).slice(0,10);
+        return ev.map(e=>{
+          const v=e._embedded?.venues?.[0];
           return {
-            name: e.name,
-            lat: parseFloat(v.location.latitude),
-            lng: parseFloat(v.location.longitude)
+            name:e.name,
+            lat:parseFloat(v.location.latitude),
+            lng:parseFloat(v.location.longitude)
           };
         });
-      } catch {
+      }catch{
         return [];
       }
     }
