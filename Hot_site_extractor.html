@@ -3,21 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nearby Places Explorer (Leaflet + OSM + Wiki Top 5)</title>
+  <title>Nearby Places Explorer (Top 5)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-    #map { height: 60vh; width: 100%; }
-    #places-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    #places-table th, #places-table td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; }
-    #places-table th { background: #f4f4f4; }
-    .num-label {
-      background: #fff;
-      border: 1px solid #000;
-      border-radius: 3px;
-      padding: 2px 5px;
-      font-weight: bold;
+    body { font-family: Arial, sans-serif; margin:0; padding:0; }
+    #map { height:60vh; width:100%; }
+    #places-table { width:100%; border-collapse:collapse; margin-top:1rem; }
+    #places-table th, #places-table td {
+      border:1px solid #ccc;
+      padding:0.5rem;
+      vertical-align:top;
     }
+    #places-table th { background:#f4f4f4; }
+    .num-label {
+      background:#fff;
+      border:2px solid;
+      border-radius:3px;
+      padding:2px 6px;
+      font-weight:bold;
+      color:#fff;
+      width:1.5em;
+      text-align:center;
+    }
+    .visited { border-color:#d9534f; background:#d9534f; }
+    .reviewed { border-color:#5bc0de; background:#5bc0de; }
+    .linked { border-color:#5cb85c; background:#5cb85c; }
   </style>
 </head>
 <body>
@@ -26,9 +36,9 @@
     <thead>
       <tr>
         <th>Radius</th>
-        <th>Most Visited<br><small>(first 5)</small></th>
-        <th>Most Reviewed<br><small>(top 5 by tag count)</small></th>
-        <th>Most Linked<br><small>(top 5 Wikipedia)</small></th>
+        <th>Most Visited<br><small>(1–5)</small></th>
+        <th>Most Reviewed<br><small>(1–5)</small></th>
+        <th>Most Linked<br><small>(1–5)</small></th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -36,17 +46,15 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    let map;
-    let userPos;
+    let map, userPos;
     const radii = [100, 500, 1000, 5000, 10000];
 
     function init() {
       if (!navigator.geolocation) {
-        alert('Geolocation not supported.');
-        return;
+        return alert('Geolocation not supported.');
       }
-      navigator.geolocation.getCurrentPosition(onPos, err => {
-        alert('Error getting location: ' + err.message);
+      navigator.geolocation.getCurrentPosition(onPos, e => {
+        alert('Error getting location: ' + e.message);
       });
     }
 
@@ -54,7 +62,7 @@
       userPos = [pos.coords.latitude, pos.coords.longitude];
       map = L.map('map').setView(userPos, 14);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors'
+        attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
       L.marker(userPos).addTo(map).bindPopup('You are here').openPopup();
       processAllRadii();
@@ -62,38 +70,39 @@
 
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
-      for (const r of radii) {
+      for (let r of radii) {
         const [visitedList, reviewedList] = await getOSMPlaces(r);
         const linkedList = await getMostLinkedWiki(r);
 
-        // Place markers: V1–V5, R1–R5, W1–W5
-        [[visitedList, 'V'], [reviewedList, 'R'], [linkedList, 'W']]
-          .forEach(([list, prefix]) => {
-            list.forEach((place, i) => {
-              L.marker([place.lat, place.lng], {
-                icon: L.divIcon({
-                  className: 'num-label',
-                  html: `${prefix}${i+1}`
-                })
+        // Add markers: categories get their class for color
+        [
+          [visitedList, 'visited'],
+          [reviewedList, 'reviewed'],
+          [linkedList, 'linked']
+        ].forEach(([list, cls]) => {
+          list.forEach((place, i) => {
+            L.marker([place.lat, place.lng], {
+              icon: L.divIcon({
+                className: `num-label ${cls}`,
+                html: String(i+1)
               })
-                .addTo(map)
-                .bindPopup(place.name || place.title);
-            });
+            })
+            .addTo(map)
+            .bindPopup(`<strong>${i+1}. ${place.name||place.title}</strong>`);
           });
+        });
 
-        // Build table row with up to 5 items per column
+        // Build the row with numbered items
+        const mkCell = list => {
+          if (!list.length) return 'N/A';
+          return list.map((p,i) => `${i+1}. ${p.name||p.title}`).join('<br>');
+        };
         const row = document.createElement('tr');
         row.innerHTML = `
           <td>${r} m</td>
-          <td>${visitedList.length
-            ? visitedList.map(p => p.name).join('<br>')
-            : 'N/A'}</td>
-          <td>${reviewedList.length
-            ? reviewedList.map(p => p.name).join('<br>')
-            : 'N/A'}</td>
-          <td>${linkedList.length
-            ? linkedList.map(p => p.title).join('<br>')
-            : 'N/A'}</td>
+          <td>${mkCell(visitedList)}</td>
+          <td>${mkCell(reviewedList)}</td>
+          <td>${mkCell(linkedList)}</td>
         `;
         tbody.appendChild(row);
       }
@@ -104,71 +113,56 @@
       const query = `[out:json][timeout:25];
         node(around:${radius},${lat},${lon})[amenity];
         out;`;
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: query
+      let resp = await fetch('https://overpass-api.de/api/interpreter', {
+        method:'POST', body: query
       });
-      const data = await res.json();
-      const elems = data.elements || [];
+      let elems = (await resp.json()).elements || [];
 
-      // "Most visited": first 5 returned
-      const visitedList = elems.slice(0, 5).map(n => ({
-        name: n.tags.name || n.tags.amenity,
-        lat: n.lat,
-        lng: n.lon
+      const visitedList = elems.slice(0,5).map(n => ({
+        name: n.tags.name||n.tags.amenity,
+        lat: n.lat, lng: n.lon
       }));
-
-      // "Most reviewed": top 5 by tag count
       const reviewedList = elems
         .slice()
-        .sort((a, b) =>
-          ((b.tags && Object.keys(b.tags).length) || 0) -
-          ((a.tags && Object.keys(a.tags).length) || 0)
+        .sort((a,b)=>
+          ((b.tags?Object.keys(b.tags).length:0) -
+           (a.tags?Object.keys(a.tags).length:0))
         )
-        .slice(0, 5)
+        .slice(0,5)
         .map(n => ({
-          name: n.tags.name || n.tags.amenity,
-          lat: n.lat,
-          lng: n.lon
+          name: n.tags.name||n.tags.amenity,
+          lat: n.lat, lng: n.lon
         }));
-
       return [visitedList, reviewedList];
     }
 
     async function getMostLinkedWiki(radius) {
       const [lat, lon] = userPos;
-      const geoRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch` +
-        `&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`
+      let geoR = await fetch(
+        `https://en.wikipedia.org/w/api.php?origin=*&action=query` +
+        `&list=geosearch&gscoord=${lat}|${lon}` +
+        `&gsradius=${radius}&gslimit=20&format=json`
       );
-      const pages = (await geoRes.json()).query.geosearch || [];
+      let pages = (await geoR.json()).query.geosearch || [];
 
-      const counts = await Promise.all(
-        pages.map(async p => {
-          const infoRes = await fetch(
-            `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere` +
-            `&titles=${encodeURIComponent(p.title)}&lhlimit=max&format=json`
-          );
-          const pagesObj = (await infoRes.json()).query.pages;
-          let total = 0;
-          Object.values(pagesObj).forEach(pg => {
-            if (Array.isArray(pg.linkshere)) {
-              total += pg.linkshere.length;
-            }
-          });
-          return { title: p.title, lat: p.lat, lng: p.lon, links: total };
-        })
-      );
+      let counts = await Promise.all(pages.map(async p => {
+        let infoR = await fetch(
+          `https://en.wikipedia.org/w/api.php?origin=*&action=query` +
+          `&prop=linkshere&titles=${encodeURIComponent(p.title)}` +
+          `&lhlimit=max&format=json`
+        );
+        let pagesObj = (await infoR.json()).query.pages;
+        let total = 0;
+        Object.values(pagesObj).forEach(pg => {
+          if (Array.isArray(pg.linkshere)) total += pg.linkshere.length;
+        });
+        return { title:p.title, lat:p.lat, lng:p.lon, links:total };
+      }));
 
-      // Top 5 by incoming-link count
       return counts
-        .sort((a, b) => b.links - a.links)
-        .slice(0, 5)
-        .map(p => ({
-          title: p.title,
-          lat: p.lat,
-          lng: p.lng
-        }));
+        .sort((a,b)=>b.links - a.links)
+        .slice(0,5)
+        .map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
     }
 
     window.onload = init;
