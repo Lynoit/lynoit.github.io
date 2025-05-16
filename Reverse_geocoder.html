@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reverse Geocode Road Features Live Plots</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2em; }
+    #info { margin-bottom: 1em; font-size: 1em; }
+    #map { height: 300px; width: 100%; margin-bottom: 2em; border: 1px solid #ccc; }
+    .chart-container { width: 100%; max-width: 600px; margin-bottom: 2em; }
+  </style>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h1>Live Road Feature Tracking</h1>
+  <div id="info">Locating…</div>
+  <div id="map"></div>
+
+  <div id="charts">
+    <div class="chart-container"><canvas id="speedChart"></canvas></div>
+    <div class="chart-container"><canvas id="roundaboutChart"></canvas></div>
+    <div class="chart-container"><canvas id="stopSignChart"></canvas></div>
+    <div class="chart-container"><canvas id="trafficLightChart"></canvas></div>
+    <div class="chart-container"><canvas id="bridgeChart"></canvas></div>
+    <div class="chart-container"><canvas id="tunnelChart"></canvas></div>
+    <div class="chart-container"><canvas id="roadTypeChart"></canvas></div>
+    <div class="chart-container"><canvas id="cityChart"></canvas></div>
+    <div class="chart-container"><canvas id="countryChart"></canvas></div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // Data arrays
+    let lastPos = null;
+    let totalDistance = 0;
+    const distances = [];
+    const speeds = [];
+    const roundabouts = [];
+    const stopSigns = [];
+    const trafficLights = [];
+    const bridges = [];
+    const tunnels = [];
+    const roadTypes = [];
+    const cities = [];
+    const countries = [];
+
+    // Route storage
+    const routeCoords = [];
+
+    // Setup map and layers
+    const info = document.getElementById('info');
+    const mapElem = document.getElementById('map');
+    const map = L.map(mapElem).setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OSM contributors'
+    }).addTo(map);
+    const marker = L.marker([0,0]).addTo(map);
+    const routeLine = L.polyline([], { color: 'blue', weight: 3 }).addTo(map);
+
+    // Haversine formula
+    function haversine([lat1,lon1],[lat2,lon2]) {
+      const R = 6371000;
+      const toRad = x => x * Math.PI / 180;
+      const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    // Initialize charts
+    const makeChart = (ctx, label, yLabel, yType='linear') => new Chart(ctx, {
+      type: 'scatter',
+      data: { datasets: [{ label, data: [] }] },
+      options: { scales: { x: { title: { display: true, text: 'Distance (m)' } }, y: { type: yType, title: { display: true, text: yLabel } } } }
+    });
+
+    const speedChart = makeChart(document.getElementById('speedChart'), 'Legal Speed', 'Speed (km/h)');
+    const roundaboutChart = makeChart(document.getElementById('roundaboutChart'), 'Roundabout', 'Presence (1/0)');
+    const stopSignChart = makeChart(document.getElementById('stopSignChart'), 'Stop Sign', 'Presence (1/0)');
+    const trafficLightChart = makeChart(document.getElementById('trafficLightChart'), 'Traffic Light', 'Presence (1/0)');
+    const bridgeChart = makeChart(document.getElementById('bridgeChart'), 'Bridge', 'Presence (1/0)');
+    const tunnelChart = makeChart(document.getElementById('tunnelChart'), 'Tunnel', 'Presence (1/0)');
+    const roadTypeChart = makeChart(document.getElementById('roadTypeChart'), 'Road Type', 'Category', 'category');
+    const cityChart = makeChart(document.getElementById('cityChart'), 'City', 'Category', 'category');
+    const countryChart = makeChart(document.getElementById('countryChart'), 'Country', 'Category', 'category');
+
+    // Update charts
+    function updateCharts() {
+      const update = (chart, arr) => {
+        chart.data.datasets[0].data = distances.map((d,i) => ({ x: d, y: arr[i] }));
+        if (chart.options.scales.y.type === 'category') {
+          chart.options.scales.y.labels = Array.from(new Set(arr));
+        }
+        chart.update();
+      };
+      update(speedChart, speeds);
+      update(roundaboutChart, roundabouts);
+      update(stopSignChart, stopSigns);
+      update(trafficLightChart, trafficLights);
+      update(bridgeChart, bridges);
+      update(tunnelChart, tunnels);
+      update(roadTypeChart, roadTypes);
+      update(cityChart, cities);
+      update(countryChart, countries);
+    }
+
+    // Reverse geocode with extra tags & add popup marker
+    function reverseGeocode(lat, lon) {
+      fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1`)
+        .then(res => res.json()).then(data => {
+          const addr = data.address || {};
+          const tags = data.extratags || {};
+
+          // Extract features
+          const features = {
+            roadType: tags.highway || 'Unknown',
+            legalSpeed: tags.maxspeed || 'N/A',
+            roundabout: tags.junction === 'roundabout',
+            stopSign: tags.highway === 'stop',
+            trafficLight: tags.highway === 'traffic_signals',
+            bridge: tags.bridge === 'yes',
+            tunnel: tags.tunnel === 'yes',
+            city: addr.city || addr.town || addr.village || 'Unknown',
+            country: addr.country || 'Unknown'
+          };
+
+          // Store data arrays
+          distances.push(totalDistance);
+          speeds.push(parseFloat(tags.maxspeed) || NaN);
+          roundabouts.push(features.roundabout ? 1 : 0);
+          stopSigns.push(features.stopSign ? 1 : 0);
+          trafficLights.push(features.trafficLight ? 1 : 0);
+          bridges.push(features.bridge ? 1 : 0);
+          tunnels.push(features.tunnel ? 1 : 0);
+          roadTypes.push(features.roadType);
+          cities.push(features.city);
+          countries.push(features.country);
+
+          // Update display & charts
+          info.innerHTML = `<p><strong>Distance:</strong> ${totalDistance.toFixed(1)} m</p>`;
+          updateCharts();
+
+          // Add popup pin on map
+          const popupContent = Object.entries(features)
+            .map(([k,v]) => `<strong>${k}:</strong> ${v}`)
+            .join('<br>');
+          L.marker([lat, lon])
+            .bindPopup(popupContent)
+            .addTo(map);
+        })
+        .catch(err => console.error('Reverse geocode error', err));
+    }
+
+    // Position updates: track route and invoke reverse geocode
+    function updatePosition(pos) {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      if (lastPos) {
+        totalDistance += haversine(lastPos, [lat, lon]);
+      }
+      lastPos = [lat, lon];
+
+      // Update route polyline
+      routeCoords.push([lat, lon]);
+      routeLine.setLatLngs(routeCoords);
+
+      // Move marker & view
+      marker.setLatLng([lat, lon]);
+      map.setView([lat, lon], 16);
+
+      // Reverse geocode and annotate
+      reverseGeocode(lat, lon);
+    }
+
+    function handleError(err) {
+      info.textContent = `Geolocation error: ${err.message}`;
+    }
+
+    // Start geolocation watch
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(updatePosition, handleError, { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 });
+    } else {
+      info.textContent = 'Geolocation not supported.';
+    }
+  </script>
+</body>
+</html>
