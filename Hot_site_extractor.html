@@ -49,20 +49,17 @@
     let map, userPos;
     const radii = [100, 500, 1000, 5000, 10000, 50000];
     const circleColors = ['#F94144','#F3722C','#F8961E','#F9844A','#F9C74F','#90BE6D'];
-    const TIMEOUT = 8000; // ms
+    const TIMEOUT = 8000;
 
-    // simple timeout wrapper (doesn't abort the fetch, but rejects)
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
       return Promise.race([
         fetch(url, opts),
-        new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), t))
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), t))
       ]);
     }
 
     function init() {
-      if (!navigator.geolocation) {
-        return alert('Geolocation not supported');
-      }
+      if (!navigator.geolocation) return alert('Geolocation not supported');
       navigator.geolocation.getCurrentPosition(onPos, e => {
         alert('Could not get location: ' + e.message);
       });
@@ -75,7 +72,6 @@
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
 
-      // draw radius circles
       radii.forEach((r,i) => {
         L.circle(userPos, {
           radius: r,
@@ -85,9 +81,7 @@
         }).addTo(map);
       });
 
-      L.marker(userPos).addTo(map)
-        .bindPopup('You are here').openPopup();
-
+      L.marker(userPos).addTo(map).bindPopup('You are here').openPopup();
       processAllRadii();
     }
 
@@ -98,23 +92,16 @@
         const r = radii[idx];
         let visited = [], reviewed = [], linked = [];
 
-        // fetch from OSM
         try {
           [visited, reviewed] = await getOSMPlaces(r);
-        } catch(e) {
-          console.warn('OSM failed @',r,e);
-        }
-        // fetch from Wikipedia
+        } catch(e) { console.warn('OSM failed @', r, e); }
         try {
           linked = await getMostLinkedWiki(r);
-        } catch(e) {
-          console.warn('Wiki failed @',r,e);
-        }
+        } catch(e) { console.warn('Wiki failed @', r, e); }
 
-        // markers: same color per radius, numbers 1–5
         [visited, reviewed, linked].forEach(list => {
           list.forEach((p,i) => {
-            L.marker([p.lat,p.lng], {
+            L.marker([p.lat, p.lng], {
               icon: L.divIcon({
                 className: `num-label radius-${r}`,
                 html: String(i+1)
@@ -125,11 +112,11 @@
           });
         });
 
-        // build table row
         const mk = arr =>
           arr.length
             ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>')
             : 'N/A';
+
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${r.toLocaleString()} m</td>
@@ -143,14 +130,13 @@
 
     async function getOSMPlaces(r) {
       const [lat,lon] = userPos;
-      const q = `[out:json][timeout:8];
-        node(around:${r},${lat},${lon})[amenity];
-        out body 50;`.replace(/\s+/g,' ');
-      const res = await fetchTimeout('https://overpass-api.de/api/interpreter',
-        { method:'POST', body:q }
-      );
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 50;`;
+      const res = await fetchTimeout('https://overpass-api.de/api/interpreter', {
+        method:'POST', body: q
+      });
       if (!res.ok) throw new Error(res.status);
       const elems = (await res.json()).elements.slice(0,200);
+
       const visited = elems.slice(0,5).map(n=>({
         name: n.tags?.name||n.tags?.amenity||'?', lat:n.lat, lng:n.lon
       }));
@@ -167,41 +153,39 @@
       return [visited, reviewed];
     }
 
+    /* ←-- this one is fixed: */
     async function getMostLinkedWiki(r) {
-      const [lat,lon] = userPos;
+      const [lat, lon] = userPos;
       const geoUrl = [
         'https://en.wikipedia.org/w/api.php?origin=*&action=query',
         `&list=geosearch&gscoord=${lat}|${lon}`,
         `&gsradius=${r}&gslimit=10&format=json`
       ].join('');
       const geoRes = await fetchTimeout(geoUrl);
-      if (!geoRes.ok) throw new Error(geoRes.status);
+      if (!geoRes.ok) throw new Error(`GeoSearch ${geoRes.status}`);
       const pages = (await geoRes.json()).query.geosearch || [];
       if (!pages.length) return [];
 
-      // single call for all linkshere counts
-      const titles = pages.map(p=>p.title).join('|');
+      const titles = pages.map(p => p.title).join('|');
       const infoUrl = [
         'https://en.wikipedia.org/w/api.php?origin=*&action=query',
         `&prop=linkshere&titles=${encodeURIComponent(titles)}`,
         '&lhlimit=max&format=json'
       ].join('');
       const infoRes = await fetchTimeout(infoUrl);
-      if (!infoRes.ok) throw new Error(infoRes.status);
+      if (!infoRes.ok) throw new Error(`Linkshere ${infoRes.status}`);
       const infoPages = (await infoRes.json()).query.pages;
 
-      // map counts back to geosearch entries
       const counts = pages.map(p => {
-        const pg = Object.values(infoPages)
-          .find(x => x.title === p.title) || {};
-        const links = Array.isArray(pg.linkshere)? pg.linkshere.length : 0;
-        return { title:p.title, lat:p.lat, lng:p.lon, links };
+        const pg = Object.values(infoPages).find(x => x.title === p.title) || {};
+        const links = Array.isArray(pg.linkshere) ? pg.linkshere.length : 0;
+        return { title: p.title, lat: p.lat, lng: p.lon, links };
       });
 
       return counts
         .sort((a,b)=>b.links - a.links)
         .slice(0,5)
-        .map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
+        .map(p=>({ title:p.title, lat:p.lat, lng:p.lng })); // <-- use p.lng
     }
 
     window.onload = init;
