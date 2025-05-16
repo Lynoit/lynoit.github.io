@@ -7,6 +7,16 @@
   <style>
     body { font-family: Arial, sans-serif; margin: 2em; }
     #info { margin-bottom: 1em; font-size: 1em; }
+    #currentFeature {
+      display: flex;
+      align-items: center;
+      margin-bottom: 1em;
+      font-size: 1.2em;
+    }
+    #currentFeature .icon {
+      font-size: 1.5em;
+      margin-right: 0.5em;
+    }
     #map { height: 300px; width: 100%; margin-bottom: 2em; border: 1px solid #ccc; }
     .chart-container { width: 100%; max-width: 600px; margin-bottom: 2em; }
   </style>
@@ -18,6 +28,13 @@
 <body>
   <h1>Live Road Feature Tracking</h1>
   <div id="info">Locating…</div>
+
+  <!-- NEW: Current feature display -->
+  <div id="currentFeature">
+    <span class="icon">❓</span>
+    <span class="label">Unknown</span>
+  </div>
+
   <div id="map"></div>
 
   <div id="charts">
@@ -30,7 +47,6 @@
     <div class="chart-container"><canvas id="roadTypeChart"></canvas></div>
     <div class="chart-container"><canvas id="cityChart"></canvas></div>
     <div class="chart-container"><canvas id="countryChart"></canvas></div>
-    <!-- New charts -->
     <div class="chart-container"><canvas id="tollChart"></canvas></div>
     <div class="chart-container"><canvas id="laneChart"></canvas></div>
     <div class="chart-container"><canvas id="surfaceChart"></canvas></div>
@@ -52,40 +68,48 @@
     const roadTypes    = [];
     const cities       = [];
     const countries    = [];
-    // New data arrays
     const tolls        = [];
     const lanes        = [];
     const surfaces     = [];
 
-    // Route storage
-    const routeCoords = [];
+    // Mapping of highway tag → icon + label
+    const featureIcons = {
+      motorway:    '🛣️',
+      trunk:       '🛤️',
+      primary:     '🚧',
+      secondary:   '🛣️',
+      tertiary:    '🚗',
+      residential: '🏠',
+      service:     '⚙️',
+      cycleway:    '🚲',
+      footway:     '🚶',
+      unknown:     '❓'
+    };
 
-    // Throttle control
-    let lastReverseTime = 0;
-    const minInterval = 1000; // ms
+    // Grab the display element
+    const currentFeature = document.getElementById('currentFeature');
+    const featureIconEl  = currentFeature.querySelector('.icon');
+    const featureLabelEl = currentFeature.querySelector('.label');
 
-    // Setup map and layers
+    // Setup map
     const info = document.getElementById('info');
     const mapElem = document.getElementById('map');
     const map = L.map(mapElem).setView([0, 0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
       attribution: '&copy; OSM contributors'
     }).addTo(map);
-    const marker = L.marker([0,0]).addTo(map);
+    const marker    = L.marker([0,0]).addTo(map);
     const routeLine = L.polyline([], { color: 'blue', weight: 3 }).addTo(map);
 
     // Haversine formula
     function haversine([lat1,lon1],[lat2,lon2]) {
-      const R = 6371000;
-      const toRad = x => x * Math.PI / 180;
+      const R = 6371000, toRad = x => x * Math.PI/180;
       const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
-      const a = Math.sin(dLat/2)**2
-              + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))
-              * Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
-    // Initialize charts
+    // Chart factory
     const makeChart = (ctx, label, yLabel, yType='linear') => new Chart(ctx, {
       type: 'scatter',
       data: { datasets: [{ label, data: [] }] },
@@ -100,30 +124,29 @@
       }
     });
 
-    const speedChart        = makeChart(document.getElementById('speedChart'),      'Legal Speed',    'Speed (km/h)');
-    const roundaboutChart   = makeChart(document.getElementById('roundaboutChart'), 'Roundabout',     'Presence (1/0)');
-    const stopSignChart     = makeChart(document.getElementById('stopSignChart'),   'Stop Sign',      'Presence (1/0)');
-    const trafficLightChart = makeChart(document.getElementById('trafficLightChart'),'Traffic Light',  'Presence (1/0)');
-    const bridgeChart       = makeChart(document.getElementById('bridgeChart'),     'Bridge',         'Presence (1/0)');
-    const tunnelChart       = makeChart(document.getElementById('tunnelChart'),     'Tunnel',         'Presence (1/0)');
-    const roadTypeChart     = makeChart(document.getElementById('roadTypeChart'),   'Road Type',      'Category', 'category');
-    const cityChart         = makeChart(document.getElementById('cityChart'),       'City',           'Category', 'category');
-    const countryChart      = makeChart(document.getElementById('countryChart'),    'Country',        'Category', 'category');
-    // New charts
-    const tollChart         = makeChart(document.getElementById('tollChart'),       'Toll Station',   'Presence (1/0)');
-    const laneChart         = makeChart(document.getElementById('laneChart'),       'Number of Lanes','Lanes');
-    const surfaceChart      = makeChart(document.getElementById('surfaceChart'),    'Surface',        'Category', 'category');
+    // Initialize charts
+    const speedChart        = makeChart(document.getElementById('speedChart'),      'Legal Speed',     'Speed (km/h)');
+    const roundaboutChart   = makeChart(document.getElementById('roundaboutChart'), 'Roundabout',      'Presence (1/0)');
+    const stopSignChart     = makeChart(document.getElementById('stopSignChart'),   'Stop Sign',       'Presence (1/0)');
+    const trafficLightChart = makeChart(document.getElementById('trafficLightChart'),'Traffic Light',   'Presence (1/0)');
+    const bridgeChart       = makeChart(document.getElementById('bridgeChart'),     'Bridge',          'Presence (1/0)');
+    const tunnelChart       = makeChart(document.getElementById('tunnelChart'),     'Tunnel',          'Presence (1/0)');
+    const roadTypeChart     = makeChart(document.getElementById('roadTypeChart'),   'Road Type',       'Category', 'category');
+    const cityChart         = makeChart(document.getElementById('cityChart'),       'City',            'Category', 'category');
+    const countryChart      = makeChart(document.getElementById('countryChart'),    'Country',         'Category', 'category');
+    const tollChart         = makeChart(document.getElementById('tollChart'),       'Toll Station',    'Presence (1/0)');
+    const laneChart         = makeChart(document.getElementById('laneChart'),       'Number of Lanes', 'Lanes');
+    const surfaceChart      = makeChart(document.getElementById('surfaceChart'),    'Surface',         'Category', 'category');
 
-    // Update charts
+    // Redraw all charts
     function updateCharts() {
       const update = (chart, arr) => {
-        chart.data.datasets[0].data = distances.map((d,i) => ({ x: d, y: arr[i] }));
-        if (chart.options.scales.y.type === 'category') {
+        chart.data.datasets[0].data = distances.map((d,i) => ({ x:d, y:arr[i] }));
+        if (chart.options.scales.y.type==='category') {
           chart.options.scales.y.labels = Array.from(new Set(arr));
         }
         chart.update();
       };
-
       update(speedChart,        speeds);
       update(roundaboutChart,   roundabouts);
       update(stopSignChart,     stopSigns);
@@ -133,55 +156,61 @@
       update(roadTypeChart,     roadTypes);
       update(cityChart,         cities);
       update(countryChart,      countries);
-      // new updates
       update(tollChart,         tolls);
       update(laneChart,         lanes);
       update(surfaceChart,      surfaces);
     }
 
-    // Reverse geocode with throttle and add popup marker
+    // Reverse geocode + feature display
+    let lastReverseTime = 0;
+    const minInterval = 1000;
     function reverseGeocode(lat, lon) {
       const now = Date.now();
       if (now - lastReverseTime < minInterval) return;
       lastReverseTime = now;
 
       fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&extratags=1`)
-        .then(res => res.json())
+        .then(r => r.json())
         .then(data => {
           const addr = data.address || {};
           const tags = data.extratags || {};
 
-          // existing features
+          // existing extractions
           const features = {
-            roadType:      tags.highway || 'Unknown',
-            legalSpeed:    tags.maxspeed || 'N/A',
-            roundabout:    tags.junction === 'roundabout',
-            stopSign:      tags.highway === 'stop',
-            trafficLight:  tags.highway === 'traffic_signals',
-            bridge:        tags.bridge === 'yes',
-            tunnel:        tags.tunnel === 'yes',
-            city:          addr.city || addr.town || addr.village || 'Unknown',
-            country:       addr.country || 'Unknown'
+            roadType:     tags.highway     || 'unknown',
+            legalSpeed:   tags.maxspeed    || 'N/A',
+            roundabout:   tags.junction==='roundabout',
+            stopSign:     tags.highway==='stop',
+            trafficLight: tags.highway==='traffic_signals',
+            bridge:       tags.bridge==='yes',
+            tunnel:       tags.tunnel==='yes',
+            city:         addr.city||addr.town||addr.village||'Unknown',
+            country:      addr.country     || 'Unknown'
           };
 
-          // new feature extractions
+          // new extractions
           const hasToll  = tags.toll === 'yes';
-          const numLanes = parseInt(tags.lanes, 10) || NaN;
+          const numLanes = parseInt(tags.lanes,10) || NaN;
           const surfType = tags.surface || 'Unknown';
+
+          // update “current feature” display
+          const rt = features.roadType.toLowerCase();
+          const icon = featureIcons[rt] || featureIcons.unknown;
+          featureIconEl.textContent  = icon;
+          featureLabelEl.textContent = rt.charAt(0).toUpperCase() + rt.slice(1);
 
           // push into arrays
           distances.push(totalDistance);
           speeds.push(parseFloat(tags.maxspeed) || NaN);
-          roundabouts.push(features.roundabout ? 1 : 0);
-          stopSigns.push(features.stopSign ? 1 : 0);
-          trafficLights.push(features.trafficLight ? 1 : 0);
-          bridges.push(features.bridge ? 1 : 0);
-          tunnels.push(features.tunnel ? 1 : 0);
+          roundabouts.push(+features.roundabout);
+          stopSigns.push(+features.stopSign);
+          trafficLights.push(+features.trafficLight);
+          bridges.push(+features.bridge);
+          tunnels.push(+features.tunnel);
           roadTypes.push(features.roadType);
           cities.push(features.city);
           countries.push(features.country);
-          // new pushes
-          tolls.push(hasToll ? 1 : 0);
+          tolls.push(+hasToll);
           lanes.push(numLanes);
           surfaces.push(surfType);
 
@@ -195,40 +224,31 @@
             tollStation: hasToll,
             lanes:       numLanes,
             surface:     surfType
-          })
-            .map(([k,v]) => `<strong>${k}:</strong> ${v}`)
-            .join('<br>');
-          L.marker([lat, lon]).bindPopup(popupContent).addTo(map);
+          }).map(([k,v]) => `<strong>${k}:</strong> ${v}`).join('<br>');
+          L.marker([lat,lon]).bindPopup(popupContent).addTo(map);
         })
-        .catch(err => console.error('Reverse geocode error', err));
+        .catch(console.error);
     }
 
-    // Position updates: track route and invoke reverse geocode
+    // Watch position
     function updatePosition(pos) {
-      const lat = pos.coords.latitude;
-      const lon = pos.coords.longitude;
-      if (lastPos) {
-        totalDistance += haversine(lastPos, [lat, lon]);
-      }
-      lastPos = [lat, lon];
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
+      if (lastPos) totalDistance += haversine(lastPos,[lat,lon]);
+      lastPos = [lat,lon];
 
-      routeCoords.push([lat, lon]);
+      routeCoords.push([lat,lon]);
       routeLine.setLatLngs(routeCoords);
-      marker.setLatLng([lat, lon]);
-      map.setView([lat, lon], 16);
+      marker.setLatLng([lat,lon]);
+      map.setView([lat,lon],16);
 
       reverseGeocode(lat, lon);
     }
-
-    function handleError(err) {
+    function handleError(err){
       info.textContent = `Geolocation error: ${err.message}`;
     }
-
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(updatePosition, handleError, {
-        enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 5000
+        enableHighAccuracy: true, maximumAge: 0, timeout: 5000
       });
     } else {
       info.textContent = 'Geolocation not supported.';
