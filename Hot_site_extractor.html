@@ -3,22 +3,32 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Nearby Places Explorer (Top 5, reliable)</title>
+  <title>Nearby Places Explorer (Top 5 + Radii)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
-    body { margin:0; font-family:Arial,sans-serif }
-    #map { height:60vh; width:100% }
-    table { width:100%; border-collapse:collapse; margin-top:1rem }
-    th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
-    th { background:#f4f4f4 }
-    .num-label { 
-      display:inline-block; width:1.8em; height:1.8em; 
-      line-height:1.8em; text-align:center; color:#fff; font-weight:bold; 
-      border-radius:50%; margin-right:4px;
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #map { height: 60vh; width: 100%; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; }
+    th { background: #f4f4f4; }
+    .num-label {
+      display: inline-block;
+      width: 1.8em; height: 1.8em;
+      line-height: 1.8em;
+      text-align: center;
+      color: #fff; font-weight: bold;
+      border-radius: 50%;
+      border: 2px solid;
     }
-    .visited  { background:#d9534f }
-    .reviewed { background:#5bc0de }
-    .linked   { background:#5cb85c }
+    /* radius‐based colors */
+    .num-label.radius-100   { background: #F94144; border-color: #F94144; }
+    .num-label.radius-500   { background: #F3722C; border-color: #F3722C; }
+    .num-label.radius-1000  { background: #F8961E; border-color: #F8961E; }
+    .num-label.radius-5000  { background: #F9844A; border-color: #F9844A; }
+    .num-label.radius-10000 { background: #F9C74F; border-color: #F9C74F; }
+    .num-label.radius-50000 { background: #90BE6D; border-color: #90BE6D; }
+    /* optional: style circles lightly */
+    .radius-circle { fill: none; stroke-opacity: 0.3; }
   </style>
 </head>
 <body>
@@ -38,10 +48,19 @@
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
     let map, userPos;
-    const radii = [100, 500, 1000, 5000, 10000];
-    const FETCH_TIMEOUT = 8000; // ms
+    // include 50 000 m as requested
+    const radii = [100, 500, 1000, 5000, 10000, 50000];
+    // matching colors for circles (same as marker colors)
+    const circleColors = [
+      '#F94144',
+      '#F3722C',
+      '#F8961E',
+      '#F9844A',
+      '#F9C74F',
+      '#90BE6D'
+    ];
+    const FETCH_TIMEOUT = 8000;
 
-    // Fetch wrapper with timeout
     function fetchWithTimeout(input, opts = {}, timeout = FETCH_TIMEOUT) {
       const controller = new AbortController();
       const id = setTimeout(() => controller.abort(), timeout);
@@ -64,54 +83,73 @@
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors'
       }).addTo(map);
-      L.marker(userPos).addTo(map).bindPopup('You are here').openPopup();
+
+      // draw concentric circles
+      radii.forEach((r, i) => {
+        L.circle(userPos, {
+          radius: r,
+          color: circleColors[i],
+          weight: 1,
+          className: 'radius-circle'
+        }).addTo(map);
+      });
+
+      L.marker(userPos)
+        .addTo(map)
+        .bindPopup('You are here')
+        .openPopup();
+
       processAllRadii();
     }
 
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
-      for (let r of radii) {
+      // clear any existing rows
+      tbody.innerHTML = '';
+
+      for (let idx = 0; idx < radii.length; idx++) {
+        const r = radii[idx];
         let visitedList = [], reviewedList = [], linkedList = [];
 
-        // 1) OSM
+        // OSM places
         try {
           [visitedList, reviewedList] = await getOSMPlaces(r);
         } catch (err) {
-          console.warn(`OSM @${r} m failed:`, err);
+          console.warn(`OSM @ ${r}m failed:`, err);
         }
 
-        // 2) Wiki
+        // Wikipedia places
         try {
           linkedList = await getMostLinkedWiki(r);
         } catch (err) {
-          console.warn(`Wiki @${r} m failed:`, err);
+          console.warn(`Wiki @ ${r}m failed:`, err);
         }
 
-        // 3) Markers
-        [
-          [visitedList,  'visited' ],
-          [reviewedList, 'reviewed'],
-          [linkedList,   'linked'  ]
-        ].forEach(([list, cls]) => {
-          list.forEach((p, i) => {
-            L.marker([p.lat, p.lng], {
-              icon: L.divIcon({
-                className: `num-label ${cls}`,
-                html: String(i+1)
+        // place markers with radius‐based color classes
+        [[visitedList, 'visited'], [reviewedList, 'reviewed'], [linkedList, 'linked']]
+          .forEach(([list]) => {
+            list.forEach((p, i) => {
+              L.marker([p.lat, p.lng], {
+                icon: L.divIcon({
+                  className: `num-label radius-${r}`,
+                  html: String(i + 1)
+                })
               })
-            })
-            .addTo(map)
-            .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
+                .addTo(map)
+                .bindPopup(`<strong>${i + 1}. ${p.name || p.title}</strong>`);
+            });
           });
-        });
 
-        // 4) Table row
-        const mkCell = arr => 
-          arr.length ? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>') : 'N/A';
+        // helper for table cells
+        const mkCell = arr =>
+          arr.length
+            ? arr.map((p, i) => `${i + 1}. ${p.name || p.title}`).join('<br>')
+            : 'N/A';
 
+        // append row
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td>${r} m</td>
+          <td>${r.toLocaleString()} m</td>
           <td>${mkCell(visitedList)}</td>
           <td>${mkCell(reviewedList)}</td>
           <td>${mkCell(linkedList)}</td>
@@ -122,62 +160,72 @@
 
     async function getOSMPlaces(radius) {
       const [lat, lon] = userPos;
-      // ask Overpass for max 50 nodes, 8s timeout
       const query = `[out:json][timeout:8];
         node(around:${radius},${lat},${lon})[amenity];
         out body 50;`;
       const res = await fetchWithTimeout(
         'https://overpass-api.de/api/interpreter',
-        { method:'POST', body: query }
+        { method: 'POST', body: query }
       );
       if (!res.ok) throw new Error(`OSM ${res.status}`);
-      const elems = (await res.json()).elements.slice(0,200);
+      const elems = (await res.json()).elements.slice(0, 200);
 
-      const visited = elems.slice(0,5).map(n=>({
-        name: n.tags?.name||n.tags?.amenity||'?', lat:n.lat, lng:n.lon
+      const visited = elems.slice(0, 5).map(n => ({
+        name: n.tags?.name || n.tags?.amenity || 'Unknown',
+        lat: n.lat,
+        lng: n.lon
       }));
+
       const reviewed = elems
         .slice()
-        .sort((a,b)=>
-          ((b.tags?Object.keys(b.tags).length:0) -
-           (a.tags?Object.keys(a.tags).length:0))
+        .sort((a, b) =>
+          ((b.tags && Object.keys(b.tags).length) || 0) -
+          ((a.tags && Object.keys(a.tags).length) || 0)
         )
-        .slice(0,5)
-        .map(n=>({
-          name: n.tags?.name||n.tags?.amenity||'?', lat:n.lat, lng:n.lon
+        .slice(0, 5)
+        .map(n => ({
+          name: n.tags?.name || n.tags?.amenity || 'Unknown',
+          lat: n.lat,
+          lng: n.lon
         }));
+
       return [visited, reviewed];
     }
 
     async function getMostLinkedWiki(radius) {
       const [lat, lon] = userPos;
-      const geoUrl = `https://en.wikipedia.org/w/api.php?origin=*&action=query
-        &list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}
-        &gslimit=10&format=json`.replace(/\s+/g,'');
+      const geoUrl = [
+        'https://en.wikipedia.org/w/api.php?origin=*&action=query',
+        `&list=geosearch&gscoord=${lat}|${lon}`,
+        `&gsradius=${radius}&gslimit=10&format=json`
+      ].join('');
       const geoRes = await fetchWithTimeout(geoUrl);
-      if (!geoRes.ok) throw new Error(`Geo ${geoRes.status}`);
+      if (!geoRes.ok) throw new Error(`GeoSearch ${geoRes.status}`);
       let pages = (await geoRes.json()).query.geosearch || [];
 
-      const counts = await Promise.all(pages.map(async p=>{
-        const infoUrl = `https://en.wikipedia.org/w/api.php?origin=*&action=query
-          &prop=linkshere&titles=${encodeURIComponent(p.title)}
-          &lhlimit=max&format=json`.replace(/\s+/g,'');
+      const counts = await Promise.all(pages.map(async p => {
+        const infoUrl = [
+          'https://en.wikipedia.org/w/api.php?origin=*&action=query',
+          `&prop=linkshere&titles=${encodeURIComponent(p.title)}`,
+          '&lhlimit=max&format=json'
+        ].join('');
         try {
           const infoRes = await fetchWithTimeout(infoUrl);
-          const pcs = (await infoRes.json()).query.pages;
-          const links = Object.values(pcs).reduce(
-            (sum,p)=> sum + (Array.isArray(p.linkshere)?p.linkshere.length:0), 0
+          const pgObj = (await infoRes.json()).query.pages;
+          const total = Object.values(pgObj).reduce(
+            (sum, pg) => sum + (Array.isArray(pg.linkshere) ? pg.linkshere.length : 0),
+            0
           );
-          return { ...p, links };
+          return { title: p.title, lat: p.lat, lng: p.lon, links: total };
         } catch {
-          return { ...p, links: 0 };
+          return { title: p.title, lat: p.lat, lng: p.lon, links: 0 };
         }
       }));
 
       return counts
-        .sort((a,b)=>b.links - a.links)
-        .slice(0,5)
-        .map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
+        .sort((a, b) => b.links - a.links)
+        .slice(0, 5)
+        .map(p => ({ title: p.title, lat: p.lat, lng: p.lon }));
     }
 
     window.onload = init;
