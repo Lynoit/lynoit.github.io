@@ -2,16 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nearby Places Explorer (Leaflet + OSM)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nearby Places Explorer (Leaflet + OSM + Wiki Top 5)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
     #map { height: 60vh; width: 100%; }
     #places-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    #places-table th, #places-table td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+    #places-table th, #places-table td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; }
     #places-table th { background: #f4f4f4; }
-    .num-label { background: #fff; border: 1px solid #000; border-radius: 3px; padding: 2px 5px; }
+    .num-label {
+      background: #fff;
+      border: 1px solid #000;
+      border-radius: 3px;
+      padding: 2px 5px;
+      font-weight: bold;
+    }
   </style>
 </head>
 <body>
@@ -20,9 +26,9 @@
     <thead>
       <tr>
         <th>Radius</th>
-        <th>Most Visited (first)</th>
-        <th>Most Reviewed (most tags)</th>
-        <th>Most Linked (Wikipedia)</th>
+        <th>Most Visited<br><small>(first 5)</small></th>
+        <th>Most Reviewed<br><small>(top 5 by tag count)</small></th>
+        <th>Most Linked<br><small>(top 5 Wikipedia)</small></th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -35,11 +41,13 @@
     const radii = [100, 500, 1000, 5000, 10000];
 
     function init() {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(onPos, err => alert('Error getting location: ' + err.message));
-      } else {
+      if (!navigator.geolocation) {
         alert('Geolocation not supported.');
+        return;
       }
+      navigator.geolocation.getCurrentPosition(onPos, err => {
+        alert('Error getting location: ' + err.message);
+      });
     }
 
     function onPos(pos) {
@@ -55,24 +63,37 @@
     async function processAllRadii() {
       const tbody = document.querySelector('#places-table tbody');
       for (const r of radii) {
-        const [visited, reviewed] = await getOSMPlaces(r);
-        const linked = await getMostLinkedWiki(r);
+        const [visitedList, reviewedList] = await getOSMPlaces(r);
+        const linkedList = await getMostLinkedWiki(r);
 
-        [visited, reviewed, linked].forEach((place, idx) => {
-          if (!place) return;
-          L.marker([place.lat, place.lng], {
-            icon: L.divIcon({ className: 'num-label', html: String(idx + 1) })
-          })
-            .addTo(map)
-            .bindPopup(place.name || place.title);
-        });
+        // Place markers: V1–V5, R1–R5, W1–W5
+        [[visitedList, 'V'], [reviewedList, 'R'], [linkedList, 'W']]
+          .forEach(([list, prefix]) => {
+            list.forEach((place, i) => {
+              L.marker([place.lat, place.lng], {
+                icon: L.divIcon({
+                  className: 'num-label',
+                  html: `${prefix}${i+1}`
+                })
+              })
+                .addTo(map)
+                .bindPopup(place.name || place.title);
+            });
+          });
 
+        // Build table row with up to 5 items per column
         const row = document.createElement('tr');
         row.innerHTML = `
           <td>${r} m</td>
-          <td>${visited?.name || 'N/A'}</td>
-          <td>${reviewed?.name || 'N/A'}</td>
-          <td>${linked?.title || 'N/A'}</td>
+          <td>${visitedList.length
+            ? visitedList.map(p => p.name).join('<br>')
+            : 'N/A'}</td>
+          <td>${reviewedList.length
+            ? reviewedList.map(p => p.name).join('<br>')
+            : 'N/A'}</td>
+          <td>${linkedList.length
+            ? linkedList.map(p => p.title).join('<br>')
+            : 'N/A'}</td>
         `;
         tbody.appendChild(row);
       }
@@ -80,60 +101,74 @@
 
     async function getOSMPlaces(radius) {
       const [lat, lon] = userPos;
-      const query = `[out:json][timeout:25];node(around:${radius},${lat},${lon})[amenity];out;`;
+      const query = `[out:json][timeout:25];
+        node(around:${radius},${lat},${lon})[amenity];
+        out;`;
       const res = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST',
         body: query
       });
       const data = await res.json();
-      const elems = data.elements;
-      if (!elems || elems.length === 0) return [null, null];
+      const elems = data.elements || [];
 
-      // "Most visited": simply take the first returned
-      const visited = elems[0];
-      // "Most reviewed": node with most tags
-      const sorted = elems.slice().sort((a, b) =>
-        ((b.tags && Object.keys(b.tags).length) || 0) - ((a.tags && Object.keys(a.tags).length) || 0)
-      );
-      const reviewed = sorted[0];
+      // "Most visited": first 5 returned
+      const visitedList = elems.slice(0, 5).map(n => ({
+        name: n.tags.name || n.tags.amenity,
+        lat: n.lat,
+        lng: n.lon
+      }));
 
-      return [
-        { name: visited.tags.name || visited.tags.amenity, lat: visited.lat, lng: visited.lon },
-        { name: reviewed.tags.name || reviewed.tags.amenity, lat: reviewed.lat, lng: reviewed.lon }
-      ];
+      // "Most reviewed": top 5 by tag count
+      const reviewedList = elems
+        .slice()
+        .sort((a, b) =>
+          ((b.tags && Object.keys(b.tags).length) || 0) -
+          ((a.tags && Object.keys(a.tags).length) || 0)
+        )
+        .slice(0, 5)
+        .map(n => ({
+          name: n.tags.name || n.tags.amenity,
+          lat: n.lat,
+          lng: n.lon
+        }));
+
+      return [visitedList, reviewedList];
     }
 
     async function getMostLinkedWiki(radius) {
       const [lat, lon] = userPos;
-      // Wiki GeoSearch
       const geoRes = await fetch(
-        `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`
+        `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch` +
+        `&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=20&format=json`
       );
-      const geoData = await geoRes.json();
-      const pages = geoData.query.geosearch;
-      if (!pages || pages.length === 0) return null;
+      const pages = (await geoRes.json()).query.geosearch || [];
 
-      // Count incoming links for each
       const counts = await Promise.all(
         pages.map(async p => {
           const infoRes = await fetch(
-            `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(
-              p.title
-            )}&lhlimit=max&format=json`
+            `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere` +
+            `&titles=${encodeURIComponent(p.title)}&lhlimit=max&format=json`
           );
-          const infoData = await infoRes.json();
-          let totalLinks = 0;
-          const pagesObj = infoData.query.pages;
-          for (const pid in pagesObj) {
-            const links = pagesObj[pid].linkshere;
-            totalLinks = Array.isArray(links) ? links.length : 0;
-          }
-          return { title: p.title, lat: p.lat, lng: p.lon, links: totalLinks };
+          const pagesObj = (await infoRes.json()).query.pages;
+          let total = 0;
+          Object.values(pagesObj).forEach(pg => {
+            if (Array.isArray(pg.linkshere)) {
+              total += pg.linkshere.length;
+            }
+          });
+          return { title: p.title, lat: p.lat, lng: p.lon, links: total };
         })
       );
-      counts.sort((a, b) => b.links - a.links);
-      const top = counts[0];
-      return top ? { title: top.title, lat: top.lat, lng: top.lng } : null;
+
+      // Top 5 by incoming-link count
+      return counts
+        .sort((a, b) => b.links - a.links)
+        .slice(0, 5)
+        .map(p => ({
+          title: p.title,
+          lat: p.lat,
+          lng: p.lng
+        }));
     }
 
     window.onload = init;
