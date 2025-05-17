@@ -532,6 +532,7 @@
     let tunnelCount   = 0;
     let lastWasBridge = false;   // debounce flags
     let lastWasTunnel = false;
+    let corrections = {};
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -566,6 +567,32 @@
     function markDirty() { isDirty = true; }
     function markClean()  { isDirty = false; }
 
+    function loadCorrections() {
+  return fetch('corrections.csv')
+    .then(r => {
+      if (!r.ok) throw new Error('couldn’t load corrections.csv');
+      return r.text();
+    })
+    .then(csv => {
+      const { data, errors } = Papa.parse(csv, { header: true, skipEmptyLines: true });
+      if (errors.length) console.warn('CSV parse errors', errors);
+      data.forEach(({ misheard, correct }) => {
+        if (misheard && correct) {
+          corrections[misheard.trim().toLowerCase()] = correct.trim();
+        }
+      });
+    })
+    .catch(err => console.error('loadCorrections failed', err));
+}
+
+    function applyCorrections(text) {
+  // split on whitespace/punctuation, preserve delimiter
+  return text.replace(/\b\w+\b/g, w => {
+    const key = w.toLowerCase();
+    return corrections[key] || w;
+  });
+}
+
     window.addEventListener('beforeunload', e => {
       if (!isDirty) return;
       e.preventDefault();
@@ -579,6 +606,7 @@
     };
 
     window.onload = () => {
+      await loadCorrections();
       initMap(); initMap2(); initCharts(); updateDateTime(); setInterval(updateDateTime,1000);
       navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
       buildButtons();
@@ -647,58 +675,61 @@ function stripHotWord(text) {
 }
 
 async function initAzureSpeech() {
-  console.log('initAzureSpeech started');    //  ← already added last time?
-  const warn = msg => console.warn('Speech init:', msg);
+  console.log('initAzureSpeech started');
 
+  // 1) Make sure the Speech SDK script loaded
   if (!window.SpeechSDK) {
-    warn('SpeechSDK global missing – script failed to load?');
-    micLamp.style.background = '#ffc107';   // 🟡  error
+    console.warn('SpeechSDK global missing – script failed to load?');
+    micLamp.style.background = '#ffc107';   // 🟡 error
     return;
   }
 
-  let recognizer;
+  // 2) Build the speech recognizer
   try {
     const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-      AZURE_KEY, AZURE_REGION
+      AZURE_KEY,
+      AZURE_REGION
     );
     speechConfig.speechRecognitionLanguage = 'en-US';
+    // enable TrueText post‐processing (optional)
     speechConfig.setProperty(
       SpeechSDK.PropertyId.SpeechServiceResponse_PostProcessingOption,
       'TrueText'
     );
 
     const audioConfig  = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    recognizer         = new SpeechSDK.SpeechRecognizer(
-      speechConfig, audioConfig
-    );
+    recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
   } catch (e) {
-    warn(e);
-    micLamp.style.background = '#ffc107';   // 🟡
+    console.warn('Speech init error:', e);
+    micLamp.style.background = '#ffc107';   // 🟡 error
     return;
   }
 
-  /* Lamp colours */
+  // 3) Lamp colours for session lifecycle
   recognizer.sessionStarted = ()  => micLamp.style.background = '#f44336'; // 🔴 listening
   recognizer.sessionStopped = ()  => micLamp.style.background = '#4caf50'; // 🟢 ready
-  recognizer.canceled       = (_,e)=> {
-    warn('Canceled: ' + e.errorDetails);
+  recognizer.canceled       = (_, e) => {
+    console.warn('Speech canceled:', e.errorDetails);
     micLamp.style.background = '#ffc107';   // 🟡 error
   };
 
-  /* Hot‑word gate */
-  recognizer.recognizing = (_,e)=> {
+  // 4) **Post‐recognition correction handlers**
+  recognizer.recognizing = (_, e) => {
     const draft = stripHotWord(e.result.text);
-    if (draft) textBox.value = draft + ' [draft]';
+    if (!draft) return;
+    const fixed = applyCorrections(draft);
+    textBox.value = fixed + ' [draft]';
   };
-  recognizer.recognized  = (_,e)=> {
+  recognizer.recognized = (_, e) => {
     if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
     const cleaned = stripHotWord(e.result.text);
-    if (cleaned) {
-      textBox.value = cleaned;
-      logButton('Manual annotation', false);
-    }
+    if (!cleaned) return;
+    const fixed = applyCorrections(cleaned);
+    textBox.value = fixed;
+    logButton('Manual annotation', false);
   };
 
+  // 5) Start continuous recognition
   recognizer.startContinuousRecognitionAsync();
 }
 
