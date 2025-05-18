@@ -322,8 +322,36 @@
   }
 }    
   </style>
+
+    <style>
+    /* simple full-screen modal */
+    #metaOverlay {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000;
+    }
+    #metaForm {
+      background: #fff; padding: 20px; border-radius: 8px;
+      max-width: 400px; width: 90%;
+    }
+    #metaForm label { display: block; margin-top: 10px; }
+    #metaForm input { width: 100%; padding: 6px; margin-top: 4px; }
+    #metaForm button { margin-top: 20px; padding: 8px 12px; }
+  </style>
+  
 </head>
 <body>
+
+    <div id="metaOverlay">
+    <form id="metaForm">
+      <h2>Please fill in a few details</h2>
+      <!-- question inputs get injected here -->
+      <button type="submit">Start</button>
+    </form>
+    </div>
+  
   <button id="toggleSidebar" aria-expanded="true">☰</button>
   <div id="sidebar" class="expanded">
     <p id="dateTime"></p>
@@ -504,6 +532,7 @@
     console.log('main script executing');
     
     // DOM refs
+    const metaAnswers = {};
     const toggleBtn = document.getElementById('toggleSidebar');
     const sidebar   = document.getElementById('sidebar');
     const locEl     = document.getElementById('location');
@@ -575,6 +604,60 @@
     function markDirty() { isDirty = true; }
     function markClean()  { isDirty = false; }
 
+    function loadMetaQueries() {
+  return fetch('Metaqueries.csv')
+    .then(r => {
+      if (!r.ok) throw new Error('Could not load Metaqueries.csv');
+      return r.text();
+    })
+    .then(csv => {
+      const { data } = Papa.parse(csv, { header: true, skipEmptyLines: true });
+      // assume each row has a column named "question"
+      const questions = data.map(row => row.question).filter(q => q);
+      renderMetaForm(questions);
+    });
+}
+
+    function renderMetaForm(questions) {
+  const form = document.getElementById('metaForm');
+  // insert each question before the submit button
+  const submitBtn = form.querySelector('button[type=submit]');
+  questions.forEach((q, i) => {
+    const label = document.createElement('label');
+    label.textContent = q;
+    label.setAttribute('for', `meta-q-${i}`);
+    const input = document.createElement('input');
+    input.id = `meta-q-${i}`;
+    input.name = q;               // use question text as key
+    input.required = true;
+    form.insertBefore(label, submitBtn);
+    form.insertBefore(input, submitBtn);
+  });
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    // collect answers
+    questions.forEach((q, i) => {
+      const val = form.elements[q].value.trim();
+      metaAnswers[q] = val;
+    });
+    // hide overlay and show meta table
+    document.getElementById('metaOverlay').style.display = 'none';
+    renderMetaTable();
+    // now kick off the rest of your init logic
+    startApp();
+  });
+}
+
+    function renderMetaTable() {
+  const tbl = document.getElementById('metaTable');
+  Object.entries(metaAnswers).forEach(([question, answer]) => {
+    const row = document.createElement('tr');
+    row.innerHTML = `<td>${question}</td><td>${answer}</td>`;
+    tbl.appendChild(row);
+  });
+}
+
     window.addEventListener('beforeunload', e => {
       if (!isDirty) return;
       e.preventDefault();
@@ -587,49 +670,33 @@
       toggleBtn.setAttribute('aria-expanded', exp);
     };
 
-   window.onload = () => {
-    loadCorrections()
-      .then(() => {
-        // Your initialization sequence runs after corrections.csv has loaded
-        initMap();
-        initMap2();
-        initCharts();
-        updateDateTime();
-        setInterval(updateDateTime, 1000);
-        navigator.geolocation.watchPosition(
-          showPosition,
-          showError,
-          {
-            enableHighAccuracy: true,
-            maximumAge: 5000,
-            timeout: 10000
-          }
-        );
-        buildButtons();
-        startCamera();
-      })
-      .catch(err => {
-        console.error('Failed to load corrections:', err);
-        // You can still initialize even if corrections failed,
-        // or handle it however you like:
-        initMap();
-        initMap2();
-        initCharts();
-        updateDateTime();
-        setInterval(updateDateTime, 1000);
-        navigator.geolocation.watchPosition(
-          showPosition,
-          showError,
-          {
-            enableHighAccuracy: true,
-            maximumAge: 5000,
-            timeout: 10000
-          }
-        );
-        buildButtons();
-        startCamera();
-      });
-  };
+    window.onload = () => {
+  // 1) load meta-questions & wait for answers
+  loadMetaQueries()
+    .catch(err => {
+      console.error('MetaQueries load failed:', err);
+      // if questions can’t load, skip straight to app
+      document.getElementById('metaOverlay').style.display = 'none';
+      startApp();
+    });
+};
+
+function startApp() {
+  // your existing code that used to live inside .then():
+  // initMap(); initMap2(); initCharts(); updateDateTime(); …
+  initMap();
+  initMap2();
+  initCharts();
+  updateDateTime();
+  setInterval(updateDateTime, 1000);
+  navigator.geolocation.watchPosition(showPosition, showError, {
+    enableHighAccuracy: true,
+    maximumAge: 5000,
+    timeout: 10000
+  });
+  buildButtons();
+  startCamera();
+}   
 
     let recognizer;  // Azure continuous recogniser
     let recogniserReady   = false;   // built at least once?
