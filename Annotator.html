@@ -532,6 +532,7 @@
     let tunnelCount   = 0;
     let lastWasBridge = false;   // debounce flags
     let lastWasTunnel = false;
+    let corrections = {};
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -578,12 +579,49 @@
       toggleBtn.setAttribute('aria-expanded', exp);
     };
 
-    window.onload = () => {
-      initMap(); initMap2(); initCharts(); updateDateTime(); setInterval(updateDateTime,1000);
-      navigator.geolocation.watchPosition(showPosition,showError,{enableHighAccuracy:true,maximumAge:5000,timeout:10000});
-      buildButtons();
-      startCamera();
-    };
+   window.onload = () => {
+    loadCorrections()
+      .then(() => {
+        // Your initialization sequence runs after corrections.csv has loaded
+        initMap();
+        initMap2();
+        initCharts();
+        updateDateTime();
+        setInterval(updateDateTime, 1000);
+        navigator.geolocation.watchPosition(
+          showPosition,
+          showError,
+          {
+            enableHighAccuracy: true,
+            maximumAge: 5000,
+            timeout: 10000
+          }
+        );
+        buildButtons();
+        startCamera();
+      })
+      .catch(err => {
+        console.error('Failed to load corrections:', err);
+        // You can still initialize even if corrections failed,
+        // or handle it however you like:
+        initMap();
+        initMap2();
+        initCharts();
+        updateDateTime();
+        setInterval(updateDateTime, 1000);
+        navigator.geolocation.watchPosition(
+          showPosition,
+          showError,
+          {
+            enableHighAccuracy: true,
+            maximumAge: 5000,
+            timeout: 10000
+          }
+        );
+        buildButtons();
+        startCamera();
+      });
+  };
 
     let recognizer;  // Azure continuous recogniser
     let recogniserReady   = false;   // built at least once?
@@ -610,6 +648,21 @@ document.getElementById('micToggle').onclick = async event => {
     event.target.textContent = 'Stop voice control';
   }
 };
+
+function loadCorrections() {
+  return fetch('corrections.csv')
+    .then(r => r.ok ? r.text() : Promise.reject('CSV load failed'))
+    .then(csv => {
+      const { data } = Papa.parse(csv, { header: true, skipEmptyLines: true });
+      data.forEach(({ misheard, correct }) => {
+        if (misheard && correct) corrections[misheard.trim().toLowerCase()] = correct.trim();
+      });
+    });
+}
+    
+function applyCorrections(text) {
+  return text.replace(/\b\w+\b/g, w => corrections[w.toLowerCase()] || w);
+}
 
 function updateCountryTable() {
   let html = `
@@ -1094,85 +1147,79 @@ function updateStatsTable () {
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
   function logButton(name, isRed) {
-  const dt    = new Date(),
-        date  = dt.toLocaleDateString(),
-        time  = dt.toLocaleTimeString();
+    // ① Timestamp
+    const dt   = new Date();
+    const date = dt.toLocaleDateString();
+    const time = dt.toLocaleTimeString();
 
-  // ── read phase & weather from the sidebar DOM ──
-  const fullPhase = document.getElementById('dayPhase').textContent;
-  const phase     = fullPhase.split(': ')[1] || fullPhase;
-  const condition = iconEl.alt || 'Unknown';    // ← must do this!
+    // ② Phase & weather
+    const fullPhase = document.getElementById('dayPhase').textContent;
+    const phase     = fullPhase.split(': ')[1] || fullPhase;
+    const condition = iconEl.alt || 'Unknown';
 
-  // parse lat/lon from sidebar
-  const [lat, lon] = locEl.innerHTML
-    .split('<br>')
-    .map(l => l.split(': ')[1]);
+    // ③ Location
+    const [lat, lon] = locEl.innerHTML
+      .split('<br>')
+      .map(l => l.split(': ')[1]);
 
-  // current distance, speed, road type, comment
-  const dist    = (totalDist / 1000).toFixed(1),
-        spd     = speedEl.textContent.split(' ')[1],
-        rt      = roadTypeEl.textContent.split(': ')[1],
-        comment = document.getElementById('textBox').value;
+    // ④ Distance, speed, road type
+    const dist = (totalDist / 1000).toFixed(1);
+    const spd  = speedEl.textContent.split(' ')[1];
+    const rt   = roadTypeEl.textContent.split(': ')[1];
 
-  // optional camera snapshot…
-  let camDataUrl = null;
-  try {
-    const video  = document.getElementById('camera');
-    const canvas = document.getElementById('cameraCanvas');
-    const ctx    = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    camDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-  } catch (e) {
-    console.warn('Camera frame failed', e);
+    // ⑤ Comment (apply corrections just once)
+    let comment = document.getElementById('textBox').value;
+    comment = applyCorrections(comment);
+
+    // ⑥ Optional camera snapshot
+    let camDataUrl = null;
+    try {
+      const video  = document.getElementById('camera');
+      const canvas = document.getElementById('cameraCanvas');
+      const ctx    = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      camDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    } catch (e) {
+      console.warn('Camera frame failed', e);
+    }
+
+    // ⑦ Push into the log array
+    logTable.push([
+      name, date, time, phase,
+      tempEl.textContent, condition,
+      lat, lon, dist, spd, rt,
+      comment, camDataUrl
+    ]);
+
+    markDirty();
+
+    // ⑧ Update displays
+    displayLogTable();
+    displayCameraTable();
+    L.marker([+lat, +lon], {
+      icon: L.divIcon({ className: 'issue-label', html: `<strong>${name}</strong>` })
+    }).addTo(map);
+
+    // ⑨ If it’s a “red” KPI event, update counts & tables
+    if (isRed) {
+      redCounts[name]                    = (redCounts[name]                     || 0) + 1;
+      roadRedCounts[rt]                  = (roadRedCounts[rt]                   || 0) + 1;
+      countryRedCounts[lastCountry]      = (countryRedCounts[lastCountry]       || 0) + 1;
+      weatherRedCounts[condition]        = (weatherRedCounts[condition]         || 0) + 1;
+      weatherDistances[condition]        = weatherDistances[condition]         || 0;
+      phaseRedCounts[phase]              = (phaseRedCounts[phase]               || 0) + 1;
+      phaseDistances[phase]              = phaseDistances[phase]               || 0;
+
+      updateStreetTable();
+      updateCountryTable();
+      updateWeatherTable();
+      updatePhaseTable();
+      updateCountTable();
+    }
+
+    // ⑩ Clear the textbox
+    document.getElementById('textBox').value = '';
   }
-
-  // push to the log
-  logTable.push([
-    name, date, time, phase,
-    tempEl.textContent, condition,
-    lat, lon, dist, spd, rt,
-    comment, camDataUrl
-  ]);
-
-  markDirty();  
-
-  // redraw logs & map marker
-  displayLogTable();
-  displayCameraTable();
-  L.marker([+lat, +lon], {
-    icon: L.divIcon({ className: 'issue-label', html: `<strong>${name}</strong>` })
-  }).addTo(map);
-
-  if (isRed) {
-    // per-issue
-    redCounts[name] = (redCounts[name] || 0) + 1;
-
-    // per-road-type
-    roadRedCounts[rt] = (roadRedCounts[rt] || 0) + 1;
-
-    countryRedCounts[lastCountry] = (countryRedCounts[lastCountry] || 0) + 1;
-
-    // per-weather-condition
-    weatherRedCounts[condition] = (weatherRedCounts[condition] || 0) + 1;
-    // ← pre-seed the distance bucket so updateWeatherTable will include it
-    weatherDistances[condition] = weatherDistances[condition] || 0;
-
-    // per-day-phase
-    phaseRedCounts[phase]    = (phaseRedCounts[phase] || 0) + 1;
-    // ← pre-seed the distance bucket so updatePhaseTable will include it
-    phaseDistances[phase]    = phaseDistances[phase]   || 0;
-
-    // now redraw all three KPI tables immediately
-    updateStreetTable();
-    updateCountryTable(); 
-    updateWeatherTable();
-    updatePhaseTable();
-    updateCountTable();
-  }
-
-  // clear the text box
-  document.getElementById('textBox').value = '';
-}
 
 function displayCameraTable() {
   const target = document.getElementById('cameraTableContainer');
