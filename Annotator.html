@@ -17,6 +17,89 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
 
+  <script>
+  // 1) pull in questions from CSV
+  function loadMetaQueries() {
+    console.log('⏳ loading meta-questions…');
+    return fetch('Metaqueries.csv')
+      .then(r => {
+        if (!r.ok) throw new Error('CSV not found');
+        return r.text();
+      })
+      .then(csv => {
+        const { data } = Papa.parse(csv, { header: true, skipEmptyLines: true });
+        const qs = data.map(r => r.question).filter(q => q);
+        renderMetaForm(qs);
+      });
+  }
+
+  // 2) build the form fields
+function renderMetaForm(questions) {
+  const form    = document.getElementById('metaForm');
+  const submit  = form.querySelector('button[type=submit]');
+  const skipBtn = document.getElementById('skipButton');
+
+  // Wire up the Skip button
+  skipBtn.addEventListener('click', () => {
+    // Populate defaults
+    window.metaAnswers = {};
+    questions.forEach(q => {
+      window.metaAnswers[q] = 'Not filled in';
+    });
+    // Close overlay, render table, start app
+    document.getElementById('metaOverlay').style.display = 'none';
+    renderMetaTable();
+    startApp();
+  });
+
+  // Inject question inputs just before the submit button
+  questions.forEach((q, i) => {
+    const lbl = document.createElement('label');
+    lbl.htmlFor = `mq-${i}`;
+    lbl.textContent = q;
+
+    const inp = document.createElement('input');
+    inp.id        = `mq-${i}`;
+    inp.name      = q;
+    inp.required  = true;
+
+    form.insertBefore(lbl, submit);
+    form.insertBefore(inp, submit);
+  });
+
+  // Handle the OK (submit) action
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    window.metaAnswers = {};
+    questions.forEach(q => {
+      window.metaAnswers[q] = form.elements[q].value.trim();
+    });
+    document.getElementById('metaOverlay').style.display = 'none';
+    renderMetaTable();
+    startApp();
+  });
+}
+
+  // 3) show the answers in your new table
+  function renderMetaTable() {
+    const tbl = document.getElementById('metaTable');
+    Object.entries(window.metaAnswers).forEach(([q,a]) => {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td>${q}</td><td>${a}</td>`;
+      tbl.appendChild(row);
+    });
+  }
+
+  // 4) adjust your onload to kick things off
+  window.onload = () => {
+    loadMetaQueries().catch(err => {
+      console.error('MetaQueries load failed:', err);
+      document.getElementById('metaOverlay').style.display = 'none';
+      startApp();
+    });
+  };
+</script>
+
 <script defer src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@1.31.0/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle.js"></script>
 
   <style>
@@ -178,6 +261,19 @@
   hyphens: auto;             /* enable hyphenation at hyphens */
 }
 
+#metaTable {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #444;
+  margin-bottom: 80px;  /* or whatever spacing you prefer */
+}
+#metaTable th,
+#metaTable td {
+  border: 1px solid #444;
+  padding: 6px 8px;
+  text-align: center;
+}
+
 #countryTable {
   width: 100%;
   border-collapse: collapse;
@@ -322,8 +418,37 @@
   }
 }    
   </style>
+
+    <style>
+    /* simple full-screen modal */
+    #metaOverlay {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 2000;
+    }
+    #metaForm {
+      background: #fff; padding: 20px; border-radius: 8px;
+      max-width: 400px; width: 90%;
+    }
+    #metaForm label { display: block; margin-top: 10px; }
+    #metaForm input { width: 100%; padding: 6px; margin-top: 4px; }
+    #metaForm button { margin-top: 20px; padding: 8px 12px; }
+  </style>
+  
 </head>
 <body>
+
+    <div id="metaOverlay">
+    <form id="metaForm">
+     <h2>Please fill in test details</h2>
+     <!-- question inputs get injected here -->     
+     <button type="submit">OK</button>
+     <button type="button" id="skipButton">Skip</button>
+    </form>
+    </div>
+  
   <button id="toggleSidebar" aria-expanded="true">☰</button>
   <div id="sidebar" class="expanded">
     <p id="dateTime"></p>
@@ -434,6 +559,13 @@
     </div>
     <div class="page-break"></div>
 
+  <div id="metaContainer" class="section">
+    <h3>Test details</h3>
+    <table id="metaTable">
+      <!-- rows will be injected here -->
+    </table>
+  </div>
+    
     <div id="statsContainer" class="section">
       <h3>Statistics</h3>
       <table id="statsTable">
@@ -496,6 +628,8 @@
     console.log('main script executing');
     
     // DOM refs
+    const appStartTime = new Date();
+    const metaAnswers = {};
     const toggleBtn = document.getElementById('toggleSidebar');
     const sidebar   = document.getElementById('sidebar');
     const locEl     = document.getElementById('location');
@@ -532,6 +666,7 @@
     let tunnelCount   = 0;
     let lastWasBridge = false;   // debounce flags
     let lastWasTunnel = false;
+    let bridgeStreak = 0;
     let corrections = {};
     
     // ── Whitelist of road types we care about ──
@@ -567,6 +702,18 @@
     function markDirty() { isDirty = true; }
     function markClean()  { isDirty = false; }
 
+    function formatAppStartTimestamp() {
+       const d = appStartTime;
+       const pad = n => String(n).padStart(2, '0');
+       const YYYY = d.getFullYear();
+       const MM   = pad(d.getMonth() + 1);
+       const DD   = pad(d.getDate());
+       const hh   = pad(d.getHours());
+       const mm   = pad(d.getMinutes());
+       const ss   = pad(d.getSeconds());
+      return `${YYYY}-${MM}-${DD}_${hh}${mm}${ss}`;
+    }
+    
     window.addEventListener('beforeunload', e => {
       if (!isDirty) return;
       e.preventDefault();
@@ -579,49 +726,33 @@
       toggleBtn.setAttribute('aria-expanded', exp);
     };
 
-   window.onload = () => {
-    loadCorrections()
-      .then(() => {
-        // Your initialization sequence runs after corrections.csv has loaded
-        initMap();
-        initMap2();
-        initCharts();
-        updateDateTime();
-        setInterval(updateDateTime, 1000);
-        navigator.geolocation.watchPosition(
-          showPosition,
-          showError,
-          {
-            enableHighAccuracy: true,
-            maximumAge: 5000,
-            timeout: 10000
-          }
-        );
-        buildButtons();
-        startCamera();
-      })
-      .catch(err => {
-        console.error('Failed to load corrections:', err);
-        // You can still initialize even if corrections failed,
-        // or handle it however you like:
-        initMap();
-        initMap2();
-        initCharts();
-        updateDateTime();
-        setInterval(updateDateTime, 1000);
-        navigator.geolocation.watchPosition(
-          showPosition,
-          showError,
-          {
-            enableHighAccuracy: true,
-            maximumAge: 5000,
-            timeout: 10000
-          }
-        );
-        buildButtons();
-        startCamera();
-      });
-  };
+    window.onload = () => {
+  // 1) load meta-questions & wait for answers
+  loadMetaQueries()
+    .catch(err => {
+      console.error('MetaQueries load failed:', err);
+      // if questions can’t load, skip straight to app
+      document.getElementById('metaOverlay').style.display = 'none';
+      startApp();
+    });
+};
+
+function startApp() {
+  // your existing code that used to live inside .then():
+  // initMap(); initMap2(); initCharts(); updateDateTime(); …
+  initMap();
+  initMap2();
+  initCharts();
+  updateDateTime();
+  setInterval(updateDateTime, 1000);
+  navigator.geolocation.watchPosition(showPosition, showError, {
+    enableHighAccuracy: true,
+    maximumAge: 5000,
+    timeout: 10000
+  });
+  buildButtons();
+  startCamera();
+}   
 
     let recognizer;  // Azure continuous recogniser
     let recogniserReady   = false;   // built at least once?
@@ -948,6 +1079,8 @@ async function initAzureSpeech() {
       const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
       const tags = data.extratags || {};
 
+      const isBridge = tags.bridge === 'yes';
+
         const isRoundabout =
        tags.junction === 'roundabout'
     || tags.highway  === 'mini_roundabout';
@@ -955,22 +1088,27 @@ async function initAzureSpeech() {
   // traffic-light junctions
   const isTrafficLight = tags.highway === 'traffic_signals';
 
-  // bridges
-  const isBridge      = tags.bridge === 'yes';
-
   // tunnels
   const isTunnel      = tags.tunnel === 'yes';
 
   // now your existing debounce/count logic…
   if (isRoundabout   && !lastWasRoundabout)   roundaboutCount++;
   if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
-  if (isBridge       && !lastWasBridge)       bridgeCount++;
   if (isTunnel       && !lastWasTunnel)       tunnelCount++;
 
   lastWasRoundabout   = isRoundabout;
   lastWasTrafficLight = isTrafficLight;
   lastWasBridge       = isBridge;
   lastWasTunnel       = isTunnel;
+
+      if (tags.bridge === 'yes') {
+  bridgeStreak++;
+  if (bridgeStreak === 5) {
+    bridgeCount++;
+  }
+} else {
+  bridgeStreak = 0;
+}
       
       const maxTag =
       data.extratags?.maxspeed
@@ -1246,7 +1384,7 @@ function displayLogTable() {
    1.  “Issue list” table (unchanged)
 ─────────────────────────────────────────────────────────── */
   let mainHtml = `
-    <table>
+    <table id="logTable">
       <tr>
         <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
         <th>Phase</th><th>Temp</th><th>Weather</th>
@@ -1454,16 +1592,38 @@ function updateWeatherTable() {
   document.getElementById('weatherTable').innerHTML = html;
 }
 
- function maybeUpdateTables() {
+const tablesToUpload = [
+  'logTable',
+  'statsTable',
+  'countTable',
+  'streetTable',
+  'metaTable',
+  'countryTable',
+  'weatherTable',
+  'phaseTable'
+];
+
+// 2️⃣ In your existing maybeUpdateTables(), after you rebuild each HTML table, do:
+async function maybeUpdateTables() {
   const now = Date.now();
   if (now - lastTableUpdate > TABLE_THROTTLE) {
+    // — rebuild all your tables —
     updateStreetTable();
     updateCountryTable();
     updateCountTable();
     updateWeatherTable();
     updatePhaseTable();
     updateStatsTable();
+    displayLogTable();   // make sure logTable exists
+
     lastTableUpdate = now;
+
+    // — now kick off uploads in parallel —
+    tablesToUpload.forEach(tableId => {
+      uploadCSVtoAzure(tableId)
+        .then(() => console.log(`✔ ${tableId}.csv uploaded`))
+        .catch(err => console.error(`✖ ${tableId} upload failed:`, err));
+    });
   }
 }
 
@@ -1498,6 +1658,56 @@ function updatePhaseTable() {
 
     function updateDateTime() { document.getElementById('dateTime').textContent = new Date().toLocaleString();
     }
+
+        function tableToCSV(tableEl) {
+      const rows = Array.from(tableEl.querySelectorAll('tr'));
+      return rows
+        .map(row => {
+          const cells = Array.from(row.querySelectorAll('th,td'));
+          return cells
+            .map(cell => {
+              // escape quotes, wrap in quotes
+              const txt = cell.textContent.replace(/"/g, '""');
+              return `"${txt}"`;
+            })
+            .join(',');
+        })
+        .join('\n');
+    }
+
+const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
+
+async function uploadCSVtoAzure(tableId) {
+  // 1. Grab the table and convert to CSV
+  const table    = document.getElementById(tableId);
+  const csv      = tableToCSV(table);
+
+  // 2. Build a timestamped blob name
+  const ts       = formatAppStartTimestamp();          // e.g. "2025-05-19_084215"
+  const blobName = `${tableId}-${ts}.csv`;             // e.g. "statsTable-2025-05-19_084215.csv"
+
+  // 3. Split the SAS URL into base and token
+  const [baseUrl, token] = containerSasUrl.split('?');
+
+  // 4. Construct the full PUT URL
+  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+
+  // 5. Perform the upload
+  const resp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   'text/csv'
+    },
+    body: csv
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Upload failed: ${resp.status} ${resp.statusText}`);
+  }
+
+  console.log(`✔ Uploaded ${blobName}`);
+}
 
     function updateSnapshotTable() {
   const container = document.getElementById('snapshotTableContainer');
