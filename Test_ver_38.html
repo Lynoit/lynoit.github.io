@@ -17,6 +17,8 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
 
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+
   <script>
   // 1) pull in questions from CSV
   function loadMetaQueries() {
@@ -678,6 +680,18 @@ function renderMetaForm(questions) {
      'tertiary','tertiary_link',
      'unclassified','residential','service','construction'
     ]);
+
+    const workbookTables = [
+      { id: 'logTable',     name: 'Log'     },
+      { id: 'statsTable',   name: 'Stats'   },
+      { id: 'countTable',   name: 'Count'   },
+      { id: 'streetTable',  name: 'Streets' },
+      { id: 'metaTable',    name: 'Meta'    },
+      { id: 'countryTable', name: 'Country' },
+      { id: 'weatherTable', name: 'Weather' },
+      { id: 'phaseTable',   name: 'Phase'   }
+    ];
+
 
     let startTime = null;        // timestamp of the first GPS fix (ms)
     const topSpeeds = [];   // running list of the 10 highest samples
@@ -1603,27 +1617,23 @@ const tablesToUpload = [
   'phaseTable'
 ];
 
-// 2️⃣ In your existing maybeUpdateTables(), after you rebuild each HTML table, do:
 async function maybeUpdateTables() {
   const now = Date.now();
   if (now - lastTableUpdate > TABLE_THROTTLE) {
-    // — rebuild all your tables —
+    // … your existing table rebuild calls …
+    displayLogTable();   // ensure logTable exists in the DOM
+    updateStatsTable();
+    updateCountTable();
     updateStreetTable();
     updateCountryTable();
-    updateCountTable();
     updateWeatherTable();
     updatePhaseTable();
-    updateStatsTable();
-    displayLogTable();   // make sure logTable exists
-
     lastTableUpdate = now;
 
-    // — now kick off uploads in parallel —
-    tablesToUpload.forEach(tableId => {
-      uploadCSVtoAzure(tableId)
-        .then(() => console.log(`✔ ${tableId}.csv uploaded`))
-        .catch(err => console.error(`✖ ${tableId} upload failed:`, err));
-    });
+    // Auto-upload the multi-sheet workbook
+    uploadWorkbookToAzure()
+      .then(() => console.log('Workbook auto-uploaded'))
+      .catch(err => console.error('Workbook upload failed:', err));
   }
 }
 
@@ -1707,6 +1717,57 @@ async function uploadCSVtoAzure(tableId) {
   }
 
   console.log(`✔ Uploaded ${blobName}`);
+}
+
+    async function uploadWorkbookToAzure() {
+  // 1. Create a new workbook
+  const wb = XLSX.utils.book_new();
+
+  // 2. For each table: grab its <table> element, convert, append
+  workbookTables.forEach(({id, name}) => {
+    const tblEl = document.getElementById(id);
+    if (!tblEl) {
+      console.warn(`Table #${id} not found—skipping sheet "${name}"`);
+      return;
+    }
+    const ws = XLSX.utils.table_to_sheet(tblEl);
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  });
+
+  // 3. Generate the binary workbook
+  const wbout = XLSX.write(wb, {
+    bookType: 'xlsx',
+    type:      'array'
+  });
+
+  // 4. Wrap in a Blob
+  const blob = new Blob([wbout], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+
+  // 5. Determine filename using your appStartTime helper
+  const ts       = formatAppStartTimestamp();            // e.g. "2025-05-19_084215"
+  const blobName = `report-${ts}.xlsx`;                  // e.g. "report-2025-05-19_084215.xlsx"
+
+  // 6. Build upload URL from containerSasUrl
+  const [baseUrl, token] = containerSasUrl.split('?');
+  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+
+  // 7. PUT to Azure Blob Storage
+  const resp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Workbook upload failed: ${resp.status} ${resp.statusText}`);
+  }
+
+  console.log(`✔ Uploaded workbook: ${blobName}`);
 }
 
     function updateSnapshotTable() {
