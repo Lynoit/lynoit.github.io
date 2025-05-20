@@ -1819,44 +1819,55 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded HTML report: ${blobName}`);
 }
 
-  async function exportPDFToAzure() {
-  // 1) Grab the element
+ async function exportPDFToAzure() {
+  // 1) Grab and expand the #mainContent so html2pdf sees everything
   const element = document.getElementById('mainContent');
+  // backup
+  const origHeight   = element.style.height;
+  const origOverflow = element.style.overflow;
+  // expand
+  element.style.height   = 'auto';
+  element.style.overflow = 'visible';
 
-  // 2) Configure html2pdf
-  const opt = {
-    margin:       0.5,                             // inches
-    filename:     `${reportBaseName}.pdf`,         // uses same base name
-    image:        { type: 'jpeg', quality: 0.98 },
-    html2canvas:  { scale: 2 },                    // higher-resolution
-    jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
-  };
+  try {
+    // 2) Configure html2pdf
+    const opt = {
+      margin:       0.5,                             // inches
+      filename:     `${reportBaseName}.pdf`,         // same base name
+      image:        { type: 'jpeg', quality: 0.98 },
+      html2canvas:  { scale: 2 },
+      jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
+    };
 
-  // 3) html2pdf can output the PDF as a Blob
-  const pdfBlob = await html2pdf()
-    .set(opt)
-    .from(element)
-    .outputPdf('blob');
+    // 3) Generate PDF blob
+    const pdfBlob = await html2pdf()
+      .set(opt)
+      .from(element)
+      .outputPdf('blob');
 
-  // 4) Build your Azure upload URL (reuse containerSasUrl)
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
+    // 4) Build upload URL
+    const [baseUrl, token] = containerSasUrl.split('?');
+    const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
 
-  // 5) PUT the PDF blob
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/pdf'
-    },
-    body: pdfBlob
-  });
+    // 5) PUT to Azure
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/pdf'
+      },
+      body: pdfBlob
+    });
+    if (!resp.ok) {
+      throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
+    }
+    console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
 
-  if (!resp.ok) {
-    throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
+  } finally {
+    // 6) Restore original styles
+    element.style.height   = origHeight;
+    element.style.overflow = origOverflow;
   }
-
-  console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
 }
     
   function updateSnapshotTable() {
