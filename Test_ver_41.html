@@ -1863,76 +1863,98 @@ async function uploadCSVtoAzure(tableId) {
     <!-- 1) Leaflet core (no “defer”) -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
-  <!-- 2) Now load the plugin so it can hook into L -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
+ <script>
+  /**
+   * Replace a live Leaflet map with a static‐map <img>.
+   * For `map2` we just center on the latest point.
+   * For `map` we draw the whole tracked polyline.
+   */
+  function snapshotMapStatic(mapInstance, containerId, isRoute) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = ''; 
 
-  <!-- 3) Your exportPDFToAzure code -->
-  <script>
-    // snapshotMap must be defined after the plugin is available:
-    function snapshotMap(mapInstance, containerId) {
-      return new Promise(resolve => {
-        // this global is injected by the plugin
-        leafletImage(mapInstance, (canvas) => {
-          const container = document.getElementById(containerId);
-          container.innerHTML = '';
-          canvas.style.width  = '100%';
-          canvas.style.height = '100%';
-          container.appendChild(canvas);
-          resolve();
-        });
+    // extract center or polyline coords:
+    let url;
+    if (!isRoute) {
+      // street‐view small map
+      const center = mapInstance.getCenter();
+      url = [
+        'https://staticmap.openstreetmap.de/staticmap.php',
+        `?center=${center.lat},${center.lng}`,
+        '&zoom=18',
+        '&size=300x200',
+        `&markers=${center.lat},${center.lng},red-pushpin`
+      ].join('');
+    } else {
+      // full route map
+      const path = positions
+        .map(p => `${p[0]},${p[1]}`)
+        .join('|');
+      // center on last point
+      const last = positions[positions.length - 1];
+      url = [
+        'https://staticmap.openstreetmap.de/staticmap.php',
+        `?center=${last[0]},${last[1]}`,
+        '&zoom=14',
+        '&size=600x400',
+        `&path=color:0x0000ff|weight:3|${encodeURIComponent(path)}`
+      ].join('');
+    }
+
+    const img = document.createElement('img');
+    img.src = url;
+    img.style.width  = '100%';
+    img.style.height = '100%';
+    img.alt = 'Snapshot map';
+    container.appendChild(img);
+  }
+
+  async function exportPDFToAzure() {
+    // 1) Bake in the two “maps” as <img>
+    snapshotMapStatic(map2, 'map2', false);
+    snapshotMapStatic(map,  'map',  true);
+
+    // 2) Expand content
+    const el = document.getElementById('mainContent');
+    const oldH = el.style.height, oldO = el.style.overflow;
+    el.style.height   = 'auto';
+    el.style.overflow = 'visible';
+
+    try {
+      // 3) PDF options
+      const opt = {
+        margin:       0.2,
+        filename:     `${reportBaseName}.pdf`,
+        image:        { type:'jpeg', quality:0.98 },
+        html2canvas:  { scale:1.5, useCORS:true },
+        jsPDF:        { unit:'in', format:'a4', orientation:'landscape' }
+      };
+
+      // 4) Generate PDF blob
+      const pdfBlob = await html2pdf().set(opt).from(el).outputPdf('blob');
+
+      // 5) Upload to Azure
+      const [baseUrl, token] = containerSasUrl.split('?');
+      const uploadUrl       = `${baseUrl}/${reportBaseName}.pdf?${token}`;
+      const resp = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'x-ms-blob-type': 'BlockBlob',
+          'Content-Type':   'application/pdf'
+        },
+        body: pdfBlob
       });
-    }
-
-    async function exportPDFToAzure() {
-      // 1) Bake in both maps
-      await snapshotMap(map,  'map');
-      await snapshotMap(map2, 'map2');
-
-      // 2) Expand content
-      const el = document.getElementById('mainContent');
-      const oldH = el.style.height;
-      const oldO = el.style.overflow;
-      el.style.height   = 'auto';
-      el.style.overflow = 'visible';
-
-      try {
-        // 3) PDF options: landscape A4, small margins
-        const opt = {
-          margin:      0.2,
-          filename:    `${reportBaseName}.pdf`,
-          image:       { type:'jpeg', quality:0.98 },
-          html2canvas: { scale:1.5, useCORS:true },
-          jsPDF:       { unit:'in', format:'a4', orientation:'landscape' }
-        };
-
-        // 4) Render PDF
-        const pdfBlob = await html2pdf()
-                                 .set(opt)
-                                 .from(el)
-                                 .outputPdf('blob');
-
-        // 5) Upload to Azure
-        const [baseUrl, token] = containerSasUrl.split('?');
-        const uploadUrl       = `${baseUrl}/${reportBaseName}.pdf?${token}`;
-        const resp = await fetch(uploadUrl, {
-          method: 'PUT',
-          headers: {
-            'x-ms-blob-type': 'BlockBlob',
-            'Content-Type':   'application/pdf'
-          },
-          body: pdfBlob
-        });
-        if (!resp.ok) {
-          throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
-        }
-        console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
-      } finally {
-        // 6) Restore styles
-        el.style.height   = oldH;
-        el.style.overflow = oldO;
+      if (!resp.ok) {
+        throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
       }
+      console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
+    } finally {
+      // 6) Restore styles
+      el.style.height   = oldH;
+      el.style.overflow = oldO;
     }
-  </script>
+  }
+</script>
   
 </body>
 </html>
