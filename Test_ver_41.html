@@ -623,9 +623,6 @@ function renderMetaForm(questions) {
     </footer>
   </div>
 
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
-
   <script>
 
     console.log('main script executing');
@@ -1818,71 +1815,6 @@ async function uploadCSVtoAzure(tableId) {
   }
   console.log(`✔ Uploaded HTML report: ${blobName}`);
 }
-
- function snapshotMap(mapInstance, containerId) {
-  return new Promise(resolve => {
-    leafletImage(mapInstance, (canvas) => {
-      const container = document.getElementById(containerId);
-      // empty out the live map
-      container.innerHTML = '';
-      // insert the static snapshot
-      canvas.style.width  = '100%';
-      canvas.style.height = '100%';
-      container.appendChild(canvas);
-      resolve();
-    });
-  });
-}
-
-async function exportPDFToAzure() {
-  // 1) Snapshot both maps so html2pdf sees them as canvases
-  await snapshotMap(map,  'map');
-  await snapshotMap(map2, 'map2');
-
-  // 2) Expand the content so nothing is clipped
-  const element = document.getElementById('mainContent');
-  const origHeight   = element.style.height;
-  const origOverflow = element.style.overflow;
-  element.style.height   = 'auto';
-  element.style.overflow = 'visible';
-
-  try {
-    // 3) Configure html2pdf for landscape A4, small margins, and high-res canvas
-    const opt = {
-      margin:       0.2,
-      filename:     `${reportBaseName}.pdf`,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 1.5, useCORS: true },
-      jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
-    };
-
-    // 4) Generate the PDF blob
-    const pdfBlob = await html2pdf()
-                          .set(opt)
-                          .from(element)
-                          .outputPdf('blob');
-
-    // 5) Upload to Azure Blob Storage
-    const [baseUrl, token] = containerSasUrl.split('?');
-    const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/pdf'
-      },
-      body: pdfBlob
-    });
-    if (!resp.ok) {
-      throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
-    }
-    console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
-  } finally {
-    // 6) Restore original styles
-    element.style.height   = origHeight;
-    element.style.overflow = origOverflow;
-  }
-}
     
   function updateSnapshotTable() {
   const container = document.getElementById('snapshotTableContainer');
@@ -1927,5 +1859,80 @@ async function exportPDFToAzure() {
 }
     
   </script>
+
+    <!-- 1) Leaflet core (no “defer”) -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- 2) Now load the plugin so it can hook into L -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
+
+  <!-- 3) Your exportPDFToAzure code -->
+  <script>
+    // snapshotMap must be defined after the plugin is available:
+    function snapshotMap(mapInstance, containerId) {
+      return new Promise(resolve => {
+        // this global is injected by the plugin
+        leafletImage(mapInstance, (canvas) => {
+          const container = document.getElementById(containerId);
+          container.innerHTML = '';
+          canvas.style.width  = '100%';
+          canvas.style.height = '100%';
+          container.appendChild(canvas);
+          resolve();
+        });
+      });
+    }
+
+    async function exportPDFToAzure() {
+      // 1) Bake in both maps
+      await snapshotMap(map,  'map');
+      await snapshotMap(map2, 'map2');
+
+      // 2) Expand content
+      const el = document.getElementById('mainContent');
+      const oldH = el.style.height;
+      const oldO = el.style.overflow;
+      el.style.height   = 'auto';
+      el.style.overflow = 'visible';
+
+      try {
+        // 3) PDF options: landscape A4, small margins
+        const opt = {
+          margin:      0.2,
+          filename:    `${reportBaseName}.pdf`,
+          image:       { type:'jpeg', quality:0.98 },
+          html2canvas: { scale:1.5, useCORS:true },
+          jsPDF:       { unit:'in', format:'a4', orientation:'landscape' }
+        };
+
+        // 4) Render PDF
+        const pdfBlob = await html2pdf()
+                                 .set(opt)
+                                 .from(el)
+                                 .outputPdf('blob');
+
+        // 5) Upload to Azure
+        const [baseUrl, token] = containerSasUrl.split('?');
+        const uploadUrl       = `${baseUrl}/${reportBaseName}.pdf?${token}`;
+        const resp = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'x-ms-blob-type': 'BlockBlob',
+            'Content-Type':   'application/pdf'
+          },
+          body: pdfBlob
+        });
+        if (!resp.ok) {
+          throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
+        }
+        console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
+      } finally {
+        // 6) Restore styles
+        el.style.height   = oldH;
+        el.style.overflow = oldO;
+      }
+    }
+  </script>
+  
 </body>
 </html>
