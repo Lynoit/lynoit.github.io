@@ -1857,26 +1857,64 @@ async function uploadCSVtoAzure(tableId) {
 }
 
  async function exportPDFToAzure() {
-  // 0) Snapshot the #map2 Leaflet map into a PNG <img>
+  // ── 0) Create an off-screen clone of #map2 so we don't destroy the live map
+  const origContainer = map2.getContainer();
+  const clone = origContainer.cloneNode();
+  clone.style.position = 'absolute';
+  clone.style.top      = '-9999px';
+  clone.style.left     = '-9999px';
+  document.body.appendChild(clone);
+
+  // ── 1) Initialize a hidden Leaflet map on that clone
+  const hiddenMap = L.map(clone, {
+    preferCanvas:       true,
+    zoomControl:        false,
+    attributionControl: false,
+    dragging:           false,
+    scrollWheelZoom:    false,
+    doubleClickZoom:    false,
+    boxZoom:            false,
+    keyboard:           false,
+    tap:                false
+  }).setView(map2.getCenter(), map2.getZoom());
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: ''
+  }).addTo(hiddenMap);
+
+  // If you had a marker/circle on map2, re-add it here:
+  L.circleMarker(map2.getCenter(), {
+    radius:      6,
+    color:       'red',
+    fillColor:   'red',
+    fillOpacity: 1
+  }).addTo(hiddenMap);
+
+  // ── 2) Wait for tiles, then snapshot via leafletImage()
   await new Promise(resolve => {
-    leafletImage(map2, (err, canvas) => {
-      if (!err && canvas) {
-        const imgUrl = canvas.toDataURL('image/png');
-        const container = document.getElementById('map2');
-        // replace the live map with our static image
-        container.innerHTML = `
-          <img 
-            src="${imgUrl}" 
-            alt="Street View Snapshot" 
-            style="width:100%; height:auto; object-fit:cover;"
-          >
-        `;
-      }
-      resolve();
+    hiddenMap.once('load', () => {
+      leafletImage(hiddenMap, (err, canvas) => {
+        if (!err && canvas) {
+          const imgUrl = canvas.toDataURL('image/png');
+          // Inject the resulting PNG into the real #map2 container
+          origContainer.innerHTML = `
+            <img
+              src="${imgUrl}"
+              alt="Street View Snapshot"
+              style="width:100%; height:auto; object-fit:cover;"
+            >
+          `;
+        }
+        resolve();
+      });
     });
   });
 
-  // 1) Expand the content so html2pdf sees everything
+  // ── 3) Tear down the hidden map and DOM clone
+  hiddenMap.remove();
+  document.body.removeChild(clone);
+
+  // ── 4) Expand mainContent so html2pdf captures everything
   const element = document.getElementById('mainContent');
   const origHeight   = element.style.height;
   const origOverflow = element.style.overflow;
@@ -1884,21 +1922,17 @@ async function uploadCSVtoAzure(tableId) {
   element.style.overflow = 'visible';
 
   try {
-    // 2) Generate the PDF blob
+    // ── 5) Configure html2pdf and generate PDF blob
     const opt = {
       margin:       0.2,
       filename:     `${reportBaseName}.pdf`,
       image:        { type: 'jpeg', quality: 0.98 },
       html2canvas:  { scale: 1.5, useCORS: true },
-      jsPDF: {
-        unit:        'in',
-        format:      'a4',
-        orientation: 'landscape'
-      }
+      jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
     };
     const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob');
 
-    // 3) Upload to Azure
+    // ── 6) Upload the PDF to Azure
     const [baseUrl, token] = containerSasUrl.split('?');
     const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
     const resp = await fetch(uploadUrl, {
@@ -1913,11 +1947,7 @@ async function uploadCSVtoAzure(tableId) {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
   } finally {
-    // 4) Restore original styles
-    element.style.height   = origHeight;
-    element.style.overflow = origOverflow;
-  }
-}
+    // ── 7) Restore original styles
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
