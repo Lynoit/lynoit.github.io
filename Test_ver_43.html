@@ -1827,71 +1827,60 @@ async function uploadCSVtoAzure(tableId) {
 }
 
  async function exportPDFToAzure() {
-  // 1) Grab & expand #mainContent so html2pdf sees everything
+  // 1) Expand mainContent so html2pdf sees everything
   const element      = document.getElementById('mainContent');
   const origHeight   = element.style.height;
   const origOverflow = element.style.overflow;
   element.style.height   = 'auto';
   element.style.overflow = 'visible';
 
-  // 2) Helper to snapshot a Leaflet map into an <img> inside its container
-  function snapshotMap(mapInstance, containerId) {
-    return new Promise(resolve => {
-      leafletImage(mapInstance, (err, canvas) => {
-        if (err) {
-          console.error('leafletImage error for', containerId, err);
-          return resolve();
-        }
-        const dataUrl = canvas.toDataURL();
-        const container = document.getElementById(containerId);
-        container.innerHTML = '';               // remove live map
-        const img = document.createElement('img');
-        img.src    = dataUrl;
-        img.style.width  = '100%';
-        img.style.height = '100%';
-        container.appendChild(img);
-        resolve();
-      });
-    });
+  // 2) Helper: build a static OSM‐map URL
+  function staticMapUrl(lat, lon, zoom, width, height) {
+    return (
+      'https://staticmap.openstreetmap.de/staticmap.php'
+      + `?center=${lat},${lon}`
+      + `&zoom=${zoom}`
+      + `&size=${width}x${height}`
+      + `&markers=${lat},${lon},red-pushpin`
+    );
   }
 
-  // 3) Snapshot your two main maps
-  await snapshotMap(map,  'map');
-  await snapshotMap(map2, 'map2');
+  // 3) Helper: replace a map‐container div with a <img> snapshot
+  function replaceWithStatic(containerId, lat, lon, zoom, w, h) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.innerHTML = '';
+    const img = document.createElement('img');
+    img.src         = staticMapUrl(lat, lon, zoom, w, h);
+    img.style.width  = '100%';
+    img.style.height = 'auto';
+    c.appendChild(img);
+  }
 
-  // 4) Re-create & snapshot each mini-map in your Issue Snapshots
+  // 4) Snapshot your two main maps
+  //    — grab their center & zoom, measure size
+  const mEl = document.getElementById('map');
+  const c1 = map.getCenter();
+  const z1 = map.getZoom();
+  const r1 = mEl.getBoundingClientRect();
+  replaceWithStatic('map',  c1.lat, c1.lng, z1, Math.round(r1.width), Math.round(r1.height));
+
+  const m2El = document.getElementById('map2');
+  const c2 = map2.getCenter();
+  const z2 = map2.getZoom();
+  const r2 = m2El.getBoundingClientRect();
+  replaceWithStatic('map2', c2.lat, c2.lng, z2, Math.round(r2.width), Math.round(r2.height));
+
+  // 5) Snapshot each mini-map in your Issue Snapshots
   for (let i = 0; i < logTable.length; i++) {
-    const lat = +logTable[i][6],
-          lon = +logTable[i][7];
-
-    // rebuild the tiny map
-    const mini = L.map(`snapmap-${i}`, {
-      zoomControl:        false,
-      attributionControl: false,
-      dragging:           false,
-      scrollWheelZoom:    false,
-      doubleClickZoom:    false,
-      boxZoom:            false,
-      keyboard:           false,
-      tap:                false
-    }).setView([lat, lon], 17);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
-     .addTo(mini);
-
-    L.circleMarker([lat, lon], {
-      radius:     6,
-      color:      'red',
-      fillColor:  'red',
-      fillOpacity:1
-    }).addTo(mini);
-
-    await snapshotMap(mini, `snapmap-${i}`);
-    mini.remove();  // clean up
+    const lat = +logTable[i][6];
+    const lon = +logTable[i][7];
+    // mini-maps were originally 300×200
+    replaceWithStatic(`snapmap-${i}`, lat, lon, 17, 300, 200);
   }
 
   try {
-    // 5) Generate PDF blob
+    // 6) Generate PDF blob
     const opt = {
       margin:      0.2,
       filename:    `${reportBaseName}.pdf`,
@@ -1904,7 +1893,7 @@ async function uploadCSVtoAzure(tableId) {
       .from(element)
       .outputPdf('blob');
 
-    // 6) Upload PDF to Azure
+    // 7) Upload PDF to Azure
     const [baseUrl, token] = containerSasUrl.split('?');
     const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
     const resp = await fetch(uploadUrl, {
@@ -1920,12 +1909,11 @@ async function uploadCSVtoAzure(tableId) {
     }
     console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
   } finally {
-    // 7) Restore original styles
+    // 8) Restore original styles
     element.style.height   = origHeight;
     element.style.overflow = origOverflow;
   }
 }
-
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
