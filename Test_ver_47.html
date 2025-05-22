@@ -1856,16 +1856,32 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded HTML report: ${blobName}`);
 }
 
- async function exportPDFToAzure() {
-  // 0) Snapshot the #map2 Leaflet map into a PNG in a hidden container
+async function exportPDFToAzure() {
+  // 0) Locate the live map and its parent wrapper
+  const map2El     = document.getElementById('map2');
+  const wrapper    = map2El.parentElement;  
+  const reportName = `${reportBaseName}.pdf`;
+
+  // 1) Ensure there’s a hidden snapshot container alongside #map2
+  let snapEl = wrapper.querySelector('#map2-snapshot');
+  if (!snapEl) {
+    snapEl = document.createElement('div');
+    snapEl.id = 'map2-snapshot';
+    snapEl.style.display = 'none';
+    snapEl.style.width  = map2El.style.width  || '100%';
+    snapEl.style.height = map2El.style.height || 'auto';
+    wrapper.appendChild(snapEl);
+  }
+
+  // 2) Render the live map into the hidden container
   await new Promise(resolve => {
     leafletImage(map2, (err, canvas) => {
       if (!err && canvas) {
         const imgUrl = canvas.toDataURL('image/png');
-        document.getElementById('map2-snapshot').innerHTML = `
-          <img 
-            src="${imgUrl}" 
-            alt="Street View Snapshot" 
+        snapEl.innerHTML = `
+          <img
+            src="${imgUrl}"
+            alt="Street View Snapshot"
             style="width:100%; height:auto; object-fit:cover;"
           >
         `;
@@ -1874,18 +1890,22 @@ async function uploadCSVtoAzure(tableId) {
     });
   });
 
-  // 1) Expand the content so html2pdf sees everything
-  const element     = document.getElementById('mainContent');
-  const origHeight  = element.style.height;
-  const origOverflow= element.style.overflow;
-  element.style.height   = 'auto';
-  element.style.overflow = 'visible';
+  // 3) Swap visibility: hide live map, show snapshot
+  map2El.style.display  = 'none';
+  snapEl.style.display  = 'block';
+
+  // 4) Expand mainContent for HTML→PDF
+  const mainEl      = document.getElementById('mainContent');
+  const origHeight  = mainEl.style.height;
+  const origOverflow= mainEl.style.overflow;
+  mainEl.style.height   = 'auto';
+  mainEl.style.overflow = 'visible';
 
   try {
-    // 2) Generate the PDF blob
+    // 5) Generate the PDF blob with html2pdf
     const opt = {
       margin:       0.2,
-      filename:     `${reportBaseName}.pdf`,
+      filename:     reportName,
       image:        { type: 'jpeg', quality: 0.98 },
       html2canvas:  { scale: 1.5, useCORS: true },
       jsPDF: {
@@ -1894,11 +1914,11 @@ async function uploadCSVtoAzure(tableId) {
         orientation: 'landscape'
       }
     };
-    const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob');
+    const pdfBlob = await html2pdf().set(opt).from(mainEl).outputPdf('blob');
 
-    // 3) Upload to Azure
+    // 6) Upload to Azure
     const [baseUrl, token] = containerSasUrl.split('?');
-    const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
+    const uploadUrl        = `${baseUrl}/${reportName}?${token}`;
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -1911,11 +1931,14 @@ async function uploadCSVtoAzure(tableId) {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
   } finally {
-    // 4) Restore original styles
-    element.style.height   = origHeight;
-    element.style.overflow = origOverflow;
+    // 7) Restore everything: mainContent style, swap map back
+    mainEl.style.height   = origHeight;
+    mainEl.style.overflow = origOverflow;
+    snapEl.style.display  = 'none';
+    map2El.style.display  = 'block';
   }
 }
+
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
