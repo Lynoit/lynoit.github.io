@@ -1857,15 +1857,18 @@ async function uploadCSVtoAzure(tableId) {
 }
 
 async function exportPDFToAzure() {
-  // ── 0) Create an off-screen clone of #map2 so we don't destroy the live map
+  // 0) Grab & clone #map2
   const origContainer = map2.getContainer();
-  const clone = origContainer.cloneNode();
+  const clone = origContainer.cloneNode(false);
   clone.style.position = 'absolute';
   clone.style.top      = '-9999px';
   clone.style.left     = '-9999px';
+  // ← make sure it actually has a size:
+  clone.style.width  = origContainer.clientWidth  + 'px';
+  clone.style.height = origContainer.clientHeight + 'px';
   document.body.appendChild(clone);
 
-  // ── 1) Initialize a hidden Leaflet map on that clone
+  // 1) Init hidden map in that clone
   const hiddenMap = L.map(clone, {
     preferCanvas:       true,
     zoomControl:        false,
@@ -1882,21 +1885,16 @@ async function exportPDFToAzure() {
     attribution: ''
   }).addTo(hiddenMap);
 
-  // If you had a marker/circle on map2, re-add it here:
-  L.circleMarker(map2.getCenter(), {
-    radius:      6,
-    color:       'red',
-    fillColor:   'red',
-    fillOpacity: 1
-  }).addTo(hiddenMap);
+  // re-add any marker you want in the snapshot
+  L.circleMarker(map2.getCenter(), { radius:6, color:'red', fillColor:'red', fillOpacity:1 })
+   .addTo(hiddenMap);
 
-  // ── 2) Wait for tiles, then snapshot via leafletImage()
+  // 2) Wait for the hidden map to load then snapshot it
   await new Promise(resolve => {
     hiddenMap.once('load', () => {
       leafletImage(hiddenMap, (err, canvas) => {
         if (!err && canvas) {
           const imgUrl = canvas.toDataURL('image/png');
-          // Inject the resulting PNG into the real #map2 container
           origContainer.innerHTML = `
             <img
               src="${imgUrl}"
@@ -1910,48 +1908,44 @@ async function exportPDFToAzure() {
     });
   });
 
-  // ── 3) Tear down the hidden map and DOM clone
+  // 3) Tear it down
   hiddenMap.remove();
   document.body.removeChild(clone);
 
-  // ── 4) Expand mainContent so html2pdf captures everything
-  const element = document.getElementById('mainContent');
+  // 4) Expand mainContent for html2pdf
+  const element      = document.getElementById('mainContent');
   const origHeight   = element.style.height;
   const origOverflow = element.style.overflow;
   element.style.height   = 'auto';
   element.style.overflow = 'visible';
 
   try {
-    // ── 5) Configure html2pdf and generate PDF blob
+    // 5) Generate PDF
     const opt = {
-      margin:       0.2,
-      filename:     `${reportBaseName}.pdf`,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 1.5, useCORS: true },
-      jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
+      margin:      0.2,
+      filename:    `${reportBaseName}.pdf`,
+      image:       { type:'jpeg', quality:0.98 },
+      html2canvas: { scale:1.5, useCORS:true },
+      jsPDF:       { unit:'in', format:'a4', orientation:'landscape' }
     };
     const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob');
 
-    // ── 6) Upload the PDF to Azure
+    // 6) Upload
     const [baseUrl, token] = containerSasUrl.split('?');
     const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/pdf'
-      },
+      headers:{ 'x-ms-blob-type':'BlockBlob', 'Content-Type':'application/pdf' },
       body: pdfBlob
     });
-    if (!resp.ok) {
-      throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
-    }
+    if (!resp.ok) throw new Error(`PDF upload failed: ${resp.status}`);
   } finally {
-    // ── 7) Restore original styles
+    // 7) Restore styles
     element.style.height   = origHeight;
     element.style.overflow = origOverflow;
   }
 }
+
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
