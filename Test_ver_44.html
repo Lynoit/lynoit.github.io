@@ -1852,41 +1852,78 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded HTML report: ${blobName}`);
 }
 
+   function bakeMapToImg(map, containerId, callback) {
+      leafletImage(map, function(err, canvas) {
+    if (err) return console.error(err);
+    const imgUrl = canvas.toDataURL('image/png');
+    const container = document.getElementById(containerId);
+    // create an <img> same size as the div
+    const img = document.createElement('img');
+    img.src    = imgUrl;
+    img.width  = container.clientWidth;
+    img.height = container.clientHeight;
+    img.style = container.style.cssText;   // preserve width/height, borders, etc.
+    container.parentNode.replaceChild(img, container);
+    callback();
+  });
+  }
+
  async function exportPDFToAzure() {
-  // 1) Grab and expand the #mainContent so html2pdf sees everything
+  // 1) Expand #mainContent so html2pdf captures everything
   const element = document.getElementById('mainContent');
-  // backup
   const origHeight   = element.style.height;
   const origOverflow = element.style.overflow;
-  // expand
   element.style.height   = 'auto';
   element.style.overflow = 'visible';
 
-  try {
-    // 2) Configure html2pdf
-const opt = {
-  margin:       0.2,                     // smaller margins
-  filename:     `${reportBaseName}.pdf`,
-  image:        { type: 'jpeg', quality: 0.98 },
-  html2canvas:  { scale: 1.5, useCORS: true },
-  jsPDF: {
-    unit:        'in',
-    format:      'a4',                   // or 'letter'
-    orientation: 'landscape'             // ← switch to landscape
+  // 2) Helper to bake a Leaflet map (tiles + overlays) into a static <img>
+  function bakeMapToImg(mapInstance, divId) {
+    return new Promise(resolve => {
+      leafletImage(mapInstance, (err, canvas) => {
+        if (err) {
+          console.error('leaflet-image error', err);
+          return resolve();
+        }
+        const imgUrl = canvas.toDataURL('image/png');
+        const div    = document.getElementById(divId);
+        const img    = document.createElement('img');
+        img.src      = imgUrl;
+        img.width    = div.clientWidth;
+        img.height   = div.clientHeight;
+        img.style.cssText = div.style.cssText;
+        div.parentNode.replaceChild(img, div);
+        resolve();
+      });
+    });
   }
-};
 
-    // 3) Generate PDF blob
+  try {
+    // 3) Configure html2pdf
+    const opt = {
+      margin:       0.2,
+      filename:     `${reportBaseName}.pdf`,
+      image:        { type: 'jpeg', quality: 0.98 },
+      html2canvas:  { scale: 1.5, useCORS: true },
+      jsPDF: {
+        unit:        'in',
+        format:      'a4',
+        orientation: 'landscape'
+      }
+    };
+
+    // 4) Bake both maps into images before PDF snapshot
+    await bakeMapToImg(map,  'map');
+    await bakeMapToImg(map2, 'map2');
+
+    // 5) Generate the PDF blob
     const pdfBlob = await html2pdf()
       .set(opt)
       .from(element)
       .outputPdf('blob');
 
-    // 4) Build upload URL
+    // 6) Upload to Azure Blob Storage
     const [baseUrl, token] = containerSasUrl.split('?');
     const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
-
-    // 5) PUT to Azure
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -1899,13 +1936,13 @@ const opt = {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
     console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
-
   } finally {
-    // 6) Restore original styles
+    // 7) Restore original styles
     element.style.height   = origHeight;
     element.style.overflow = origOverflow;
   }
 }
+
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
