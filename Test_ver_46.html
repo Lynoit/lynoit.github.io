@@ -1857,40 +1857,50 @@ async function uploadCSVtoAzure(tableId) {
 }
 
  async function exportPDFToAzure() {
-  // 1) Grab and expand the #mainContent so html2pdf sees everything
+  // 0) Snapshot the #map2 Leaflet map into a PNG <img>
+  await new Promise(resolve => {
+    leafletImage(map2, (err, canvas) => {
+      if (!err && canvas) {
+        const imgUrl = canvas.toDataURL('image/png');
+        const container = document.getElementById('map2');
+        // replace the live map with our static image
+        container.innerHTML = `
+          <img 
+            src="${imgUrl}" 
+            alt="Street View Snapshot" 
+            style="width:100%; height:auto; object-fit:cover;"
+          >
+        `;
+      }
+      resolve();
+    });
+  });
+
+  // 1) Expand the content so html2pdf sees everything
   const element = document.getElementById('mainContent');
-  // backup
   const origHeight   = element.style.height;
   const origOverflow = element.style.overflow;
-  // expand
   element.style.height   = 'auto';
   element.style.overflow = 'visible';
 
   try {
-    // 2) Configure html2pdf
-const opt = {
-  margin:       0.2,                     // smaller margins
-  filename:     `${reportBaseName}.pdf`,
-  image:        { type: 'jpeg', quality: 0.98 },
-  html2canvas:  { scale: 1.5, useCORS: true },
-  jsPDF: {
-    unit:        'in',
-    format:      'a4',                   // or 'letter'
-    orientation: 'landscape'             // ← switch to landscape
-  }
-};
+    // 2) Generate the PDF blob
+    const opt = {
+      margin:       0.2,
+      filename:     `${reportBaseName}.pdf`,
+      image:        { type: 'jpeg', quality: 0.98 },
+      html2canvas:  { scale: 1.5, useCORS: true },
+      jsPDF: {
+        unit:        'in',
+        format:      'a4',
+        orientation: 'landscape'
+      }
+    };
+    const pdfBlob = await html2pdf().set(opt).from(element).outputPdf('blob');
 
-    // 3) Generate PDF blob
-    const pdfBlob = await html2pdf()
-      .set(opt)
-      .from(element)
-      .outputPdf('blob');
-
-    // 4) Build upload URL
+    // 3) Upload to Azure
     const [baseUrl, token] = containerSasUrl.split('?');
     const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
-
-    // 5) PUT to Azure
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -1902,10 +1912,8 @@ const opt = {
     if (!resp.ok) {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
-    console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
-
   } finally {
-    // 6) Restore original styles
+    // 4) Restore original styles
     element.style.height   = origHeight;
     element.style.overflow = origOverflow;
   }
