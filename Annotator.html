@@ -15,7 +15,6 @@
 
   <!-- PapaParse for CSV parsing -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-image/0.4.0/leaflet-image.js"></script>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
@@ -127,6 +126,16 @@ function renderMetaForm(questions) {
       background: #007bff; border: none; color: #fff;
       font-size: 1.5em; padding: 4px 8px; cursor: pointer;
       border-radius: 4px; z-index: 1100;
+    }
+
+    .issue-label {
+  background: rgba(255, 255, 255, 0.9);
+  color: #000;
+  font-weight: bold;
+  padding: 2px 6px;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  white-space: nowrap;
     }
 
     .spinner {
@@ -471,6 +480,7 @@ function renderMetaForm(questions) {
     <div class="distanceContainer">
       <p id="totalDistance">Distance: 0.0 km</p>
     </div>
+    <button class="bigButton orangeButton" id="uploadNowButton">Upload data to cloud</button>
     <button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button>
   </div>
 
@@ -624,7 +634,8 @@ function renderMetaForm(questions) {
     </footer>
   </div>
 
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-image@0.4.0/leaflet-image.js"></script>
 
   <script>
 
@@ -656,6 +667,7 @@ function renderMetaForm(questions) {
     const AZURE_REGION = 'northeurope';
     const PHASE_THROTTLE = 5 * 60 * 1000;
     const TABLE_THROTTLE = 30 * 1000;
+    const UPLOAD_THROTTLE = 5 * 60 * 1000
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
 
@@ -671,6 +683,7 @@ function renderMetaForm(questions) {
     let lastWasTunnel = false;
     let bridgeStreak = 0;
     let corrections = {};
+    let lastUploadTime = 0;
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -755,8 +768,9 @@ function renderMetaForm(questions) {
 };
 
 function startApp() {
-  // your existing code that used to live inside .then():
-  // initMap(); initMap2(); initCharts(); updateDateTime(); …
+  loadCorrections()
+    .then(() => console.log('Corrections loaded:', corrections))
+    .catch(err => console.warn('Corrections load failed:', err));  
   initMap();
   initMap2();
   initCharts();
@@ -1120,7 +1134,7 @@ async function initAzureSpeech() {
 
       if (tags.bridge === 'yes') {
   bridgeStreak++;
-  if (bridgeStreak === 5) {
+  if (bridgeStreak === 8) {
     bridgeCount++;
   }
 } else {
@@ -1351,9 +1365,16 @@ function updateStatsTable () {
     // ⑧ Update displays
     displayLogTable();
     displayCameraTable();
-    L.marker([+lat, +lon], {
-      icon: L.divIcon({ className: 'issue-label', html: `<strong>${name}</strong>` })
-    }).addTo(map);
+
+      const issueNumber = logTable.length;
+
+  // add marker with number instead of text
+  L.marker([+lat, +lon], {
+    icon: L.divIcon({
+      className: 'issue-label',
+      html: `<strong>${issueNumber}</strong>`
+    })
+  }).addTo(map);
 
     // ⑨ If it’s a “red” KPI event, update counts & tables
     if (isRed) {
@@ -1465,41 +1486,67 @@ function displayLogTable() {
   document.getElementById('snapshotTableContainer').innerHTML = snapHtml;
 
 
+/* 3.  Bake each snap-map into a PNG via leaflet-image */
+logTable.forEach((row, i) => {
+  const lat = parseFloat(row[6]), lon = parseFloat(row[7]);
+  const mapId = `snapmap-${i}`;
+  // 3.1 Build the live Leaflet map exactly as before
+  const mini = L.map(mapId, {
+    zoomControl: false,
+    attributionControl: false,
+    dragging: false,
+    scrollWheelZoom: false,
+    doubleClickZoom: false,
+    boxZoom: false,
+    keyboard: false,
+    tap: false,
+    preferCanvas: true
+  }).setView([lat, lon], 17);
 
-/* ───────────────────────────────────────────────────────────
-   3.  Turn each “snapmap-x” div into a tiny Leaflet map
-─────────────────────────────────────────────────────────── */
-  logTable.forEach((row, i) => {
-    const lat = parseFloat(row[6]), lon = parseFloat(row[7]);
+   const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+     attribution: '© OSM contributors',
+     crossOrigin: true
+   }).addTo(mini);
 
-    const mini = L.map(`snapmap-${i}`, {
-      zoomControl: false,
-      attributionControl: false,
-      dragging: false,
-      scrollWheelZoom: false,
-      doubleClickZoom: false,
-      boxZoom: false,
-      keyboard: false,
-      tap: false
-    }).setView([lat, lon], 17);
+  L.circleMarker([lat, lon], {
+    radius: 6,
+    color: 'red',
+    fillColor: 'red',
+    fillOpacity: 1
+  }).addTo(mini);
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors'
-    }).addTo(mini);
+  mini.invalidateSize();
 
-    L.circleMarker([lat, lon], {
-      radius: 6,
-      color: 'red',
-      fillColor: 'red',
-      fillOpacity: 1
-    }).addTo(mini);
+   // ○ wait until the tile layer has fired its “load” event…
+   tiles.once('load', () => {
+     // 3.2 Now snapshot it into a canvas → PNG
+     leafletImage(mini, function(err, canvas) {
+  
+    if (err) {
+      console.error('leaflet-image error', err);
+      return;
+    }
+    const imgUrl = canvas.toDataURL('image/png');
 
-    mini.invalidateSize();
-  });
+    // 3.3 Swap out the <div> for a real <img>  
+    const cell = document.getElementById(`mapcell-${i}`);
+    cell.innerHTML = `
+      <img
+        src="${imgUrl}"
+        width="300" height="200"
+        style="object-fit:cover;border:1px solid #444;"
+        alt="Map snapshot ${i+1}"
+      />
+    `;
+
+    // 3.4 Tear down the temporary map
+    mini.remove();
+     });
+   });  // ← end of tiles.once('load')
+});
 }
 
-
-    function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
+  function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
    function buildButtons () {
@@ -1552,6 +1599,7 @@ function displayLogTable() {
     })
     .catch(err => console.error(err));
 }
+  
     function updateDayPhase(lat, lon) {
     fetch(`https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lon}&formatted=0`)
     .then(r => r.json())
@@ -1622,28 +1670,34 @@ const tablesToUpload = [
 
 async function maybeUpdateTables() {
   const now = Date.now();
+
+  // 1) Table updates (unchanged)
   if (now - lastTableUpdate > TABLE_THROTTLE) {
-    // … your existing table rebuild calls …
-    displayLogTable();   // ensure logTable exists in the DOM
+    displayLogTable();
     updateStatsTable();
     updateCountTable();
     updateStreetTable();
     updateCountryTable();
     updateWeatherTable();
     updatePhaseTable();
-    lastTableUpdate = now;
-
     uploadWorkbookToAzure()
       .then(() => console.log('Workbook auto-uploaded'))
       .catch(err => console.error('Workbook upload failed:', err));
+    lastTableUpdate = now;
+  }
 
-    exportMainContentToAzure()
-      .then(() => console.log('Main content auto-uploaded'))
-      .catch(err => console.error('Main content upload failed:', err));
-
+  // 2) Uploads, but only once every 5 minutes
+  if (now - lastUploadTime > UPLOAD_THROTTLE) {
+    lastUploadTime = now;
+    //uploadWorkbookToAzure()
+    //  .then(() => console.log('Workbook auto-uploaded'))
+    //  .catch(err => console.error('Workbook upload failed:', err));
+    //exportMainContentToAzure()
+    //  .then(() => console.log('Main content auto-uploaded'))
+    //  .catch(err => console.error('HTML upload failed:', err));
     exportPDFToAzure()
       .then(() => console.log('PDF report uploaded'))
-      .catch(err => console.error('PDF upload failed:', err));    
+      .catch(err => console.error('PDF upload failed:', err));
   }
 }
 
@@ -1819,37 +1873,69 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded HTML report: ${blobName}`);
 }
 
- async function exportPDFToAzure() {
-  // 1) Grab and expand the #mainContent so html2pdf sees everything
-  const element = document.getElementById('mainContent');
-  // backup
-  const origHeight   = element.style.height;
-  const origOverflow = element.style.overflow;
-  // expand
-  element.style.height   = 'auto';
-  element.style.overflow = 'visible';
+async function exportPDFToAzure() {
+  // 0) Locate the live map and its parent wrapper
+  const map2El     = document.getElementById('map2');
+  const wrapper    = map2El.parentElement;  
+  const reportName = `${reportBaseName}.pdf`;
+
+  // 1) Ensure there’s a hidden snapshot container alongside #map2
+  let snapEl = wrapper.querySelector('#map2-snapshot');
+  if (!snapEl) {
+    snapEl = document.createElement('div');
+    snapEl.id = 'map2-snapshot';
+    snapEl.style.display = 'none';
+    snapEl.style.width  = map2El.style.width  || '100%';
+    snapEl.style.height = map2El.style.height || 'auto';
+    wrapper.appendChild(snapEl);
+  }
+
+  // 2) Render the live map into the hidden container
+  await new Promise(resolve => {
+    leafletImage(map2, (err, canvas) => {
+      if (!err && canvas) {
+        const imgUrl = canvas.toDataURL('image/png');
+        snapEl.innerHTML = `
+          <img
+            src="${imgUrl}"
+            alt="Street View Snapshot"
+            style="width:100%; height:auto; object-fit:cover;"
+          >
+        `;
+      }
+      resolve();
+    });
+  });
+
+  // 3) Swap visibility: hide live map, show snapshot
+  map2El.style.display  = 'none';
+  snapEl.style.display  = 'block';
+
+  // 4) Expand mainContent for HTML→PDF
+  const mainEl      = document.getElementById('mainContent');
+  const origHeight  = mainEl.style.height;
+  const origOverflow= mainEl.style.overflow;
+  mainEl.style.height   = 'auto';
+  mainEl.style.overflow = 'visible';
 
   try {
-    // 2) Configure html2pdf
+    // 5) Generate the PDF blob with html2pdf
     const opt = {
-      margin:       0.5,                             // inches
-      filename:     `${reportBaseName}.pdf`,         // same base name
+      margin:       0.2,
+      filename:     reportName,
       image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 2 },
-      jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
+      html2canvas:  { scale: 1.5, useCORS: true },
+      jsPDF: {
+        unit:        'in',
+        format:      'a4',
+        orientation: 'landscape'
+      }
     };
+    const pdfBlob = await html2pdf().set(opt).from(mainEl).outputPdf('blob');
 
-    // 3) Generate PDF blob
-    const pdfBlob = await html2pdf()
-      .set(opt)
-      .from(element)
-      .outputPdf('blob');
-
-    // 4) Build upload URL
+    // 6) Upload to Azure
     const [baseUrl, token] = containerSasUrl.split('?');
-    const uploadUrl        = `${baseUrl}/${reportBaseName}.pdf?${token}`;
-
-    // 5) PUT to Azure
+    const uploadUrl        = `${baseUrl}/${reportName}?${token}`;
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -1861,14 +1947,42 @@ async function uploadCSVtoAzure(tableId) {
     if (!resp.ok) {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
-    console.log(`✔ Uploaded PDF: ${reportBaseName}.pdf`);
-
   } finally {
-    // 6) Restore original styles
-    element.style.height   = origHeight;
-    element.style.overflow = origOverflow;
+    // 7) Restore everything: mainContent style, swap map back
+    mainEl.style.height   = origHeight;
+    mainEl.style.overflow = origOverflow;
+    snapEl.style.display  = 'none';
+    map2El.style.display  = 'block';
   }
 }
+
+
+    // 1) Grab the button
+const uploadNowBtn = document.getElementById('uploadNowButton');
+
+// 2) Helper to show a brief spinner state
+function withSpinner(btn, fn) {
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Uploading…';
+  return fn()
+    .catch(err => console.error('Manual upload failed:', err))
+    .finally(() => {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    });
+}
+
+// 3) On-click, fire all three
+uploadNowBtn.addEventListener('click', () => {
+  withSpinner(uploadNowBtn, async () => {
+    // you can await each in sequence (or Promise.all if you prefer)
+    await uploadWorkbookToAzure();
+    //await exportMainContentToAzure();
+    await exportPDFToAzure();
+    console.log('✔ Manual upload complete');
+  });
+});
     
   function updateSnapshotTable() {
   const container = document.getElementById('snapshotTableContainer');
