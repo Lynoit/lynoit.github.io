@@ -1956,38 +1956,36 @@ async function exportPDFToAzure() {
   }
 }
 
-    // 1) List the IDs you want to include, in order
+// 1) List the IDs you want to include, in order
 const SECTIONS_TO_EXPORT = [
-  'logTableContainer',     // your issue list
-  'snapshotContainer',     // your snapshots section
-  'mapContainer',          // the route map
-  'chartsContainer',       // the charts
-  // add any others you like...
+  'logTableContainer',   // Issue list
+  'snapshotContainer',   // Issue Snapshots
+  'mapContainer',        // Route view
+  'chartsContainer',     // Charts
+  // …add more as needed
 ];
 
-// 2) The export function
-async function exportCustomSectionsToPDF() {
-  // build a timestamped filename
-  const filename = `CustomExport_${formatAppStartTimestamp()}.pdf`;
+// 2) Custom export + upload function
+async function exportCustomSectionsToAzure() {
+  // filename
+  const blobName = `CustomExport_${formatAppStartTimestamp()}.pdf`;
+  const [ baseUrl, token ] = containerSasUrl.split('?');
+  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
 
-  // 3) Create off-screen wrapper
+  // 3) Build an offscreen wrapper and clone sections into it
   const tmp = document.createElement('div');
   tmp.style.position = 'absolute';
   tmp.style.top      = '-9999px';
   tmp.style.padding  = '20px';
   document.body.appendChild(tmp);
 
-  // 4) Clone each section into tmp
   SECTIONS_TO_EXPORT.forEach((id, idx) => {
-    const original = document.getElementById(id);
-    if (!original) return;  // skip missing
-    const clone = original.cloneNode(true);
-
-    // strip interactive bits if you prefer
-    clone.querySelectorAll('button, input, [id="exportSelector"]').forEach(n => n.remove());
+    const src = document.getElementById(id);
+    if (!src) return;
+    const clone = src.cloneNode(true);
+    // remove interactive bits if desired
+    clone.querySelectorAll('button, input').forEach(n => n.remove());
     tmp.appendChild(clone);
-
-    // add a page-break div if not last
     if (idx < SECTIONS_TO_EXPORT.length - 1) {
       const br = document.createElement('div');
       br.className = 'page-break';
@@ -1995,23 +1993,48 @@ async function exportCustomSectionsToPDF() {
     }
   });
 
-  // 5) Run html2pdf
+  // 4) Generate a PDF blob (not .save())
   const opt = {
     margin:       0.2,
-    filename,
+    filename:     blobName,
     image:        { type: 'jpeg', quality: 0.98 },
     html2canvas:  { scale: 1.5, useCORS: true },
     jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' }
   };
+  let pdfBlob;
   try {
-    await html2pdf().set(opt).from(tmp).save();
+    pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
   } catch (err) {
-    console.error('PDF export failed:', err);
+    console.error('PDF generation failed:', err);
+    document.body.removeChild(tmp);
+    return;
+  }
+
+  // 5) Upload to Azure
+  try {
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/pdf'
+      },
+      body: pdfBlob
+    });
+    if (!resp.ok) {
+      throw new Error(`${resp.status} ${resp.statusText}`);
+    }
+    console.log(`✔ Uploaded custom PDF as ${blobName}`);
+  } catch (err) {
+    console.error('Custom PDF upload failed:', err);
   } finally {
-    // 6) clean up
+    // 6) Clean up
     document.body.removeChild(tmp);
   }
 }
+
+// 7) Hook it up to your export button
+document.getElementById('exportSelectedBtn')
+        .addEventListener('click', exportCustomSectionsToAzure);
 
     // 1) Grab the button
 const uploadNowBtn = document.getElementById('uploadNowButton');
