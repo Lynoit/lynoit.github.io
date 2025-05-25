@@ -1965,25 +1965,32 @@ const SECTIONS_TO_EXPORT = [
   // …add more as needed
 ];
 
-// 2) Custom export + upload function
 async function exportCustomSectionsToAzure() {
-  // filename
   const blobName = `CustomExport_${formatAppStartTimestamp()}.pdf`;
   const [ baseUrl, token ] = containerSasUrl.split('?');
   const uploadUrl = `${baseUrl}/${blobName}?${token}`;
 
-  // 3) Build an offscreen wrapper and clone sections into it
+  // 1) Build a temporary wrapper that sits at top:0 but is invisible (opacity:0)
   const tmp = document.createElement('div');
-  tmp.style.position = 'absolute';
-  tmp.style.top      = '-9999px';
-  tmp.style.padding  = '20px';
+  tmp.id = 'pdf-custom-clone';
+  Object.assign(tmp.style, {
+    position: 'absolute',
+    top: '0',
+    left: '0',
+    width: '100%',
+    background: '#fff',
+    opacity: '0',            // invisible but still rendered
+    pointerEvents: 'none',   // clicks pass through
+    zIndex: '9999'
+  });
   document.body.appendChild(tmp);
 
+  // 2) Clone each section into tmp
   SECTIONS_TO_EXPORT.forEach((id, idx) => {
     const src = document.getElementById(id);
     if (!src) return;
     const clone = src.cloneNode(true);
-    // remove interactive bits if desired
+    // strip out any interactive bits
     clone.querySelectorAll('button, input').forEach(n => n.remove());
     tmp.appendChild(clone);
     if (idx < SECTIONS_TO_EXPORT.length - 1) {
@@ -1993,16 +2000,25 @@ async function exportCustomSectionsToAzure() {
     }
   });
 
-  // 4) Generate a PDF blob (not .save())
-  const opt = {
-    margin:       0.2,
-    filename:     blobName,
-    image:        { type: 'jpeg', quality: 0.98 },
-    html2canvas:  { scale: 1.5, useCORS: true },
-    jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' }
-  };
+  // 3) Generate the PDF blob (now html2canvas can “see” tmp at top:0)
   let pdfBlob;
   try {
+    const opt = {
+      margin:      0.2,
+      filename:    blobName,
+      image:       { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale:    1.5,
+        useCORS:  true,
+        scrollX:  0,
+        scrollY:  0
+      },
+      jsPDF:       {
+        unit:        'in',
+        format:      'a4',
+        orientation: 'portrait'
+      }
+    };
     pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
   } catch (err) {
     console.error('PDF generation failed:', err);
@@ -2010,10 +2026,10 @@ async function exportCustomSectionsToAzure() {
     return;
   }
 
-  // 5) Upload to Azure
+  // 4) Upload to Azure
   try {
     const resp = await fetch(uploadUrl, {
-      method: 'PUT',
+      method:  'PUT',
       headers: {
         'x-ms-blob-type': 'BlockBlob',
         'Content-Type':   'application/pdf'
@@ -2021,13 +2037,13 @@ async function exportCustomSectionsToAzure() {
       body: pdfBlob
     });
     if (!resp.ok) {
-      throw new Error(`${resp.status} ${resp.statusText}`);
+      throw new Error(`Upload failed: ${resp.status} ${resp.statusText}`);
     }
     console.log(`✔ Uploaded custom PDF as ${blobName}`);
   } catch (err) {
     console.error('Custom PDF upload failed:', err);
   } finally {
-    // 6) Clean up
+    // 5) Clean up
     document.body.removeChild(tmp);
   }
 }
