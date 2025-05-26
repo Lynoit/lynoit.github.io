@@ -1988,130 +1988,141 @@ let sectionTexts = {};
   }
 
   // 1) Custom PDF export with per-section header & text
-  async function exportCustomSectionsToAzure() {
-  // 1) Prep blob name & upload URL
-  const blobName = `${reportBaseName}.pdf`;
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
+   async function exportCustomSectionsToAzure() {
+    // 1) Prep blob name & upload URL
+    const blobName = `${reportBaseName}.pdf`;
+    const [baseUrl, token] = containerSasUrl.split('?');
+    const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
 
-  // 2) Off-DOM A4-width container at 180 mm
-  const tmp = document.createElement('div');
-  tmp.id = 'pdf-custom-clone';
-  Object.assign(tmp.style, {
-    position:   'relative',
-    width:      '180mm',
-    margin:     '0 auto',
-    background: '#fff',
-    boxSizing:  'border-box',
-  });
-  document.body.appendChild(tmp);
+    // 2) Create off-DOM wrapper sized to A4-width
+    const tmp = document.createElement('div');
+    tmp.id = 'pdf-custom-clone';
+    Object.assign(tmp.style, {
+      position:   'relative',
+      width:      '180mm',      /* tightened from 190mm */
+      margin:     '0 auto',
+      background: '#fff',
+      boxSizing:  'border-box',
+    });
+    document.body.appendChild(tmp);
 
-  // 3) Inject minimal styling
-  const style = document.createElement('style');
-  style.textContent = `
-    #pdf-custom-clone table {
-      width: 100% !important;
-      table-layout: fixed;
-      word-wrap: break-word;
-      font-size: 9px;
-      border-collapse: collapse;
-    }
-    #pdf-custom-clone th, #pdf-custom-clone td {
-      padding: 4px;
-      border: 1px solid #444;
-    }
-    #pdf-custom-clone h2 { font-size:14px; margin:12px 0 4px; }
-    #pdf-custom-clone p  { font-size:11px; margin:0 0 8px; }
-  `;
-  tmp.appendChild(style);
+    // 3) Inject CSS for tables, headings—and your snapshot-table column widths
+    const style = document.createElement('style');
+    style.textContent = `
+      #pdf-custom-clone h2 {
+        font-size: 18px;
+        margin: 0.5em 0 0.2em;
+      }
+      #pdf-custom-clone p {
+        font-size: 11px;
+        margin: 0 0 8px;
+      }
+      #pdf-custom-clone table {
+        width: 100% !important;
+        table-layout: fixed;
+        word-wrap: break-word;
+        font-size: 9px;
+        border-collapse: collapse;
+      }
+      #pdf-custom-clone th,
+      #pdf-custom-clone td {
+        padding: 4px;
+        border: 1px solid #444;
+        vertical-align: top;
+      }
 
-  // 4) Iterate sections
-  SECTIONS_TO_EXPORT.forEach((id, idx) => {
-    // 4a) Charts container: replace with two full-width images
-    if (id === 'chartsContainer') {
-      // Distance vs Time
-      const distImg = new Image();
-      distImg.src   = distanceChart.toBase64Image();
-      distImg.style.width  = '100%';
-      distImg.style.display = 'block';
-      tmp.appendChild(distImg);
+      /* Snapshot table: tighten first two cols, expand last two */
+      #pdf-custom-clone #snapshotTableContainer table th:nth-child(1),
+      #pdf-custom-clone #snapshotTableContainer table td:nth-child(1),
+      #pdf-custom-clone #snapshotTableContainer table th:nth-child(2),
+      #pdf-custom-clone #snapshotTableContainer table td:nth-child(2) {
+        width: 10%;    /* small “No.” & “Issue” */
+      }
+      #pdf-custom-clone #snapshotTableContainer table th:nth-child(3),
+      #pdf-custom-clone #snapshotTableContainer table td:nth-child(3),
+      #pdf-custom-clone #snapshotTableContainer table th:nth-child(4),
+      #pdf-custom-clone #snapshotTableContainer table td:nth-child(4) {
+        width: 40%;    /* generous “Map” & “Photo” */
+      }
+      .page-break { page-break-after: always; }
+    `;
+    tmp.appendChild(style);
 
-      // page-break before next chart
-      const br = document.createElement('div');
-      br.className = 'page-break';
-      tmp.appendChild(br);
-
-      // Speed vs Distance
-      const speedImg = new Image();
-      speedImg.src   = speedChart.toBase64Image();
-      speedImg.style.width  = '100%';
-      speedImg.style.display = 'block';
-      tmp.appendChild(speedImg);
-
-    } else {
-      // 4b) Normal clone of each section
-      const src = document.getElementById(id);
-      if (src) {
+    // 4) Clone each section…
+    SECTIONS_TO_EXPORT.forEach((id, idx) => {
+      if (id === 'chartsContainer') {
+        // …charts → images…
+        const wrapper = document.createElement('div');
+        wrapper.id = 'chartsContainer';
+        const distImg = new Image();
+        distImg.src   = distanceChart.toBase64Image();
+        distImg.style.width = '100%';
+        wrapper.appendChild(distImg);
+        wrapper.appendChild(Object.assign(document.createElement('div'), { className: 'page-break' }));
+        const speedImg = new Image();
+        speedImg.src   = speedChart.toBase64Image();
+        speedImg.style.width = '100%';
+        wrapper.appendChild(speedImg);
+        tmp.appendChild(wrapper);
+      } else {
+        // …everything else gets cloned…
+        const src = document.getElementById(id);
+        if (!src) return;
         const clone = src.cloneNode(true);
-        clone.querySelectorAll('button, input').forEach(n => n.remove());
+        clone.querySelectorAll('button,input').forEach(n => n.remove());
         tmp.appendChild(clone);
       }
-    }
-
-    // 4c) Page-break after every section except last
-    if (idx < SECTIONS_TO_EXPORT.length - 1) {
-      const pbr = document.createElement('div');
-      pbr.className = 'page-break';
-      tmp.appendChild(pbr);
-    }
-  });
-
-  // 5) Ensure overflow visible
-  const htmlEl = document.documentElement;
-  const bodyEl = document.body;
-  const origHtmlOv = htmlEl.style.overflow;
-  const origBodyOv = bodyEl.style.overflow;
-  htmlEl.style.overflow = 'visible';
-  bodyEl.style.overflow = 'visible';
-
-  // 6) Generate PDF blob
-  let pdfBlob;
-  try {
-    const opt = {
-      margin:      5,    // mm
-      filename:    blobName,
-      image:       { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 1, useCORS: true, scrollX: 0, scrollY: 0 },
-      jsPDF:       { unit: 'mm', format: 'a4', orientation: 'portrait' }
-    };
-    pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
-  } catch (err) {
-    console.error('PDF generation failed:', err);
-  } finally {
-    // restore overflow & clean up
-    htmlEl.style.overflow = origHtmlOv;
-    bodyEl.style.overflow = origBodyOv;
-    document.body.removeChild(tmp);
-  }
-
-  if (!pdfBlob) return;
-
-  // 7) Upload to Azure
-  try {
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/pdf'
-      },
-      body: pdfBlob
+      if (idx < SECTIONS_TO_EXPORT.length - 1) {
+        const pbr = document.createElement('div');
+        pbr.className = 'page-break';
+        tmp.appendChild(pbr);
+      }
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    console.log(`✔ Uploaded custom PDF as ${blobName}`);
-  } catch (err) {
-    console.error('Custom PDF upload failed:', err);
+
+    // 5) Prepare for html2canvas
+    const htmlEl = document.documentElement;
+    const bodyEl = document.body;
+    const origHtmlOv = htmlEl.style.overflow;
+    const origBodyOv = bodyEl.style.overflow;
+    htmlEl.style.overflow = 'visible';
+    bodyEl.style.overflow = 'visible';
+
+    // 6) Generate PDF blob
+    let pdfBlob;
+    try {
+      const opt = {
+        margin:      5,
+        filename:    blobName,
+        image:       { type:'jpeg', quality:0.98 },
+        html2canvas: { scale:1, useCORS:true, scrollX:0, scrollY:0 },
+        jsPDF:       { unit:'mm', format:'a4', orientation:'portrait' }
+      };
+      pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+    } finally {
+      htmlEl.style.overflow = origHtmlOv;
+      bodyEl.style.overflow = origBodyOv;
+      document.body.removeChild(tmp);
+    }
+    if (!pdfBlob) return;
+
+    // 7) Upload to Azure
+    try {
+      const resp = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'x-ms-blob-type': 'BlockBlob',
+          'Content-Type':   'application/pdf'
+        },
+        body: pdfBlob
+      });
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+      console.log(`✔ Uploaded custom PDF as ${blobName}`);
+    } catch (err) {
+      console.error('Custom PDF upload failed:', err);
+    }
   }
-}
 
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
