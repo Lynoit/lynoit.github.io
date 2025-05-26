@@ -1966,37 +1966,41 @@ const SECTIONS_TO_EXPORT = [
 ];
 
 async function exportCustomSectionsToAzure() {
-  // … your blobName/uploadUrl setup …
+  // ─────────── Define your blob name & upload URL ───────────
+  const blobName = `CustomExport_${formatAppStartTimestamp()}.pdf`;
+  const [baseUrl, token] = containerSasUrl.split('?');
+  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
 
-  // 1) Build the off-screen wrapper, but give it a PDF-page–sized width
+  // ─────────── Build the clone wrapper ───────────
   const tmp = document.createElement('div');
+  tmp.id = 'pdf-custom-clone';               //  ← make sure your CSS targets this
   Object.assign(tmp.style, {
     position: 'relative',
-    width: '190mm',          // exactly A4 width minus 2×10 mm margins
-    background: '#fff',
-    margin: '0 auto'
+    width:    '190mm',                        // A4 minus margins
+    margin:   '0 auto',
+    background:'#fff',
+    boxSizing:'border-box'
   });
   document.body.appendChild(tmp);
 
-  // 2) Inject CSS so all tables fill & wrap
+  // ─────────── Inject wrapping CSS ───────────
   const style = document.createElement('style');
   style.textContent = `
-    #pdf-custom-clone, #pdf-custom-clone * {
-      box-sizing: border-box;
-    }
     #pdf-custom-clone table {
-      width: 100% !important;
-      table-layout: fixed;
-      word-wrap: break-word;
-      font-size: 9px;    /* shrink text slightly */
+      width:          100% !important;
+      table-layout:   fixed;
+      word-wrap:      break-word;
+      font-size:      9px;
+      border-collapse: collapse;
     }
     #pdf-custom-clone th, #pdf-custom-clone td {
       padding: 4px;
+      border: 1px solid #444;
     }
   `;
   tmp.appendChild(style);
 
-  // 3) Clone your sections below that...
+  // ─────────── Clone your chosen sections ───────────
   SECTIONS_TO_EXPORT.forEach((id, idx) => {
     const src = document.getElementById(id);
     if (!src) return;
@@ -2010,42 +2014,51 @@ async function exportCustomSectionsToAzure() {
     }
   });
 
-  // 4) Temporarily unlock overflow
-  document.documentElement.style.overflow = 'visible';
+  // ─────────── Allow html2canvas to “see” it ───────────
+  const htmlEl = document.documentElement;
+  const origOverflowHtml = htmlEl.style.overflow;
+  const origOverflowBody = document.body.style.overflow;
+  htmlEl.style.overflow  = 'visible';
   document.body.style.overflow = 'visible';
 
-  // 5) Generate PDF with mm units and small margins
+  // ─────────── Generate the PDF blob ───────────
   let pdfBlob;
   try {
     const opt = {
-      margin:      5,  // millimeters
-      filename:    blobName,
-      image:       { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 1, useCORS: true, scrollX: 0, scrollY: 0 },
-      jsPDF:       { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      margin:       5,               // mm
+      filename:     blobName,
+      image:        { type:'jpeg', quality:0.98 },
+      html2canvas:  { scale:1, useCORS:true, scrollX:0, scrollY:0 },
+      jsPDF:        { unit:'mm', format:'a4', orientation:'portrait' }
     };
     pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
+  } catch (err) {
+    console.error('PDF generation failed:', err);
   } finally {
-    // restore and clean up
-    document.documentElement.style.overflow = '';
-    document.body.style.overflow = '';
+    // restore overflow and remove the clone
+    htmlEl.style.overflow  = origOverflowHtml;
+    document.body.style.overflow = origOverflowBody;
     document.body.removeChild(tmp);
   }
 
   if (!pdfBlob) return;
 
-  // 6) Upload as before…
-  await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/pdf'
-    },
-    body: pdfBlob
-  });
+  // ─────────── Upload to Azure ───────────
+  try {
+    const resp = await fetch(uploadUrl, {
+      method:  'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/pdf'
+      },
+      body: pdfBlob
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    console.log(`✔ Uploaded custom PDF as ${blobName}`);
+  } catch (err) {
+    console.error('Custom PDF upload failed:', err);
+  }
 }
-
-
 
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
