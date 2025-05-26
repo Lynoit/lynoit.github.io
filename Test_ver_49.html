@@ -1695,10 +1695,7 @@ async function maybeUpdateTables() {
     //exportMainContentToAzure()
     //  .then(() => console.log('Main content auto-uploaded'))
     //  .catch(err => console.error('HTML upload failed:', err));
-    //exportPDFToAzure()
-    //  .then(() => console.log('PDF report uploaded'))
-    //  .catch(err => console.error('PDF upload failed:', err));
-    exportCustomSectionsToAzure()
+    exportPDFToAzure()
       .then(() => console.log('PDF report uploaded'))
       .catch(err => console.error('PDF upload failed:', err));
   }
@@ -1975,23 +1972,24 @@ const SECTIONS_TO_EXPORT = [
 ];
 
 async function exportCustomSectionsToAzure() {
-  // 1) Use the shared reportBaseName for the filename
-  const blobName = `${reportBaseName}.pdf`;
+  // 1) Prep blob name & upload URL
+  const blobName  = `CustomExport_${formatAppStartTimestamp()}.pdf`;
   const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+  const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
 
-  // 2) Build a full-width wrapper (100% of viewport)
+  // 2) Create an off-DOM wrapper sized to A4-width (190mm minus margins)
   const tmp = document.createElement('div');
   tmp.id = 'pdf-custom-clone';
   Object.assign(tmp.style, {
     position:   'relative',
-    width:      '100%',
+    width:      '190mm',
+    margin:     '0 auto',
     background: '#fff',
-    boxSizing:  'border-box'
+    boxSizing:  'border-box',
   });
   document.body.appendChild(tmp);
 
-  // 3) Inject CSS to wrap wide tables
+  // 3) Inject table-wrapping CSS
   const style = document.createElement('style');
   style.textContent = `
     #pdf-custom-clone table {
@@ -2001,31 +1999,32 @@ async function exportCustomSectionsToAzure() {
       font-size: 9px;
       border-collapse: collapse;
     }
-    #pdf-custom-clone th,
-    #pdf-custom-clone td {
+    #pdf-custom-clone th, #pdf-custom-clone td {
       padding: 4px;
       border: 1px solid #444;
-      word-break: break-word;
     }
   `;
   tmp.appendChild(style);
 
-  // 4) Clone each section, converting charts to images
+  // 4) Clone everything *except* canvases—we’ll handle charts specially
   SECTIONS_TO_EXPORT.forEach((id, idx) => {
     if (id === 'chartsContainer') {
+      // replace the whole chartsContainer with images
       const wrapper = document.createElement('div');
-      // Distance chart
+      wrapper.id = 'chartsContainer';  // keep the same ID if you like
+
+      // distance chart
       const distImg = new Image();
       distImg.src   = distanceChart.toBase64Image();
       distImg.style.width = '100%';
       wrapper.appendChild(distImg);
 
-      // Page‐break between charts
-      const br1 = document.createElement('div');
-      br1.className = 'page-break';
-      wrapper.appendChild(br1);
+      // page‐break between the two?
+      const br = document.createElement('div');
+      br.className = 'page-break';
+      wrapper.appendChild(br);
 
-      // Speed chart
+      // speed chart
       const speedImg = new Image();
       speedImg.src   = speedChart.toBase64Image();
       speedImg.style.width = '100%';
@@ -2033,14 +2032,15 @@ async function exportCustomSectionsToAzure() {
 
       tmp.appendChild(wrapper);
     } else {
+      // normal clone for tables, maps, etc.
       const src = document.getElementById(id);
       if (!src) return;
       const clone = src.cloneNode(true);
+      // strip interactive bits
       clone.querySelectorAll('button, input').forEach(n => n.remove());
       tmp.appendChild(clone);
     }
-
-    // Insert a page‐break after every section except the last
+    // add a page‐break except after the last
     if (idx < SECTIONS_TO_EXPORT.length - 1) {
       const pbr = document.createElement('div');
       pbr.className = 'page-break';
@@ -2048,37 +2048,39 @@ async function exportCustomSectionsToAzure() {
     }
   });
 
-  // 5) Ensure html2canvas captures full height
+  // 5) Ensure overflow is visible so html2canvas can render full height
   const htmlEl        = document.documentElement;
   const origHtmlOv    = htmlEl.style.overflow;
   const origBodyOv    = document.body.style.overflow;
   htmlEl.style.overflow        = 'visible';
   document.body.style.overflow = 'visible';
 
-  // 6) Generate the PDF blob (portrait A4, 0.2in margins)
+  // 6) Generate PDF blob
   let pdfBlob;
   try {
     const opt = {
-      margin:      0.2,   // inches
+      margin:      5,         // mm
       filename:    blobName,
-      image:       { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 1.5, useCORS: true, scrollX: 0, scrollY: 0 },
-      jsPDF:       { unit: 'in', format: 'a4', orientation: 'portrait' }
+      image:       { type:'jpeg', quality:0.98 },
+      html2canvas: { scale:1, useCORS:true, scrollX:0, scrollY:0 },
+      jsPDF:       { unit:'mm', format:'a4', orientation:'portrait' }
     };
     pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
   } catch (err) {
     console.error('PDF generation failed:', err);
   } finally {
+    // restore overflow and remove the clone
     htmlEl.style.overflow        = origHtmlOv;
     document.body.style.overflow = origBodyOv;
     document.body.removeChild(tmp);
   }
+
   if (!pdfBlob) return;
 
   // 7) Upload to Azure
   try {
     const resp = await fetch(uploadUrl, {
-      method:  'PUT',
+      method: 'PUT',
       headers: {
         'x-ms-blob-type': 'BlockBlob',
         'Content-Type':   'application/pdf'
@@ -2091,6 +2093,7 @@ async function exportCustomSectionsToAzure() {
     console.error('Custom PDF upload failed:', err);
   }
 }
+
 
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
@@ -2115,7 +2118,7 @@ uploadNowBtn.addEventListener('click', () => {
     await uploadWorkbookToAzure();
 
     // upload the full PDF
-    //await exportPDFToAzure();
+    await exportPDFToAzure();
 
     // upload *your* custom-sections PDF
     await exportCustomSectionsToAzure();
