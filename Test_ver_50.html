@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1961,6 +1960,20 @@ async function exportPDFToAzure() {
   }
 }
 
+let sectionTexts = {};
+
+async function loadSectionTexts() {
+  try {
+    const resp = await fetch('sectionTexts.json');
+    sectionTexts  = await resp.json();
+  } catch (err) {
+    console.warn('Could not load section-text mapping:', err);
+  }
+}
+
+// … somewhere at startup or right before export …
+await loadSectionTexts();    
+
 // 1) List the IDs you want to include, in order
 const SECTIONS_TO_EXPORT = [
   'metaContainer',         // Test details
@@ -1976,128 +1989,168 @@ const SECTIONS_TO_EXPORT = [
   'chartsContainer'        // Charts (gets replaced with images)
 ];
 
-async function exportCustomSectionsToAzure() {
-  // 1) Prep blob name & upload URL
-  const blobName = `${reportBaseName}.pdf`;
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
-
-  // 2) Create an off-DOM wrapper sized to A4-width (190mm minus margins)
-  const tmp = document.createElement('div');
-  tmp.id = 'pdf-custom-clone';
-  Object.assign(tmp.style, {
-    position:   'relative',
-    width:      '190mm',
-    margin:     '0 auto',
-    background: '#fff',
-    boxSizing:  'border-box',
-  });
-  document.body.appendChild(tmp);
-
-  // 3) Inject table-wrapping CSS
-  const style = document.createElement('style');
-  style.textContent = `
-    #pdf-custom-clone table {
-      width: 100% !important;
-      table-layout: fixed;
-      word-wrap: break-word;
-      font-size: 9px;
-      border-collapse: collapse;
+<script>
+  // 0) Helper: load section headers & texts from external JSON
+  let sectionTexts = {};
+  async function loadSectionTexts() {
+    try {
+      const resp = await fetch('sectionTexts.json');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      sectionTexts = await resp.json();
+    } catch (err) {
+      console.warn('Could not load section-text mapping:', err);
+      sectionTexts = {};  // fallback to empty
     }
-    #pdf-custom-clone th, #pdf-custom-clone td {
-      padding: 4px;
-      border: 1px solid #444;
-    }
-  `;
-  tmp.appendChild(style);
-
-  // 4) Clone everything *except* canvases—we’ll handle charts specially
-  SECTIONS_TO_EXPORT.forEach((id, idx) => {
-    if (id === 'chartsContainer') {
-      // replace the whole chartsContainer with images
-      const wrapper = document.createElement('div');
-      wrapper.id = 'chartsContainer';  // keep the same ID if you like
-
-      // distance chart
-      const distImg = new Image();
-      distImg.src   = distanceChart.toBase64Image();
-      distImg.style.width = '100%';
-      wrapper.appendChild(distImg);
-
-      // page‐break between the two?
-      const br = document.createElement('div');
-      br.className = 'page-break';
-      wrapper.appendChild(br);
-
-      // speed chart
-      const speedImg = new Image();
-      speedImg.src   = speedChart.toBase64Image();
-      speedImg.style.width = '100%';
-      wrapper.appendChild(speedImg);
-
-      tmp.appendChild(wrapper);
-    } else {
-      // normal clone for tables, maps, etc.
-      const src = document.getElementById(id);
-      if (!src) return;
-      const clone = src.cloneNode(true);
-      // strip interactive bits
-      clone.querySelectorAll('button, input').forEach(n => n.remove());
-      tmp.appendChild(clone);
-    }
-    // add a page‐break except after the last
-    if (idx < SECTIONS_TO_EXPORT.length - 1) {
-      const pbr = document.createElement('div');
-      pbr.className = 'page-break';
-      tmp.appendChild(pbr);
-    }
-  });
-
-  // 5) Ensure overflow is visible so html2canvas can render full height
-  const htmlEl        = document.documentElement;
-  const origHtmlOv    = htmlEl.style.overflow;
-  const origBodyOv    = document.body.style.overflow;
-  htmlEl.style.overflow        = 'visible';
-  document.body.style.overflow = 'visible';
-
-  // 6) Generate PDF blob
-  let pdfBlob;
-  try {
-    const opt = {
-      margin:      5,         // mm
-      filename:    blobName,
-      image:       { type:'jpeg', quality:0.98 },
-      html2canvas: { scale:1, useCORS:true, scrollX:0, scrollY:0 },
-      jsPDF:       { unit:'mm', format:'a4', orientation:'portrait' }
-    };
-    pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
-  } catch (err) {
-    console.error('PDF generation failed:', err);
-  } finally {
-    // restore overflow and remove the clone
-    htmlEl.style.overflow        = origHtmlOv;
-    document.body.style.overflow = origBodyOv;
-    document.body.removeChild(tmp);
   }
 
-  if (!pdfBlob) return;
+  // 1) Custom PDF export with per-section header & text
+  async function exportCustomSectionsToAzure() {
+    // load your JSON definitions
+    await loadSectionTexts();
 
-  // 7) Upload to Azure
-  try {
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/pdf'
-      },
-      body: pdfBlob
+    // build blob name & upload URL
+    const blobName = `${reportBaseName}.pdf`;
+    const [baseUrl, token] = containerSasUrl.split('?');
+    const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
+
+    // create an off-DOM clone container sized to A4 width
+    const tmp = document.createElement('div');
+    tmp.id = 'pdf-custom-clone';
+    Object.assign(tmp.style, {
+      position:   'relative',
+      width:      '190mm',
+      margin:     '0 auto',
+      background: '#fff',
+      boxSizing:  'border-box',
     });
-    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    console.log(`✔ Uploaded custom PDF as ${blobName}`);
-  } catch (err) {
-    console.error('Custom PDF upload failed:', err);
+    document.body.appendChild(tmp);
+
+    // inject simple table styles
+    const style = document.createElement('style');
+    style.textContent = `
+      #pdf-custom-clone table {
+        width: 100% !important;
+        table-layout: fixed;
+        word-wrap: break-word;
+        font-size: 9px;
+        border-collapse: collapse;
+      }
+      #pdf-custom-clone th, #pdf-custom-clone td {
+        padding: 4px;
+        border: 1px solid #444;
+      }
+      #pdf-custom-clone h2 {
+        font-size: 14px;
+        margin: 12px 0 4px;
+      }
+      #pdf-custom-clone p {
+        font-size: 11px;
+        margin: 0 0 8px;
+      }
+    `;
+    tmp.appendChild(style);
+
+    // 2) Iterate sections, inject header/text, then clone content
+    SECTIONS_TO_EXPORT.forEach((id, idx) => {
+      // 2a) header + descriptive text
+      const info = sectionTexts[id];
+      if (info) {
+        const h2 = document.createElement('h2');
+        h2.textContent = info.header;
+        tmp.appendChild(h2);
+
+        const p = document.createElement('p');
+        p.textContent = info.text;
+        tmp.appendChild(p);
+      }
+
+      // 2b) charts get turned into images
+      if (id === 'chartsContainer') {
+        const wrapper = document.createElement('div');
+        wrapper.id = 'chartsContainer';
+        // distance chart
+        const distImg = new Image();
+        distImg.src   = distanceChart.toBase64Image();
+        distImg.style.width = '100%';
+        wrapper.appendChild(distImg);
+        // page break between charts
+        const br = document.createElement('div');
+        br.className = 'page-break';
+        wrapper.appendChild(br);
+        // speed chart
+        const speedImg = new Image();
+        speedImg.src   = speedChart.toBase64Image();
+        speedImg.style.width = '100%';
+        wrapper.appendChild(speedImg);
+
+        tmp.appendChild(wrapper);
+
+      } else {
+        // 2c) normal clone for tables, maps, etc.
+        const src = document.getElementById(id);
+        if (src) {
+          const clone = src.cloneNode(true);
+          // strip interactive elements
+          clone.querySelectorAll('button, input').forEach(n => n.remove());
+          tmp.appendChild(clone);
+        }
+      }
+
+      // 2d) page-break after every section except the last
+      if (idx < SECTIONS_TO_EXPORT.length - 1) {
+        const pbr = document.createElement('div');
+        pbr.className = 'page-break';
+        tmp.appendChild(pbr);
+      }
+    });
+
+    // 3) Ensure overflow visible for html2canvas
+    const htmlEl = document.documentElement;
+    const bodyEl = document.body;
+    const origHtmlOv = htmlEl.style.overflow;
+    const origBodyOv = bodyEl.style.overflow;
+    htmlEl.style.overflow = 'visible';
+    bodyEl.style.overflow = 'visible';
+
+    // 4) Generate PDF blob
+    let pdfBlob;
+    try {
+      const opt = {
+        margin:      5,    // mm
+        filename:    blobName,
+        image:       { type:'jpeg', quality:0.98 },
+        html2canvas: { scale:1, useCORS:true, scrollX:0, scrollY:0 },
+        jsPDF:       { unit:'mm', format:'a4', orientation:'portrait' }
+      };
+      pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+    } finally {
+      // restore overflow & remove clone
+      htmlEl.style.overflow = origHtmlOv;
+      bodyEl.style.overflow = origBodyOv;
+      document.body.removeChild(tmp);
+    }
+
+    if (!pdfBlob) return;
+
+    // 5) Upload to Azure
+    try {
+      const resp = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'x-ms-blob-type': 'BlockBlob',
+          'Content-Type':   'application/pdf'
+        },
+        body: pdfBlob
+      });
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+      console.log(`✔ Uploaded custom PDF as ${blobName}`);
+    } catch (err) {
+      console.error('Custom PDF upload failed:', err);
+    }
   }
-}
+</script>
 
 
 // 1) Grab the existing Upload button
