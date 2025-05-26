@@ -1966,33 +1966,37 @@ const SECTIONS_TO_EXPORT = [
 ];
 
 async function exportCustomSectionsToAzure() {
-  const blobName = `CustomExport_${formatAppStartTimestamp()}.pdf`;
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+  // … your blobName/uploadUrl setup …
 
-  // 1) Create the off-screen clone container
+  // 1) Build the off-screen wrapper, but give it a PDF-page–sized width
   const tmp = document.createElement('div');
-
-  // after document.body.appendChild(tmp);
-const style = document.createElement('style');
-style.textContent = `
-  #pdf-custom-clone table {
-    width: 100% !important;
-    table-layout: fixed;
-    word-break: break-word;
-    font-size: 10px;            /* shrink text a bit if you like */
-  }
-`;
-tmp.prepend(style);
-  
   Object.assign(tmp.style, {
     position: 'relative',
-    width: '100%',
+    width: '190mm',          // exactly A4 width minus 2×10 mm margins
     background: '#fff',
+    margin: '0 auto'
   });
   document.body.appendChild(tmp);
 
-  // 2) Clone each section into it
+  // 2) Inject CSS so all tables fill & wrap
+  const style = document.createElement('style');
+  style.textContent = `
+    #pdf-custom-clone, #pdf-custom-clone * {
+      box-sizing: border-box;
+    }
+    #pdf-custom-clone table {
+      width: 100% !important;
+      table-layout: fixed;
+      word-wrap: break-word;
+      font-size: 9px;    /* shrink text slightly */
+    }
+    #pdf-custom-clone th, #pdf-custom-clone td {
+      padding: 4px;
+    }
+  `;
+  tmp.appendChild(style);
+
+  // 3) Clone your sections below that...
   SECTIONS_TO_EXPORT.forEach((id, idx) => {
     const src = document.getElementById(id);
     if (!src) return;
@@ -2006,51 +2010,41 @@ tmp.prepend(style);
     }
   });
 
-  // 3) Temporarily override html/body overflow so html2canvas can render full tmp
-  const docEl = document.documentElement;
-  const origDocOverflow = docEl.style.overflow;
-  const origBodyOverflow = document.body.style.overflow;
-  docEl.style.overflow = 'visible';
+  // 4) Temporarily unlock overflow
+  document.documentElement.style.overflow = 'visible';
   document.body.style.overflow = 'visible';
-  document.body.style.height = 'auto';
 
+  // 5) Generate PDF with mm units and small margins
   let pdfBlob;
   try {
     const opt = {
-      margin:       0.2,
-      filename:     blobName,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 1.5, useCORS: true, scrollX: 0, scrollY: 0 },
-      jsPDF:        { unit: 'in', format: 'a4', orientation: 'landscape' }
+      margin:      5,  // millimeters
+      filename:    blobName,
+      image:       { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 1, useCORS: true, scrollX: 0, scrollY: 0 },
+      jsPDF:       { unit: 'mm', format: 'a4', orientation: 'portrait' }
     };
     pdfBlob = await html2pdf().set(opt).from(tmp).outputPdf('blob');
-  } catch (err) {
-    console.error('PDF generation failed:', err);
   } finally {
-    // 4) restore overflow & remove tmp
-    docEl.style.overflow = origDocOverflow;
-    document.body.style.overflow = origBodyOverflow;
+    // restore and clean up
+    document.documentElement.style.overflow = '';
+    document.body.style.overflow = '';
     document.body.removeChild(tmp);
   }
 
   if (!pdfBlob) return;
 
-  // 5) Upload to Azure
-  try {
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/pdf'
-      },
-      body: pdfBlob
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    console.log(`✔ Uploaded custom PDF as ${blobName}`);
-  } catch (err) {
-    console.error('Custom PDF upload failed:', err);
-  }
+  // 6) Upload as before…
+  await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   'application/pdf'
+    },
+    body: pdfBlob
+  });
 }
+
 
 
 // 1) Grab the existing Upload button
