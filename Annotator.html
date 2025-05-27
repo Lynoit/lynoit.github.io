@@ -507,31 +507,38 @@ function renderMetaForm(questions) {
 
     <style>
       /* start hidden */
-      #buttonGroups {
-    display: none;
-      }
-  /* when checkbox is checked, show it */
-      #showButtons:checked ~ #buttonGroups {
-        display: flex;         /* or block, grid, whatever layout you need */
-        align-items: flex-start;   /* if you want centering like your parent */
-        gap: 6px;              /* if you want that spacing */
-      }
+#buttonGroups {
+  display: none;
+}
+#showButtons:checked ~ #buttonGroups {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
     </style>
 
-    <div style="margin-bottom:10px;
-            display:flex;
-            flex-wrap:wrap;
-            align-items:center;
-            gap:6px;">
-      <input type="checkbox" id="showButtons" checked>
-      <label for="showButtons">Show KPI Hot Keys</label>
+<div
+  style="
+    margin-bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  ">
+  <input type="checkbox" id="showButtons" checked>
+  <label for="showButtons">Show KPI buttons</label>
 
-<div id="buttonGroups" class="center-groups" style="margin-top:6px; margin-bottom:30px;">
-   <div class="center-groups inner-button-wrapper" style="margin-top: 6px; margin-bottom: 30px;">
-  </div>
-</div>
-      
-    </div>
+  <!-- your new dropdown lives beside the checkbox -->
+  <label for="buttonConfig" style="margin-left:8px;">Button setup:</label>
+  <select id="buttonConfig">
+    <option value="KPI_buttons.csv">ADAS KPI</option>
+    <option value="buttons.csv">ADAS KPI (old)</option>
+  </select>
+  <!-- buildButtons will populate this directly -->
+  <div id="buttonGroups" class="center-groups" style="margin-top:6px; margin-bottom:30px;">
+   </div>
+   </div>
+
     <div class="page-break"></div>
 
     <h3>Issue list</h3>
@@ -630,7 +637,7 @@ function renderMetaForm(questions) {
     </div>
 
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
-      Ver 1.13
+      Ver 1.14
       © Lynoit Tech 2025
     </footer>
   </div>
@@ -782,7 +789,13 @@ function startApp() {
     maximumAge: 5000,
     timeout: 10000
   });
-  buildButtons();
+    const configSelect = document.getElementById('buttonConfig');
+  configSelect.addEventListener('change', e => {
+    // rebuild with the newly selected CSV
+    buildButtons(e.target.value);
+  });
+  // initial build
+  buildButtons(configSelect.value);
   startCamera();
 }   
 
@@ -1550,55 +1563,67 @@ logTable.forEach((row, i) => {
   function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
-   function buildButtons () {
-  fetch('KPI_buttons.csv')
+  function buildButtons(csvFile = 'KPI_buttons.csv') {
+  // 1. Get the container and clear out any existing buttons
+  const buttonGroups = document.getElementById('buttonGroups');
+  buttonGroups.innerHTML = '';
+
+  // 2. Fetch & parse the CSV
+  fetch(csvFile)
     .then(response => {
-      if (!response.ok) throw new Error('Failed to load buttons.csv');
+      if (!response.ok) {
+        throw new Error(`Failed to load ${csvFile}: ${response.status} ${response.statusText}`);
+      }
       return response.text();
     })
     .then(csvText => {
-      // Parse CSV → array of objects {group,label,cssClass,logName,isRed}
       const { data, errors } = Papa.parse(csvText, {
         header: true,
         skipEmptyLines: true
       });
-      if (errors.length) console.error('CSV parse errors', errors);
+      if (errors.length) {
+        console.error('CSV parse errors:', errors);
+      }
 
-      const groups = {};   // <div> elements keyed by group name
+      // 3. Organize buttons by group
+      const groups = {};  // { groupName: <div> }
 
       data.forEach(row => {
         const {
-          group       = '',
-          label       = '',
-          cssClass    = '',
-          logName     = label,   // fall back to the visible label
-          /* isRed from CSV is ignored – we decide by cssClass */
+          group    = '',
+          label    = '',
+          cssClass = '',
+          logName  = label    // fallback if not specified
         } = row;
 
-        if (!group || !label) return;      // skip incomplete rows
+        if (!group || !label) return;  // skip invalid rows
 
-        // Create the group container the first time we see this group
+        // Create a container for this group if needed
         if (!groups[group]) {
           const wrap = document.createElement('div');
           wrap.className = 'button-group';
-          groups[group]  = wrap;
           buttonGroups.appendChild(wrap);
+          groups[group] = wrap;
         }
 
-        // Build the button element
+        // Create the button
         const btn = document.createElement('button');
         btn.textContent = label;
         btn.classList.add('bigButton', ...cssClass.trim().split(/\s+/));
 
-        // KPI flag: ONLY red-styled buttons count
-        const kpiEvent = btn.classList.contains('redButton');  // true → updates countTable
+        // Determine whether it's a "red" KPI event
+        const isRed = btn.classList.contains('redButton');
 
-        btn.onclick = () => logButton(logName, kpiEvent);
+        // Wire up the click handler
+        btn.addEventListener('click', () => logButton(logName, isRed));
 
+        // Add it to the right group
         groups[group].appendChild(btn);
       });
     })
-    .catch(err => console.error(err));
+    .catch(err => {
+      console.error('Error building buttons:', err);
+    });
 }
   
     function updateDayPhase(lat, lon) {
