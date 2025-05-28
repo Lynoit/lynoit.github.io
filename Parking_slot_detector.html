@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Slot-Measurer</title>
+  <style>
+    canvas, video { position: absolute; top: 0; left: 0; }
+  </style>
+</head>
+<body>
+  <video id="cam" autoplay playsinline width="100%" height="100%"></video>
+  <canvas id="hud"></canvas>
+
+<script type="module">
+import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js';
+import { load as loadYolov8 } from 'https://cdn.skypack.dev/yolov8-tfjs';
+
+// 1. Camera ------------------------------------------------------
+const v = document.getElementById('cam');
+navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+  .then(strm => { v.srcObject = strm });
+
+// 2. Load model ---------------------------------------------------
+const model = await loadYolov8('yolov8-tiny.onnx');   // ~15 MB
+
+// 3. WebXR session -----------------------------------------------
+let xrSession, xrViewerSpace, xrHitTestSource;
+if (navigator.xr) {
+  xrSession = await navigator.xr.requestSession('immersive-ar', {
+     requiredFeatures: ['hit-test', 'plane-detection', 'depth-sensing']
+  });
+  xrViewerSpace   = await xrSession.requestReferenceSpace('viewer');
+  xrHitTestSource = await xrSession.requestHitTestSource({ space: xrViewerSpace });
+}
+
+// 4. Main loop ----------------------------------------------------
+const cvs = document.getElementById('hud');
+const ctx = cvs.getContext('2d');
+function loop() {
+  if (v.readyState >= 2) {
+    cvs.width = v.videoWidth;
+    cvs.height = v.videoHeight;
+    ctx.drawImage(v, 0, 0);                 // show camera feed
+
+    // --- run detector every N frames ---
+    detectAndMeasure();
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+
+async function detectAndMeasure() {
+  const tfImg = tf.browser.fromPixels(v).resizeNearestNeighbor([640,640]).expandDims(0).div(255);
+  const preds = await model.predict(tfImg);           // returns boxes + class + four corners
+
+  for (const slot of preds) {
+    // slot.corners = [{u,v} x4] in pixel space
+    const world = [];
+    for (const {u, v: w} of slot.corners) {
+      const hits = await xrFrame.getHitTestResultsForTransientInput(xrHitTestSource);
+      const pose = hits[0]?.getPose(xrReferenceSpace);
+      if (!pose) continue;
+      world.push(pose.transform.position);      // {x,y,z} in metres
+    }
+    if (world.length === 4) {
+      const len = (dist(world[0],world[3]) + dist(world[1],world[2])) / 2;
+      const wid = (dist(world[0],world[1]) + dist(world[2],world[3])) / 2;
+
+      ctx.strokeStyle = 'lime'; ctx.lineWidth = 3;
+      ctx.beginPath(); slot.corners.forEach((p,i)=>{ const n=slot.corners[(i+1)%4];
+        ctx.moveTo(p.u,p.w); ctx.lineTo(n.u,n.w); });
+      ctx.stroke();
+      ctx.fillStyle = '#0f0';
+      ctx.fillText(`${len.toFixed(2)} × ${wid.toFixed(2)} m`, slot.corners[0].u, slot.corners[0].w-10);
+    }
+  }
+}
+
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z);}
+</script>
+</body>
+</html>
