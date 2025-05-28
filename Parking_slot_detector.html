@@ -1,83 +1,119 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Parking-slot tester 0.2</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parking Slot Detector</title>
   <style>
-    html,body { margin:0;height:100%;overflow:hidden;background:#000; }
-    video,canvas { position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover; }
-    #log { position:absolute;bottom:0;left:0;width:100%;background:#000a;color:#0f0;
-           font:14px/1.4 monospace;padding:4px;pointer-events:none;white-space:pre-wrap; }
+    body { display: flex; flex-direction: column; align-items: center; font-family: Arial, sans-serif; margin: 0; padding: 0; }
+    #video, #canvas { border: 1px solid #ccc; }
+    #controls { margin: 10px; }
+    label { margin-right: 5px; }
   </style>
 </head>
 <body>
-  <video id="cam" muted playsinline></video>
-  <canvas id="hud"></canvas>
-  <pre id="log"></pre>
+  <h1>Parking Slot Detector</h1>
+  <div id="controls">
+    <label for="calibration">Calibration (px per meter):</label>
+    <input type="number" id="calibration" value="100" step="1">
+  </div>
+  <video id="video" width="640" height="480" autoplay muted></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
 
-<script type="module">
-import * as tf from 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js';
+  <!-- Include OpenCV.js -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+  <script>
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let streaming = false;
 
-/* ---------- helper ------------------------------------------------------ */
-const log = (...m) => document.getElementById('log').textContent += m.join(' ')+'\n';
-
-/* ---------- 1. start camera -------------------------------------------- */
-async function startCamera(){
-  try{
-    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
-    cam.srcObject = stream;
-    await cam.play();
-    log('🎥 camera stream OK');
-  }catch(e){ log('❌ getUserMedia:', e.message); }
-}
-const cam = document.getElementById('cam');
-await startCamera();
-
-/* ---------- 2. WebXR feature probe (optional) --------------------------- */
-let useXR = false, xrSession, xrRefSpace, xrHitSource;
-if (navigator.xr){
-  const isArCapable = await navigator.xr.isSessionSupported('immersive-ar');
-  log('WebXR present  :', isArCapable);
-  if (isArCapable){
-    xrSession = await navigator.xr.requestSession('immersive-ar',{
-      optionalFeatures:['hit-test','plane-detection','depth-sensing','dom-overlay'],
-      domOverlay:{root:document.body}
-    });
-    xrRefSpace   = await xrSession.requestReferenceSpace('local');
-    const feats  = xrSession.enabledFeatures.values();
-    log('XR features   :', [...feats].join(', '));
-    // Only ask for a hit-test source if the feature exists
-    if (xrSession.enabledFeatures.has?.('hit-test')){
-      xrHitSource = await xrSession.requestHitTestSource({space:xrRefSpace});
-      log('hit-test ready');
+    function onOpenCvReady() {
+      console.log('OpenCV.js is ready');
+      startCamera();
     }
-    useXR = true;
-  }
-}else{
-  log('No navigator.xr (desktop / iOS <17.4)');
-}
 
-/* ---------- 3. canvas resize ------------------------------------------- */
-const cvs = document.getElementById('hud');
-const ctx = cvs.getContext('2d');
-function resize(){ cvs.width = cam.videoWidth; cvs.height = cam.videoHeight; }
-cam.addEventListener('loadedmetadata', resize); window.addEventListener('resize', resize);
+    function startCamera() {
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          video.srcObject = stream;
+          video.play();
+        })
+        .catch(err => console.error('Error accessing camera: ' + err));
 
-/* ---------- 4. main loop (fallback vs XR) ------------------------------ */
-function fallbackLoop(){ drawCamFrame(); requestAnimationFrame(fallbackLoop); }
-function drawCamFrame(){
-  if (!cam.videoWidth) return;          // camera not ready yet
-  ctx.drawImage(cam,0,0,cvs.width,cvs.height);
-  //  ↑ add your YOLO + measurement overlay here
-}
+      video.addEventListener('canplay', () => {
+        if (!streaming) {
+          streaming = true;
+          processVideo();
+        }
+      });
+    }
 
-if (useXR){
-  xrSession.requestAnimationFrame(function onXR(t,frame){
-    xrSession.requestAnimationFrame(onXR);
-    drawCamFrame();                     // for now just reuse the same drawing
-    // you can hit-test here using frame.getHitTestResults(xrHitSource)
-  });
-}else fallbackLoop();
-</script>
+    function processVideo() {
+      const cap = new cv.VideoCapture(video);
+      let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
+      let gray = new cv.Mat();
+      let blurred = new cv.Mat();
+      let edges = new cv.Mat();
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+
+      const FPS = 30;
+      function detect() {
+        cap.read(src);
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+        cv.Canny(blurred, edges, 50, 150);
+
+        cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        let calib = parseFloat(document.getElementById('calibration').value) || 100;
+
+        for (let i = 0; i < contours.size(); i++) {
+          let cnt = contours.get(i);
+          let approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
+
+          // Look for quadrilaterals
+          if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
+            let points = [];
+            for (let j = 0; j < 4; j++) {
+              let pt = approx.data32S.slice(j*2, j*2+2);
+              points.push({ x: pt[0], y: pt[1] });
+            }
+            // Draw polygon
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let k = 1; k < points.length; k++) {
+              ctx.lineTo(points[k].x, points[k].y);
+            }
+            ctx.closePath();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'lime';
+            ctx.stroke();
+
+            // Compute bounding box and measure
+            let rect = cv.boundingRect(approx);
+            let widthPx = rect.width;
+            let heightPx = rect.height;
+            let widthM = (widthPx / calib).toFixed(2);
+            let heightM = (heightPx / calib).toFixed(2);
+
+            ctx.font = '16px Arial';
+            ctx.fillStyle = 'red';
+            ctx.fillText(`${widthM}m x ${heightM}m`, rect.x, rect.y - 5);
+
+            approx.delete();
+          }
+          cnt.delete();
+        }
+
+        // schedule next frame
+        setTimeout(detect, 1000 / FPS);
+      }
+      detect();
+    }
+  </script>
 </body>
 </html>
