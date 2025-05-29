@@ -4,10 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Annotator Reports Viewer</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-o9N1j8WXG6kRJDvRh3jE2aoxl3M6w5cKTIa9mrP0PkE=" crossorigin=""/>
   <style>
     body { margin:0; font-family:sans-serif; background:#121212; color:#fff; }
-    #sidebar { position:fixed; left:0; top:0; bottom:0; width:240px;
-               background:#1f1f1f; overflow-y:auto; }
+    #sidebar { position:fixed; left:0; top:0; bottom:0; width:240px; background:#1f1f1f; overflow-y:auto; }
     #content { margin-left:240px; padding:20px; }
     .day-header { padding:12px 16px; cursor:pointer; border-bottom:1px solid #333; }
     .day-header:hover { background:#333; }
@@ -20,6 +22,7 @@
     th, td { border:1px solid #333; padding:8px; }
     th { background:#202020; }
     .error { color:#f88; padding:16px; }
+    #issue-map { height: 400px; margin-bottom: 20px; }
   </style>
 </head>
 <body>
@@ -28,17 +31,21 @@
 
   <!-- SheetJS for XLSX parsing -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-VK1GEntjSMi9MTx2f0g1NNhM9f+G2Gk3Xb4j8kR7v4k=" crossorigin=""></script>
 
   <script>
   (async function(){
     const ACCOUNT   = 'annotationcsv';
     const CONTAINER = 'csv';
 
-    // SAS token generated in Azure Portal (read+list on container)
+    // SAS token (read+list)
     const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-05-30T04:50:50Z&st=2025-05-29T20:50:50Z&spr=https&sig=Ny142dmI2gwNB%2BjCgI%2Fm1n6iLtBtTNXgTPMlVhbnmQA%3D';
 
     const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
 
+    let issueCoords = [];
     document.addEventListener('DOMContentLoaded', listBlobs);
 
     async function listBlobs() {
@@ -65,8 +72,7 @@
     }
 
     function buildSidebar(files) {
-      const sb = document.getElementById('sidebar');
-      sb.innerHTML = '';
+      const sb = document.getElementById('sidebar'); sb.innerHTML = '';
       const groups = {};
 
       files.forEach(f => {
@@ -78,15 +84,11 @@
 
       Object.keys(groups).sort().reverse().forEach(day => {
         const hdr = document.createElement('div');
-        hdr.className = 'day-header';
-        hdr.textContent = day;
-
-        const lst = document.createElement('ul');
-        lst.className = 'session-list';
+        hdr.className = 'day-header'; hdr.textContent = day;
+        const lst = document.createElement('ul'); lst.className = 'session-list';
 
         groups[day].sort().forEach(file => {
-          const li = document.createElement('li');
-          li.className = 'session-item';
+          const li = document.createElement('li'); li.className = 'session-item';
           li.textContent = file.replace(day + '_', '').replace('.xlsx','');
           li.onclick = () => loadFile(file);
           lst.appendChild(li);
@@ -95,15 +97,13 @@
         hdr.onclick = () => {
           lst.style.display = lst.style.display === 'block' ? 'none' : 'block';
         };
-
-        sb.appendChild(hdr);
-        sb.appendChild(lst);
+        sb.appendChild(hdr); sb.appendChild(lst);
       });
     }
 
     async function loadFile(filename) {
-      const content = document.getElementById('content');
-      content.innerHTML = `<h1>${filename}</h1>`;
+      const content = document.getElementById('content'); content.innerHTML = `<h1>${filename}</h1>`;
+      issueCoords = [];
 
       let buffer;
       try {
@@ -119,6 +119,57 @@
       wb.SheetNames.forEach(name => {
         const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
         content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
+        if (name === 'Issue') {
+          parseIssues(name);
+        }
+      });
+
+      // After rendering, insert map between KPI and Road types
+      insertMap();
+    }
+
+    function parseIssues(sheetId) {
+      const tbl = document.getElementById(sheetId);
+      if (!tbl) return;
+      const rows = Array.from(tbl.querySelectorAll('tr')).slice(1);
+      rows.forEach(r => {
+        const cells = r.querySelectorAll('td');
+        // Assuming columns: [IssueNo, ..., Coordinates, ...]
+        const issueNo = cells[0].textContent.trim();
+        const coordText = Array.from(cells).find(td => td.textContent.includes(','))?.textContent.trim();
+        if (coordText) {
+          const [lat, lng] = coordText.split(',').map(Number);
+          if (!isNaN(lat) && !isNaN(lng)) {
+            issueCoords.push({ issueNo, lat, lng });
+          }
+        }
+      });
+    }
+
+    function insertMap() {
+      if (!issueCoords.length) return;
+      const content = document.getElementById('content');
+      // Find Road types header
+      const roadHeader = Array.from(content.querySelectorAll('h2'))
+        .find(h => h.textContent.trim() === 'Road types');
+      const mapDiv = document.createElement('div');
+      mapDiv.id = 'issue-map';
+      if (roadHeader) {
+        content.insertBefore(mapDiv, roadHeader);
+      } else {
+        content.appendChild(mapDiv);
+      }
+
+      const map = L.map('issue-map').fitBounds(
+        issueCoords.map(c => [c.lat, c.lng])
+      );
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+      issueCoords.forEach(c => {
+        L.circleMarker([c.lat, c.lng], { radius: 6, color: 'red', fillOpacity: 0.8 })
+          .bindPopup(`Issue ${c.issueNo}`)
+          .addTo(map);
       });
     }
 
