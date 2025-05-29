@@ -20,6 +20,7 @@
     table { width: 100%; border-collapse: collapse; margin-bottom: 2em; }
     th, td { border: 1px solid #333; padding: 8px; }
     th { background: #202020; }
+    .error { padding: 16px; color: #f88; }
   </style>
 </head>
 <body>
@@ -27,61 +28,76 @@
   <div id="content"><h1>Select a session to view</h1></div>
 
   <script>
-    // Directory where your XLSX files live
     const FILE_DIR = './data';
     const MANIFEST = `${FILE_DIR}/files.json`;
 
     document.addEventListener('DOMContentLoaded', () => {
-      // First try fetching a manifest file
-      fetch(MANIFEST)
-        .then(res => {
-          if (!res.ok) throw new Error('Manifest not found');
-          return res.json();
-        })
-        .then(files => {
-          console.log('Loaded manifest with', files.length, 'entries');
-          buildSidebar(files);
-        })
-        .catch(() => {
-          // Fallback: attempt directory listing or GitHub API
-          fetch(`${FILE_DIR}/`)
-            .then(res => {
-              if (!res.ok) throw new Error(`HTTP ${res.status}`);
-              return res.text();
-            })
-            .then(html => {
-              const parser = new DOMParser();
-              const doc = parser.parseFromString(html, 'text/html');
-              const links = Array.from(doc.querySelectorAll('a'));
-              const files = links.map(a => a.getAttribute('href'))
-                                .filter(name => name && name.endsWith('.xlsx'));
-              buildSidebar(files);
-            })
-            .catch(err => {
-              console.warn('Directory listing failed, trying GitHub API…', err);
-              // Try GitHub REST API for public repos
-              // Replace USERNAME and REPO with your GitHub details
-              const apiUrl = 'https://api.github.com/repos/USERNAME/REPO/contents/data';
-              fetch(apiUrl)
-                .then(res => {
-                  if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-                  return res.json();
-                })
-                .then(json => {
-                  const files = json
-                    .filter(item => item.type === 'file' && item.name.endsWith('.xlsx'))
-                    .map(item => item.name);
-                  buildSidebar(files);
-                })
-                .catch(apiErr => {
-                  console.error('GitHub API failed:', apiErr);
-                  document.getElementById('sidebar').innerHTML = 
-                    `<div style="padding:16px; color:#f88;">Unable to list files.<br>
-                     Please generate data/files.json or enable directory listings,\n                     or configure the GitHub API URL with your USERNAME/REPO.</div>`;
-                });
-            });
-        });
+      loadFiles();
     });
+
+    async function loadFiles() {
+      let files;
+      // 1. Try manifest
+      try {
+        const res = await fetch(MANIFEST);
+        if (res.ok) {
+          files = await res.json();
+          console.log('Loaded manifest:', files);
+          return buildSidebar(files);
+        }
+        throw new Error('Manifest not found');
+      } catch (e) {
+        console.warn(e);
+      }
+      // 2. Try directory listing
+      try {
+        const res = await fetch(`${FILE_DIR}/`);
+        if (res.ok) {
+          const html = await res.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          files = Array.from(doc.querySelectorAll('a'))
+            .map(a => a.getAttribute('href'))
+            .filter(name => name && name.endsWith('.xlsx'));
+          console.log('Loaded directory listing:', files);
+          return buildSidebar(files);
+        }
+        throw new Error(`HTTP ${res.status}`);
+      } catch (e) {
+        console.warn('Directory listing failed:', e);
+      }
+      // 3. Try GitHub API auto-detect
+      try {
+        const { hostname, pathname } = window.location;
+        let user, repo;
+        if (hostname.endsWith('github.io')) {
+          user = hostname.split('.')[0];
+          // pathname like '/repo/...'
+          const parts = pathname.split('/').filter(p => p);
+          repo = parts[0] || user;
+          const apiUrl = `https://api.github.com/repos/${user}/${repo}/contents/data`;
+          const res = await fetch(apiUrl);
+          if (res.ok) {
+            const data = await res.json();
+            files = data
+              .filter(item => item.type === 'file' && item.name.endsWith('.xlsx'))
+              .map(item => item.name);
+            console.log('Loaded via GitHub API:', files);
+            return buildSidebar(files);
+          }
+          throw new Error(`GitHub API ${res.status}`);
+        }
+        throw new Error('Not on GitHub Pages');
+      } catch (e) {
+        console.error('GitHub API fallback failed:', e);
+      }
+      // All methods failed
+      document.getElementById('sidebar').innerHTML = 
+        `<div class="error">Unable to list files.<br>
+         Please add a <code>data/files.json</code> manifest,<br>
+         enable directory listings on <code>/data/</code>,<br>
+         or host on GitHub Pages with <code>/data</code> folder.</div>`;
+    }
 
     function buildSidebar(files) {
       const sidebar = document.getElementById('sidebar');
@@ -94,47 +110,41 @@
         groups[day] = groups[day] || [];
         groups[day].push(f);
       });
-
       Object.keys(groups).sort().reverse().forEach(day => {
         const header = document.createElement('div');
         header.className = 'day-header';
         header.textContent = day;
         sidebar.appendChild(header);
-
-        const list = document.createElement('ul');
-        list.className = 'session-list';
+        const list = document.createElement('ul'); list.className = 'session-list';
         groups[day].sort().forEach(file => {
           const item = document.createElement('li');
           item.className = 'session-item';
-          item.textContent = file.replace(day + '_', '').replace('.xlsx', '');
+          item.textContent = file.replace(`${day}_`, '').replace('.xlsx', '');
           item.addEventListener('click', () => loadFile(file));
           list.appendChild(item);
         });
         sidebar.appendChild(list);
-
         header.addEventListener('click', () => {
           list.style.display = list.style.display === 'block' ? 'none' : 'block';
         });
       });
     }
 
-    function loadFile(filename) {
+    async function loadFile(filename) {
       const content = document.getElementById('content');
       content.innerHTML = `<h1>${filename}</h1>`;
-      fetch(`${FILE_DIR}/${filename}`)
-        .then(res => res.arrayBuffer())
-        .then(data => {
-          const wb = XLSX.read(data, { type: 'array' });
-          wb.SheetNames.forEach(name => {
-            const sheet = wb.Sheets[name];
-            const html = XLSX.utils.sheet_to_html(sheet, { id: name });
-            content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>` + html);
-          });
-        })
-        .catch(err => {
-          console.error('Error loading file:', err);
-          content.innerHTML = `<p style="color:#f88;">Failed to load ${filename}</p>`;
+      try {
+        const res = await fetch(`${FILE_DIR}/${filename}`);
+        const arrayBuffer = await res.arrayBuffer();
+        const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+        wb.SheetNames.forEach(name => {
+          const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
+          content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>` + html);
         });
+      } catch (e) {
+        console.error('Error loading file:', e);
+        content.innerHTML += `<p class="error">Failed to load ${filename}</p>`;
+      }
     }
   </script>
 </body>
