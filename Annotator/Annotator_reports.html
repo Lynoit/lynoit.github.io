@@ -2,27 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <title>Annotator Reports Viewer</title>
+
+  <!-- Favicon (prevent 404) -->
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+
   <!-- Dependencies -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-  <script type="module" src="https://unpkg.com/@azure/storage-blob@12.14.1/dist/azure-storage-blob.min.js"></script>
+  <!-- jsDelivr serves with Access-Control-Allow-Origin: * -->
+  <script type="module"
+          src="https://cdn.jsdelivr.net/npm/@azure/storage-blob@12.14.1/dist/azure-storage-blob.min.js">
+  </script>
 
   <style>
     /* Grafana-style dark theme */
-    body { margin: 0; font-family: sans-serif; background: #121212; color: #fff; }
-    #sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 240px; background: #1f1f1f; overflow-y: auto; }
-    #content { margin-left: 240px; padding: 20px; }
-    .day-header { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #333; }
-    .day-header:hover { background: #333; }
-    .session-list { display: none; list-style: none; margin: 0; padding: 0; }
-    .session-item { padding: 8px 32px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.9em; }
-    .session-item:hover { background: #2a2a2a; }
-    h2 { margin-top: 1.5em; border-bottom: 1px solid #333; padding-bottom: 4px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 2em; }
-    th, td { border: 1px solid #333; padding: 8px; }
-    th { background: #202020; }
-    .error { padding: 16px; color: #f88; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #121212;
+      color: #fff;
+    }
+    #sidebar {
+      position: fixed;
+      left: 0; top: 0; bottom: 0;
+      width: 240px;
+      background: #1f1f1f;
+      overflow-y: auto;
+    }
+    #content {
+      margin-left: 240px;
+      padding: 20px;
+    }
+    .day-header {
+      padding: 12px 16px;
+      cursor: pointer;
+      border-bottom: 1px solid #333;
+    }
+    .day-header:hover {
+      background: #333;
+    }
+    .session-list {
+      display: none;
+      list-style: none;
+      margin: 0; padding: 0;
+    }
+    .session-item {
+      padding: 8px 32px;
+      cursor: pointer;
+      border-bottom: 1px solid #222;
+      font-size: 0.9em;
+    }
+    .session-item:hover {
+      background: #2a2a2a;
+    }
+    h1 {
+      margin-top: 0;
+    }
+    h2 {
+      margin-top: 1.5em;
+      border-bottom: 1px solid #333;
+      padding-bottom: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 2em;
+    }
+    th, td {
+      border: 1px solid #333;
+      padding: 8px;
+    }
+    th {
+      background: #202020;
+    }
+    .error {
+      padding: 16px;
+      color: #f88;
+    }
   </style>
 </head>
 <body>
@@ -30,14 +89,15 @@
   <div id="content"><h1>Select a session to view</h1></div>
 
   <script type="module">
-    import { BlobServiceClient, StorageSharedKeyCredential } from "https://unpkg.com/@azure/storage-blob@12.14.1/dist/azure-storage-blob.esm.js";
+    import { BlobServiceClient, StorageSharedKeyCredential }
+      from "https://cdn.jsdelivr.net/npm/@azure/storage-blob@12.14.1/dist/azure-storage-blob.esm.js";
 
-    // Azure configuration
+    // ----- Azure config -----
     const AZURE_ACCOUNT   = 'annotationcsv';
     const AZURE_KEY       = '31mglZQASLS9g4mcaTvMpznyzYYJyFr7I3ERTm84jeQrPNOlp5tXJQQJ99BEACi5YpzXJ3w3AAAYACOGJuNe';
     const AZURE_CONTAINER = 'csv';
 
-    // Local fallback directory
+    // ----- Local fallback -----
     const FILE_DIR = './data';
     const MANIFEST = `${FILE_DIR}/files.json`;
 
@@ -51,14 +111,17 @@
 
     async function loadFiles() {
       let files;
-      // 1. Try manifest
+
+      // 1. Try manifest.json
       try {
         const res = await fetch(MANIFEST);
         if (res.ok) {
           files = await res.json();
           return buildSidebar(files);
         }
-      } catch {}
+      } catch (e) {
+        console.warn('Manifest load failed', e);
+      }
 
       // 2. Try Azure SDK listing
       try {
@@ -67,7 +130,9 @@
           if (blob.name.endsWith('.xlsx')) files.push(blob.name);
         }
         if (files.length) return buildSidebar(files);
-      } catch (e) { console.warn('Azure SDK listing failed', e); }
+      } catch (e) {
+        console.warn('Azure SDK listing failed', e);
+      }
 
       // 3. Try directory listing
       try {
@@ -80,9 +145,11 @@
             .filter(name => name && name.endsWith('.xlsx'));
           if (files.length) return buildSidebar(files);
         }
-      } catch {}
+      } catch (e) {
+        console.warn('Directory listing failed', e);
+      }
 
-      // 4. GitHub Pages API
+      // 4. GitHub Pages API fallback
       try {
         const { hostname, pathname } = window.location;
         if (hostname.endsWith('github.io')) {
@@ -92,60 +159,92 @@
           const res = await fetch(apiUrl);
           if (res.ok) {
             const data = await res.json();
-            files = data.filter(i => i.type==='file'&&i.name.endsWith('.xlsx')).map(i=>i.name);
+            files = data
+              .filter(i => i.type === 'file' && i.name.endsWith('.xlsx'))
+              .map(i => i.name);
             if (files.length) return buildSidebar(files);
           }
         }
-      } catch {}
+      } catch (e) {
+        console.warn('GitHub API fallback failed', e);
+      }
 
-      // All failed
-      document.getElementById('sidebar').innerHTML =
-        `<div class="error">Unable to list files.<br>Check your Azure config,<br>manifest, directory listing,<br>or GitHub repo setup.</div>`;
+      // All methods failed
+      document.getElementById('sidebar').innerHTML = `
+        <div class="error">
+          Unable to list files.<br>
+          Check your Azure config,<br>
+          manifest.json, directory listing,<br>
+          or GitHub repo setup.
+        </div>`;
     }
 
     function buildSidebar(files) {
-      const sidebar = document.getElementById('sidebar'); sidebar.innerHTML = '';
+      const sidebar = document.getElementById('sidebar');
+      sidebar.innerHTML = '';
       const groups = {};
+
       files.forEach(f => {
         const m = f.match(/(\d{4}-\d{2}-\d{2})/);
         if (!m) return;
-        (groups[m[1]] = groups[m[1]]||[]).push(f);
+        (groups[m[1]] = groups[m[1]] || []).push(f);
       });
-      Object.keys(groups).sort().reverse().forEach(day => {
-        const header = Object.assign(document.createElement('div'),{className:'day-header',textContent:day});
-        const list = Object.assign(document.createElement('ul'),{className:'session-list'});
-        groups[day].sort().forEach(file => {
-          const item = Object.assign(document.createElement('li'),{className:'session-item',textContent:file.replace(day+'_','').replace('.xlsx','')});
-          item.onclick = ()=>loadFile(file);
-          list.appendChild(item);
+
+      Object.keys(groups)
+        .sort().reverse()
+        .forEach(day => {
+          const header = Object.assign(document.createElement('div'), {
+            className: 'day-header',
+            textContent: day
+          });
+          const list = Object.assign(document.createElement('ul'), {
+            className: 'session-list'
+          });
+          groups[day].sort().forEach(file => {
+            const item = Object.assign(document.createElement('li'), {
+              className: 'session-item',
+              textContent: file.replace(day + '_', '').replace('.xlsx', '')
+            });
+            item.onclick = () => loadFile(file);
+            list.appendChild(item);
+          });
+          header.onclick = () => {
+            list.style.display =
+              list.style.display === 'block' ? 'none' : 'block';
+          };
+          sidebar.append(header, list);
         });
-        header.onclick=()=>list.style.display=list.style.display==='block'?'none':'block';
-        sidebar.append(header,list);
-      });
     }
 
     async function loadFile(filename) {
-      const content = document.getElementById('content'); content.innerHTML=`<h1>${filename}</h1>`;
+      const content = document.getElementById('content');
+      content.innerHTML = `<h1>${filename}</h1>`;
       try {
         let dataBuffer;
-        // Try Azure first
+
+        // Try Azure download first
         try {
           const blobClient = containerClient.getBlobClient(filename);
           const download = await blobClient.download();
           dataBuffer = await download.arrayBuffer();
         } catch {
-          // Fallback
+          // Fallback to local
           const res = await fetch(`${FILE_DIR}/${filename}`);
           dataBuffer = await res.arrayBuffer();
         }
-        const wb = XLSX.read(new Uint8Array(dataBuffer),{type:'array'});
-        wb.SheetNames.forEach(name=>{
-          const html = XLSX.utils.sheet_to_html(wb.Sheets[name],{id:name});
-          content.insertAdjacentHTML('beforeend',`<h2>${name}</h2>${html}`);
+
+        const wb = XLSX.read(new Uint8Array(dataBuffer), { type: 'array' });
+        wb.SheetNames.forEach(name => {
+          const html = XLSX.utils.sheet_to_html(
+            wb.Sheets[name],
+            { id: name }
+          );
+          content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
         });
+
       } catch (e) {
         console.error('Error loading file:', e);
-        content.innerHTML+=`<p class="error">Failed to load ${filename}</p>`;
+        content.innerHTML += `<p class="error">Failed to load ${filename}</p>`;
       }
     }
   </script>
