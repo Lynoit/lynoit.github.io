@@ -6,7 +6,7 @@
   <title>Annotator Reports Viewer</title>
   <!-- Tiny favicon to avoid 404 -->
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-  <!-- Leaflet CSS (no integrity) -->
+  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     body { margin:0; font-family:sans-serif; background:#121212; color:#fff; }
@@ -23,16 +23,16 @@
     th, td { border:1px solid #333; padding:8px; }
     th { background:#202020; }
     .error { color:#f88; padding:16px; }
-    #issue-map { height:400px; margin-bottom:20px; }
+    #issue-map { height:400px; margin:20px 0; }
   </style>
 </head>
 <body>
   <div id="sidebar"></div>
   <div id="content"><h1>Select a session to view</h1></div>
 
-  <!-- SheetJS for XLSX parsing -->
+  <!-- SheetJS -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-  <!-- Leaflet JS (no integrity) -->
+  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <script>
@@ -64,40 +64,37 @@
       const sb = document.getElementById('sidebar'); sb.innerHTML = '';
       const groups = {};
       files.forEach(f => {
-        const d = (f.match(/(\d{4}-\d{2}-\d{2})/) || [])[1];
+        const d = (f.match(/(\d{4}-\d{2}-\d{2})/)||[])[1];
         if (!d) return;
-        (groups[d] = groups[d] || []).push(f);
+        (groups[d] = groups[d]||[]).push(f);
       });
       Object.keys(groups).sort().reverse().forEach(day => {
-        const hdr = document.createElement('div');
-        hdr.className = 'day-header'; hdr.textContent = day;
+        const hdr = document.createElement('div'); hdr.className = 'day-header'; hdr.textContent = day;
         const lst = document.createElement('ul'); lst.className = 'session-list';
         groups[day].sort().forEach(file => {
-          const li = document.createElement('li');
-          li.className = 'session-item';
-          li.textContent = file.replace(day + '_', '').replace('.xlsx', '');
-          li.onclick = () => loadFile(file);
+          const li = document.createElement('li'); li.className = 'session-item';
+          li.textContent = file.replace(`${day}_`, '').replace('.xlsx','');
+          li.onclick = ()=>loadFile(file);
           lst.appendChild(li);
         });
-        hdr.onclick = () => lst.style.display = lst.style.display === 'block' ? 'none' : 'block';
-        sb.appendChild(hdr); sb.appendChild(lst);
+        hdr.onclick = ()=> lst.style.display = lst.style.display==='block'?'none':'block';
+        sb.append(hdr, lst);
       });
     }
 
     async function loadFile(filename) {
-      const content = document.getElementById('content');
-      content.innerHTML = `<h1>${filename}</h1>`;
+      const content = document.getElementById('content'); content.innerHTML = `<h1>${filename}</h1>`;
       issueCoords = [];
       try {
         const res = await fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`);
         const buf = await res.arrayBuffer();
-        const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+        const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
         wb.SheetNames.forEach(name => {
           const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
           content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
-          if (name === 'Issue') parseIssues(name);
-          if (name === 'KPI') content.insertAdjacentHTML('beforeend', '<div id="issue-map"></div>');
+          if (name==='Issue') parseIssues(name);
         });
+        insertMapBeforeRoadTypes();
         if (issueCoords.length) initMap();
       } catch(e) {
         content.innerHTML += `<div class="error">Failed to load ${filename}: ${e.message}</div>`;
@@ -105,24 +102,35 @@
     }
 
     function parseIssues(sheetId) {
-      const tbl = document.getElementById(sheetId);
-      if (!tbl) return;
-      Array.from(tbl.querySelectorAll('tr')).slice(1).forEach(r => {
+      const tbl = document.getElementById(sheetId); if(!tbl) return;
+      Array.from(tbl.querySelectorAll('tr')).slice(1).forEach(r=>{
         const cells = r.querySelectorAll('td');
         const issueNo = cells[0]?.textContent.trim();
-        const coordCell = Array.from(cells).find(td => /[-0-9\.]+,\s*[-0-9\.]+/.test(td.textContent));
-        if (coordCell) {
-          const [lat, lng] = coordCell.textContent.split(',').map(s => parseFloat(s));
-          if (!isNaN(lat) && !isNaN(lng)) issueCoords.push({ issueNo, lat, lng });
+        const coord = Array.from(cells).find(td=>/[-0-9\.]+,\s*[-0-9\.]+/.test(td.textContent));
+        if (coord) {
+          const [lat,lng] = coord.textContent.split(',').map(s=>parseFloat(s));
+          if (!isNaN(lat)&&!isNaN(lng)) issueCoords.push({issueNo,lat,lng});
         }
       });
     }
 
+    function insertMapBeforeRoadTypes() {
+      // remove existing if any
+      const old = document.getElementById('issue-map'); if(old) old.remove();
+      // find Road types header
+      const content = document.getElementById('content');
+      const headers = Array.from(content.querySelectorAll('h2'));
+      const road = headers.find(h=>h.textContent.trim()==='Road types');
+      const mapDiv = document.createElement('div'); mapDiv.id='issue-map';
+      if(road) content.insertBefore(mapDiv, road);
+      else content.append(mapDiv);
+    }
+
     function initMap() {
-      const map = L.map('issue-map').fitBounds(issueCoords.map(c => [c.lat, c.lng]));
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-      issueCoords.forEach(c => {
-        L.circleMarker([c.lat, c.lng], { radius: 6, color: 'red', fillOpacity: 0.8 })
+      const map = L.map('issue-map').fitBounds(issueCoords.map(c=>[c.lat,c.lng]));
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
+      issueCoords.forEach(c=>{
+        L.circleMarker([c.lat,c.lng],{radius:6,color:'red',fillOpacity:0.8})
          .bindPopup(`Issue ${c.issueNo}`).addTo(map);
       });
     }
