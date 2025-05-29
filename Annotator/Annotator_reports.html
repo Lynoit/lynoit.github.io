@@ -3,52 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <title>Annotator Reports Viewer</title>
-  <!-- Prevent 404 on favicon -->
+
+  <!-- Prevent a 404 by supplying an empty favicon -->
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
 
-  <!-- SheetJS (this CDN is fine for CORS) -->
+  <!-- SheetJS for XLSX parsing (CORS-safe) -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <!-- Azure Blob Storage UMD build (classic <script> tags do NOT require CORS headers) -->
+  <script src="https://unpkg.com/@azure/storage-blob@12.14.1/dist/azure-storage-blob.min.js"></script>
 
   <style>
-    /* Grafana‐style dark theme */
-    body { margin:0; font-family:sans-serif; background:#121212; color:#fff }
-    #sidebar { position:fixed; left:0; top:0; bottom:0; width:240px; background:#1f1f1f; overflow-y:auto }
-    #content { margin-left:240px; padding:20px }
-    .day-header { padding:12px 16px; cursor:pointer; border-bottom:1px solid #333 }
-    .day-header:hover { background:#333 }
-    .session-list { display:none; list-style:none; margin:0; padding:0 }
-    .session-item { padding:8px 32px; cursor:pointer; border-bottom:1px solid #222; font-size:0.9em }
-    .session-item:hover { background:#2a2a2a }
-    h1 { margin-top:0 }
-    h2 { margin-top:1.5em; border-bottom:1px solid #333; padding-bottom:4px }
-    table { width:100%; border-collapse:collapse; margin-bottom:2em }
-    th, td { border:1px solid #333; padding:8px }
-    th { background:#202020 }
-    .error { padding:16px; color:#f88 }
+    /* Grafana-style dark theme */
+    body { margin: 0; font-family: sans-serif; background: #121212; color: #fff; }
+    #sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 240px; background: #1f1f1f; overflow-y: auto; }
+    #content { margin-left: 240px; padding: 20px; }
+    .day-header { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #333; }
+    .day-header:hover { background: #333; }
+    .session-list { display: none; list-style: none; margin: 0; padding: 0; }
+    .session-item { padding: 8px 32px; cursor: pointer; border-bottom: 1px solid #222; font-size: 0.9em; }
+    .session-item:hover { background: #2a2a2a; }
+    h1 { margin-top: 0; }
+    h2 { margin-top: 1.5em; border-bottom: 1px solid #333; padding-bottom: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 2em; }
+    th, td { border: 1px solid #333; padding: 8px; }
+    th { background: #202020; }
+    .error { padding: 16px; color: #f88; }
   </style>
 </head>
 <body>
   <div id="sidebar"></div>
   <div id="content"><h1>Select a session to view</h1></div>
 
-  <!-- Load the ES module build from your own vendor folder -->
-  <script type="module">
-    import { BlobServiceClient, StorageSharedKeyCredential }
-      from './vendor/azure-storage-blob.esm.js';
+  <script>
+    // Pull the named exports off the global AzureStorageBlob object
+    const { BlobServiceClient, StorageSharedKeyCredential } = AzureStorageBlob;
 
-    // ---------- Azure config ----------
+    // ——— Your Azure config ———
     const AZURE_ACCOUNT   = 'annotationcsv';
     const AZURE_KEY       = '31mglZQASLS9g4mcaTvMpznyzYYJyFr7I3ERTm84jeQrPNOlp5tXJQQJ99BEACi5YpzXJ3w3AAAYACOGJuNe';
     const AZURE_CONTAINER = 'csv';
 
-    // ---------- Local fallback ----------
-    const FILE_DIR = './data', MANIFEST = `${FILE_DIR}/files.json`;
+    // ——— Local fallback settings ———
+    const FILE_DIR = './data';
+    const MANIFEST = `${FILE_DIR}/files.json`;
 
+    // Create the clients
     const cred = new StorageSharedKeyCredential(AZURE_ACCOUNT, AZURE_KEY);
     const blobServiceClient = new BlobServiceClient(
-      `https://${AZURE_ACCOUNT}.blob.core.windows.net`, cred
+      `https://${AZURE_ACCOUNT}.blob.core.windows.net`,
+      cred
     );
     const containerClient = blobServiceClient.getContainerClient(AZURE_CONTAINER);
 
@@ -56,20 +62,30 @@
 
     async function loadFiles() {
       let files;
-      // 1. Manifest
+
+      // 1) Try the JSON manifest
       try {
         const res = await fetch(MANIFEST);
-        if (res.ok) return buildSidebar(await res.json());
-      } catch {}
-      // 2. Azure listing
+        if (res.ok) {
+          files = await res.json();
+          return buildSidebar(files);
+        }
+      } catch (e) {
+        console.warn('Manifest load failed', e);
+      }
+
+      // 2) Try Azure SDK listing
       try {
         files = [];
         for await (const blob of containerClient.listBlobsFlat()) {
           if (blob.name.endsWith('.xlsx')) files.push(blob.name);
         }
         if (files.length) return buildSidebar(files);
-      } catch (e) { console.warn('Azure SDK listing failed', e); }
-      // 3. Directory listing
+      } catch (e) {
+        console.warn('Azure SDK listing failed', e);
+      }
+
+      // 3) Try a plain directory index
       try {
         const res = await fetch(`${FILE_DIR}/`);
         if (res.ok) {
@@ -77,11 +93,14 @@
           const doc = new DOMParser().parseFromString(html, 'text/html');
           files = Array.from(doc.querySelectorAll('a'))
             .map(a => a.getAttribute('href'))
-            .filter(n => n && n.endsWith('.xlsx'));
+            .filter(name => name && name.endsWith('.xlsx'));
           if (files.length) return buildSidebar(files);
         }
-      } catch {}
-      // 4. GitHub API fallback
+      } catch (e) {
+        console.warn('Directory listing failed', e);
+      }
+
+      // 4) GitHub Pages API fallback
       try {
         const { hostname, pathname } = window.location;
         if (hostname.endsWith('github.io')) {
@@ -91,12 +110,17 @@
           const res = await fetch(apiUrl);
           if (res.ok) {
             const data = await res.json();
-            files = data.filter(i => i.type==='file'&&i.name.endsWith('.xlsx')).map(i=>i.name);
+            files = data
+              .filter(item => item.type === 'file' && item.name.endsWith('.xlsx'))
+              .map(item => item.name);
             if (files.length) return buildSidebar(files);
           }
         }
-      } catch {}
-      // All failed
+      } catch (e) {
+        console.warn('GitHub API fallback failed', e);
+      }
+
+      // If we got here, everything failed
       document.getElementById('sidebar').innerHTML = `
         <div class="error">
           Unable to list files.<br>
@@ -110,29 +134,33 @@
       const sidebar = document.getElementById('sidebar');
       sidebar.innerHTML = '';
       const groups = {};
+
       files.forEach(f => {
         const m = f.match(/(\d{4}-\d{2}-\d{2})/);
         if (!m) return;
         (groups[m[1]] = groups[m[1]] || []).push(f);
       });
+
       Object.keys(groups).sort().reverse().forEach(day => {
-        const header = Object.assign(document.createElement('div'), {
-          className: 'day-header', textContent: day
-        });
-        const list = Object.assign(document.createElement('ul'), {
-          className: 'session-list'
-        });
+        const header = document.createElement('div');
+        header.className = 'day-header';
+        header.textContent = day;
+
+        const list = document.createElement('ul');
+        list.className = 'session-list';
+
         groups[day].sort().forEach(file => {
-          const item = Object.assign(document.createElement('li'), {
-            className: 'session-item',
-            textContent: file.replace(day+'_','').replace('.xlsx','')
-          });
+          const item = document.createElement('li');
+          item.className = 'session-item';
+          item.textContent = file.replace(day + '_', '').replace('.xlsx','');
           item.onclick = () => loadFile(file);
           list.appendChild(item);
         });
+
         header.onclick = () => {
-          list.style.display = list.style.display==='block' ? 'none' : 'block';
+          list.style.display = list.style.display === 'block' ? 'none' : 'block';
         };
+
         sidebar.append(header, list);
       });
     }
@@ -140,23 +168,27 @@
     async function loadFile(filename) {
       const content = document.getElementById('content');
       content.innerHTML = `<h1>${filename}</h1>`;
+
       try {
-        let dataBuffer;
-        // Try Azure first
+        let arrayBuffer;
+
+        // Try Azure download first
         try {
           const blobClient = containerClient.getBlobClient(filename);
-          const download = await blobClient.download();
-          dataBuffer = await download.arrayBuffer();
+          const downloadResponse = await blobClient.download();
+          arrayBuffer = await downloadResponse.arrayBuffer();
         } catch {
-          // Fallback local
+          // Fallback to local fetch
           const res = await fetch(`${FILE_DIR}/${filename}`);
-          dataBuffer = await res.arrayBuffer();
+          arrayBuffer = await res.arrayBuffer();
         }
-        const wb = XLSX.read(new Uint8Array(dataBuffer), { type:'array' });
+
+        const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
         wb.SheetNames.forEach(name => {
-          const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id:name });
+          const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
           content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
         });
+
       } catch (e) {
         console.error('Error loading file:', e);
         content.innerHTML += `<p class="error">Failed to load ${filename}</p>`;
