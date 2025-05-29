@@ -28,12 +28,16 @@
   <div id="content"><h1>Select a session to view</h1></div>
 
   <script>
+    // Configuration: Azure Storage details
+    const AZURE_ACCOUNT   = 'YOUR_ACCOUNT_NAME';
+    const AZURE_CONTAINER = 'YOUR_CONTAINER_NAME';
+    const AZURE_SAS       = 'YOUR_SAS_TOKEN'; // starts with sv=
+    const AZURE_URL       = `https://${AZURE_ACCOUNT}.blob.core.windows.net/${AZURE_CONTAINER}`;
+
     const FILE_DIR = './data';
     const MANIFEST = `${FILE_DIR}/files.json`;
 
-    document.addEventListener('DOMContentLoaded', () => {
-      loadFiles();
-    });
+    document.addEventListener('DOMContentLoaded', () => loadFiles());
 
     async function loadFiles() {
       let files;
@@ -45,11 +49,25 @@
           console.log('Loaded manifest:', files);
           return buildSidebar(files);
         }
-        throw new Error('Manifest not found');
-      } catch (e) {
-        console.warn(e);
-      }
-      // 2. Try directory listing
+      } catch (e) { console.warn('Manifest load failed', e); }
+
+      // 2. Try Azure Blob listing
+      try {
+        const res = await fetch(`${AZURE_URL}?restype=container&comp=list&${AZURE_SAS}`);
+        if (res.ok) {
+          const xml = await res.text();
+          const parser = new DOMParser();
+          const xmlDoc = parser.parseFromString(xml, 'application/xml');
+          const names = Array.from(xmlDoc.getElementsByTagName('Name'))
+                             .map(n => n.textContent)
+                             .filter(n => n.endsWith('.xlsx'));
+          console.log('Loaded via Azure:', names);
+          return buildSidebar(names);
+        }
+        throw new Error(`Azure HTTP ${res.status}`);
+      } catch (e) { console.warn('Azure listing failed:', e); }
+
+      // 3. Try directory listing
       try {
         const res = await fetch(`${FILE_DIR}/`);
         if (res.ok) {
@@ -62,41 +80,34 @@
           console.log('Loaded directory listing:', files);
           return buildSidebar(files);
         }
-        throw new Error(`HTTP ${res.status}`);
-      } catch (e) {
-        console.warn('Directory listing failed:', e);
-      }
-      // 3. Try GitHub API auto-detect
+      } catch (e) { console.warn('Directory listing failed:', e); }
+
+      // 4. Try GitHub Pages API
       try {
         const { hostname, pathname } = window.location;
-        let user, repo;
         if (hostname.endsWith('github.io')) {
-          user = hostname.split('.')[0];
-          // pathname like '/repo/...'
-          const parts = pathname.split('/').filter(p => p);
-          repo = parts[0] || user;
-          const apiUrl = `https://api.github.com/repos/${user}/${repo}/contents/data`;
+          const user = hostname.split('.')[0];
+          const repo = pathname.split('/').filter(p => p)[0] || user;
+          const apiUrl = `https://api.github.com/repos/${user}/${repo}/contents/${AZURE_CONTAINER || 'data'}`;
           const res = await fetch(apiUrl);
           if (res.ok) {
             const data = await res.json();
-            files = data
-              .filter(item => item.type === 'file' && item.name.endsWith('.xlsx'))
-              .map(item => item.name);
+            files = data.filter(item => item.type === 'file' && item.name.endsWith('.xlsx'))
+                        .map(item => item.name);
             console.log('Loaded via GitHub API:', files);
             return buildSidebar(files);
           }
-          throw new Error(`GitHub API ${res.status}`);
         }
-        throw new Error('Not on GitHub Pages');
-      } catch (e) {
-        console.error('GitHub API fallback failed:', e);
-      }
+      } catch (e) { console.warn('GitHub API failed:', e); }
+
       // All methods failed
       document.getElementById('sidebar').innerHTML = 
         `<div class="error">Unable to list files.<br>
-         Please add a <code>data/files.json</code> manifest,<br>
-         enable directory listings on <code>/data/</code>,<br>
-         or host on GitHub Pages with <code>/data</code> folder.</div>`;
+         Ensure one of:<br>
+         • manifest at <code>data/files.json</code><br>
+         • Azure Storage config (account/container/SAS)<br>
+         • directory listings enabled at <code>/data/</code><br>
+         • GitHub Pages <code>/data</code> in repo<br></div>`;
     }
 
     function buildSidebar(files) {
@@ -111,14 +122,11 @@
         groups[day].push(f);
       });
       Object.keys(groups).sort().reverse().forEach(day => {
-        const header = document.createElement('div');
-        header.className = 'day-header';
-        header.textContent = day;
+        const header = document.createElement('div'); header.className = 'day-header'; header.textContent = day;
         sidebar.appendChild(header);
         const list = document.createElement('ul'); list.className = 'session-list';
         groups[day].sort().forEach(file => {
-          const item = document.createElement('li');
-          item.className = 'session-item';
+          const item = document.createElement('li'); item.className = 'session-item';
           item.textContent = file.replace(`${day}_`, '').replace('.xlsx', '');
           item.addEventListener('click', () => loadFile(file));
           list.appendChild(item);
@@ -134,7 +142,13 @@
       const content = document.getElementById('content');
       content.innerHTML = `<h1>${filename}</h1>`;
       try {
-        const res = await fetch(`${FILE_DIR}/${filename}`);
+        // Try Azure URL first
+        let url = `${AZURE_URL}/${filename}${AZURE_SAS}`;
+        let res = await fetch(url);
+        if (!res.ok) {
+          // Fallback to local
+          res = await fetch(`${FILE_DIR}/${filename}`);
+        }
         const arrayBuffer = await res.arrayBuffer();
         const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
         wb.SheetNames.forEach(name => {
