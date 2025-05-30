@@ -4,9 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Annotator Reports Viewer</title>
-  <link rel="icon" href="data:;base64,iVBORw0KGgo="> <!-- Tiny favicon -->
-  <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     body { margin:0; font-family:sans-serif; background:#fff; color:#000; }
     #sidebar { position:fixed; left:0; top:0; bottom:0; width:240px; background:#f5f5f5; overflow-y:auto; }
@@ -29,9 +28,7 @@
   <div id="sidebar"></div>
   <div id="content"><h1>Select a session to view</h1></div>
 
-  <!-- SheetJS -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const ACCOUNT = 'annotationcsv';
@@ -40,40 +37,55 @@
     const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
     let issueCoords = [];
 
-    document.addEventListener('DOMContentLoaded', () => listBlobs());
+    document.addEventListener('DOMContentLoaded', listBlobs);
 
     function listBlobs() {
       fetch(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`)
-        .then(res => res.text())
+        .then(response => response.text())
         .then(xml => {
-          const doc = new DOMParser().parseFromString(xml, 'application/xml');
-          const blobs = Array.from(doc.getElementsByTagName('Blob'))
-            .map(b => b.getElementsByTagName('Name')[0].textContent)
-            .filter(n => n.endsWith('.xlsx'));
-          if (!blobs.length) return showError('No .xlsx files found.');
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(xml, 'application/xml');
+          const blobs = Array.from(doc.getElementsByTagName('Name'))
+            .map(el => el.textContent)
+            .filter(name => name.endsWith('.xlsx'));
+          if (blobs.length === 0) {
+            showError('No .xlsx files found.');
+            return;
+          }
           buildSidebar(blobs);
         })
-        .catch(e => showError('Failed to list blobs: ' + e.message));
+        .catch(error => showError('Failed to list blobs: ' + error));
     }
 
     function buildSidebar(files) {
-      const sb = document.getElementById('sidebar'); sb.innerHTML = '';
-      const groups = {};
-      files.forEach(f => {
-        const d = (f.match(/(\d{4}-\d{2}-\d{2})/) || [])[1]; if (!d) return;
-        (groups[d] = groups[d] || []).push(f);
-      });
+      const sb = document.getElementById('sidebar');
+      sb.innerHTML = '';
+      const groups = files.reduce((acc, file) => {
+        const match = file.match(/(\d{4}-\d{2}-\d{2})/);
+        if (!match) return acc;
+        const day = match[1];
+        acc[day] = acc[day] || [];
+        acc[day].push(file);
+        return acc;
+      }, {});
       Object.keys(groups).sort().reverse().forEach(day => {
-        const hdr = document.createElement('div'); hdr.className = 'day-header'; hdr.textContent = day;
-        const lst = document.createElement('ul'); lst.className = 'session-list';
+        const hdr = document.createElement('div');
+        hdr.className = 'day-header';
+        hdr.textContent = day;
+        const lst = document.createElement('ul');
+        lst.className = 'session-list';
         groups[day].sort().forEach(file => {
-          const li = document.createElement('li'); li.className = 'session-item';
+          const li = document.createElement('li');
+          li.className = 'session-item';
           li.textContent = file.replace(`${day}_`, '').replace('.xlsx','');
-          li.onclick = () => loadFile(file);
+          li.addEventListener('click', () => loadFile(file));
           lst.appendChild(li);
         });
-        hdr.onclick = () => lst.style.display = lst.style.display==='block'?'none':'block';
-        sb.append(hdr, lst);
+        hdr.addEventListener('click', () => {
+          lst.style.display = lst.style.display === 'block' ? 'none' : 'block';
+        });
+        sb.appendChild(hdr);
+        sb.appendChild(lst);
       });
     }
 
@@ -81,67 +93,83 @@
       const content = document.getElementById('content');
       content.innerHTML = `<h1>${filename}</h1>`;
       issueCoords = [];
-
       fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then(res => res.arrayBuffer())
-        .then(buf => {
-          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-          wb.SheetNames.forEach(name => {
-            const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
-            content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
-            parseIssues(name);
+        .then(response => response.arrayBuffer())
+        .then(buffer => {
+          const data = new Uint8Array(buffer);
+          const wb = XLSX.read(data, { type: 'array' });
+          wb.SheetNames.forEach(sheet => {
+            const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
+            content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
+            parseIssues(sheet);
           });
         })
         .then(() => {
-          if (issueCoords.length > 2) {
-            insertMap(); initMap();
+          if (issueCoords.length >= 3) {
+            insertMap();
+            initMap();
           } else {
             content.insertAdjacentHTML('beforeend',
               `<div class="error">Need at least 3 issues to plot a map (found ${issueCoords.length}).</div>`
             );
           }
         })
-        .catch(e => {
-          content.innerHTML += `<div class="error">Failed to load ${filename}: ${e.message}</div>`;
+        .catch(error => {
+          content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
         });
     }
 
     function parseIssues(sheetId) {
-      const tbl = document.getElementById(sheetId); if (!tbl) return;
-      const rows = tbl.querySelectorAll('tr'); if (rows.length<2) return;
-      const headerCells = Array.from(rows[0].querySelectorAll('th, td'));
-      const headers = headerCells.map(c=>c.textContent.trim().toLowerCase());
-      const latIdx = headers.findIndex(h=>h.includes('lat'));
-      const lonIdx = headers.findIndex(h=>h.includes('lon'));
-      const issueIdx = headers.findIndex(h=>h.includes('issue'));
-      if (latIdx<0||lonIdx<0) return;
-      rows.forEach((row, i) => {
-        if (i===0) return;
+      const table = document.getElementById(sheetId);
+      if (!table) return;
+      const rows = Array.from(table.querySelectorAll('tr'));
+      if (rows.length < 2) return;
+      const headers = Array.from(rows[0].querySelectorAll('th, td'))
+        .map(cell => cell.textContent.trim().toLowerCase());
+      const latIdx = headers.findIndex(h => h.includes('lat'));
+      const lonIdx = headers.findIndex(h => h.includes('lon'));
+      const issueIdx = headers.findIndex(h => h.includes('issue'));
+      if (latIdx < 0 || lonIdx < 0) return;
+      rows.slice(1).forEach((row, i) => {
         const cells = Array.from(row.querySelectorAll('td'));
-        const issueNo = issueIdx>=0?cells[issueIdx].textContent.trim():`row ${i}`;
         const lat = parseFloat(cells[latIdx].textContent.trim());
         const lon = parseFloat(cells[lonIdx].textContent.trim());
-        console.log(`Parsed row ${i}: lat=${lat}, lon=${lon}`);
-        if (!isNaN(lat)&&!isNaN(lon)) issueCoords.push({issueNo,lat,lon});
+        const issueNo = issueIdx >= 0 ? cells[issueIdx].textContent.trim() : `row ${i+1}`;
+        console.log(`Row ${i+1}: lat=${lat}, lon=${lon}`);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          issueCoords.push({ issueNo, lat, lon });
+        }
       });
-      console.log('issueCoords:',issueCoords);
+      console.log('Collected coords:', issueCoords);
     }
 
     function insertMap() {
-      const old = document.getElementById('issue-map'); if(old) old.remove();
-      const d = document.createElement('div'); d.id='issue-map'; d.style.width='100%'; d.style.height='400px';
-      document.getElementById('content').appendChild(d);
+      const existing = document.getElementById('issue-map');
+      if (existing) existing.remove();
+      const mapDiv = document.createElement('div');
+      mapDiv.id = 'issue-map';
+      mapDiv.style.width = '100%';
+      mapDiv.style.height = '400px';
+      document.getElementById('content').appendChild(mapDiv);
     }
 
     function initMap() {
-      const map = L.map('issue-map');
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors'}).addTo(map);
-      map.fitBounds(issueCoords.map(c=>[c.lat,c.lon]));
-      issueCoords.forEach(c=>L.circleMarker([c.lat,c.lon],{radius:6,fillOpacity:0.8,color:'red'}).bindPopup(`Issue ${c.issueNo}`).addTo(map));
-      map.whenReady(()=>map.invalidateSize());
+      const map = L.map('issue-map').setView([0,0],2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+      map.fitBounds(issueCoords.map(c => [c.lat,c.lon]));
+      issueCoords.forEach(c => {
+        L.circleMarker([c.lat,c.lon], { radius:6, color:'red', fillOpacity:0.8 })
+          .bindPopup(`Issue ${c.issueNo}`)
+          .addTo(map);
+      });
+      map.whenReady(() => map.invalidateSize());
     }
 
-    function showError(msg) { document.getElementById('sidebar').innerHTML=`<div class="error">${msg}</div>`; }
+    function showError(message) {
+      document.getElementById('sidebar').innerHTML = `<div class="error">${message}</div>`;
+    }
   </script>
 </body>
 </html>
