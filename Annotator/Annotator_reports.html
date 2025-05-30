@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Annotator Reports Viewer</title>
-  <!-- Tiny favicon to avoid 404 -->
+  <!-- Tiny favicon -->
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-  <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <!-- Leaflet CSS (no SRI) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body {
       margin: 0;
@@ -33,9 +33,7 @@
       cursor: pointer;
       border-bottom: 1px solid #ddd;
     }
-    .day-header:hover {
-      background: #e0e0e0;
-    }
+    .day-header:hover { background: #e0e0e0; }
     .session-list {
       display: none;
       list-style: none;
@@ -47,12 +45,8 @@
       cursor: pointer;
       border-bottom: 1px solid #eee;
     }
-    .session-item:hover {
-      background: #f0f0f0;
-    }
-    h1 {
-      margin-top: 0;
-    }
+    .session-item:hover { background: #f0f0f0; }
+    h1 { margin-top: 0; }
     h2 {
       margin-top: 1.5em;
       border-bottom: 1px solid #ddd;
@@ -67,28 +61,29 @@
       border: 1px solid #ccc;
       padding: 8px;
     }
-    th {
-      background: #f0f0f0;
-    }
+    th { background: #f0f0f0; }
     .error {
       color: #d00;
       padding: 16px;
     }
     #issue-map {
+      width: 100%;
       height: 400px;
       margin: 20px 0;
+      border: 1px solid #aaa;
     }
   </style>
 </head>
 <body>
   <div id="sidebar"></div>
-  <div id="content"><h1>Select a session to view</h1></div>
+  <div id="content">
+    <h1>Select a session to view</h1>
+  </div>
 
   <!-- SheetJS -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-  <!-- Leaflet JS -->
+  <!-- Leaflet JS (no SRI) -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
   <script>
   (async function(){
     const ACCOUNT   = 'annotationcsv';
@@ -128,17 +123,19 @@
         groups[day].sort().forEach(file => {
           const li = document.createElement('li'); li.className = 'session-item';
           li.textContent = file.replace(`${day}_`, '').replace('.xlsx','');
-          li.onclick = ()=>loadFile(file);
+          li.onclick = () => loadFile(file);
           lst.appendChild(li);
         });
-        hdr.onclick = ()=> lst.style.display = lst.style.display==='block'?'none':'block';
+        hdr.onclick = () => lst.style.display = lst.style.display === 'block' ? 'none' : 'block';
         sb.append(hdr, lst);
       });
     }
 
     async function loadFile(filename) {
-      const content = document.getElementById('content'); content.innerHTML = `<h1>${filename}</h1>`;
+      const content = document.getElementById('content');
+      content.innerHTML = `<h1>${filename}</h1>`;
       issueCoords = [];
+
       try {
         const res = await fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`);
         const buf = await res.arrayBuffer();
@@ -146,45 +143,58 @@
         wb.SheetNames.forEach(name => {
           const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { id: name });
           content.insertAdjacentHTML('beforeend', `<h2>${name}</h2>${html}`);
-          if (name==='Issue') parseIssues(name);
+          if (name === 'Issue') parseIssues(name);
         });
-        insertMapBeforeRoadTypes();
-        if (issueCoords.length) initMap();
       } catch(e) {
         content.innerHTML += `<div class="error">Failed to load ${filename}: ${e.message}</div>`;
+        return;
+      }
+
+      if (issueCoords.length > 2) {
+        insertMapBeforeRoadTypes();
+        initMap();
+      } else {
+        content.insertAdjacentHTML('beforeend',
+          `<div class="error">Need at least 3 issues to plot a map (found ${issueCoords.length}).</div>`
+        );
       }
     }
 
     function parseIssues(sheetId) {
-      const tbl = document.getElementById(sheetId); if(!tbl) return;
-      Array.from(tbl.querySelectorAll('tr')).slice(1).forEach(r=>{
+      const tbl = document.getElementById(sheetId); if (!tbl) return;
+      Array.from(tbl.querySelectorAll('tr')).slice(1).forEach(r => {
         const cells = r.querySelectorAll('td');
         const issueNo = cells[0]?.textContent.trim();
-        const coord = Array.from(cells).find(td=>/[-0-9\.]+,\s*[-0-9\.]+/.test(td.textContent));
+        const coord = Array.from(cells).find(td => /-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?/.test(td.textContent));
         if (coord) {
-          const [lat,lng] = coord.textContent.split(',').map(s=>parseFloat(s));
-          if (!isNaN(lat)&&!isNaN(lng)) issueCoords.push({issueNo,lat,lng});
+          const [lat, lng] = coord.textContent.split(',').map(s => parseFloat(s));
+          if (!isNaN(lat) && !isNaN(lng)) issueCoords.push({ issueNo, lat, lng });
         }
       });
     }
 
     function insertMapBeforeRoadTypes() {
-      const old = document.getElementById('issue-map'); if(old) old.remove();
+      const old = document.getElementById('issue-map'); if (old) old.remove();
       const content = document.getElementById('content');
-      const headers = Array.from(content.querySelectorAll('h2'));
-      const road = headers.find(h=>h.textContent.trim()==='Road types');
-      const mapDiv = document.createElement('div'); mapDiv.id='issue-map';
-      if(road) content.insertBefore(mapDiv, road);
-      else content.append(mapDiv);
+      const mapDiv = document.createElement('div');
+      mapDiv.id = 'issue-map';
+      mapDiv.style.width = '100%';
+      mapDiv.style.height = '400px';
+      content.appendChild(mapDiv);
     }
 
     function initMap() {
-      const map = L.map('issue-map').fitBounds(issueCoords.map(c=>[c.lat,c.lng]));
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
-      issueCoords.forEach(c=>{
-        L.circleMarker([c.lat,c.lng],{radius:6,color:'red',fillOpacity:0.8})
-         .bindPopup(`Issue ${c.issueNo}`).addTo(map);
+      const map = L.map('issue-map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+      map.fitBounds(issueCoords.map(c => [c.lat, c.lng]));
+      issueCoords.forEach(c => {
+        L.circleMarker([c.lat, c.lng], { radius:6, color:'red', fillOpacity:0.8 })
+         .bindPopup(`Issue ${c.issueNo}`)
+         .addTo(map);
       });
+      map.whenReady(() => map.invalidateSize());
     }
 
     function showError(msg) {
