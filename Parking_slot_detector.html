@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector (Status Updates)</title>
+  <title>Parking Slot Detector (with Live Status)</title>
   <style>
     body {
       display: flex;
@@ -80,7 +80,7 @@
   <!-- Chart.js for plotting -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <!-- OpenCV.js (async) -->
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 </head>
 <body>
   <div id="status">Loading OpenCV…</div>
@@ -88,7 +88,7 @@
   <h1>Parking Slot Detector (with Live Status)</h1>
 
   <div id="controls">
-    <button id="btnStart">Start Camera</button>
+    <button id="btnStart" disabled>Start Camera</button>
 
     <label for="calibWidth">Calib rect W (m):</label>
     <input type="number" id="calibWidth" value="2" step="0.1" min="0.1" />
@@ -203,8 +203,8 @@
         return arr.reduce((a, b) => a + b, 0) / arr.length;
       }
       _std(arr, mean) {
-        let varian = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
-        return Math.sqrt(varian);
+        let variance = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
+        return Math.sqrt(variance);
       }
     }
 
@@ -236,11 +236,12 @@
     let measurementChart;
 
     // -------------------------------------------------------
-    // onOpenCvReady(): Fired when OpenCV.js has loaded
+    // When OpenCV’s runtime is fully initialized, this will fire
     // -------------------------------------------------------
     function onOpenCvReady() {
       updateStatus('OpenCV loaded. Click “Start Camera” to begin.');
       cvReady = true;
+      btnStart.disabled = false;
     }
 
     // -------------------------------------------------------
@@ -331,7 +332,7 @@
     }
 
     // -------------------------------------------------------
-    // Calibrate Perspective: click 4 points on overlay
+    // Calibrate Perspective: user clicks 4 points on overlay
     // -------------------------------------------------------
     btnCalibrate.addEventListener('click', () => {
       if (!streaming) return;
@@ -397,15 +398,15 @@
     }
 
     // -------------------------------------------------------
-    // processFrame(): main loop, warping + detection + drawing
+    // Main loop: warp + detect + draw
     // -------------------------------------------------------
     function processFrame() {
       if (!streaming) return;
       cap.read(src);
-      // Draw original frame to canvas
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       if (H) {
+        updateStatus('Warping + edge detection in bird’s-eye…');
         cv.warpPerspective(src, birdMat, H, new cv.Size(birdCanvas.width, birdCanvas.height));
         birdCtx.drawImage(birdCanvas, 0, 0, birdCanvas.width, birdCanvas.height);
         runDetectionOnBird();
@@ -417,10 +418,9 @@
     }
 
     // -------------------------------------------------------
-    // runDetectionOnBird(): detect slots in bird’s-eye view
+    // Detect slots in bird’s-eye view
     // -------------------------------------------------------
     function runDetectionOnBird() {
-      updateStatus('Warping + edge detection in bird’s-eye…');
       cv.cvtColor(birdMat, gray, cv.COLOR_RGBA2GRAY);
       cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
       cv.Canny(blurred, edges, 50, 150);
@@ -447,4 +447,64 @@
             rectBird.x, rectBird.y + rectBird.height
           ]);
           let ptsOrig = new cv.Mat();
-          cv.perspectiveTransform(
+          cv.perspectiveTransform(ptsBird, ptsOrig, H_inv);
+          let data = ptsOrig.data32F;
+          let rectOrig = [
+            { x: data[0], y: data[1] },
+            { x: data[2], y: data[3] },
+            { x: data[4], y: data[5] },
+            { x: data[6], y: data[7] }
+          ];
+          ptsBird.delete(); ptsOrig.delete();
+
+          detections.push({
+            cx, cy,
+            widthM, heightM,
+            rectBird,
+            rectOrig
+          });
+        }
+        approx.delete();
+        cnt.delete();
+      }
+
+      tracker.update(detections);
+      drawDetections(detections);
+      updateChart();
+    }
+
+    // -------------------------------------------------------
+    // drawDetections(): overlay on original canvas
+    // -------------------------------------------------------
+    function drawDetections(detections) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      for (let slot of tracker.slots) {
+        let nearest = null, bestD = Infinity;
+        for (let det of detections) {
+          let dx = det.cx - slot.lastCx;
+          let dy = det.cy - slot.lastCy;
+          let d = Math.hypot(dx, dy);
+          if (d < bestD) {
+            bestD = d;
+            nearest = det;
+          }
+        }
+        if (!nearest) continue;
+
+        ctx.lineWidth   = 3;
+        ctx.strokeStyle = slot.isStable ? 'cyan' : 'yellow';
+        ctx.beginPath();
+        ctx.moveTo(nearest.rectOrig[0].x, nearest.rectOrig[0].y);
+        for (let k = 1; k < 4; k++) {
+          ctx.lineTo(nearest.rectOrig[k].x, nearest.rectOrig[k].y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+
+        ctx.font = '16px Arial';
+        ctx.fillStyle = slot.isStable ? 'cyan' : 'yellow';
+        if (slot.isStable) {
+          let wMean = slot.meanWidth.toFixed(2);
+          let hMean = slot.meanHeight.toFixed(2);
+          ctx.fillText(`#${slot.id}: ${w
