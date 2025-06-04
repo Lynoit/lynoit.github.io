@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector</title>
+  <title>Parking Slot Detector (with Start Button)</title>
   <style>
     body {
       display: flex;
@@ -11,14 +11,28 @@
       align-items: center;
       font-family: Arial, sans-serif;
       margin: 0;
-      padding: 0;
+      padding: 20px;
+      background: #f3f3f3;
     }
     #video, #canvas {
       border: 1px solid #ccc;
       margin-top: 10px;
+      max-width: 100%;
     }
     #controls {
-      margin: 10px;
+      margin-bottom: 15px;
+    }
+    button {
+      padding: 8px 16px;
+      font-size: 16px;
+    }
+    input[type="number"] {
+      width: 80px;
+      font-size: 14px;
+    }
+    label {
+      font-size: 14px;
+      margin-right: 6px;
     }
   </style>
 </head>
@@ -26,13 +40,15 @@
   <h1>Parking Slot Detector</h1>
 
   <div id="controls">
+    <button id="btnStart">Start Camera</button>
+    &nbsp;&nbsp;
     <label for="calibration">Calibration (px per meter):</label>
     <input type="number" id="calibration" value="100" step="1" />
   </div>
 
-  <!-- Hidden <video> element to grab frames; actual drawing happens on the <canvas> -->
-  <video id="video" autoplay muted playsinline style="display: none;"></video>
-  <canvas id="canvas"></canvas>
+  <!-- Make the video visible so you can confirm it’s on -->
+  <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
+  <canvas id="canvas" style="display: none;"></canvas>
 
   <!-- Load OpenCV.js -->
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
@@ -40,144 +56,157 @@
     let video       = document.getElementById('video');
     let canvas      = document.getElementById('canvas');
     let ctx         = canvas.getContext('2d');
+    let btnStart    = document.getElementById('btnStart');
     let streaming   = false;
+    let cvReady     = false;
+    let cap, src, gray, blurred, edges, contours, hierarchy;
 
     function onOpenCvReady() {
-      console.log("✅ OpenCV.js is ready");
-      startCamera();
+      console.log("✅ OpenCV.js loaded");
+      cvReady = true;
+      // Only enable the Start button once OpenCV is ready
+      btnStart.disabled = false;
     }
 
-    function startCamera() {
-      // Try to open the back-facing camera first
-      navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: "environment" } }
-      })
-      .then(stream => {
-        video.srcObject = stream;
-        video.play();
-      })
-      .catch(err => {
-        // Fallback to any available camera if the environment camera isn't accessible
-        console.warn("❗ Could not access environment camera. Using default instead.", err);
-        return navigator.mediaDevices.getUserMedia({ video: true });
-      })
-      .then(fallbackStream => {
-        if (fallbackStream) {
-          video.srcObject = fallbackStream;
-          video.play();
-        }
-      })
-      .catch(err => {
-        console.error("❌ Camera error:", err);
-      });
-
-      // Once the video metadata is loaded, we know the actual frame size
-      video.addEventListener('loadedmetadata', () => {
-        if (!streaming) {
-          streaming = true;
-          processVideo();
-        }
-      });
-    }
-
-    function processVideo() {
-      // Wait until videoWidth and videoHeight are nonzero
-      const vW = video.videoWidth;
-      const vH = video.videoHeight;
-      if (!vW || !vH) {
-        requestAnimationFrame(processVideo);
+    async function startCamera() {
+      if (!cvReady) {
+        alert("Please wait for OpenCV to finish loading.");
         return;
       }
 
-      // Resize the canvas to match the camera frame size exactly
+      btnStart.disabled = true;
+      btnStart.innerText = "Starting…";
+
+      try {
+        // Ask for the back-facing camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false
+        });
+        video.srcObject = stream;
+        video.style.display = "block"; // show the video element
+        canvas.style.display = "block"; // we'll draw onto this later
+        video.play();
+      } catch (err) {
+        console.error("❌ getUserMedia error:", err);
+        alert("Could not access camera. Check permissions or HTTPS.");
+        btnStart.disabled = false;
+        btnStart.innerText = "Start Camera";
+        return;
+      }
+
+      // Wait for the video metadata so we know its dimensions
+      video.addEventListener('loadedmetadata', () => {
+        if (!streaming) {
+          streaming = true;
+          initializeMatsAndLoop();
+        }
+      });
+    }
+
+    function initializeMatsAndLoop() {
+      // At this point, video.videoWidth and video.videoHeight are set
+      const vW = video.videoWidth;
+      const vH = video.videoHeight;
+
+      if (!vW || !vH) {
+        // If for some reason metadata isn’t ready, try again on next frame
+        requestAnimationFrame(initializeMatsAndLoop);
+        return;
+      }
+
+      // Resize canvas to match the actual camera frame
       canvas.width  = vW;
       canvas.height = vH;
 
-      // Allocate OpenCV Mats with correct dimensions
-      let src       = new cv.Mat(vH, vW, cv.CV_8UC4);
-      let gray      = new cv.Mat();
-      let blurred   = new cv.Mat();
-      let edges     = new cv.Mat();
-      let contours  = new cv.MatVector();
-      let hierarchy = new cv.Mat();
+      // Allocate OpenCV Mats
+      src       = new cv.Mat(vH, vW, cv.CV_8UC4);
+      gray      = new cv.Mat();
+      blurred   = new cv.Mat();
+      edges     = new cv.Mat();
+      contours  = new cv.MatVector();
+      hierarchy = new cv.Mat();
 
-      const cap = new cv.VideoCapture(video);
-      const FPS = 30;
+      // Create a VideoCapture object from the <video> element
+      cap = new cv.VideoCapture(video);
 
-      function detect() {
-        // Read a frame from the video into src
-        cap.read(src);
+      // Start the processing loop
+      btnStart.innerText = "Detecting…";
+      setTimeout(detectFrame, 0);
+    }
 
-        // Convert to grayscale and blur to reduce noise
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    function detectFrame() {
+      // Read one frame from the camera into src
+      cap.read(src);
 
-        // Canny edge detection
-        cv.Canny(blurred, edges, 50, 150);
+      // 1) Convert to grayscale
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-        // Find contours in the edge map
-        cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+      // 2) Gaussian blur
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
 
-        // Draw the original video frame onto the canvas
-        ctx.drawImage(video, 0, 0, vW, vH);
+      // 3) Canny edge detection
+      cv.Canny(blurred, edges, 50, 150);
 
-        // Fetch the calibration value (pixels per meter)
-        let calib = parseFloat(document.getElementById('calibration').value) || 100;
+      // 4) Find contours
+      cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
-        // Loop through each contour
-        for (let i = 0; i < contours.size(); i++) {
-          let cnt = contours.get(i);
-          let approx = new cv.Mat();
+      // 5) Draw the live video frame onto the canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-          // Approximate each contour to a polygonal curve
-          cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
+      // 6) Loop over each contour and look for 4-point polygons
+      let calib = parseFloat(document.getElementById('calibration').value) || 100;
+      for (let i = 0; i < contours.size(); i++) {
+        let cnt    = contours.get(i);
+        let approx = new cv.Mat();
 
-          // Only keep polygons that have exactly 4 vertices and a minimum area
-          if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
-            // Extract the four corner points from approx.data32S
-            let pts = [];
-            for (let j = 0; j < 4; j++) {
-              let x = approx.data32S[j * 2];
-              let y = approx.data32S[j * 2 + 1];
-              pts.push({ x: x, y: y });
-            }
+        // Approximate contour to polygon
+        cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
 
-            // Draw the quadrilateral in lime-green
-            ctx.beginPath();
-            ctx.moveTo(pts[0].x, pts[0].y);
-            for (let k = 1; k < 4; k++) {
-              ctx.lineTo(pts[k].x, pts[k].y);
-            }
-            ctx.closePath();
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = 'lime';
-            ctx.stroke();
-
-            // Compute the bounding rectangle of this quadrilateral
-            let rect = cv.boundingRect(approx);
-            let widthPx  = rect.width;
-            let heightPx = rect.height;
-
-            // Convert pixel measurements to meters
-            let widthM  = (widthPx / calib).toFixed(2);
-            let heightM = (heightPx / calib).toFixed(2);
-
-            // Draw the text label (e.g., "2.50 m × 5.00 m") just above the rectangle
-            ctx.fillStyle = 'red';
-            ctx.font = '16px Arial';
-            ctx.fillText(`${widthM} m × ${heightM} m`, rect.x, rect.y - 5);
+        // Only keep polygons with exactly 4 vertices and a big enough area
+        if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
+          // Extract the four corner points
+          let pts = [];
+          for (let j = 0; j < 4; j++) {
+            let x = approx.data32S[j * 2];
+            let y = approx.data32S[j * 2 + 1];
+            pts.push({ x: x, y: y });
           }
 
-          approx.delete();
-          cnt.delete();
+          // Draw a lime-green quadrilateral
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          for (let k = 1; k < 4; k++) {
+            ctx.lineTo(pts[k].x, pts[k].y);
+          }
+          ctx.closePath();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = 'lime';
+          ctx.stroke();
+
+          // Compute bounding rectangle and convert to meters
+          let rect     = cv.boundingRect(approx);
+          let widthPx  = rect.width;
+          let heightPx = rect.height;
+          let widthM   = (widthPx / calib).toFixed(2);
+          let heightM  = (heightPx / calib).toFixed(2);
+
+          // Draw the size label just above the rectangle
+          ctx.fillStyle = 'red';
+          ctx.font = '16px Arial';
+          ctx.fillText(`${widthM} m × ${heightM} m`, rect.x, rect.y - 5);
         }
 
-        // Schedule the next frame
-        setTimeout(detect, 1000 / FPS);
+        approx.delete();
+        cnt.delete();
       }
 
-      detect();
+      // Schedule next frame
+      setTimeout(detectFrame, 1000 / 30);
     }
+
+    // Hook up the Start button
+    btnStart.addEventListener('click', startCamera);
   </script>
 </body>
 </html>
