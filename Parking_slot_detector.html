@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector (with Start Button)</title>
+  <title>Parking Slot Detector with Averaging</title>
   <style>
     body {
       display: flex;
@@ -37,34 +37,125 @@
   </style>
 </head>
 <body>
-  <h1>Parking Slot Detector</h1>
+  <h1>Parking Slot Detector (Averaging)</h1>
 
   <div id="controls">
-    <button id="btnStart">Start Camera</button>
+    <button id="btnStart" disabled>Start Camera</button>
     &nbsp;&nbsp;
     <label for="calibration">Calibration (px per meter):</label>
     <input type="number" id="calibration" value="100" step="1" />
   </div>
 
-  <!-- Make the video visible so you can confirm it’s on -->
   <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
   <canvas id="canvas" style="display: none;"></canvas>
 
-  <!-- Load OpenCV.js -->
+  <!-- OpenCV.js -->
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
   <script>
-    let video       = document.getElementById('video');
-    let canvas      = document.getElementById('canvas');
-    let ctx         = canvas.getContext('2d');
-    let btnStart    = document.getElementById('btnStart');
-    let streaming   = false;
-    let cvReady     = false;
+    // -------------------------------------------------------
+    // 1) SlotTracker class: matches detections to tracked slots,
+    //    accumulates measurements, computes running mean & stdev.
+    // -------------------------------------------------------
+    class SlotTracker {
+      constructor() {
+        this.slots = [];
+        this.nextId = 1;
+        // parameters you can tweak:
+        this.MATCH_DIST_PX = 50;    // max pixel‐distance to consider same slot
+        this.MIN_SAMPLES    = 5;    // min # of measurements before checking stability
+        this.STABLE_STD_M   = 0.05; // threshold in meters for "stable" SD
+      }
+
+      /**
+       * update(detections)
+       *  • detections: array of { cx, cy, widthM, heightM }
+       * Returns nothing.  Internally updates this.slots.
+       */
+      update(detections) {
+        // 1) Mark all existing slots as “not updated”:
+        this.slots.forEach(slot => slot.updated = false);
+
+        for (let det of detections) {
+          // Try to find an existing slot whose last centroid is within MATCH_DIST_PX:
+          let bestMatch = null;
+          let bestDist   = Infinity;
+          for (let slot of this.slots) {
+            let dx = det.cx - slot.lastCx;
+            let dy = det.cy - slot.lastCy;
+            let d  = Math.hypot(dx, dy);
+            if (d < this.MATCH_DIST_PX && d < bestDist) {
+              bestDist = d;
+              bestMatch = slot;
+            }
+          }
+
+          if (bestMatch) {
+            // Append new measurement, update centroid:
+            bestMatch.widthHistory.push(det.widthM);
+            bestMatch.heightHistory.push(det.heightM);
+            bestMatch.lastCx = det.cx;
+            bestMatch.lastCy = det.cy;
+            bestMatch.updated = true;
+          } else {
+            // No existing slot matched: create a brand-new tracked slot
+            this.slots.push({
+              id: this.nextId++,
+              lastCx: det.cx,
+              lastCy: det.cy,
+              widthHistory: [det.widthM],
+              heightHistory: [det.heightM],
+              updated: true // this frame
+            });
+          }
+        }
+
+        // 2) Remove any slot that hasn’t been updated for a while (optional).
+        //    For simplicity, we’ll remove slots not updated in the last frame:
+        this.slots = this.slots.filter(slot => slot.updated);
+
+        // 3) Recompute means and standard deviations for each slot:
+        for (let slot of this.slots) {
+          slot.meanWidth  = this._mean(slot.widthHistory);
+          slot.meanHeight = this._mean(slot.heightHistory);
+          slot.stdWidth   = this._std(slot.widthHistory, slot.meanWidth);
+          slot.stdHeight  = this._std(slot.heightHistory, slot.meanHeight);
+          slot.isStable   = (
+            slot.widthHistory.length >= this.MIN_SAMPLES &&
+            slot.stdWidth <= this.STABLE_STD_M &&
+            slot.stdHeight <= this.STABLE_STD_M
+          );
+        }
+      }
+
+      _mean(arr) {
+        let sum = arr.reduce((a, b) => a + b, 0);
+        return sum / arr.length;
+      }
+      _std(arr, mean) {
+        let variance = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
+        return Math.sqrt(variance);
+      }
+    }
+
+    // -------------------------------------------------------
+    // 2) Main code: camera start, OpenCV setup, detect loop
+    // -------------------------------------------------------
+    let video     = document.getElementById('video');
+    let canvas    = document.getElementById('canvas');
+    let ctx       = canvas.getContext('2d');
+    let btnStart  = document.getElementById('btnStart');
+    let streaming = false;
+    let cvReady   = false;
+
+    // OpenCV Mats & VideoCapture
     let cap, src, gray, blurred, edges, contours, hierarchy;
+
+    // Single SlotTracker for the entire session
+    let tracker = new SlotTracker();
 
     function onOpenCvReady() {
       console.log("✅ OpenCV.js loaded");
       cvReady = true;
-      // Only enable the Start button once OpenCV is ready
       btnStart.disabled = false;
     }
 
@@ -78,14 +169,13 @@
       btnStart.innerText = "Starting…";
 
       try {
-        // Ask for the back-facing camera
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "environment" },
           audio: false
         });
         video.srcObject = stream;
-        video.style.display = "block"; // show the video element
-        canvas.style.display = "block"; // we'll draw onto this later
+        video.style.display = "block";   // show video
+        canvas.style.display = "block";  // show canvas
         video.play();
       } catch (err) {
         console.error("❌ getUserMedia error:", err);
@@ -95,7 +185,6 @@
         return;
       }
 
-      // Wait for the video metadata so we know its dimensions
       video.addEventListener('loadedmetadata', () => {
         if (!streaming) {
           streaming = true;
@@ -105,21 +194,16 @@
     }
 
     function initializeMatsAndLoop() {
-      // At this point, video.videoWidth and video.videoHeight are set
       const vW = video.videoWidth;
       const vH = video.videoHeight;
-
       if (!vW || !vH) {
-        // If for some reason metadata isn’t ready, try again on next frame
         requestAnimationFrame(initializeMatsAndLoop);
         return;
       }
 
-      // Resize canvas to match the actual camera frame
       canvas.width  = vW;
       canvas.height = vH;
 
-      // Allocate OpenCV Mats
       src       = new cv.Mat(vH, vW, cv.CV_8UC4);
       gray      = new cv.Mat();
       blurred   = new cv.Mat();
@@ -127,43 +211,31 @@
       contours  = new cv.MatVector();
       hierarchy = new cv.Mat();
 
-      // Create a VideoCapture object from the <video> element
       cap = new cv.VideoCapture(video);
 
-      // Start the processing loop
       btnStart.innerText = "Detecting…";
       setTimeout(detectFrame, 0);
     }
 
     function detectFrame() {
-      // Read one frame from the camera into src
       cap.read(src);
-
-      // 1) Convert to grayscale
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-      // 2) Gaussian blur
       cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-
-      // 3) Canny edge detection
       cv.Canny(blurred, edges, 50, 150);
-
-      // 4) Find contours
       cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
-      // 5) Draw the live video frame onto the canvas
+      // Draw the live video to the canvas first
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // 6) Loop over each contour and look for 4-point polygons
       let calib = parseFloat(document.getElementById('calibration').value) || 100;
+
+      // 1) Gather all detections this frame
+      let detections = []; // will hold {cx, cy, widthM, heightM}
       for (let i = 0; i < contours.size(); i++) {
         let cnt    = contours.get(i);
         let approx = new cv.Mat();
-
-        // Approximate contour to polygon
         cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
 
-        // Only keep polygons with exactly 4 vertices and a big enough area
         if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
           // Extract the four corner points
           let pts = [];
@@ -173,39 +245,74 @@
             pts.push({ x: x, y: y });
           }
 
-          // Draw a lime-green quadrilateral
-          ctx.beginPath();
-          ctx.moveTo(pts[0].x, pts[0].y);
-          for (let k = 1; k < 4; k++) {
-            ctx.lineTo(pts[k].x, pts[k].y);
-          }
-          ctx.closePath();
-          ctx.lineWidth = 2;
-          ctx.strokeStyle = 'lime';
-          ctx.stroke();
+          // Compute centroid in pixel space:
+          let cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
+          let cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
 
-          // Compute bounding rectangle and convert to meters
-          let rect     = cv.boundingRect(approx);
-          let widthPx  = rect.width;
-          let heightPx = rect.height;
-          let widthM   = (widthPx / calib).toFixed(2);
-          let heightM  = (heightPx / calib).toFixed(2);
+          // Compute bounding rectangle (in pixels)
+          let rect    = cv.boundingRect(approx);
+          let widthPx = rect.width;
+          let heightPx= rect.height;
+          let widthM  = widthPx / calib;
+          let heightM = heightPx / calib;
 
-          // Draw the size label just above the rectangle
-          ctx.fillStyle = 'red';
-          ctx.font = '16px Arial';
-          ctx.fillText(`${widthM} m × ${heightM} m`, rect.x, rect.y - 5);
+          detections.push({ cx, cy, widthM, heightM, rect });
         }
 
         approx.delete();
         cnt.delete();
       }
 
-      // Schedule next frame
+      // 2) Let the tracker absorb these detections
+      tracker.update(detections);
+
+      // 3) Draw each tracked slot’s outline & (mean or “stable”) measurement
+      for (let slot of tracker.slots) {
+        // We need to re‐draw a rectangle around each slot. 
+        // But we only stored centroids & meter‐values, not the exact pixel corners.
+        // For simplicity, let's re‐find the “closest” contour to each slot’s centroid 
+        // (from this frame's detections), and draw its hull—then overlay the mean text.
+
+        // Find the “current” detection matching this slot (by centroid)
+        let nearest = null;
+        let bestD   = Infinity;
+        for (let det of detections) {
+          let dx = det.cx - slot.lastCx;
+          let dy = det.cy - slot.lastCy;
+          let d  = Math.hypot(dx, dy);
+          if (d < bestD) {
+            bestD = d;
+            nearest = det;
+          }
+        }
+        if (!nearest) continue;
+
+        // Draw the bounding rect of this nearest detection in a thicker line
+        let r = nearest.rect;
+        ctx.lineWidth   = 3;
+        ctx.strokeStyle = slot.isStable ? 'cyan' : 'yellow';
+        ctx.strokeRect(r.x, r.y, r.width, r.height);
+
+        // Draw the mean measurement (if stable) or a “...calculating” label if not
+        ctx.font      = '18px Arial';
+        ctx.textBaseline = 'top';
+        if (slot.isStable) {
+          // Round to 2 decimals
+          let wMean = slot.meanWidth.toFixed(2);
+          let hMean = slot.meanHeight.toFixed(2);
+          ctx.fillStyle = 'cyan';
+          ctx.fillText(`Slot #${slot.id}: ${wMean} m × ${hMean} m`, r.x, r.y - 22);
+        } else {
+          let count = slot.widthHistory.length;
+          ctx.fillStyle = 'yellow';
+          ctx.fillText(`Slot #${slot.id}: measuring (${count})…`, r.x, r.y - 22);
+        }
+      }
+
+      // Cleanup & schedule next frame
       setTimeout(detectFrame, 1000 / 30);
     }
 
-    // Hook up the Start button
     btnStart.addEventListener('click', startCamera);
   </script>
 </body>
