@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector with Table & Plot</title>
+  <title>Parking Slot Detector with Perspective Correction</title>
   <style>
     body {
       display: flex;
@@ -14,25 +14,30 @@
       padding: 20px;
       background: #f3f3f3;
     }
-    #video, #canvas, #measurementChart {
+    #video, #canvas, #birdCanvas, #measurementChart {
       border: 1px solid #ccc;
       margin-top: 10px;
       max-width: 100%;
     }
     #controls {
       margin-bottom: 15px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
     }
     button {
-      padding: 8px 16px;
-      font-size: 16px;
+      padding: 6px 12px;
+      font-size: 14px;
     }
     input[type="number"] {
-      width: 80px;
+      width: 70px;
       font-size: 14px;
     }
     label {
       font-size: 14px;
-      margin-right: 6px;
+      margin-right: 4px;
     }
     table {
       border-collapse: collapse;
@@ -52,6 +57,16 @@
       width: 100px;
       border: 1px solid #000;
     }
+    #calibrationOverlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      cursor: crosshair;
+    }
+    #videoContainer {
+      position: relative;
+      display: inline-block;
+    }
   </style>
 
   <!-- Chart.js for plotting -->
@@ -60,20 +75,26 @@
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
 </head>
 <body>
-  <h1>Parking Slot Detector (Final Table & Plot)</h1>
+  <h1>Parking Slot Detector with Perspective Correction</h1>
 
   <div id="controls">
-    <!-- Removed `disabled` attribute here so it’s always clickable -->
     <button id="btnStart">Start Camera</button>
-    &nbsp;&nbsp;
-    <label for="calibration">Calibration (px per meter):</label>
-    <input type="number" id="calibration" value="100" step="1" />
+    <label for="calibWidth">Calib rect W (m):</label>
+    <input type="number" id="calibWidth" value="2" step="0.1" min="0.1" />
+    <label for="calibHeight">Calib rect H (m):</label>
+    <input type="number" id="calibHeight" value="5" step="0.1" min="0.1" />
+    <label for="calibPxPerM">Scale (px/m):</label>
+    <input type="number" id="calibPxPerM" value="100" step="1" min="1" />
+    <button id="btnCalibrate" disabled>Calibrate Perspective</button>
   </div>
 
-  <!-- Hidden until we start -->
-  <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
+  <div id="videoContainer">
+    <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
+    <canvas id="calibrationOverlay" width="640" height="480" style="display: none;"></canvas>
+  </div>
   <canvas id="canvas" style="display: none;"></canvas>
-  <canvas id="measurementChart" width="640" height="200" style="display: none; margin-top: 20px;"></canvas>
+  <canvas id="birdCanvas" style="display: none; margin-top: 10px;"></canvas>
+  <canvas id="measurementChart" width="640" height="200" style="display: none; margin-top: 10px;"></canvas>
 
   <h2>Recorded Slots</h2>
   <table id="slotsTable">
@@ -93,27 +114,22 @@
 
   <script>
     // -------------------------------------------------------
-    // SlotTracker class: matches detections to tracked slots,
-    // accumulates measurements, computes running mean & stdev,
-    // and keeps history for plotting & finalizing.
+    // SlotTracker: tracks slots, accumulates measurements, stats
     // -------------------------------------------------------
     class SlotTracker {
       constructor() {
         this.slots = [];
         this.nextId = 1;
-        this.MATCH_DIST_PX = 50;    // distance threshold for matching centroids
-        this.MIN_SAMPLES    = 5;    // minimum frames before calling "stable"
-        this.STABLE_STD_M   = 0.05; // std‐dev threshold in meters
+        this.MATCH_DIST_PX = 50;
+        this.MIN_SAMPLES = 5;
+        this.STABLE_STD_M = 0.05;
       }
 
       update(detections) {
-        // Mark all existing as not updated
         this.slots.forEach(slot => slot.updated = false);
 
         for (let det of detections) {
-          // Find best‐matching existing slot by centroid proximity
-          let bestMatch = null;
-          let bestDist = Infinity;
+          let bestMatch = null, bestDist = Infinity;
           for (let slot of this.slots) {
             let dx = det.cx - slot.lastCx;
             let dy = det.cy - slot.lastCy;
@@ -123,22 +139,21 @@
               bestMatch = slot;
             }
           }
-
           if (bestMatch) {
-            // Append new measurement & update centroid/rect
             bestMatch.widthHistory.push(det.widthM);
             bestMatch.heightHistory.push(det.heightM);
             bestMatch.lastCx = det.cx;
             bestMatch.lastCy = det.cy;
-            bestMatch.lastRect = det.rect;
+            bestMatch.lastRectBird = det.rectBird;
+            bestMatch.lastRectOrig = det.rectOrig;
             bestMatch.updated = true;
           } else {
-            // Create new slot entry
             this.slots.push({
               id: this.nextId++,
               lastCx: det.cx,
               lastCy: det.cy,
-              lastRect: det.rect,
+              lastRectBird: det.rectBird,
+              lastRectOrig: det.rectOrig,
               widthHistory: [det.widthM],
               heightHistory: [det.heightM],
               updated: true,
@@ -148,17 +163,13 @@
             });
           }
         }
-
-        // Remove any that didn’t get updated this frame
         this.slots = this.slots.filter(slot => slot.updated);
-
-        // Recompute stats for each slot
         for (let slot of this.slots) {
-          slot.meanWidth  = this._mean(slot.widthHistory);
+          slot.meanWidth = this._mean(slot.widthHistory);
           slot.meanHeight = this._mean(slot.heightHistory);
-          slot.stdWidth   = this._std(slot.widthHistory, slot.meanWidth);
-          slot.stdHeight  = this._std(slot.heightHistory, slot.meanHeight);
-          slot.isStable   = (
+          slot.stdWidth = this._std(slot.widthHistory, slot.meanWidth);
+          slot.stdHeight = this._std(slot.heightHistory, slot.meanHeight);
+          slot.isStable = (
             slot.widthHistory.length >= this.MIN_SAMPLES &&
             slot.stdWidth <= this.STABLE_STD_M &&
             slot.stdHeight <= this.STABLE_STD_M
@@ -167,8 +178,7 @@
       }
 
       _mean(arr) {
-        let sum = arr.reduce((a, b) => a + b, 0);
-        return sum / arr.length;
+        return arr.reduce((a, b) => a + b, 0) / arr.length;
       }
       _std(arr, mean) {
         let variance = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
@@ -177,86 +187,92 @@
     }
 
     // -------------------------------------------------------
-    // Main code: camera start, OpenCV setup, detect loop, plotting, and table
+    // Globals and elements
     // -------------------------------------------------------
-    let video       = document.getElementById('video');
-    let canvas      = document.getElementById('canvas');
-    let ctx         = canvas.getContext('2d');
-    let btnStart    = document.getElementById('btnStart');
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let birdCanvas = document.getElementById('birdCanvas');
+    let birdCtx = birdCanvas.getContext('2d');
+    let overlay = document.getElementById('calibrationOverlay');
+    let overlayCtx = overlay.getContext('2d');
     let chartCanvas = document.getElementById('measurementChart');
-    let streaming   = false;
-    let cvReady     = false;
+    let btnStart = document.getElementById('btnStart');
+    let btnCalibrate = document.getElementById('btnCalibrate');
+    let calibWidthInput = document.getElementById('calibWidth');
+    let calibHeightInput = document.getElementById('calibHeight');
+    let calibPxPerMInput = document.getElementById('calibPxPerM');
+    let slotsTable = document.getElementById('slotsTable').querySelector('tbody');
 
-    // OpenCV Mats & VideoCapture
-    let cap, src, gray, blurred, edges, contours, hierarchy;
-
-    // One tracker for the session
+    let streaming = false, cvReady = false;
+    let cap, src, birdMat, gray, blurred, edges, contours, hierarchy;
+    let H = null, H_inv = null;
+    let calibrationMode = false;
+    let clickedPoints = []; // store 4 clicked image points
     let tracker = new SlotTracker();
-
-    // Chart.js instance
     let measurementChart;
 
     function onOpenCvReady() {
-      console.log("✅ OpenCV.js loaded");
+      console.log('✅ OpenCV.js loaded');
       cvReady = true;
     }
 
+    // -------------------------------------------------------
+    // Start camera on button click
+    // -------------------------------------------------------
     btnStart.addEventListener('click', async () => {
       if (!cvReady) {
-        alert("Please wait a moment for OpenCV to finish loading.");
+        alert('Please wait for OpenCV to finish loading.');
         return;
       }
-      startCamera();
-    });
-
-    async function startCamera() {
       btnStart.disabled = true;
-      btnStart.innerText = "Starting…";
+      btnStart.innerText = 'Starting…';
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
+          video: { facingMode: 'environment' },
           audio: false
         });
         video.srcObject = stream;
-        video.style.display = "block";
-        canvas.style.display = "block";
-        chartCanvas.style.display = "block";
+        video.style.display = 'block';
+        overlay.style.display = 'block';
+        canvas.style.display = 'block';
+        birdCanvas.style.display = 'block';
+        chartCanvas.style.display = 'block';
         video.play();
       } catch (err) {
-        console.error("❌ getUserMedia error:", err);
-        alert("Could not access camera. Use HTTPS and grant permission.");
+        console.error('❌ getUserMedia error:', err);
+        alert('Could not access camera. Ensure HTTPS and grant permission.');
         btnStart.disabled = false;
-        btnStart.innerText = "Start Camera";
+        btnStart.innerText = 'Start Camera';
         return;
       }
 
       video.addEventListener('loadedmetadata', () => {
         if (!streaming) {
           streaming = true;
-          initializeMatsAndPlot();
+          initializeMats();
         }
       });
-    }
+    });
 
-    function initializeMatsAndPlot() {
-      const vW = video.videoWidth;
-      const vH = video.videoHeight;
-      if (!vW || !vH) {
-        requestAnimationFrame(initializeMatsAndPlot);
+    function initializeMats() {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h) {
+        requestAnimationFrame(initializeMats);
         return;
       }
+      overlay.width = w; overlay.height = h;
+      canvas.width = w; canvas.height = h;
+      birdCanvas.width = w; birdCanvas.height = h;
 
-      canvas.width  = vW;
-      canvas.height = vH;
-
-      src       = new cv.Mat(vH, vW, cv.CV_8UC4);
-      gray      = new cv.Mat();
-      blurred   = new cv.Mat();
-      edges     = new cv.Mat();
-      contours  = new cv.MatVector();
+      src = new cv.Mat(h, w, cv.CV_8UC4);
+      birdMat = new cv.Mat(h, w, cv.CV_8UC4);
+      gray = new cv.Mat();
+      blurred = new cv.Mat();
+      edges = new cv.Mat();
+      contours = new cv.MatVector();
       hierarchy = new cv.Mat();
-
       cap = new cv.VideoCapture(video);
 
       // Initialize Chart.js
@@ -278,65 +294,170 @@
             }
           },
           plugins: {
-            legend: {
-              labels: { usePointStyle: true }
-            }
+            legend: { labels: { usePointStyle: true } }
           }
         }
       });
 
-      btnStart.innerText = "Detecting…";
-      setTimeout(detectFrame, 0);
+      btnCalibrate.disabled = false;
+      btnStart.innerText = 'Camera Started';
+      requestAnimationFrame(processFrame);
     }
 
-    function detectFrame() {
+    // -------------------------------------------------------
+    // Calibration: user clicks 4 points on the video to define a known rectangle
+    // -------------------------------------------------------
+    btnCalibrate.addEventListener('click', () => {
+      if (!streaming) return;
+      calibrationMode = true;
+      clickedPoints = [];
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+      btnCalibrate.innerText = 'Click 4 Corners';
+    });
+
+    overlay.addEventListener('click', (ev) => {
+      if (!calibrationMode) return;
+      const rect = overlay.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      clickedPoints.push({ x, y });
+      // Draw a small circle at the clicked point
+      overlayCtx.fillStyle = 'red';
+      overlayCtx.beginPath();
+      overlayCtx.arc(x, y, 5, 0, 2 * Math.PI);
+      overlayCtx.fill();
+      if (clickedPoints.length === 4) {
+        finishCalibration();
+      }
+    });
+
+    function finishCalibration() {
+      calibrationMode = false;
+      btnCalibrate.innerText = 'Calibrate Perspective';
+      // Read real-world size and scale
+      const Wm = parseFloat(calibWidthInput.value);
+      const Hm = parseFloat(calibHeightInput.value);
+      const pxPerM = parseFloat(calibPxPerMInput.value);
+      if (!(Wm > 0 && Hm > 0 && pxPerM > 0)) {
+        alert('Invalid calibration dimensions.');
+        return;
+      }
+      // Source points: clicked in order TL → TR → BR → BL
+      let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        clickedPoints[0].x, clickedPoints[0].y,
+        clickedPoints[1].x, clickedPoints[1].y,
+        clickedPoints[2].x, clickedPoints[2].y,
+        clickedPoints[3].x, clickedPoints[3].y
+      ]);
+      // Destination points in bird's-eye plane (in pixels)
+      const wPx = Wm * pxPerM;
+      const hPx = Hm * pxPerM;
+      let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+        0, 0,
+        wPx, 0,
+        wPx, hPx,
+        0, hPx
+      ]);
+      H = new cv.Mat();
+      H_inv = new cv.Mat();
+      cv.getPerspectiveTransform(srcPts, dstPts, H);
+      cv.getPerspectiveTransform(dstPts, srcPts, H_inv);
+      srcPts.delete(); dstPts.delete();
+      alert('Perspective calibrated!');
+
+      // Clear overlay
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
+    // -------------------------------------------------------
+    // Main processing loop
+    // -------------------------------------------------------
+    function processFrame() {
+      if (!streaming) return;
       cap.read(src);
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      // Draw the original camera frame to canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // If we have a valid homography, warp to bird's-eye
+      if (H) {
+        cv.warpPerspective(src, birdMat, H, new cv.Size(birdCanvas.width, birdCanvas.height));
+        birdCtx.drawImage(birdCanvas, 0, 0, birdCanvas.width, birdCanvas.height);
+        runDetectionOnBird();
+      }
+
+      requestAnimationFrame(processFrame);
+    }
+
+    // -------------------------------------------------------
+    // Detect slots in the bird's-eye view
+    // -------------------------------------------------------
+    function runDetectionOnBird() {
+      cv.cvtColor(birdMat, gray, cv.COLOR_RGBA2GRAY);
       cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
       cv.Canny(blurred, edges, 50, 150);
       cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
-      // Draw camera frame
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      let calib = parseFloat(document.getElementById('calibration').value) || 100;
-
-      // Collect detections
+      let pxPerM = parseFloat(calibPxPerMInput.value) || 100;
       let detections = [];
+
       for (let i = 0; i < contours.size(); i++) {
-        let cnt    = contours.get(i);
+        let cnt = contours.get(i);
         let approx = new cv.Mat();
         cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
-
+        // In bird's-eye view, a slot should appear roughly rectangular
         if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
-          let pts = [];
-          for (let j = 0; j < 4; j++) {
-            let x = approx.data32S[j * 2];
-            let y = approx.data32S[j * 2 + 1];
-            pts.push({ x, y });
-          }
-          let cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
-          let cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
-          let rect = cv.boundingRect(approx);
-          let widthPx  = rect.width;
-          let heightPx = rect.height;
-          let widthM   = widthPx / calib;
-          let heightM  = heightPx / calib;
-          detections.push({ cx, cy, widthM, heightM, rect });
-        }
+          // Compute bounding rect in bird's-eye
+          let rectBird = cv.boundingRect(approx);
+          let widthM = rectBird.width / pxPerM;
+          let heightM = rectBird.height / pxPerM;
+          // Compute centroid in bird's-eye coords
+          let cx = rectBird.x + rectBird.width / 2;
+          let cy = rectBird.y + rectBird.height / 2;
 
+          // Now find the four corners of rectBird in bird's-eye, map them back to original
+          let ptsBird = cv.matFromArray(4, 1, cv.CV_32FC2, [
+            rectBird.x, rectBird.y,
+            rectBird.x + rectBird.width, rectBird.y,
+            rectBird.x + rectBird.width, rectBird.y + rectBird.height,
+            rectBird.x, rectBird.y + rectBird.height
+          ]);
+          let ptsOrig = new cv.Mat();
+          cv.perspectiveTransform(ptsBird, ptsOrig, H_inv);
+          let data = ptsOrig.data32F; // [x0,y0, x1,y1, x2,y2, x3,y3]
+          let rectOrig = [
+            { x: data[0], y: data[1] },
+            { x: data[2], y: data[3] },
+            { x: data[4], y: data[5] },
+            { x: data[6], y: data[7] }
+          ];
+          ptsBird.delete(); ptsOrig.delete();
+
+          detections.push({
+            cx, cy,
+            widthM, heightM,
+            rectBird: rectBird,
+            rectOrig: rectOrig
+          });
+        }
         approx.delete();
         cnt.delete();
       }
 
-      // Update tracker
       tracker.update(detections);
+      drawDetections(detections);
+      updateChart();
+    }
 
-      // Draw each tracked slot and check stability
+    // -------------------------------------------------------
+    // Draw results on original canvas and record stable slots
+    // -------------------------------------------------------
+    function drawDetections(detections) {
+      // Clear only the overlay part (we already have the frame drawn)
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
       for (let slot of tracker.slots) {
-        // Find nearest detection
-        let nearest = null;
-        let bestD = Infinity;
+        // Find nearest detection by bird's-eye centroid
+        let nearest = null, bestD = Infinity;
         for (let det of detections) {
           let dx = det.cx - slot.lastCx;
           let dy = det.cy - slot.lastCy;
@@ -347,32 +468,40 @@
           }
         }
         if (!nearest) continue;
-
-        let r = nearest.rect;
-        ctx.lineWidth   = 3;
+        // Draw quadrilateral on original view
+        ctx.lineWidth = 3;
         ctx.strokeStyle = slot.isStable ? 'cyan' : 'yellow';
-        ctx.strokeRect(r.x, r.y, r.width, r.height);
+        ctx.beginPath();
+        ctx.moveTo(nearest.rectOrig[0].x, nearest.rectOrig[0].y);
+        for (let k = 1; k < 4; k++) {
+          ctx.lineTo(nearest.rectOrig[k].x, nearest.rectOrig[k].y);
+        }
+        ctx.closePath();
+        ctx.stroke();
 
-        ctx.font         = '18px Arial';
-        ctx.textBaseline = 'top';
+        // Label
+        ctx.font = '16px Arial';
+        ctx.fillStyle = slot.isStable ? 'cyan' : 'yellow';
         if (slot.isStable) {
           let wMean = slot.meanWidth.toFixed(2);
           let hMean = slot.meanHeight.toFixed(2);
-          ctx.fillStyle = 'cyan';
-          ctx.fillText(`Slot #${slot.id}: ${wMean} m × ${hMean} m`, r.x, r.y - 22);
+          ctx.fillText(`#${slot.id}: ${wMean}m × ${hMean}m`, nearest.rectOrig[0].x, nearest.rectOrig[0].y - 6);
         } else {
           let count = slot.widthHistory.length;
-          ctx.fillStyle = 'yellow';
-          ctx.fillText(`Slot #${slot.id}: measuring (${count})…`, r.x, r.y - 22);
+          ctx.fillText(`#${slot.id}: measuring (${count})…`, nearest.rectOrig[0].x, nearest.rectOrig[0].y - 6);
         }
 
-        // Record final measurement in table once
+        // Record stable slot once
         if (slot.isStable && !slot.recorded) {
-          recordSlot(slot, r);
+          recordSlot(slot, nearest.rectOrig);
         }
       }
+    }
 
-      // Update Chart.js with individual histories
+    // -------------------------------------------------------
+    // Update Chart.js with individual measurement histories
+    // -------------------------------------------------------
+    function updateChart() {
       for (let slot of tracker.slots) {
         if (slot.datasetWidthIndex === null) {
           let wIndex = measurementChart.data.datasets.length;
@@ -391,50 +520,52 @@
             fill: false,
             pointStyle: 'triangle'
           });
-          slot.datasetWidthIndex  = wIndex;
+          slot.datasetWidthIndex = wIndex;
           slot.datasetHeightIndex = hIndex;
         }
-
-        let widthData  = slot.widthHistory.map((w, i) => ({ x: i + 1, y: w }));
+        let widthData = slot.widthHistory.map((w, i) => ({ x: i + 1, y: w }));
         let heightData = slot.heightHistory.map((h, i) => ({ x: i + 1, y: h }));
-
-        measurementChart.data.datasets[slot.datasetWidthIndex].data  = widthData;
+        measurementChart.data.datasets[slot.datasetWidthIndex].data = widthData;
         measurementChart.data.datasets[slot.datasetHeightIndex].data = heightData;
       }
       measurementChart.update();
-
-      setTimeout(detectFrame, 1000 / 30);
     }
 
     // -------------------------------------------------------
-    // recordSlot(): snapshot + geolocation + table insertion
+    // recordSlot(): take snapshot overlay + geolocation + table
     // -------------------------------------------------------
-    function recordSlot(slot, rect) {
-      // 1) Snapshot of the slot region
+    function recordSlot(slot, quadOrig) {
+      // 1) Snapshot: draw quad on offscreen, extract image
       let snapC = document.createElement('canvas');
-      snapC.width  = rect.width;
-      snapC.height = rect.height;
+      snapC.width = canvas.width;
+      snapC.height = canvas.height;
       let snapCtx = snapC.getContext('2d');
-      snapCtx.drawImage(
-        canvas,
-        rect.x, rect.y, rect.width, rect.height,
-        0, 0, rect.width, rect.height
-      );
+      snapCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      snapCtx.lineWidth = 3;
+      snapCtx.strokeStyle = 'cyan';
+      snapCtx.beginPath();
+      snapCtx.moveTo(quadOrig[0].x, quadOrig[0].y);
+      for (let k = 1; k < 4; k++) {
+        snapCtx.lineTo(quadOrig[k].x, quadOrig[k].y);
+      }
+      snapCtx.closePath();
+      snapCtx.stroke();
+      // Label size
+      snapCtx.font = '16px Arial';
+      snapCtx.fillStyle = 'cyan';
+      let wMean = slot.meanWidth.toFixed(2);
+      let hMean = slot.meanHeight.toFixed(2);
+      snapCtx.fillText(`${wMean}m × ${hMean}m`, quadOrig[0].x, quadOrig[0].y - 6);
       let dataURL = snapC.toDataURL('image/png');
 
-      // 2) Get geolocation
+      // 2) Geolocation
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            addTableRow(
-              slot,
-              pos.coords.latitude.toFixed(6),
-              pos.coords.longitude.toFixed(6),
-              dataURL
-            );
+          pos => {
+            addTableRow(slot, pos.coords.latitude.toFixed(6), pos.coords.longitude.toFixed(6), dataURL);
             slot.recorded = true;
           },
-          (err) => {
+          err => {
             console.warn('Geolocation error:', err);
             addTableRow(slot, 'N/A', 'N/A', dataURL);
             slot.recorded = true;
@@ -447,28 +578,19 @@
     }
 
     function addTableRow(slot, lat, lon, dataURL) {
-      let tbody = document.getElementById('slotsTable').querySelector('tbody');
-      let row = tbody.insertRow();
-
-      let cellSlot     = row.insertCell();
-      let cellLat      = row.insertCell();
-      let cellLon      = row.insertCell();
-      let cellLength   = row.insertCell();
-      let cellWidth    = row.insertCell();
-      let cellStd      = row.insertCell();
-      let cellSnapshot = row.insertCell();
-
-      cellSlot.innerText   = slot.id;
-      cellLat.innerText    = lat;
-      cellLon.innerText    = lon;
-      cellLength.innerText = slot.meanHeight.toFixed(2);
-      cellWidth.innerText  = slot.meanWidth.toFixed(2);
-      cellStd.innerText    = `σw=${slot.stdWidth.toFixed(2)}, σh=${slot.stdHeight.toFixed(2)}`;
-
+      let row = slotsTable.insertRow();
+      let c1 = row.insertCell(), c2 = row.insertCell(), c3 = row.insertCell();
+      let c4 = row.insertCell(), c5 = row.insertCell(), c6 = row.insertCell(), c7 = row.insertCell();
+      c1.innerText = slot.id;
+      c2.innerText = lat;
+      c3.innerText = lon;
+      c4.innerText = slot.meanHeight.toFixed(2);
+      c5.innerText = slot.meanWidth.toFixed(2);
+      c6.innerText = `σw=${slot.stdWidth.toFixed(2)}, σh=${slot.stdHeight.toFixed(2)}`;
       let img = document.createElement('img');
       img.src = dataURL;
       img.className = 'snapshot';
-      cellSnapshot.appendChild(img);
+      c7.appendChild(img);
     }
   </script>
 </body>
