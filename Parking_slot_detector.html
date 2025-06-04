@@ -54,29 +54,27 @@
     }
   </style>
 
-  <!-- Load Chart.js (for plotting) -->
+  <!-- Chart.js for plotting -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- Load OpenCV.js -->
+  <!-- OpenCV.js (async) -->
   <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
 </head>
 <body>
   <h1>Parking Slot Detector (Final Table & Plot)</h1>
 
   <div id="controls">
-    <button id="btnStart" disabled>Start Camera</button>
+    <!-- Removed `disabled` attribute here so it’s always clickable -->
+    <button id="btnStart">Start Camera</button>
     &nbsp;&nbsp;
     <label for="calibration">Calibration (px per meter):</label>
     <input type="number" id="calibration" value="100" step="1" />
   </div>
 
-  <!-- Visible video element -->
+  <!-- Hidden until we start -->
   <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
-  <!-- Canvas where we draw detection results -->
   <canvas id="canvas" style="display: none;"></canvas>
-  <!-- Canvas where we plot individual measurements -->
   <canvas id="measurementChart" width="640" height="200" style="display: none; margin-top: 20px;"></canvas>
 
-  <!-- Table for finalized slot measurements -->
   <h2>Recorded Slots</h2>
   <table id="slotsTable">
     <thead>
@@ -103,29 +101,23 @@
       constructor() {
         this.slots = [];
         this.nextId = 1;
-        // parameters you can tweak:
-        this.MATCH_DIST_PX = 50;    // max pixel‐distance to consider same slot
-        this.MIN_SAMPLES    = 5;    // min # of measurements before checking stability
-        this.STABLE_STD_M   = 0.05; // threshold in meters for "stable" SD
+        this.MATCH_DIST_PX = 50;    // distance threshold for matching centroids
+        this.MIN_SAMPLES    = 5;    // minimum frames before calling "stable"
+        this.STABLE_STD_M   = 0.05; // std‐dev threshold in meters
       }
 
-      /**
-       * update(detections)
-       *  • detections: array of { cx, cy, widthM, heightM, rect }
-       * Returns nothing.  Internally updates this.slots.
-       */
       update(detections) {
-        // 1) Mark all existing slots as “not updated”
+        // Mark all existing as not updated
         this.slots.forEach(slot => slot.updated = false);
 
         for (let det of detections) {
-          // Try to find an existing slot whose last centroid is within MATCH_DIST_PX
+          // Find best‐matching existing slot by centroid proximity
           let bestMatch = null;
-          let bestDist   = Infinity;
+          let bestDist = Infinity;
           for (let slot of this.slots) {
             let dx = det.cx - slot.lastCx;
             let dy = det.cy - slot.lastCy;
-            let d  = Math.hypot(dx, dy);
+            let d = Math.hypot(dx, dy);
             if (d < this.MATCH_DIST_PX && d < bestDist) {
               bestDist = d;
               bestMatch = slot;
@@ -133,15 +125,15 @@
           }
 
           if (bestMatch) {
-            // Append new measurement, update centroid
+            // Append new measurement & update centroid/rect
             bestMatch.widthHistory.push(det.widthM);
             bestMatch.heightHistory.push(det.heightM);
             bestMatch.lastCx = det.cx;
             bestMatch.lastCy = det.cy;
-            bestMatch.lastRect = det.rect; // store most recent rect
+            bestMatch.lastRect = det.rect;
             bestMatch.updated = true;
           } else {
-            // No existing slot matched: create a brand-new tracked slot
+            // Create new slot entry
             this.slots.push({
               id: this.nextId++,
               lastCx: det.cx,
@@ -149,24 +141,24 @@
               lastRect: det.rect,
               widthHistory: [det.widthM],
               heightHistory: [det.heightM],
-              updated: true,             
-              datasetWidthIndex: null,   
+              updated: true,
+              datasetWidthIndex: null,
               datasetHeightIndex: null,
-              recorded: false            // have we added it to the final table?
+              recorded: false
             });
           }
         }
 
-        // 2) Remove any slot that hasn’t been updated this frame
+        // Remove any that didn’t get updated this frame
         this.slots = this.slots.filter(slot => slot.updated);
 
-        // 3) Recompute means and standard deviations for each slot
+        // Recompute stats for each slot
         for (let slot of this.slots) {
-          slot.meanWidth   = this._mean(slot.widthHistory);
-          slot.meanHeight  = this._mean(slot.heightHistory);
-          slot.stdWidth    = this._std(slot.widthHistory, slot.meanWidth);
-          slot.stdHeight   = this._std(slot.heightHistory, slot.meanHeight);
-          slot.isStable    = (
+          slot.meanWidth  = this._mean(slot.widthHistory);
+          slot.meanHeight = this._mean(slot.heightHistory);
+          slot.stdWidth   = this._std(slot.widthHistory, slot.meanWidth);
+          slot.stdHeight  = this._std(slot.heightHistory, slot.meanHeight);
+          slot.isStable   = (
             slot.widthHistory.length >= this.MIN_SAMPLES &&
             slot.stdWidth <= this.STABLE_STD_M &&
             slot.stdHeight <= this.STABLE_STD_M
@@ -185,7 +177,7 @@
     }
 
     // -------------------------------------------------------
-    // Main code: camera start, OpenCV setup, detect loop, plotting, and table insertion
+    // Main code: camera start, OpenCV setup, detect loop, plotting, and table
     // -------------------------------------------------------
     let video       = document.getElementById('video');
     let canvas      = document.getElementById('canvas');
@@ -198,7 +190,7 @@
     // OpenCV Mats & VideoCapture
     let cap, src, gray, blurred, edges, contours, hierarchy;
 
-    // Single SlotTracker for the entire session
+    // One tracker for the session
     let tracker = new SlotTracker();
 
     // Chart.js instance
@@ -207,15 +199,17 @@
     function onOpenCvReady() {
       console.log("✅ OpenCV.js loaded");
       cvReady = true;
-      btnStart.disabled = false;
     }
 
-    async function startCamera() {
+    btnStart.addEventListener('click', async () => {
       if (!cvReady) {
-        alert("Please wait for OpenCV to finish loading.");
+        alert("Please wait a moment for OpenCV to finish loading.");
         return;
       }
+      startCamera();
+    });
 
+    async function startCamera() {
       btnStart.disabled = true;
       btnStart.innerText = "Starting…";
 
@@ -225,13 +219,13 @@
           audio: false
         });
         video.srcObject = stream;
-        video.style.display    = "block";  // show video
-        canvas.style.display   = "block";  // show drawing canvas
-        chartCanvas.style.display = "block"; // show chart canvas
+        video.style.display = "block";
+        canvas.style.display = "block";
+        chartCanvas.style.display = "block";
         video.play();
       } catch (err) {
         console.error("❌ getUserMedia error:", err);
-        alert("Could not access camera. Check permissions or HTTPS.");
+        alert("Could not access camera. Use HTTPS and grant permission.");
         btnStart.disabled = false;
         btnStart.innerText = "Start Camera";
         return;
@@ -253,11 +247,9 @@
         return;
       }
 
-      // Resize canvas to match the actual camera frame
       canvas.width  = vW;
       canvas.height = vH;
 
-      // Allocate OpenCV Mats
       src       = new cv.Mat(vH, vW, cv.CV_8UC4);
       gray      = new cv.Mat();
       blurred   = new cv.Mat();
@@ -304,38 +296,32 @@
       cv.Canny(blurred, edges, 50, 150);
       cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
-      // 1) Draw the live video frame onto the canvas
+      // Draw camera frame
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       let calib = parseFloat(document.getElementById('calibration').value) || 100;
 
-      // 2) Gather all detections this frame
-      let detections = []; // will hold {cx, cy, widthM, heightM, rect}
+      // Collect detections
+      let detections = [];
       for (let i = 0; i < contours.size(); i++) {
         let cnt    = contours.get(i);
         let approx = new cv.Mat();
         cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
 
         if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
-          // Extract the four corner points
           let pts = [];
           for (let j = 0; j < 4; j++) {
             let x = approx.data32S[j * 2];
             let y = approx.data32S[j * 2 + 1];
-            pts.push({ x: x, y: y });
+            pts.push({ x, y });
           }
-
-          // Compute centroid in pixel space:
           let cx = (pts[0].x + pts[1].x + pts[2].x + pts[3].x) / 4;
           let cy = (pts[0].y + pts[1].y + pts[2].y + pts[3].y) / 4;
-
-          // Compute bounding rectangle (in pixels)
-          let rect    = cv.boundingRect(approx);
-          let widthPx = rect.width;
-          let heightPx= rect.height;
-          let widthM  = widthPx / calib;
-          let heightM = heightPx / calib;
-
+          let rect = cv.boundingRect(approx);
+          let widthPx  = rect.width;
+          let heightPx = rect.height;
+          let widthM   = widthPx / calib;
+          let heightM  = heightPx / calib;
           detections.push({ cx, cy, widthM, heightM, rect });
         }
 
@@ -343,18 +329,18 @@
         cnt.delete();
       }
 
-      // 3) Let the tracker absorb these detections
+      // Update tracker
       tracker.update(detections);
 
-      // 4) Draw each tracked slot’s outline & (mean or “stable”) measurement
+      // Draw each tracked slot and check stability
       for (let slot of tracker.slots) {
-        // Find the “current” detection matching this slot (by centroid proximity)
+        // Find nearest detection
         let nearest = null;
-        let bestD   = Infinity;
+        let bestD = Infinity;
         for (let det of detections) {
           let dx = det.cx - slot.lastCx;
           let dy = det.cy - slot.lastCy;
-          let d  = Math.hypot(dx, dy);
+          let d = Math.hypot(dx, dy);
           if (d < bestD) {
             bestD = d;
             nearest = det;
@@ -362,13 +348,11 @@
         }
         if (!nearest) continue;
 
-        // Draw the bounding rect of this nearest detection
         let r = nearest.rect;
         ctx.lineWidth   = 3;
         ctx.strokeStyle = slot.isStable ? 'cyan' : 'yellow';
         ctx.strokeRect(r.x, r.y, r.width, r.height);
 
-        // Draw the mean measurement (if stable) or a “...measuring” label if not yet
         ctx.font         = '18px Arial';
         ctx.textBaseline = 'top';
         if (slot.isStable) {
@@ -382,18 +366,110 @@
           ctx.fillText(`Slot #${slot.id}: measuring (${count})…`, r.x, r.y - 22);
         }
 
-        // 5) If slot is now stable and not yet recorded → record it
+        // Record final measurement in table once
         if (slot.isStable && !slot.recorded) {
           recordSlot(slot, r);
         }
       }
 
-      // 6) Update the Chart.js plot with each slot’s individual measurements
+      // Update Chart.js with individual histories
       for (let slot of tracker.slots) {
-        // If this slot doesn’t yet have assigned dataset indices, add them now
         if (slot.datasetWidthIndex === null) {
           let wIndex = measurementChart.data.datasets.length;
           measurementChart.data.datasets.push({
             label: `Slot ${slot.id} Width`,
             data: [],
             borderWidth: 2,
+            fill: false,
+            pointStyle: 'circle'
+          });
+          let hIndex = measurementChart.data.datasets.length;
+          measurementChart.data.datasets.push({
+            label: `Slot ${slot.id} Height`,
+            data: [],
+            borderWidth: 2,
+            fill: false,
+            pointStyle: 'triangle'
+          });
+          slot.datasetWidthIndex  = wIndex;
+          slot.datasetHeightIndex = hIndex;
+        }
+
+        let widthData  = slot.widthHistory.map((w, i) => ({ x: i + 1, y: w }));
+        let heightData = slot.heightHistory.map((h, i) => ({ x: i + 1, y: h }));
+
+        measurementChart.data.datasets[slot.datasetWidthIndex].data  = widthData;
+        measurementChart.data.datasets[slot.datasetHeightIndex].data = heightData;
+      }
+      measurementChart.update();
+
+      setTimeout(detectFrame, 1000 / 30);
+    }
+
+    // -------------------------------------------------------
+    // recordSlot(): snapshot + geolocation + table insertion
+    // -------------------------------------------------------
+    function recordSlot(slot, rect) {
+      // 1) Snapshot of the slot region
+      let snapC = document.createElement('canvas');
+      snapC.width  = rect.width;
+      snapC.height = rect.height;
+      let snapCtx = snapC.getContext('2d');
+      snapCtx.drawImage(
+        canvas,
+        rect.x, rect.y, rect.width, rect.height,
+        0, 0, rect.width, rect.height
+      );
+      let dataURL = snapC.toDataURL('image/png');
+
+      // 2) Get geolocation
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            addTableRow(
+              slot,
+              pos.coords.latitude.toFixed(6),
+              pos.coords.longitude.toFixed(6),
+              dataURL
+            );
+            slot.recorded = true;
+          },
+          (err) => {
+            console.warn('Geolocation error:', err);
+            addTableRow(slot, 'N/A', 'N/A', dataURL);
+            slot.recorded = true;
+          }
+        );
+      } else {
+        addTableRow(slot, 'N/A', 'N/A', dataURL);
+        slot.recorded = true;
+      }
+    }
+
+    function addTableRow(slot, lat, lon, dataURL) {
+      let tbody = document.getElementById('slotsTable').querySelector('tbody');
+      let row = tbody.insertRow();
+
+      let cellSlot     = row.insertCell();
+      let cellLat      = row.insertCell();
+      let cellLon      = row.insertCell();
+      let cellLength   = row.insertCell();
+      let cellWidth    = row.insertCell();
+      let cellStd      = row.insertCell();
+      let cellSnapshot = row.insertCell();
+
+      cellSlot.innerText   = slot.id;
+      cellLat.innerText    = lat;
+      cellLon.innerText    = lon;
+      cellLength.innerText = slot.meanHeight.toFixed(2);
+      cellWidth.innerText  = slot.meanWidth.toFixed(2);
+      cellStd.innerText    = `σw=${slot.stdWidth.toFixed(2)}, σh=${slot.stdHeight.toFixed(2)}`;
+
+      let img = document.createElement('img');
+      img.src = dataURL;
+      img.className = 'snapshot';
+      cellSnapshot.appendChild(img);
+    }
+  </script>
+</body>
+</html>
