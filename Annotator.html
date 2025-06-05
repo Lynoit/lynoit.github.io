@@ -679,6 +679,7 @@ function renderMetaForm(questions) {
     const UPLOAD_THROTTLE = 5 * 60 * 1000
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
+    const samplingTable = [];
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -735,6 +736,8 @@ function renderMetaForm(questions) {
     let weatherRedCounts   = {};    // red presses per weather condition
     let phaseRedCounts     = {};    // (optional) red presses per day phase
     let isDirty = false;
+    let wakeLock = null;
+    let lastSpeedKmh = 0;
 
     function markDirty() { isDirty = true; }
     function markClean()  { isDirty = false; }
@@ -776,7 +779,44 @@ function renderMetaForm(questions) {
     });
 };
 
-function startApp() {
+  async function requestWakeLock() {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        console.log('Wake lock acquired');
+        wakeLock.addEventListener('release', () => {
+          console.log('Wake lock released');
+        });
+      } catch (err) {
+        console.error('Failed to acquire wake lock:', err);
+      }
+    } else {
+      console.warn('Wake Lock API not supported on this browser');
+    }
+  }
+
+  async function releaseWakeLock() {
+    if (wakeLock) {
+      try {
+        await wakeLock.release();
+        wakeLock = null;
+        console.log('Wake lock released manually');
+      } catch (err) {
+        console.error('Error releasing wake lock:', err);
+      }
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (wakeLock !== null && document.visibilityState === 'visible') {
+      requestWakeLock();
+    }
+  });
+
+  function startApp() {
+    // 1) Acquire a wake lock right away
+    requestWakeLock();
+    
   loadCorrections()
     .then(() => console.log('Corrections loaded:', corrections))
     .catch(err => console.warn('Corrections load failed:', err));  
@@ -785,6 +825,36 @@ function startApp() {
   initCharts();
   updateDateTime();
   setInterval(updateDateTime, 1000);
+
+    // ─── schedule 30 sec samples for (Timestamp, Lat, Lon, Distance, Speed, Maxspeed) ───
+setInterval(() => {
+  // Only record if we have at least one GPS fix
+  if (!lastPos) return;
+
+  // Build a new row
+  const rowNo       = samplingTable.length + 1;
+  const timestamp   = new Date().toISOString();          // ISO format, e.g. "2025-06-02T14:08:30.123Z"
+  const latitude    = lastPos.lat;
+  const longitude   = lastPos.lon;
+  // totalDist is in meters; convert to kilometers with 3 decimals
+  const distanceKm  = (totalDist / 1000).toFixed(3);
+  // lastSpeedKmh was stored above
+  const speed       = lastSpeedKmh.toFixed(1);
+  // maxSpeed is already a Number; record with 1 decimal
+  const maxSpd      = maxSpeed.toFixed(1);
+
+  // Push into our hidden sampling table
+  samplingTable.push({
+    no:        rowNo,
+    timestamp: timestamp,
+    lat:       latitude,
+    lon:       longitude,
+    distance:  distanceKm,
+    speed:     speed,
+    maxspeed:  maxSpd
+  });
+}, 10 * 1000);  // every 30 000 ms
+    
   navigator.geolocation.watchPosition(showPosition, showError, {
     enableHighAccuracy: true,
     maximumAge: 5000,
@@ -1061,6 +1131,8 @@ async function initAzureSpeech() {
   } else {
     /* existing “valid sample” logic — keep exactly as you have it */
 
+    lastSpeedKmh = speedKmh;
+    
     // 1. maintain the top-10 speeds list
     topSpeeds.push(speedKmh);
     topSpeeds.sort((a, b) => b - a);
@@ -1818,25 +1890,22 @@ async function uploadCSVtoAzure(tableId) {
   // 1. Create a new workbook
   const wb = XLSX.utils.book_new();
 
-  // 2. For each table: grab its <table> element, convert, append
-  workbookTables.forEach(({id, name}) => {
+  // 2. For each visible table: convert and append
+  workbookTables.forEach(({ id, name }) => {
     const tblEl = document.getElementById(id);
     if (!tblEl) {
       console.warn(`Table #${id} not found—skipping sheet "${name}"`);
       return;
     }
 
-    // 1) Convert the HTML table into a worksheet
+    // 2.1) Convert the HTML table into a worksheet
     const ws = XLSX.utils.table_to_sheet(tblEl);
 
-    // 2) If it’s one of our “percent” sheets, multiply col C by 100
-    //    (sheet names as you defined in workbookTables)
-    if (['Road types','Country','Weather','Phase'].includes(name)) {
-      // decode the sheet range
+    // 2.2) If it’s one of the “percent” sheets, multiply column C by 100
+    if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
       const range = XLSX.utils.decode_range(ws['!ref']);
-      // for each data‐row (skip header at row 0)
       for (let row = range.s.r + 1; row <= range.e.r; ++row) {
-        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 }); // zero‐based col 2 = third column
+        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 });
         const cell = ws[cellRef];
         if (cell && typeof cell.v === 'number') {
           cell.v = cell.v * 100;
@@ -1844,31 +1913,52 @@ async function uploadCSVtoAzure(tableId) {
       }
     }
 
-    // 3) Append the corrected sheet
+    // 2.3) Append that sheet under its given name
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-  // 3. Generate the binary workbook
+  // 3. Build and append the hidden "Sampling" sheet
+  // 3.1) First row = headers
+  const samplingAoA = [
+    ["No", "Timestamp", "Latitude", "Longitude", "Distance (km)", "Speed (km/h)", "Legal Speed (km/h)"]
+  ];
+
+  // 3.2) One row per entry in samplingTable (each entry must have .legalSpeed)
+  samplingTable.forEach(entry => {
+    samplingAoA.push([
+      entry.no,
+      entry.timestamp,
+      entry.lat,
+      entry.lon,
+      entry.distance,
+      entry.speed,
+      entry.legalSpeed
+    ]);
+  });
+
+  // 3.3) Convert that array‐of‐arrays into a worksheet and append as "Sampling"
+  const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
+  XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
+
+  // 4. Generate the binary workbook
   const wbout = XLSX.write(wb, {
     bookType: 'xlsx',
     type:      'array'
   });
 
-  // 4. Wrap in a Blob
+  // 5. Wrap in a Blob
   const blob = new Blob([wbout], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
 
-  // 5. Determine filename using your appStartTime helper
-  const ts       = formatAppStartTimestamp();            // e.g. "2025-05-19_084215"
-  
+  // 6. Determine filename using your appStartTime helper
   const blobName = `${reportBaseName}.xlsx`;
 
-  // 6. Build upload URL from containerSasUrl
+  // 7. Build upload URL from containerSasUrl
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  // 7. PUT to Azure Blob Storage
+  // 8. PUT to Azure Blob Storage
   const resp = await fetch(uploadUrl, {
     method: 'PUT',
     headers: {
@@ -1884,7 +1974,7 @@ async function uploadCSVtoAzure(tableId) {
 
   console.log(`✔ Uploaded workbook: ${blobName}`);
 }
-
+    
   async function exportMainContentToAzure() {
   const mainEl = document.getElementById('mainContent');
   const htmlDoc = `
