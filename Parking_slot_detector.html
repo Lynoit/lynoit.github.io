@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector (jsfeat, Direct Homography)</title>
+  <title>Parking Slot Detector (auto‐calibration)</title>
   <style>
     body {
       display: flex;
@@ -76,22 +76,22 @@
     }
   </style>
 
-  <!-- jsfeat library (pure‐JS computer vision) -->
+  <!-- jsfeat for image processing -->
   <script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat.min.js"></script>
 </head>
 <body>
   <div id="status">Waiting to start…</div>
 
-  <h1>Parking Slot Detector (jsfeat)</h1>
+  <h1>Parking Slot Detector (auto‐calibration)</h1>
 
   <div id="controls">
     <button id="btnStart">Start Camera</button>
     <button id="btnCalibrate" disabled>Calibrate Perspective</button>
 
-    <label for="calibWidth">Calib rect W (m):</label>
+    <label for="calibWidth">Slot W (m):</label>
     <input type="number" id="calibWidth" value="2" step="0.1" min="0.1" />
 
-    <label for="calibHeight">Calib rect H (m):</label>
+    <label for="calibHeight">Slot L (m):</label>
     <input type="number" id="calibHeight" value="5" step="0.1" min="0.1" />
 
     <label for="calibPxPerM">Scale (px/m):</label>
@@ -101,7 +101,7 @@
   <div id="videoContainer">
     <video id="video" autoplay muted playsinline width="640" height="480" style="display:none;"></video>
     <canvas id="overlayCanvas" width="640" height="480"
-            style="position:absolute; left:0; top:0; display:none; cursor: crosshair;"></canvas>
+            style="position:absolute; left:0; top:0; display:none;"></canvas>
   </div>
 
   <canvas id="canvasOut" width="640" height="480" style="display:none; margin-top:10px;"></canvas>
@@ -132,7 +132,7 @@
     }
 
     // -------------------------------------------------------
-    // SlotTracker: tracks slots, accumulates measurements, stats
+    // SlotTracker: tracks slot measurements and stability
     // -------------------------------------------------------
     class SlotTracker {
       constructor() {
@@ -144,6 +144,7 @@
       }
       update(detections) {
         this.slots.forEach(s => s.updated = false);
+
         for (let det of detections) {
           let best = null, bestD = Infinity;
           for (let s of this.slots) {
@@ -180,7 +181,9 @@
             });
           }
         }
+
         this.slots = this.slots.filter(s => s.updated);
+
         for (let s of this.slots) {
           s.meanWidth  = this._mean(s.widthHistory);
           s.meanHeight = this._mean(s.heightHistory);
@@ -197,7 +200,7 @@
         return arr.reduce((a, b) => a + b, 0) / arr.length;
       }
       _std(arr, mean) {
-        let varSum = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
+        let varSum = arr.reduce((acc, v) => acc + (v - mean)**2, 0) / arr.length;
         return Math.sqrt(varSum);
       }
     }
@@ -221,16 +224,35 @@
     const slotsTableBody = document.querySelector('#slotsTable tbody');
 
     let streaming       = false;
-    let calibrationMode = false;
-    let clickedPoints   = [];
     let H = null, H_inv = null;
-    const width = 640, height = 480;
+    const width  = 640, height = 480;
 
     // jsfeat buffers
     let srcImage, grayImg, blurredImg, edgeImg;
 
     // -------------------------------------------------------
-    // After load, enable Start
+    // Build a “reasonable” intrinsic matrix K
+    // Assumption: 60° horizontal FOV, image size 640×480
+    // -------------------------------------------------------
+    function buildIntrinsics() {
+      // focal length (in px) for 60° FOV: f = width / (2 tan(60°/2))
+      const f_px = width / (2 * Math.tan((60 * Math.PI/180)/2));
+      // principal point at center:
+      const c_x = width / 2;
+      const c_y = height / 2;
+      const K = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      K.data.set([
+        f_px,   0,    c_x,
+          0,   f_px,  c_y,
+          0,    0,     1
+      ]);
+      return K;
+    }
+
+    let K = buildIntrinsics();
+
+    // -------------------------------------------------------
+    // Once the page loads, enable “Start Camera”
     // -------------------------------------------------------
     window.addEventListener('load', () => {
       updateStatus('Click “Start Camera” to begin.');
@@ -238,7 +260,7 @@
     });
 
     // -------------------------------------------------------
-    // Start camera & initialize jsfeat mats
+    // 1) Start camera & initialize jsfeat buffers
     // -------------------------------------------------------
     btnStart.addEventListener('click', async () => {
       updateStatus('Accessing camera…');
@@ -277,69 +299,77 @@
     });
 
     // -------------------------------------------------------
-    // Calibrate Perspective: click four corners
+    // 2) Automatically compute homography—no clicks needed
     // -------------------------------------------------------
     btnCalibrate.addEventListener('click', () => {
-      if (!streaming) return;
-      calibrationMode = true;
-      clickedPoints = [];
-      ovCtx.clearRect(0, 0, width, height);
-      updateStatus('Calibration mode: click 4 corners (TL→TR→BR→BL).');
-    });
+      // We assume:
+      //  • Camera at (X, Y, Z) = (2 m, 1.5 m, 0 m)  
+      //  • It is pitched downward so its optical axis points to the center of a 2 × 5 m rectangle whose nearest corner is (0,0,0).
+      //  • We only need four world→image plane correspondences: the four corners of that 2 × 5 rectangle.
 
-    overlayCanvas.addEventListener('click', ev => {
-      if (!calibrationMode) return;
-      const rect = overlayCanvas.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      const y = ev.clientY - rect.top;
-      clickedPoints.push({ x, y });
-      ovCtx.fillStyle = 'red';
-      ovCtx.beginPath();
-      ovCtx.arc(x, y, 5, 0, 2 * Math.PI);
-      ovCtx.fill();
-      updateStatus(`Clicked point ${clickedPoints.length}/4 at (${x.toFixed(0)},${y.toFixed(0)})`);
-      if (clickedPoints.length === 4) {
-        finishCalibration();
-      }
-    });
-
-    function finishCalibration() {
-      calibrationMode = false;
       updateStatus('Computing homography…');
 
+      // Real-world rectangle corners in ground-plane coords (Y=0):
+      //  (0,0,0), (W,0,0), (W,0,L), (0,0,L)
       const Wm = parseFloat(calibWidthInp.value);
-      const Hm = parseFloat(calibHeightInp.value);
+      const Lm = parseFloat(calibHeightInp.value);
       const pxPerM = parseFloat(calibPxInp.value);
-      if (!(Wm > 0 && Hm > 0 && pxPerM > 0)) {
-        alert('Invalid calibration values.');
+      if (!(Wm > 0 && Lm > 0 && pxPerM > 0)) {
+        alert('Invalid dimensions or scale.');
         updateStatus('Click “Calibrate Perspective” again.');
         return;
       }
-      const Wpx = Wm * pxPerM;
-      const Hpx = Hm * pxPerM;
 
-      // Build flat arrays of 4 corner pairs
-      const imgPts = new Float32Array([
-        clickedPoints[0].x, clickedPoints[0].y,
-        clickedPoints[1].x, clickedPoints[1].y,
-        clickedPoints[2].x, clickedPoints[2].y,
-        clickedPoints[3].x, clickedPoints[3].y
-      ]);
-      const dstPts = new Float32Array([
-        0,   0,
-        Wpx, 0,
-        Wpx, Hpx,
-        0,   Hpx
+      // 2.1 Compute camera rotation R and translation t “offline”:
+      //     Camera position C = (2, 1.5, 0).
+      const C = [2, 1.5, 0];
+      //     World-rectangle center = (Wm/2, 0, Lm/2).
+      const center = [Wm / 2, 0, Lm / 2];
+      //     Compute vector V = center - C:
+      const Vx = center[0] - C[0];  // = (Wm/2 - 2)
+      const Vy = center[1] - C[1];  // = (0 - 1.5) = -1.5
+      const Vz = center[2] - C[2];  // = (Lm/2 - 0)
+
+      //     Pitch angle θ = atan2( sqrt(Vx^2 + Vy^2), Vz ).
+      const horizLen = Math.hypot(Vx, Vy);
+      const θ = Math.atan2(horizLen, Vz);   // camera tilts by θ around X-axis
+
+      //     Build R = rotation about X by (–θ), so that camera's optical axis (0,0,1) points to V.
+      const cθ = Math.cos(θ), sθ = Math.sin(θ);
+      const R = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      // Rₓ(–θ) =
+      R.data.set([
+         1,   0,    0,
+         0,  cθ,  -sθ,
+         0,  sθ,   cθ
       ]);
 
-      // Direct homography solver (no RANSAC). Requires 4 non‐collinear points.
-      H = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
-      const ok = jsfeat.motion_estimator.homography2d(imgPts, dstPts, H);
-      if (!ok) {
-        updateStatus('❌ Homography failed—points may be collinear. Try again.');
-        H = null;
-        return;
-      }
+      //     Compute t = –R · C:
+      const t = [
+        -(R.data[0]*C[0] + R.data[1]*C[1] + R.data[2]*C[2]),
+        -(R.data[3]*C[0] + R.data[4]*C[1] + R.data[5]*C[2]),
+        -(R.data[6]*C[0] + R.data[7]*C[1] + R.data[8]*C[2])
+      ];
+
+      // 2.2 Assemble the 3×3 homography H = K * [ r₁  r₂  t ]:
+      const Hmat = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      // [ r₁  r₂  t ] is 3×3, where r₁ = first column of R, r₂ = second column of R
+      //   [ r₁ r₂ t ] = [
+      //     R[0], R[1], t[0];
+      //     R[3], R[4], t[1];
+      //     R[6], R[7], t[2]
+      //   ]
+      const M = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      M.data.set([
+        R.data[0], R.data[1], t[0],
+        R.data[3], R.data[4], t[1],
+        R.data[6], R.data[7], t[2]
+      ]);
+      // Multiply K * M → Hmat
+      jsfeat.matmath.multiply_3x3(K, M, Hmat);
+
+      H = Hmat;
+      // 2.3 Compute inverse homography H_inv:
       H_inv = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
       jsfeat.matmath.invert_3x3(H, H_inv);
 
@@ -347,11 +377,11 @@
     }
 
     // -------------------------------------------------------
-    // Main loop: grab frame, warp, Canny, find quads, draw
+    // 3) Main loop: warp → Canny → find quads → track → draw
     // -------------------------------------------------------
     function processFrame() {
       if (!streaming) return;
-      // 1) Copy video frame into srcImage RGBA buffer
+      // Copy the video frame into srcImage[]
       outCtx.drawImage(video, 0, 0, width, height);
       const rgbaData = outCtx.getImageData(0, 0, width, height).data;
       for (let i = 0; i < rgbaData.length; i++) {
@@ -359,19 +389,21 @@
       }
 
       if (H) {
-        // 2) Warp into bird’s‐eye
+        // Warp into bird’s‐eye
         jsfeat.imgproc.warp_perspective(srcImage, birdCanvas, width, height, H, jsfeat.constants.INTERPOLATE_LINEAR);
 
-        // 3) Grab the warped RGBA → grayscale → blur → Canny
+        // Convert to grayscale
         const birdRGBA = birdCtx.getImageData(0, 0, width, height).data;
         jsfeat.imgproc.grayscale(birdRGBA, width, height, grayImg);
+        // Blur a bit
         jsfeat.imgproc.gaussian_blur(grayImg, blurredImg, 5);
+        // Canny edge
         jsfeat.imgproc.canny(blurredImg, edgeImg, 50, 150);
 
-        // 4) Find raw contours in edgeImg
+        // Find simple contours in the binary edge map
         const contours = simpleFindContours(edgeImg, width, height);
 
-        // 5) Approximate to quadrilaterals
+        // Approximate each contour → quads
         const quads = [];
         for (let cnt of contours) {
           if (cnt.length < 50) continue;
@@ -384,14 +416,12 @@
               maxX = Math.max(maxX, p.x);
               maxY = Math.max(maxY, p.y);
             }
-            const w_px = maxX - minX;
-            const h_px = maxY - minY;
+            const w_px = maxX - minX, h_px = maxY - minY;
             const widthM  = w_px / parseFloat(calibPxInp.value);
             const heightM = h_px / parseFloat(calibPxInp.value);
-            const cx = minX + w_px / 2;
-            const cy = minY + h_px / 2;
+            const cx = minX + w_px / 2, cy = minY + h_px / 2;
 
-            // 6) Back‐project corners to original view using H_inv
+            // Back-project corners via H_inv
             const srcCorners = new Float32Array([
               approx[0].x, approx[0].y, 1,
               approx[1].x, approx[1].y, 1,
@@ -418,10 +448,10 @@
           }
         }
 
-        // 7) Track slots over time
+        // Feed these quads into the slot‐tracker
         tracker.update(quads);
 
-        // 8) Draw on the output canvas
+        // Draw video + overlays
         outCtx.drawImage(video, 0, 0, width, height);
         for (let slot of tracker.slots) {
           let best = null, bestD = Infinity;
@@ -461,7 +491,7 @@
           }
         }
       } else {
-        // If no homography yet, just show the raw video
+        // If not calibrated yet, just show the raw video
         outCtx.drawImage(video, 0, 0, width, height);
       }
 
@@ -552,8 +582,13 @@
       tdId.textContent = slot.id;
       tr.appendChild(tdId);
 
-      const tdLat = document.createElement('td'); tdLat.textContent = 'N/A'; tr.appendChild(tdLat);
-      const tdLon = document.createElement('td'); tdLon.textContent = 'N/A'; tr.appendChild(tdLon);
+      const tdLat = document.createElement('td');
+      tdLat.textContent = 'N/A';
+      tr.appendChild(tdLat);
+
+      const tdLon = document.createElement('td');
+      tdLon.textContent = 'N/A';
+      tr.appendChild(tdLon);
 
       const tdLen = document.createElement('td');
       tdLen.textContent = slot.meanHeight.toFixed(2);
