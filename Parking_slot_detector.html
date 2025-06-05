@@ -72,11 +72,11 @@
     }
   </style>
 
-  <!-- jsfeat library (for image processing) -->
+  <!-- jsfeat library (for edge detection, warping, etc.) -->
   <script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat.min.js"></script>
 </head>
 <body>
-  <div id="status">Initializing…</div>
+  <div id="status">Requesting camera access…</div>
 
   <h1>Parking Slot Detector (auto‐start & auto‐calibration)</h1>
 
@@ -125,7 +125,7 @@
     }
 
     // -------------------------------------------------------
-    // SlotTracker: tracks slot measurements and stability
+    // SlotTracker: tracks slot measurements / stability
     // -------------------------------------------------------
     class SlotTracker {
       constructor() {
@@ -137,7 +137,6 @@
       }
       update(detections) {
         this.slots.forEach(s => s.updated = false);
-
         for (let det of detections) {
           let best = null, bestD = Infinity;
           for (let s of this.slots) {
@@ -174,9 +173,7 @@
             });
           }
         }
-
         this.slots = this.slots.filter(s => s.updated);
-
         for (let s of this.slots) {
           s.meanWidth  = this._mean(s.widthHistory);
           s.meanHeight = this._mean(s.heightHistory);
@@ -223,7 +220,7 @@
 
     // -------------------------------------------------------
     // Build a “reasonable” intrinsic matrix K
-    // Assumption: 60° horizontal FOV, image size 640×480
+    // (60° horizontal FOV, 640×480 resolution)
     // -------------------------------------------------------
     function buildIntrinsics() {
       const f_px = width / (2 * Math.tan((60 * Math.PI/180)/2));
@@ -240,7 +237,7 @@
     let K = buildIntrinsics();
 
     // -------------------------------------------------------
-    // On load, start camera automatically
+    // 1) As soon as the page loads, request camera access.
     // -------------------------------------------------------
     window.addEventListener('load', () => {
       updateStatus('Requesting camera access…');
@@ -266,75 +263,80 @@
         return;
       }
 
-      video.addEventListener('loadedmetadata', () => {
+      // As soon as the video is playing, initialize the jsfeat mats
+      video.addEventListener('playing', () => {
         if (!streaming) {
           streaming = true;
           srcImage   = new jsfeat.U8_t(width * height * 4);
           grayImg    = new jsfeat.U8_t(width * height);
           blurredImg = new jsfeat.U8_t(width * height);
           edgeImg    = new jsfeat.U8_t(width * height);
-          computeAutomaticHomography();  
+
+          // 2) Immediately compute homography (no manual clicks)
+          computeAutomaticHomography();
+
+          // 3) Start the per-frame loop
           requestAnimationFrame(processFrame);
         }
       });
     }
 
     // -------------------------------------------------------
-    // Automatically compute homography (no clicks)
+    // 2) Automatically compute homography (no clicking)
     // -------------------------------------------------------
     function computeAutomaticHomography() {
-      // Use:
-      //  • Camera at (2, 1.5, 0)
-      //  • Known rectangle W × L from inputs (in meters)
-      //  • Compute R and t so camera looks at center of that rectangle
-
+      // Read inputs
       const Wm = parseFloat(calibWidthInp.value);
       const Lm = parseFloat(calibHeightInp.value);
       const pxPerM = parseFloat(calibPxInp.value);
+
+      // Validate
       if (!(Wm > 0 && Lm > 0 && pxPerM > 0)) {
         updateStatus('Invalid dimensions or scale—check inputs.');
         return;
       }
 
-      // Camera position
+      // Camera at (2, 1.5, 0)
       const C = [2, 1.5, 0];
-      // Rectangle center
-      const center = [Wm/2, 0, Lm/2];
-      // Vector to center
-      const Vx = center[0] - C[0];
-      const Vy = center[1] - C[1];
-      const Vz = center[2] - C[2];
-      // Pitch angle
+      // Rectangle center = (Wm/2, 0, Lm/2)
+      const centerX = Wm / 2, centerY = 0, centerZ = Lm / 2;
+
+      // Vector from C → center
+      const Vx = centerX - C[0];
+      const Vy = centerY - C[1];
+      const Vz = centerZ - C[2];
+
+      // Pitch angle θ = atan2( sqrt(Vx^2 + Vy^2), Vz )
       const horizLen = Math.hypot(Vx, Vy);
       const θ = Math.atan2(horizLen, Vz);
       const cθ = Math.cos(θ), sθ = Math.sin(θ);
-      // Rotation about X by –θ
+
+      // Rotation about X by –θ  (so optical axis (0,0,1) points at V)
       const R = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
       R.data.set([
-        1,   0,    0,
-        0,  cθ,  -sθ,
-        0,  sθ,   cθ
+        1,    0,     0,
+        0,   cθ,  -sθ,
+        0,   sθ,   cθ
       ]);
-      // Translation t = –R·C
-      const t = [
-        -(R.data[0]*C[0] + R.data[1]*C[1] + R.data[2]*C[2]),
-        -(R.data[3]*C[0] + R.data[4]*C[1] + R.data[5]*C[2]),
-        -(R.data[6]*C[0] + R.data[7]*C[1] + R.data[8]*C[2])
-      ];
 
-      // Build [r1 r2 t] matrix
+      // Translation t = –R · C
+      const t0 = -(R.data[0]*C[0] + R.data[1]*C[1] + R.data[2]*C[2]);
+      const t1 = -(R.data[3]*C[0] + R.data[4]*C[1] + R.data[5]*C[2]);
+      const t2 = -(R.data[6]*C[0] + R.data[7]*C[1] + R.data[8]*C[2]);
+
+      // Build [r1 r2 t] 3×3 matrix
       const M = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
       M.data.set([
-        R.data[0], R.data[1], t[0],
-        R.data[3], R.data[4], t[1],
-        R.data[6], R.data[7], t[2]
+        R.data[0],  R.data[1],  t0,
+        R.data[3],  R.data[4],  t1,
+        R.data[6],  R.data[7],  t2
       ]);
 
-      // H = K * M
+      // H = K · M
       H = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
       jsfeat.matmath.multiply_3x3(K, M, H);
 
-      // H_inv
+      // H_inv = inverse of H
       H_inv = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
       jsfeat.matmath.invert_3x3(H, H_inv);
 
@@ -342,12 +344,12 @@
     }
 
     // -------------------------------------------------------
-    // Main loop: warp → Canny → find quads → track → draw
+    // 3) Main loop: warp → Canny → find quads → track → draw
     // -------------------------------------------------------
     function processFrame() {
       if (!streaming) return;
 
-      // Copy video frame into srcImage
+      // Copy current video frame into srcImage[]
       outCtx.drawImage(video, 0, 0, width, height);
       const rgbaData = outCtx.getImageData(0, 0, width, height).data;
       for (let i = 0; i < rgbaData.length; i++) {
@@ -355,7 +357,7 @@
       }
 
       if (H) {
-        // Warp to bird’s‐eye
+        // Warp into bird’s-eye
         jsfeat.imgproc.warp_perspective(srcImage, birdCanvas, width, height, H, jsfeat.constants.INTERPOLATE_LINEAR);
 
         // Grayscale → blur → Canny
@@ -364,7 +366,7 @@
         jsfeat.imgproc.gaussian_blur(grayImg, blurredImg, 5);
         jsfeat.imgproc.canny(blurredImg, edgeImg, 50, 150);
 
-        // Find contours
+        // Find simple contours
         const contours = simpleFindContours(edgeImg, width, height);
         const quads = [];
         for (let cnt of contours) {
@@ -381,9 +383,9 @@
             const w_px = maxX - minX, h_px = maxY - minY;
             const widthM  = w_px / parseFloat(calibPxInp.value);
             const heightM = h_px / parseFloat(calibPxInp.value);
-            const cx = minX + w_px / 2, cy = minY + h_px / 2;
+            const cx = minX + w_px/2, cy = minY + h_px/2;
 
-            // Back-project 4 corners via H_inv
+            // Back-project corners using H_inv
             const srcCorners = new Float32Array([
               approx[0].x, approx[0].y, 1,
               approx[1].x, approx[1].y, 1,
@@ -395,7 +397,7 @@
 
             const rectOrig = [];
             for (let i = 0; i < 12; i += 3) {
-              const invW = 1.0 / dstCorners[i + 2];
+              const invW = 1.0 / dstCorners[i+2];
               rectOrig.push({
                 x: dstCorners[i]   * invW,
                 y: dstCorners[i+1] * invW
@@ -406,7 +408,7 @@
           }
         }
 
-        // Track and draw
+        // Track & draw
         tracker.update(quads);
         outCtx.drawImage(video, 0, 0, width, height);
         for (let slot of tracker.slots) {
@@ -447,7 +449,7 @@
           }
         }
       } else {
-        // If homography not ready, show raw video
+        // If homography isn’t built, just show the raw video
         outCtx.drawImage(video, 0, 0, width, height);
       }
 
