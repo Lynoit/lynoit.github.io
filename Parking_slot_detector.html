@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector (jsfeat)</title>
+  <title>Parking Slot Detector (jsfeat, Direct Homography)</title>
   <style>
     body {
       display: flex;
@@ -76,7 +76,7 @@
     }
   </style>
 
-  <!-- jsfeat library -->
+  <!-- jsfeat library (pure‐JS computer vision) -->
   <script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat.min.js"></script>
 </head>
 <body>
@@ -100,7 +100,7 @@
 
   <div id="videoContainer">
     <video id="video" autoplay muted playsinline width="640" height="480" style="display:none;"></video>
-    <canvas id="overlayCanvas" width="640" height="480" 
+    <canvas id="overlayCanvas" width="640" height="480"
             style="position:absolute; left:0; top:0; display:none; cursor: crosshair;"></canvas>
   </div>
 
@@ -318,6 +318,7 @@
       const Wpx = Wm * pxPerM;
       const Hpx = Hm * pxPerM;
 
+      // Build flat arrays of 4 corner pairs
       const imgPts = new Float32Array([
         clickedPoints[0].x, clickedPoints[0].y,
         clickedPoints[1].x, clickedPoints[1].y,
@@ -331,16 +332,11 @@
         0,   Hpx
       ]);
 
+      // Direct homography solver (no RANSAC). Requires 4 non‐collinear points.
       H = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
-      const count = jsfeat.motion_estimator.homography2d_ransac(
-        imgPts, dstPts,
-        H,
-        1000,
-        2.0,
-        null
-      );
-      if (!count) {
-        updateStatus('❌ Homography RANSAC failed. Try again.');
+      const ok = jsfeat.motion_estimator.homography2d(imgPts, dstPts, H);
+      if (!ok) {
+        updateStatus('❌ Homography failed—points may be collinear. Try again.');
         H = null;
         return;
       }
@@ -355,6 +351,7 @@
     // -------------------------------------------------------
     function processFrame() {
       if (!streaming) return;
+      // 1) Copy video frame into srcImage RGBA buffer
       outCtx.drawImage(video, 0, 0, width, height);
       const rgbaData = outCtx.getImageData(0, 0, width, height).data;
       for (let i = 0; i < rgbaData.length; i++) {
@@ -362,13 +359,19 @@
       }
 
       if (H) {
+        // 2) Warp into bird’s‐eye
         jsfeat.imgproc.warp_perspective(srcImage, birdCanvas, width, height, H, jsfeat.constants.INTERPOLATE_LINEAR);
+
+        // 3) Grab the warped RGBA → grayscale → blur → Canny
         const birdRGBA = birdCtx.getImageData(0, 0, width, height).data;
         jsfeat.imgproc.grayscale(birdRGBA, width, height, grayImg);
         jsfeat.imgproc.gaussian_blur(grayImg, blurredImg, 5);
         jsfeat.imgproc.canny(blurredImg, edgeImg, 50, 150);
 
+        // 4) Find raw contours in edgeImg
         const contours = simpleFindContours(edgeImg, width, height);
+
+        // 5) Approximate to quadrilaterals
         const quads = [];
         for (let cnt of contours) {
           if (cnt.length < 50) continue;
@@ -381,11 +384,14 @@
               maxX = Math.max(maxX, p.x);
               maxY = Math.max(maxY, p.y);
             }
-            const w_px = maxX - minX, h_px = maxY - minY;
+            const w_px = maxX - minX;
+            const h_px = maxY - minY;
             const widthM  = w_px / parseFloat(calibPxInp.value);
             const heightM = h_px / parseFloat(calibPxInp.value);
-            const cx = minX + w_px / 2, cy = minY + h_px / 2;
+            const cx = minX + w_px / 2;
+            const cy = minY + h_px / 2;
 
+            // 6) Back‐project corners to original view using H_inv
             const srcCorners = new Float32Array([
               approx[0].x, approx[0].y, 1,
               approx[1].x, approx[1].y, 1,
@@ -412,8 +418,10 @@
           }
         }
 
+        // 7) Track slots over time
         tracker.update(quads);
 
+        // 8) Draw on the output canvas
         outCtx.drawImage(video, 0, 0, width, height);
         for (let slot of tracker.slots) {
           let best = null, bestD = Infinity;
@@ -442,15 +450,18 @@
           if (slot.isStable) {
             const wM = slot.meanWidth.toFixed(2);
             const hM = slot.meanHeight.toFixed(2);
-            outCtx.fillText(`#${slot.id}: ${wM}×${hM}m`, best.rectOrig[0].x, best.rectOrig[0].y - 10);
+            outCtx.fillText(`#${slot.id}: ${wM}×${hM}m`,
+                             best.rectOrig[0].x, best.rectOrig[0].y - 10);
             if (!slot.recorded) {
               addSlotToTable(slot);
             }
           } else {
-            outCtx.fillText(`#${slot.id}`, best.rectOrig[0].x, best.rectOrig[0].y - 10);
+            outCtx.fillText(`#${slot.id}`,
+                             best.rectOrig[0].x, best.rectOrig[0].y - 10);
           }
         }
       } else {
+        // If no homography yet, just show the raw video
         outCtx.drawImage(video, 0, 0, width, height);
       }
 
