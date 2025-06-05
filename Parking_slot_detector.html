@@ -3,8 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Parking Slot Detector (with Live Status)</title>
-
+  <title>Parking Slot Detector (jsfeat)</title>
   <style>
     body {
       display: flex;
@@ -32,6 +31,7 @@
       gap: 10px;
       align-items: center;
       justify-content: center;
+      margin-bottom: 10px;
     }
     button {
       padding: 6px 12px;
@@ -48,13 +48,11 @@
     #videoContainer {
       position: relative;
       display: inline-block;
-      margin-top: 10px;
     }
     #video, 
-    #calibrationOverlay, 
-    #canvas, 
-    #birdCanvas, 
-    #measurementChart {
+    #overlayCanvas, 
+    #canvasOut, 
+    #birdCanvas {
       border: 1px solid #ccc;
       max-width: 100%;
     }
@@ -78,25 +76,17 @@
     }
   </style>
 
-  <!-- Chart.js for plotting measurements -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-  <!-- OpenCV.js (TechStark build) loaded synchronously -->
-  <script src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0/opencv.js"></script>
-  <script>
-    // As soon as the WASM runtime inside OpenCV.js is ready, this will run:
-    cv['onRuntimeInitialized'] = function() {
-      onOpenCvReady();
-    };
-  </script>
+  <!-- jsfeat library -->
+  <script src="https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat.min.js"></script>
 </head>
 <body>
-  <div id="status">Loading OpenCV…</div>
+  <div id="status">Waiting to start…</div>
 
-  <h1>Parking Slot Detector (with Live Status)</h1>
+  <h1>Parking Slot Detector (jsfeat)</h1>
 
   <div id="controls">
-    <button id="btnStart" disabled>Start Camera</button>
+    <button id="btnStart">Start Camera</button>
+    <button id="btnCalibrate" disabled>Calibrate Perspective</button>
 
     <label for="calibWidth">Calib rect W (m):</label>
     <input type="number" id="calibWidth" value="2" step="0.1" min="0.1" />
@@ -106,19 +96,16 @@
 
     <label for="calibPxPerM">Scale (px/m):</label>
     <input type="number" id="calibPxPerM" value="100" step="1" min="1" />
-
-    <button id="btnCalibrate" disabled>Calibrate Perspective</button>
   </div>
 
   <div id="videoContainer">
-    <video id="video" autoplay muted playsinline width="640" height="480" style="display: none;"></video>
-    <canvas id="calibrationOverlay" width="640" height="480"
-            style="display: none; position: absolute; top: 0; left: 0; cursor: crosshair;"></canvas>
+    <video id="video" autoplay muted playsinline width="640" height="480" style="display:none;"></video>
+    <canvas id="overlayCanvas" width="640" height="480" 
+            style="position:absolute; left:0; top:0; display:none; cursor: crosshair;"></canvas>
   </div>
 
-  <canvas id="canvas" style="display: none; margin-top: 10px;"></canvas>
-  <canvas id="birdCanvas" style="display: none; margin-top: 10px;"></canvas>
-  <canvas id="measurementChart" width="640" height="200" style="display: none; margin-top: 10px;"></canvas>
+  <canvas id="canvasOut" width="640" height="480" style="display:none; margin-top:10px;"></canvas>
+  <canvas id="birdCanvas" width="640" height="480" style="display:none; margin-top:10px;"></canvas>
 
   <h2>Recorded Slots</h2>
   <table id="slotsTable">
@@ -155,39 +142,31 @@
         this.MIN_SAMPLES = 5;
         this.STABLE_STD_M = 0.05;
       }
-
       update(detections) {
-        // Mark all existing slots as not updated this frame
-        this.slots.forEach(slot => slot.updated = false);
-
-        // For each detection, try to match to an existing slot
+        this.slots.forEach(s => s.updated = false);
         for (let det of detections) {
-          let bestMatch = null, bestDist = Infinity;
-          for (let slot of this.slots) {
-            let dx = det.cx - slot.lastCx;
-            let dy = det.cy - slot.lastCy;
+          let best = null, bestD = Infinity;
+          for (let s of this.slots) {
+            let dx = det.cx - s.lastCx;
+            let dy = det.cy - s.lastCy;
             let d = Math.hypot(dx, dy);
-            if (d < this.MATCH_DIST_PX && d < bestDist) {
-              bestDist = d;
-              bestMatch = slot;
+            if (d < this.MATCH_DIST_PX && d < bestD) {
+              bestD = d;
+              best = s;
             }
           }
-          if (bestMatch) {
-            // Update matched slot’s history
-            bestMatch.widthHistory.push(det.widthM);
-            bestMatch.heightHistory.push(det.heightM);
-            bestMatch.lastCx = det.cx;
-            bestMatch.lastCy = det.cy;
-            bestMatch.lastRectBird = det.rectBird;
-            bestMatch.lastRectOrig = det.rectOrig;
-            bestMatch.updated = true;
+          if (best) {
+            best.widthHistory.push(det.widthM);
+            best.heightHistory.push(det.heightM);
+            best.lastCx = det.cx;
+            best.lastCy = det.cy;
+            best.lastRectOrig = det.rectOrig;
+            best.updated = true;
           } else {
-            // Create a brand-new slot entry
             this.slots.push({
               id: this.nextId++,
               lastCx: det.cx,
               lastCy: det.cy,
-              lastRectBird: det.rectBird,
               lastRectOrig: det.rectOrig,
               widthHistory: [det.widthM],
               heightHistory: [det.heightM],
@@ -201,93 +180,83 @@
             });
           }
         }
-
-        // Remove any slot that was not updated this frame
-        this.slots = this.slots.filter(slot => slot.updated);
-
-        // Recompute mean, std, and stability for each slot
-        for (let slot of this.slots) {
-          slot.meanWidth  = this._mean(slot.widthHistory);
-          slot.meanHeight = this._mean(slot.heightHistory);
-          slot.stdWidth   = this._std(slot.widthHistory, slot.meanWidth);
-          slot.stdHeight  = this._std(slot.heightHistory, slot.meanHeight);
-          slot.isStable   = (
-            slot.widthHistory.length >= this.MIN_SAMPLES &&
-            slot.stdWidth <= this.STABLE_STD_M &&
-            slot.stdHeight <= this.STABLE_STD_M
+        this.slots = this.slots.filter(s => s.updated);
+        for (let s of this.slots) {
+          s.meanWidth  = this._mean(s.widthHistory);
+          s.meanHeight = this._mean(s.heightHistory);
+          s.stdWidth   = this._std(s.widthHistory, s.meanWidth);
+          s.stdHeight  = this._std(s.heightHistory, s.meanHeight);
+          s.isStable   = (
+            s.widthHistory.length >= this.MIN_SAMPLES &&
+            s.stdWidth <= this.STABLE_STD_M &&
+            s.stdHeight <= this.STABLE_STD_M
           );
         }
       }
-
       _mean(arr) {
         return arr.reduce((a, b) => a + b, 0) / arr.length;
       }
       _std(arr, mean) {
-        let variance = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
-        return Math.sqrt(variance);
+        let varSum = arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
+        return Math.sqrt(varSum);
       }
     }
+    const tracker = new SlotTracker();
 
     // -------------------------------------------------------
     // Globals / DOM elements
     // -------------------------------------------------------
-    let video            = document.getElementById('video');
-    let overlay          = document.getElementById('calibrationOverlay');
-    let overlayCtx       = overlay.getContext('2d');
-    let canvas           = document.getElementById('canvas');
-    let ctx              = canvas.getContext('2d');
-    let birdCanvas       = document.getElementById('birdCanvas');
-    let birdCtx          = birdCanvas.getContext('2d');
-    let chartCanvas      = document.getElementById('measurementChart');
-    let btnStart         = document.getElementById('btnStart');
-    let btnCalibrate     = document.getElementById('btnCalibrate');
-    let calibWidthInput  = document.getElementById('calibWidth');
-    let calibHeightInput = document.getElementById('calibHeight');
-    let calibPxPerMInput = document.getElementById('calibPxPerM');
-    let slotsTableBody   = document.querySelector('#slotsTable tbody');
+    const video          = document.getElementById('video');
+    const overlayCanvas  = document.getElementById('overlayCanvas');
+    const ovCtx          = overlayCanvas.getContext('2d');
+    const outCanvas      = document.getElementById('canvasOut');
+    const outCtx         = outCanvas.getContext('2d');
+    const birdCanvas     = document.getElementById('birdCanvas');
+    const birdCtx        = birdCanvas.getContext('2d');
+    const btnStart       = document.getElementById('btnStart');
+    const btnCalibrate   = document.getElementById('btnCalibrate');
+    const calibWidthInp  = document.getElementById('calibWidth');
+    const calibHeightInp = document.getElementById('calibHeight');
+    const calibPxInp     = document.getElementById('calibPxPerM');
+    const slotsTableBody = document.querySelector('#slotsTable tbody');
 
-    let streaming   = false;
-    let cvReady     = false;
-    let cap, src, birdMat, gray, blurred, edges, contours, hierarchy;
-    let H = null, H_inv = null;
+    let streaming       = false;
     let calibrationMode = false;
-    let clickedPoints = [];
-    let tracker = new SlotTracker();
-    let measurementChart;
+    let clickedPoints   = [];
+    let H = null, H_inv = null;
+    const width = 640, height = 480;
+
+    // jsfeat buffers
+    let srcImage, grayImg, blurredImg, edgeImg;
 
     // -------------------------------------------------------
-    // onOpenCvReady(): called once OpenCV’s WASM runtime is initialized
+    // After load, enable Start
     // -------------------------------------------------------
-    function onOpenCvReady() {
-      updateStatus('OpenCV loaded. Click “Start Camera” to begin.');
-      cvReady = true;
+    window.addEventListener('load', () => {
+      updateStatus('Click “Start Camera” to begin.');
       btnStart.disabled = false;
-    }
+    });
 
     // -------------------------------------------------------
-    // Start camera & initialize Mats
+    // Start camera & initialize jsfeat mats
     // -------------------------------------------------------
     btnStart.addEventListener('click', async () => {
-      if (!cvReady) {
-        alert('Please wait for OpenCV to load.');
-        return;
-      }
       updateStatus('Accessing camera…');
       btnStart.disabled = true;
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
+          video: { facingMode: 'environment', width: width, height: height },
           audio: false
         });
         video.srcObject = stream;
-        video.style.display      = 'block';
-        overlay.style.display    = 'block';
-        canvas.style.display     = 'block';
-        birdCanvas.style.display = 'block';
-        chartCanvas.style.display= 'block';
+        video.style.display = 'block';
+        overlayCanvas.style.display = 'block';
+        outCanvas.style.display     = 'block';
+        birdCanvas.style.display    = 'block';
         video.play();
         updateStatus('Camera started. Click “Calibrate Perspective” when ready.');
+        btnCalibrate.disabled = false;
       } catch (err) {
         console.error('Camera error:', err);
         updateStatus('⛔ Could not access camera. Check permissions and HTTPS.');
@@ -298,81 +267,37 @@
       video.addEventListener('loadedmetadata', () => {
         if (!streaming) {
           streaming = true;
-          initializeMats();
+          srcImage   = new jsfeat.U8_t(width * height * 4);
+          grayImg    = new jsfeat.U8_t(width * height);
+          blurredImg = new jsfeat.U8_t(width * height);
+          edgeImg    = new jsfeat.U8_t(width * height);
+          requestAnimationFrame(processFrame);
         }
       });
     });
 
-    function initializeMats() {
-      const w = video.videoWidth, h = video.videoHeight;
-      if (!w || !h) {
-        requestAnimationFrame(initializeMats);
-        return;
-      }
-      overlay.width    = w; overlay.height    = h;
-      canvas.width     = w; canvas.height     = h;
-      birdCanvas.width = w; birdCanvas.height = h;
-
-      src      = new cv.Mat(h, w, cv.CV_8UC4);
-      birdMat  = new cv.Mat(h, w, cv.CV_8UC4);
-      gray     = new cv.Mat();
-      blurred  = new cv.Mat();
-      edges    = new cv.Mat();
-      contours = new cv.MatVector();
-      hierarchy= new cv.Mat();
-      cap      = new cv.VideoCapture(video);
-
-      // Initialize Chart.js
-      const ctxChart = chartCanvas.getContext('2d');
-      measurementChart = new Chart(ctxChart, {
-        type: 'line',
-        data: { datasets: [] },
-        options: {
-          parsing: false,
-          animation: false,
-          scales: {
-            x: {
-              type: 'linear',
-              position: 'bottom',
-              title: { display: true, text: 'Sample #' }
-            },
-            y: {
-              title: { display: true, text: 'Size (m)' }
-            }
-          },
-          plugins: {
-            legend: { labels: { usePointStyle: true } }
-          }
-        }
-      });
-
-      btnCalibrate.disabled = false;
-      updateStatus('Ready to calibrate. Click “Calibrate Perspective.”');
-      requestAnimationFrame(processFrame);
-    }
-
     // -------------------------------------------------------
-    // Calibrate Perspective: user clicks 4 points on overlay
+    // Calibrate Perspective: click four corners
     // -------------------------------------------------------
     btnCalibrate.addEventListener('click', () => {
       if (!streaming) return;
       calibrationMode = true;
       clickedPoints = [];
-      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-      updateStatus('Calibration mode: click four corners of a known rectangle (TL → TR → BR → BL).');
+      ovCtx.clearRect(0, 0, width, height);
+      updateStatus('Calibration mode: click 4 corners (TL→TR→BR→BL).');
     });
 
-    overlay.addEventListener('click', ev => {
+    overlayCanvas.addEventListener('click', ev => {
       if (!calibrationMode) return;
-      const rect = overlay.getBoundingClientRect();
+      const rect = overlayCanvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
       clickedPoints.push({ x, y });
-      overlayCtx.fillStyle = 'red';
-      overlayCtx.beginPath();
-      overlayCtx.arc(x, y, 5, 0, 2 * Math.PI);
-      overlayCtx.fill();
-      updateStatus(`Clicked point ${clickedPoints.length}/4 at (${x.toFixed(0)}, ${y.toFixed(0)})`);
+      ovCtx.fillStyle = 'red';
+      ovCtx.beginPath();
+      ovCtx.arc(x, y, 5, 0, 2 * Math.PI);
+      ovCtx.fill();
+      updateStatus(`Clicked point ${clickedPoints.length}/4 at (${x.toFixed(0)},${y.toFixed(0)})`);
       if (clickedPoints.length === 4) {
         finishCalibration();
       }
@@ -381,250 +306,279 @@
     function finishCalibration() {
       calibrationMode = false;
       updateStatus('Computing homography…');
-      btnCalibrate.innerText = 'Calibrate Perspective';
-      const Wm = parseFloat(calibWidthInput.value);
-      const Hm = parseFloat(calibHeightInput.value);
-      const pxPerM = parseFloat(calibPxPerMInput.value);
+
+      const Wm = parseFloat(calibWidthInp.value);
+      const Hm = parseFloat(calibHeightInp.value);
+      const pxPerM = parseFloat(calibPxInp.value);
       if (!(Wm > 0 && Hm > 0 && pxPerM > 0)) {
         alert('Invalid calibration values.');
-        updateStatus('Ready to calibrate again.');
+        updateStatus('Click “Calibrate Perspective” again.');
         return;
       }
+      const Wpx = Wm * pxPerM;
+      const Hpx = Hm * pxPerM;
 
-      // Build source and destination point mats
-      let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+      const imgPts = new Float32Array([
         clickedPoints[0].x, clickedPoints[0].y,
         clickedPoints[1].x, clickedPoints[1].y,
         clickedPoints[2].x, clickedPoints[2].y,
         clickedPoints[3].x, clickedPoints[3].y
       ]);
-      const wPx = Wm * pxPerM;
-      const hPx = Hm * pxPerM;
-      let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-        0, 0,
-        wPx, 0,
-        wPx, hPx,
-        0, hPx
+      const dstPts = new Float32Array([
+        0,   0,
+        Wpx, 0,
+        Wpx, Hpx,
+        0,   Hpx
       ]);
 
-      H = new cv.Mat();
-      H_inv = new cv.Mat();
-      cv.getPerspectiveTransform(srcPts, dstPts, H);
-      cv.getPerspectiveTransform(dstPts, srcPts, H_inv);
-      srcPts.delete(); dstPts.delete();
+      H = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      const count = jsfeat.motion_estimator.homography2d_ransac(
+        imgPts, dstPts,
+        H,
+        1000,
+        2.0,
+        null
+      );
+      if (!count) {
+        updateStatus('❌ Homography RANSAC failed. Try again.');
+        H = null;
+        return;
+      }
+      H_inv = new jsfeat.matrix_t(3, 3, jsfeat.F32C1_t);
+      jsfeat.matmath.invert_3x3(H, H_inv);
 
-      updateStatus('Perspective calibrated. Now detecting in bird’s-eye view.');
-      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+      updateStatus('Perspective calibrated. Starting detection…');
     }
 
     // -------------------------------------------------------
-    // Main loop: warp + detect + draw
+    // Main loop: grab frame, warp, Canny, find quads, draw
     // -------------------------------------------------------
     function processFrame() {
       if (!streaming) return;
-      cap.read(src);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      outCtx.drawImage(video, 0, 0, width, height);
+      const rgbaData = outCtx.getImageData(0, 0, width, height).data;
+      for (let i = 0; i < rgbaData.length; i++) {
+        srcImage[i] = rgbaData[i];
+      }
 
       if (H) {
-        updateStatus('Warping + edge detection in bird’s-eye…');
-        cv.warpPerspective(src, birdMat, H, new cv.Size(birdCanvas.width, birdCanvas.height));
-        birdCtx.drawImage(birdCanvas, 0, 0, birdCanvas.width, birdCanvas.height);
-        runDetectionOnBird();
+        jsfeat.imgproc.warp_perspective(srcImage, birdCanvas, width, height, H, jsfeat.constants.INTERPOLATE_LINEAR);
+        const birdRGBA = birdCtx.getImageData(0, 0, width, height).data;
+        jsfeat.imgproc.grayscale(birdRGBA, width, height, grayImg);
+        jsfeat.imgproc.gaussian_blur(grayImg, blurredImg, 5);
+        jsfeat.imgproc.canny(blurredImg, edgeImg, 50, 150);
+
+        const contours = simpleFindContours(edgeImg, width, height);
+        const quads = [];
+        for (let cnt of contours) {
+          if (cnt.length < 50) continue;
+          const approx = approxPoly(cnt, 2.0);
+          if (approx.length === 4) {
+            let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+            for (let p of approx) {
+              minX = Math.min(minX, p.x);
+              minY = Math.min(minY, p.y);
+              maxX = Math.max(maxX, p.x);
+              maxY = Math.max(maxY, p.y);
+            }
+            const w_px = maxX - minX, h_px = maxY - minY;
+            const widthM  = w_px / parseFloat(calibPxInp.value);
+            const heightM = h_px / parseFloat(calibPxInp.value);
+            const cx = minX + w_px / 2, cy = minY + h_px / 2;
+
+            const srcCorners = new Float32Array([
+              approx[0].x, approx[0].y, 1,
+              approx[1].x, approx[1].y, 1,
+              approx[2].x, approx[2].y, 1,
+              approx[3].x, approx[3].y, 1
+            ]);
+            const dstCorners = new Float32Array(12);
+            jsfeat.matmath.multiply_3x3src(H_inv, srcCorners, dstCorners);
+
+            const rectOrig = [];
+            for (let i = 0; i < 12; i += 3) {
+              const invW = 1.0 / dstCorners[i + 2];
+              rectOrig.push({
+                x: dstCorners[i]   * invW,
+                y: dstCorners[i+1] * invW
+              });
+            }
+
+            quads.push({
+              cx, cy,
+              widthM, heightM,
+              rectOrig
+            });
+          }
+        }
+
+        tracker.update(quads);
+
+        outCtx.drawImage(video, 0, 0, width, height);
+        for (let slot of tracker.slots) {
+          let best = null, bestD = Infinity;
+          for (let q of quads) {
+            const dx = q.cx - slot.lastCx;
+            const dy = q.cy - slot.lastCy;
+            const d = Math.hypot(dx, dy);
+            if (d < bestD) {
+              bestD = d;
+              best = q;
+            }
+          }
+          if (!best) continue;
+          outCtx.lineWidth   = 3;
+          outCtx.strokeStyle = slot.isStable ? 'lime' : 'yellow';
+          outCtx.beginPath();
+          outCtx.moveTo(best.rectOrig[0].x, best.rectOrig[0].y);
+          for (let k = 1; k < 4; k++) {
+            outCtx.lineTo(best.rectOrig[k].x, best.rectOrig[k].y);
+          }
+          outCtx.closePath();
+          outCtx.stroke();
+
+          outCtx.font = '16px Arial';
+          outCtx.fillStyle = slot.isStable ? 'lime' : 'yellow';
+          if (slot.isStable) {
+            const wM = slot.meanWidth.toFixed(2);
+            const hM = slot.meanHeight.toFixed(2);
+            outCtx.fillText(`#${slot.id}: ${wM}×${hM}m`, best.rectOrig[0].x, best.rectOrig[0].y - 10);
+            if (!slot.recorded) {
+              addSlotToTable(slot);
+            }
+          } else {
+            outCtx.fillText(`#${slot.id}`, best.rectOrig[0].x, best.rectOrig[0].y - 10);
+          }
+        }
       } else {
-        updateStatus('Waiting for perspective calibration…');
+        outCtx.drawImage(video, 0, 0, width, height);
       }
 
       requestAnimationFrame(processFrame);
     }
 
     // -------------------------------------------------------
-    // Detect slots in bird’s-eye view
+    // Simple contour finder for binary edge image
     // -------------------------------------------------------
-    function runDetectionOnBird() {
-      cv.cvtColor(birdMat, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-      cv.Canny(blurred, edges, 50, 150);
-      cv.findContours(edges, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
+    function simpleFindContours(binImg, w, h) {
+      const contours = [];
+      const visited = new Uint8Array(w * h);
+      function idx(x, y) { return y * w + x; }
 
-      let pxPerM = parseFloat(calibPxPerMInput.value) || 100;
-      let detections = [];
-
-      for (let i = 0; i < contours.size(); i++) {
-        let cnt = contours.get(i);
-        let approx = new cv.Mat();
-        cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
-        if (approx.rows === 4 && cv.contourArea(approx) > 1000) {
-          let rectBird = cv.boundingRect(approx);
-          let widthM   = rectBird.width / pxPerM;
-          let heightM  = rectBird.height / pxPerM;
-          let cx = rectBird.x + rectBird.width / 2;
-          let cy = rectBird.y + rectBird.height / 2;
-
-          let ptsBird = cv.matFromArray(4, 1, cv.CV_32FC2, [
-            rectBird.x, rectBird.y,
-            rectBird.x + rectBird.width, rectBird.y,
-            rectBird.x + rectBird.width, rectBird.y + rectBird.height,
-            rectBird.x, rectBird.y + rectBird.height
-          ]);
-          let ptsOrig = new cv.Mat();
-          cv.perspectiveTransform(ptsBird, ptsOrig, H_inv);
-          let data = ptsOrig.data32F;
-          let rectOrig = [
-            { x: data[0], y: data[1] },
-            { x: data[2], y: data[3] },
-            { x: data[4], y: data[5] },
-            { x: data[6], y: data[7] }
-          ];
-          ptsBird.delete(); ptsOrig.delete();
-
-          detections.push({
-            cx, cy,
-            widthM, heightM,
-            rectBird,
-            rectOrig
-          });
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = idx(x, y);
+          if (binImg[i] !== 0 && !visited[i]) {
+            const contour = [];
+            let cx = x, cy = y;
+            let dir = 0;
+            do {
+              visited[idx(cx, cy)] = 1;
+              contour.push({ x: cx, y: cy });
+              let found = false;
+              for (let k = 0; k < 8; k++) {
+                const d = (dir + k) % 8;
+                const nx = cx + [1,1,0,-1,-1,-1,0,1][d];
+                const ny = cy + [0,1,1,1,0,-1,-1,-1][d];
+                if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                  if (binImg[idx(nx, ny)] !== 0) {
+                    cx = nx; cy = ny;
+                    dir = (d + 5) % 8;
+                    found = true;
+                    break;
+                  }
+                }
+              }
+              if (!found) break;
+            } while (!(cx === x && cy === y));
+            if (contour.length > 0) {
+              contours.push(contour);
+            }
+          }
         }
-        approx.delete();
-        cnt.delete();
       }
-
-      tracker.update(detections);
-      drawDetections(detections);
-      updateChart();
+      return contours;
     }
 
     // -------------------------------------------------------
-    // drawDetections(): overlay on original canvas
+    // Ramer–Douglas–Peucker polygon approximation
     // -------------------------------------------------------
-    function drawDetections(detections) {
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      for (let slot of tracker.slots) {
-        let nearest = null, bestD = Infinity;
-        for (let det of detections) {
-          let dx = det.cx - slot.lastCx;
-          let dy = det.cy - slot.lastCy;
-          let d = Math.hypot(dx, dy);
-          if (d < bestD) {
-            bestD = d;
-            nearest = det;
+    function approxPoly(points, epsilon) {
+      function rdp(start, end, arr, eps, out) {
+        let maxDist = 0, index = -1;
+        const x1 = arr[start].x,  y1 = arr[start].y;
+        const x2 = arr[end].x,    y2 = arr[end].y;
+        for (let i = start + 1; i < end; i++) {
+          const px = arr[i].x, py = arr[i].y;
+          const num = Math.abs((y2 - y1) * px - (x2 - x1) * py + x2 * y1 - y2 * x1);
+          const den = Math.hypot(y2 - y1, x2 - x1);
+          const dist = den === 0 ? 0 : num / den;
+          if (dist > maxDist) {
+            maxDist = dist;
+            index = i;
           }
         }
-        if (!nearest) continue;
-
-        ctx.lineWidth   = 3;
-        ctx.strokeStyle = slot.isStable ? 'cyan' : 'yellow';
-        ctx.beginPath();
-        ctx.moveTo(nearest.rectOrig[0].x, nearest.rectOrig[0].y);
-        for (let k = 1; k < 4; k++) {
-          ctx.lineTo(nearest.rectOrig[k].x, nearest.rectOrig[k].y);
-        }
-        ctx.closePath();
-        ctx.stroke();
-
-        ctx.font = '16px Arial';
-        ctx.fillStyle = slot.isStable ? 'cyan' : 'yellow';
-        if (slot.isStable) {
-          let wMean = slot.meanWidth.toFixed(2);
-          let hMean = slot.meanHeight.toFixed(2);
-          ctx.fillText(`#${slot.id}: ${wMean}×${hMean} m`, nearest.rectOrig[0].x, nearest.rectOrig[0].y - 10);
-
-          if (!slot.recorded) {
-            addSlotToTable(slot);
-          }
+        if (maxDist > eps) {
+          rdp(start, index, arr, eps, out);
+          rdp(index, end, arr, eps, out);
         } else {
-          ctx.fillText(`#${slot.id}`, nearest.rectOrig[0].x, nearest.rectOrig[0].y - 10);
+          out.push(arr[start]);
         }
       }
+      const out = [];
+      rdp(0, points.length - 1, points, epsilon, out);
+      out.push(points[points.length - 1]);
+      return out;
     }
 
     // -------------------------------------------------------
-    // updateChart(): redraw the Chart.js line chart
-    // -------------------------------------------------------
-    function updateChart() {
-      measurementChart.data.datasets = [];
-      for (let slot of tracker.slots) {
-        if (slot.widthHistory.length > 0) {
-          measurementChart.data.datasets.push({
-            label: `Slot ${slot.id} Width (m)`,
-            data: slot.widthHistory.map((w, i) => ({ x: i + 1, y: w })),
-            fill: false
-          });
-          measurementChart.data.datasets.push({
-            label: `Slot ${slot.id} Height (m)`,
-            data: slot.heightHistory.map((h, i) => ({ x: i + 1, y: h })),
-            fill: false
-          });
-        }
-      }
-      measurementChart.update();
-    }
-
-    // -------------------------------------------------------
-    // addSlotToTable(slot): append a new row for a stable slot
+    // addSlotToTable: append a new row for a stable slot
     // -------------------------------------------------------
     function addSlotToTable(slot) {
       const tr = document.createElement('tr');
 
-      // Slot #
       const tdId = document.createElement('td');
       tdId.textContent = slot.id;
       tr.appendChild(tdId);
 
-      // Latitude & Longitude (not implemented—placeholder)
-      const tdLat = document.createElement('td');
-      tdLat.textContent = 'N/A';
-      tr.appendChild(tdLat);
+      const tdLat = document.createElement('td'); tdLat.textContent = 'N/A'; tr.appendChild(tdLat);
+      const tdLon = document.createElement('td'); tdLon.textContent = 'N/A'; tr.appendChild(tdLon);
 
-      const tdLon = document.createElement('td');
-      tdLon.textContent = 'N/A';
-      tr.appendChild(tdLon);
+      const tdLen = document.createElement('td');
+      tdLen.textContent = slot.meanHeight.toFixed(2);
+      tr.appendChild(tdLen);
 
-      // Length (m)
-      const tdLength = document.createElement('td');
-      tdLength.textContent = slot.meanHeight.toFixed(2);
-      tr.appendChild(tdLength);
+      const tdWid = document.createElement('td');
+      tdWid.textContent = slot.meanWidth.toFixed(2);
+      tr.appendChild(tdWid);
 
-      // Width (m)
-      const tdWidth = document.createElement('td');
-      tdWidth.textContent = slot.meanWidth.toFixed(2);
-      tr.appendChild(tdWidth);
-
-      // Std Dev (m): average of width/std and height/std
       const tdStd = document.createElement('td');
       const avgStd = ((slot.stdWidth + slot.stdHeight) / 2).toFixed(2);
       tdStd.textContent = avgStd;
       tr.appendChild(tdStd);
 
-      // Snapshot: capture a small image of the slot from the main canvas
       const tdSnap = document.createElement('td');
       const snapCanvas = document.createElement('canvas');
-      const rectPoints = slot.lastRectOrig;
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (let p of rectPoints) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
+      const rectPts = slot.lastRectOrig;
+      let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+      for (let p of rectPts) {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
       }
-      const wBox = maxX - minX;
-      const hBox = maxY - minY;
+      const wBox = maxX - minX, hBox = maxY - minY;
       minX = Math.max(0, minX);
       minY = Math.max(0, minY);
-      const clampedW = Math.min(canvas.width - minX, wBox);
-      const clampedH = Math.min(canvas.height - minY, hBox);
-
-      snapCanvas.width = clampedW;
-      snapCanvas.height = clampedH;
-      const snapCtx = snapCanvas.getContext('2d');
-      snapCtx.drawImage(
-        canvas,
-        minX, minY, clampedW, clampedH,
-        0, 0, clampedW, clampedH
-      );
+      const cw = Math.min(outCanvas.width - minX, wBox);
+      const ch = Math.min(outCanvas.height - minY, hBox);
+      snapCanvas.width  = cw;
+      snapCanvas.height = ch;
+      const sctx = snapCanvas.getContext('2d');
+      sctx.drawImage(outCanvas, minX, minY, cw, ch, 0, 0, cw, ch);
       const img = document.createElement('img');
-      img.src = snapCanvas.toDataURL('image/png');
       img.className = 'snapshot';
+      img.src = snapCanvas.toDataURL('image/png');
       tdSnap.appendChild(img);
       tr.appendChild(tdSnap);
 
