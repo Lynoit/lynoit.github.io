@@ -127,6 +127,8 @@
 
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.0/jszip.min.js"></script>
+  
   <script>
     const ACCOUNT = 'annotationcsv';
     const CONTAINER = 'csv';
@@ -205,107 +207,162 @@
     }
 
     function loadFile(filename) {
-      const content = document.getElementById('content');
-      content.innerHTML = ''; // clear out previous content
-      issueCoords = []; // reset collected coordinates
-      samplingCoords = [];
+  const content = document.getElementById('content');
+  content.innerHTML = '';
+  issueCoords = [];
+  samplingCoords = [];
 
-      // 1) XLSX download button
-      const xlsxLink = document.createElement('a');
-      xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
-      xlsxLink.textContent = 'Download XLSX';
-      xlsxLink.className = 'download-button';
-      xlsxLink.setAttribute('download', filename);
-      content.appendChild(xlsxLink);
+  // 1) XLSX download button
+  const xlsxLink = document.createElement('a');
+  xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  xlsxLink.textContent = 'Download XLSX';
+  xlsxLink.className = 'download-button';
+  xlsxLink.setAttribute('download', filename);
+  content.appendChild(xlsxLink);
 
-      // 2) PDF download button (same name but .pdf)
-      const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
-      const pdfLink = document.createElement('a');
-      pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
-      pdfLink.textContent = 'Download PDF';
-      pdfLink.className = 'download-button';
-      pdfLink.setAttribute('download', pdfFilename);
-      content.appendChild(pdfLink);
+  // 2) PDF download button (same base name, .pdf)
+  const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
+  const pdfLink = document.createElement('a');
+  pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
+  pdfLink.textContent = 'Download PDF';
+  pdfLink.className = 'download-button';
+  pdfLink.setAttribute('download', pdfFilename);
+  content.appendChild(pdfLink);
 
-      // 3) Fetch and render sheets (separately parsing “Sampling”)
-      fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then((response) => response.arrayBuffer())
-        .then((buffer) => {
-          const data = new Uint8Array(buffer);
-          const wb = XLSX.read(data, { type: 'array' });
+  // 3) Fetch & extract ZIP for "Issue snapshots"
+  const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
+  fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`)
+    .then((resp) => {
+      if (!resp.ok) {
+        return Promise.reject('ZIP not found');
+      }
+      return resp.arrayBuffer();
+    })
+    .then((buffer) => JSZip.loadAsync(buffer))
+    .then((zip) => {
+      // Create heading and table for snapshots
+      const title = document.createElement('h2');
+      title.textContent = 'Issue snapshots';
+      content.appendChild(title);
 
-          // --- Parse “Sampling” sheet (if it exists) right away: ---
-          const samplingSheetName = wb.SheetNames.find(
-            (name) => name.toLowerCase() === 'sampling'
-          );
-          if (samplingSheetName) {
-            parseSamplingSheet(wb.Sheets[samplingSheetName]);
-          }
+      const table = document.createElement('table');
+      table.id = 'issue-snapshots';
+      const headerRow = document.createElement('tr');
+      headerRow.innerHTML = '<th>Issue #</th><th>Snapshot</th>';
+      table.appendChild(headerRow);
 
-          // --- Now render all non-“Sampling” sheets as HTML tables: ---
-          let nonSamplingCount = 0;
-          let mapInserted = false;
+      zip.forEach((relativePath, zipEntry) => {
+        if (zipEntry.dir) return;
+        if (!/\.(jpe?g|png|gif)$/i.test(relativePath)) return;
 
-          wb.SheetNames.forEach((sheet) => {
-            // Skip any sheet named “Sampling” (case-insensitive)
-            if (sheet.toLowerCase() === 'sampling') return;
+        // Derive issue number from file name (strip extension)
+        const issueNo = relativePath.replace(/\.[^/.]+$/, '');
 
-            // Convert this sheet to HTML and insert it
-            const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], {
-              id: sheet,
-            });
-            content.insertAdjacentHTML(
-              'beforeend',
-              `<h2>${sheet}</h2>${html}`
-            );
+        // Load image as Blob, then create a row with <img>
+        zipEntry.async('blob').then((blob) => {
+          const imgURL = URL.createObjectURL(blob);
+          const row = document.createElement('tr');
 
-            // Parse lat/lon from this sheet into issueCoords
-            parseIssues(sheet);
+          const cell1 = document.createElement('td');
+          cell1.textContent = issueNo;
 
-            nonSamplingCount++;
-            // As soon as two non-“Sampling” sheets are inserted, add the map placeholder
-            if (nonSamplingCount === 2 && !mapInserted) {
-              const mapDiv = document.createElement('div');
-              mapDiv.id = 'issue-map';
-              mapDiv.style.width = '100%';
-              mapDiv.style.height = '400px';
-              mapDiv.style.margin = '20px 0';
-              mapDiv.style.border = '1px solid #aaa';
-              content.appendChild(mapDiv);
-              mapInserted = true;
-            }
-          });
-        })
-        .then(() => {
-          // If fewer than two non-“Sampling” sheets existed, ensure a map placeholder exists
-          if (!document.getElementById('issue-map')) {
-            const mapDiv = document.createElement('div');
-            mapDiv.id = 'issue-map';
-            mapDiv.style.width = '100%';
-            mapDiv.style.height = '400px';
-            mapDiv.style.margin = '20px 0';
-            mapDiv.style.border = '1px solid #aaa';
-            content.appendChild(mapDiv);
-          }
+          const cell2 = document.createElement('td');
+          const img = document.createElement('img');
+          img.src = imgURL;
+          img.style.maxWidth = '200px';
+          img.style.maxHeight = '200px';
+          cell2.appendChild(img);
 
-          // Now decide whether to draw the map or show an error
-          // We plot the map even if issueCoords is empty, as long as samplingCoords has 1 point.
-          if (issueCoords.length > 0 || samplingCoords.length > 0) {
-            initMap();
-          } else {
-            const placeholder = document.getElementById('issue-map');
-            if (placeholder) {
-              const err = document.createElement('div');
-              err.className = 'error';
-              err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
-              placeholder.replaceWith(err);
-            }
-          }
-        })
-        .catch((error) => {
-          content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
+          row.appendChild(cell1);
+          row.appendChild(cell2);
+          table.appendChild(row);
         });
-    }
+      });
+
+      content.appendChild(table);
+    })
+    .catch((err) => {
+      console.warn('Could not load ZIP for snapshots:', err);
+      // (Optional) Show a user‐facing message if desired:
+      // const noimg = document.createElement('div');
+      // noimg.className = 'error';
+      // noimg.textContent = 'No issue snapshots found.';
+      // content.appendChild(noimg);
+    });
+
+  // 4) Fetch XLSX and render sheets + map
+  fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+    .then((response) => response.arrayBuffer())
+    .then((buffer) => {
+      const data = new Uint8Array(buffer);
+      const wb = XLSX.read(data, { type: 'array' });
+
+      // Parse "Sampling" sheet (if present)
+      const samplingSheetName = wb.SheetNames.find(
+        (name) => name.toLowerCase() === 'sampling'
+      );
+      if (samplingSheetName) {
+        parseSamplingSheet(wb.Sheets[samplingSheetName]);
+      }
+
+      // Render all non-"Sampling" sheets as HTML tables and collect issue coords
+      let nonSamplingCount = 0;
+      let mapInserted = false;
+
+      wb.SheetNames.forEach((sheet) => {
+        if (sheet.toLowerCase() === 'sampling') return;
+
+        // Convert sheet to HTML table
+        const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
+        content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
+
+        // Parse lat/lon from this sheet into issueCoords
+        parseIssues(sheet);
+        nonSamplingCount++;
+
+        // As soon as two non-"Sampling" sheets are rendered, insert map placeholder
+        if (nonSamplingCount === 2 && !mapInserted) {
+          const mapDiv = document.createElement('div');
+          mapDiv.id = 'issue-map';
+          mapDiv.style.width = '100%';
+          mapDiv.style.height = '400px';
+          mapDiv.style.margin = '20px 0';
+          mapDiv.style.border = '1px solid #aaa';
+          content.appendChild(mapDiv);
+          mapInserted = true;
+        }
+      });
+    })
+    .then(() => {
+      // If fewer than two non-"Sampling" sheets existed, ensure a map placeholder
+      if (!document.getElementById('issue-map')) {
+        const mapDiv = document.createElement('div');
+        mapDiv.id = 'issue-map';
+        mapDiv.style.width = '100%';
+        mapDiv.style.height = '400px';
+        mapDiv.style.margin = '20px 0';
+        mapDiv.style.border = '1px solid #aaa';
+        content.appendChild(mapDiv);
+      }
+
+      // Draw the map if there's at least one issue or sampling point
+      if (issueCoords.length > 0 || samplingCoords.length > 0) {
+        initMap();
+      } else {
+        const placeholder = document.getElementById('issue-map');
+        if (placeholder) {
+          const err = document.createElement('div');
+          err.className = 'error';
+          err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
+          placeholder.replaceWith(err);
+        }
+      }
+    })
+    .catch((error) => {
+      content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
+    });
+}
+
 
     /**
      * parseIssues(sheetId)
