@@ -19,6 +19,8 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+  
   <script>
   // 1) pull in questions from CSV
   function loadMetaQueries() {
@@ -1800,7 +1802,12 @@ async function maybeUpdateTables() {
 
     exportCustomSectionsToAzure()
       .then(() => console.log('PDF report uploaded'))
-      .catch(err => console.error('PDF upload failed:', err));    
+      .catch(err => console.error('PDF upload failed:', err));
+
+      uploadSnapshotsZipToAzure()
+    .then(() => console.log('Snapshots ZIP uploaded'))
+    .catch(err => console.error('Snapshots ZIP upload failed:', err));
+    
   }
 }
 
@@ -2122,6 +2129,66 @@ let sectionTexts = {};
       sectionTexts = {};
     }
   }
+
+    /**
+ * 1) createSnapshotsZip()
+ *
+ *   Iterates over logTable[]; for each entry that has a base64 JPEG, 
+ *   inserts it into a JSZip instance under “<issue-number>.jpg.” 
+ *   Returns a Blob of the completed .zip.
+ */
+async function createSnapshotsZip() {
+  const zip = new JSZip();
+
+  // Iterate every row in logTable
+  logTable.forEach((row, index) => {
+    const camDataUrl = row[12];
+    if (!camDataUrl) return;             // skip if no snapshot
+
+    // Extract base64 payload (everything after “data:image/jpeg;base64,”)
+    const commaIdx   = camDataUrl.indexOf(',');
+    if (commaIdx < 0) return;            // invalid URL
+    const base64Data = camDataUrl.slice(commaIdx + 1);
+    const fileName   = `${index + 1}.jpg`; // issue numbers are 1-based
+
+    // Add that file into the zip, marking it as base64
+    zip.file(fileName, base64Data, { base64: true });
+  });
+
+  // Generate the .zip as a blob
+  return zip.generateAsync({ type: 'blob' });
+}
+
+/**
+ * 2) uploadSnapshotsZipToAzure()
+ *
+ *   Calls createSnapshotsZip(), then uploads the resulting Blob to
+ *   your Azure container using the same SAS token pattern as your XLSX/PDF.
+ */
+async function uploadSnapshotsZipToAzure() {
+  // 1) Build the zip blob
+  const zipBlob = await createSnapshotsZip();
+  // 2) Use the same base reportBaseName (e.g. “Annotator_report_2025-06-06_143205”)
+  const blobName = `${reportBaseName}.zip`;
+
+  // 3) Split your containerSasUrl into base + token
+  const [ baseUrl, token ] = containerSasUrl.split('?');
+  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+
+  // 4) PUT the zip blob
+  const resp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   'application/zip'
+    },
+    body: zipBlob
+  });
+  if (!resp.ok) {
+    throw new Error(`Zip upload failed: ${resp.status} ${resp.statusText}`);
+  }
+  console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
+}
 
   async function exportCustomSectionsToAzure() {
   // 0) Load your external section-texts JSON
