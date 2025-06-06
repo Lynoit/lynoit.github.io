@@ -70,13 +70,12 @@
       padding: 8px;
     }
     th {
-      background-color: #f5f5f5 !important;
+      background: #f5f5f5 !important;
     }
     .error {
       color: #d00;
       padding: 16px;
     }
-    /* CSS for the red badge icons */
     .issue-badge {
       display: flex;
       align-items: center;
@@ -96,7 +95,6 @@
       margin: 20px 0;
       border: 1px solid #aaa;
     }
-    /* Simple styling for the download buttons */
     .download-button {
       display: inline-block;
       margin-right: 12px;
@@ -125,8 +123,18 @@
     Ver 1.0
   </footer>
 
+  <!-- SheetJS -->
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- PDF.js -->
+  <script
+    src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js"
+    integrity="sha512-z+upQas8EspdFW3tzBsK5fDxGUn09v451GFPgfwruOY0NVZeJbQWcW5P0fbZHJNdGwOyM+e/LnYKQW30r1HYZA=="
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+
   <script>
     const ACCOUNT = 'annotationcsv';
     const CONTAINER = 'csv';
@@ -134,7 +142,6 @@
       'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
     const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
 
-    // Two separate arrays now:
     let issueCoords = [];
     let samplingCoords = [];
 
@@ -196,8 +203,7 @@
               lst.appendChild(li);
             });
           hdr.onclick = () => {
-            lst.style.display =
-              lst.style.display === 'block' ? 'none' : 'block';
+            lst.style.display = lst.style.display === 'block' ? 'none' : 'block';
           };
           sb.appendChild(hdr);
           sb.appendChild(lst);
@@ -206,8 +212,8 @@
 
     function loadFile(filename) {
       const content = document.getElementById('content');
-      content.innerHTML = ''; // clear out previous content
-      issueCoords = []; // reset collected coordinates
+      content.innerHTML = '';
+      issueCoords = [];
       samplingCoords = [];
 
       // 1) XLSX download button
@@ -218,7 +224,7 @@
       xlsxLink.setAttribute('download', filename);
       content.appendChild(xlsxLink);
 
-      // 2) PDF download button (same name but .pdf)
+      // 2) PDF download button
       const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
       const pdfLink = document.createElement('a');
       pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
@@ -227,14 +233,14 @@
       pdfLink.setAttribute('download', pdfFilename);
       content.appendChild(pdfLink);
 
-      // 3) Fetch and render sheets (separately parsing “Sampling”)
+      // 3) Fetch and render sheets
       fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
         .then((response) => response.arrayBuffer())
         .then((buffer) => {
           const data = new Uint8Array(buffer);
           const wb = XLSX.read(data, { type: 'array' });
 
-          // --- Parse “Sampling” sheet (if it exists) right away: ---
+          // Parse “Sampling” sheet (if exists)
           const samplingSheetName = wb.SheetNames.find(
             (name) => name.toLowerCase() === 'sampling'
           );
@@ -242,28 +248,19 @@
             parseSamplingSheet(wb.Sheets[samplingSheetName]);
           }
 
-          // --- Now render all non-“Sampling” sheets as HTML tables: ---
           let nonSamplingCount = 0;
           let mapInserted = false;
-
           wb.SheetNames.forEach((sheet) => {
-            // Skip any sheet named “Sampling” (case-insensitive)
             if (sheet.toLowerCase() === 'sampling') return;
 
-            // Convert this sheet to HTML and insert it
-            const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], {
-              id: sheet,
-            });
-            content.insertAdjacentHTML(
-              'beforeend',
-              `<h2>${sheet}</h2>${html}`
-            );
+            // Insert table HTML
+            const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
+            content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-            // Parse lat/lon from this sheet into issueCoords
+            // Parse issues
             parseIssues(sheet);
 
             nonSamplingCount++;
-            // As soon as two non-“Sampling” sheets are inserted, add the map placeholder
             if (nonSamplingCount === 2 && !mapInserted) {
               const mapDiv = document.createElement('div');
               mapDiv.id = 'issue-map';
@@ -277,7 +274,7 @@
           });
         })
         .then(() => {
-          // If fewer than two non-“Sampling” sheets existed, ensure a map placeholder exists
+          // Ensure map placeholder exists
           if (!document.getElementById('issue-map')) {
             const mapDiv = document.createElement('div');
             mapDiv.id = 'issue-map';
@@ -288,8 +285,6 @@
             content.appendChild(mapDiv);
           }
 
-          // Now decide whether to draw the map or show an error
-          // We plot the map even if issueCoords is empty, as long as samplingCoords has 1 point.
           if (issueCoords.length > 0 || samplingCoords.length > 0) {
             initMap();
           } else {
@@ -297,22 +292,21 @@
             if (placeholder) {
               const err = document.createElement('div');
               err.className = 'error';
-              err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
+              err.innerHTML =
+                `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
               placeholder.replaceWith(err);
             }
           }
+
+          // Fetch and render “Issue Snapshots” from PDF
+          const baseName = filename.replace(/\.xlsx$/i, '');
+          fetchAndRenderIssueSnapshots(baseName);
         })
         .catch((error) => {
           content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
         });
     }
 
-    /**
-     * parseIssues(sheetId)
-     *   - Finds the HTML table with id=sheetId,
-     *     looks for “lat” and “lon” columns,
-     *     and pushes into issueCoords.
-     */
     function parseIssues(sheetId) {
       const table = document.getElementById(sheetId);
       if (!table) return;
@@ -320,9 +314,7 @@
       if (rows.length < 2) return;
 
       const headerCells = Array.from(rows[0].querySelectorAll('th, td'));
-      const headers = headerCells.map((cell) =>
-        cell.textContent.trim().toLowerCase()
-      );
+      const headers = headerCells.map((cell) => cell.textContent.trim().toLowerCase());
 
       const latIdx = headers.findIndex((h) => h.includes('lat'));
       const lonIdx = headers.findIndex((h) => h.includes('lon'));
@@ -339,23 +331,15 @@
       });
     }
 
-    /**
-     * parseSamplingSheet(sheet)
-     *   - Uses XLSX.utils.sheet_to_json with header:1 to read the first row,
-     *     finds lat/lon columns, and pushes into samplingCoords.
-     */
     function parseSamplingSheet(sheet) {
-      // Convert entire sheet to a 2D array: first row = headers
       const raw = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      if (raw.length < 2) return; // need at least one data row
+      if (raw.length < 2) return;
 
-      // First row = headers
       const headers = raw[0].map((h) => String(h).trim().toLowerCase());
       const latIdx = headers.findIndex((h) => h.includes('lat'));
       const lonIdx = headers.findIndex((h) => h.includes('lon'));
       if (latIdx < 0 || lonIdx < 0) return;
 
-      // For each subsequent row, pull lat/lon
       for (let i = 1; i < raw.length; i++) {
         const row = raw[i];
         const lat = parseFloat(row[latIdx]);
@@ -366,19 +350,12 @@
       }
     }
 
-    /**
-     * initMap()
-     *   - Creates the Leaflet map,
-     *   - Plots red “issue” badges from issueCoords,
-     *   - Then plots blue circle markers from samplingCoords.
-     */
     function initMap() {
       const map = L.map('issue-map').setView([0, 0], 2);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; OpenStreetMap contributors',
       }).addTo(map);
 
-      // Combine all coords just to compute a bounds that covers everything
       const allPoints = [
         ...issueCoords.map((c) => [c.lat, c.lon]),
         ...samplingCoords.map((c) => [c.lat, c.lon]),
@@ -387,7 +364,6 @@
         map.fitBounds(allPoints);
       }
 
-      // 1) draw the “issue” badges (red)
       issueCoords.forEach((c) => {
         const icon = L.divIcon({
           className: 'issue-label',
@@ -398,17 +374,15 @@
         L.marker([c.lat, c.lon], { icon }).addTo(map);
       });
 
-      // 2) draw sampling points in blue
-samplingCoords.forEach((c) => {
-  L.circleMarker([c.lat, c.lon], {
-    radius: 3,        // smaller pixel radius
-    color: 'blue',
-    fillOpacity: 0.6,
-    weight: 1         // thinner outline if you like
-  }).addTo(map);
-});
+      samplingCoords.forEach((c) => {
+        L.circleMarker([c.lat, c.lon], {
+          radius: 3,
+          color: 'blue',
+          fillOpacity: 0.6,
+          weight: 1,
+        }).addTo(map);
+      });
 
-      // Fix Leaflet sizing bug if container was initially hidden
       map.whenReady(() => map.invalidateSize());
     }
 
@@ -417,6 +391,40 @@ samplingCoords.forEach((c) => {
         'sidebar'
       ).innerHTML = `<div class="error">${message}</div>`;
     }
-  </script>
-</body>
-</html>
+
+    // ───────── PDF.js Logic for “Issue Snapshots” ─────────
+
+    async function fetchAndRenderIssueSnapshots(filenameWithoutExtension) {
+      const pdfUrl = `${BASE_URL}/${filenameWithoutExtension}.pdf?${SAS_TOKEN}`;
+
+      let arrayBuffer;
+      try {
+        const resp = await fetch(pdfUrl);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        arrayBuffer = await resp.arrayBuffer();
+      } catch (err) {
+        console.error("Error fetching PDF:", err);
+        const warn = document.createElement("div");
+        warn.className = "error";
+        warn.textContent = `Could not fetch PDF: ${err.message}`;
+        document.getElementById("content").appendChild(warn);
+        return;
+      }
+
+      let pdf;
+      try {
+        pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      } catch (err) {
+        console.error("PDF.js parse error:", err);
+        const warn = document.createElement("div");
+        warn.className = "error";
+        warn.textContent = `PDF.js failed to parse the PDF: ${err.message}`;
+        document.getElementById("content").appendChild(warn);
+        return;
+      }
+
+      let foundTable = false;
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+        const pageText = text
