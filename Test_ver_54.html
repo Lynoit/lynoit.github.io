@@ -2130,64 +2130,85 @@ let sectionTexts = {};
     }
   }
 
-    /**
- * 1) createSnapshotsZip()
+/**
+ * createSnapshotsZip()
  *
- *   Iterates over logTable[]; for each entry that has a base64 JPEG, 
- *   inserts it into a JSZip instance under “<issue-number>.jpg.” 
- *   Returns a Blob of the completed .zip.
+ *   Go through each row in logTable. If row[12] is a valid data‐URL,
+ *   strip off the prefix, add the base64 payload to JSZip under "<n>.jpg",
+ *   and report how many you added. Returns a Promise<Blob>.
  */
 async function createSnapshotsZip() {
   const zip = new JSZip();
+  let totalRows     = logTable.length;
+  let imagesZipped  = 0;
 
-  // Iterate every row in logTable
+  console.log(`🔍 createSnapshotsZip: logTable has ${totalRows} rows.`);
+
   logTable.forEach((row, index) => {
     const camDataUrl = row[12];
-    if (!camDataUrl) return;             // skip if no snapshot
 
-    // Extract base64 payload (everything after “data:image/jpeg;base64,”)
+    if (!camDataUrl) {
+      // no snapshot at this row
+      return;
+    }
+    if (typeof camDataUrl !== 'string' || !camDataUrl.startsWith('data:image/')) {
+      console.warn(`⚠️ Row ${index} has an invalid camDataUrl:`, camDataUrl);
+      return;
+    }
+
+    // Everything after the comma is base64
     const commaIdx   = camDataUrl.indexOf(',');
-    if (commaIdx < 0) return;            // invalid URL
+    if (commaIdx < 0) {
+      console.warn(`⚠️ Row ${index} camDataUrl missing comma delimiter.`);
+      return;
+    }
     const base64Data = camDataUrl.slice(commaIdx + 1);
     const fileName   = `${index + 1}.jpg`; // issue numbers are 1-based
 
-    // Add that file into the zip, marking it as base64
     zip.file(fileName, base64Data, { base64: true });
+    imagesZipped++;
   });
 
-  // Generate the .zip as a blob
+  console.log(`✅ createSnapshotsZip: added ${imagesZipped} image(s) to the ZIP.`);
+
+  // If nothing was added, JSZip will still generate a zip, but it’s empty.
   return zip.generateAsync({ type: 'blob' });
 }
 
 /**
- * 2) uploadSnapshotsZipToAzure()
+ * uploadSnapshotsZipToAzure()
  *
- *   Calls createSnapshotsZip(), then uploads the resulting Blob to
- *   your Azure container using the same SAS token pattern as your XLSX/PDF.
+ *   Calls createSnapshotsZip(), then uploads the resulting zip Blob
+ *   to Azure under "<reportBaseName>.zip".
  */
 async function uploadSnapshotsZipToAzure() {
-  // 1) Build the zip blob
-  const zipBlob = await createSnapshotsZip();
-  // 2) Use the same base reportBaseName (e.g. “Annotator_report_2025-06-06_143205”)
-  const blobName = `${reportBaseName}.zip`;
+  try {
+    const zipBlob  = await createSnapshotsZip();
+    const blobName = `${reportBaseName}.zip`;
+    const [baseUrl, token] = containerSasUrl.split('?');
+    const uploadUrl = `${baseUrl}/${blobName}?${token}`;
 
-  // 3) Split your containerSasUrl into base + token
-  const [ baseUrl, token ] = containerSasUrl.split('?');
-  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+    // If the zip is completely empty, you can optionally skip the upload.
+    if (zipBlob.size === 0) {
+      console.warn(`⚠️ uploadSnapshotsZipToAzure: ZIP[${blobName}] is empty (size=0). Skipping upload.`);
+      return;
+    }
 
-  // 4) PUT the zip blob
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/zip'
-    },
-    body: zipBlob
-  });
-  if (!resp.ok) {
-    throw new Error(`Zip upload failed: ${resp.status} ${resp.statusText}`);
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/zip'
+      },
+      body: zipBlob
+    });
+    if (!resp.ok) {
+      throw new Error(`Zip upload failed: ${resp.status} ${resp.statusText}`);
+    }
+    console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
+  } catch (err) {
+    console.error('❌ uploadSnapshotsZipToAzure error:', err);
   }
-  console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
 }
 
   async function exportCustomSectionsToAzure() {
