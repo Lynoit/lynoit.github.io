@@ -212,6 +212,13 @@
   issueCoords = [];
   samplingCoords = [];
 
+  // This will hold our Issue‐table metadata and values
+  const issueTableInfo = {
+    sheetName: null,
+    headerNames: { col1: '', col2: '', col3: '' },
+    issueInfo: {}  // { [issueNo]: { col1, col2, col3, lat, lon } }
+  };
+
   // 1) XLSX download button
   const xlsxLink = document.createElement('a');
   xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
@@ -220,7 +227,7 @@
   xlsxLink.setAttribute('download', filename);
   content.appendChild(xlsxLink);
 
-  // 2) PDF download button (same base name, .pdf)
+  // 2) PDF download button
   const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
   const pdfLink = document.createElement('a');
   pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
@@ -229,14 +236,14 @@
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
-  // 3) Fetch XLSX and render sheets + map
+  // 3) Fetch the XLSX, render sheets, collect issue data
   fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
     .then((response) => response.arrayBuffer())
     .then((buffer) => {
       const data = new Uint8Array(buffer);
       const wb = XLSX.read(data, { type: 'array' });
 
-      // Parse "Sampling" sheet (if present)
+      // Parse “Sampling” if present
       const samplingSheetName = wb.SheetNames.find(
         (name) => name.toLowerCase() === 'sampling'
       );
@@ -244,31 +251,62 @@
         parseSamplingSheet(wb.Sheets[samplingSheetName]);
       }
 
-      // Render all non-"Sampling" sheets as HTML tables and collect issue coords
       let nonSamplingCount = 0;
       let mapInserted = false;
 
       wb.SheetNames.forEach((sheet) => {
         if (sheet.toLowerCase() === 'sampling') return;
 
-        // Convert sheet to HTML table
+        // Render the sheet as HTML
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
         content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-        // Ensure the newly inserted table's header gets the grey background
+        // Now extract issue data from the first sheet that has lat/lon
         const tableElem = document.getElementById(sheet);
         if (tableElem) {
-          const ths = tableElem.querySelectorAll('th');
-          ths.forEach((th) => {
-            th.style.backgroundColor = '#f5f5f5';
-          });
+          const rows = Array.from(tableElem.querySelectorAll('tr'));
+          if (rows.length > 1) {
+            const headerCells = Array.from(rows[0].querySelectorAll('th,td'));
+            const headers = headerCells.map((c) =>
+              c.textContent.trim().toLowerCase()
+            );
+            const latIdx = headers.findIndex((h) => h.includes('lat'));
+            const lonIdx = headers.findIndex((h) => h.includes('lon'));
+
+            if (latIdx >= 0 && lonIdx >= 0) {
+              // First lat/lon‐bearing sheet is our Issue table
+              if (!issueTableInfo.sheetName) {
+                issueTableInfo.sheetName = sheet;
+                issueTableInfo.headerNames.col1 = headerCells[0].textContent.trim();
+                issueTableInfo.headerNames.col2 = headerCells[1].textContent.trim();
+                // Column 13 = index 12 (if it exists)
+                issueTableInfo.headerNames.col3 =
+                  headerCells[12]?.textContent.trim() || '';
+              }
+
+              // Loop data rows to grab columns 1,2,13 + lat/lon
+              rows.slice(1).forEach((row) => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const issueNo = cells[0].textContent.trim();
+                const col1 = cells[0].textContent.trim();
+                const col2 = cells[1].textContent.trim();
+                const col3 = cells[12]?.textContent.trim() || '';
+                const lat = parseFloat(cells[latIdx].textContent.trim());
+                const lon = parseFloat(cells[lonIdx].textContent.trim());
+
+                // Collect for the big map
+                if (!isNaN(lat) && !isNaN(lon)) {
+                  issueCoords.push({ lat, lon });
+                }
+
+                // Store in our lookup
+                issueTableInfo.issueInfo[issueNo] = { col1, col2, col3, lat, lon };
+              });
+            }
+          }
         }
 
-        // Parse lat/lon from this sheet into issueCoords
-        parseIssues(sheet);
         nonSamplingCount++;
-
-        // As soon as two non-"Sampling" sheets are rendered, insert map placeholder
         if (nonSamplingCount === 2 && !mapInserted) {
           const mapDiv = document.createElement('div');
           mapDiv.id = 'issue-map';
@@ -282,7 +320,7 @@
       });
     })
     .then(() => {
-      // If fewer than two non-"Sampling" sheets existed, ensure a map placeholder
+      // Ensure a map placeholder if <2 sheets
       if (!document.getElementById('issue-map')) {
         const mapDiv = document.createElement('div');
         mapDiv.id = 'issue-map';
@@ -292,114 +330,131 @@
         mapDiv.style.border = '1px solid #aaa';
         content.appendChild(mapDiv);
       }
-
-      // Draw the map if there's at least one issue or sampling point
+      // Draw the main map
       if (issueCoords.length > 0 || samplingCoords.length > 0) {
         initMap();
       } else {
         const placeholder = document.getElementById('issue-map');
-        if (placeholder) {
-          const err = document.createElement('div');
-          err.className = 'error';
-          err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
-          placeholder.replaceWith(err);
-        }
+        const err = document.createElement('div');
+        err.className = 'error';
+        err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
+        placeholder.replaceWith(err);
       }
     })
     .then(() => {
-      // 4) Now that the map (or error) is in place, fetch & extract ZIP for "Issue snapshots"
+      // 4) Fetch & unzip images for the enhanced snapshot table
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
       return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`)
         .then((resp) => {
-          if (!resp.ok) {
-            return Promise.reject('ZIP not found');
-          }
+          if (!resp.ok) return Promise.reject('ZIP not found');
           return resp.arrayBuffer();
         })
         .then((buffer) => JSZip.loadAsync(buffer))
         .then((zip) => {
-          // Locate the map placeholder (or its error replacement)
           const mapDiv = document.getElementById('issue-map');
 
-          // Create heading for snapshots
+          // Build the enhanced Issue-snapshots table
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
-          // Create table and fit it to content
           const table = document.createElement('table');
           table.id = 'issue-snapshots';
-          table.style.width = 'auto';              // fit to content
-          table.style.marginBottom = '2em';        // same bottom margin as other tables
+          table.style.width = 'auto';               // fit to content
+          table.style.marginBottom = '2em';
           table.style.borderCollapse = 'collapse';
 
-          // Header row
+          // Header row: copy col1/2/13 names, then Map, then Snapshot
           const headerRow = document.createElement('tr');
-          const th1 = document.createElement('th');
-          th1.textContent = 'Issue #';
-          th1.style.backgroundColor = '#f5f5f5';
-          const th2 = document.createElement('th');
-          th2.textContent = 'Snapshot';
-          th2.style.backgroundColor = '#f5f5f5';
-          headerRow.appendChild(th1);
-          headerRow.appendChild(th2);
+          ['col1', 'col2', 'col3'].forEach((key) => {
+            const th = document.createElement('th');
+            th.textContent = issueTableInfo.headerNames[key];
+            th.style.backgroundColor = '#f5f5f5';
+            th.style.padding = '8px';
+            th.style.border = '1px solid #ccc';
+            headerRow.appendChild(th);
+          });
+          ['Location', 'Snapshot'].forEach((txt) => {
+            const th = document.createElement('th');
+            th.textContent = txt;
+            th.style.backgroundColor = '#f5f5f5';
+            th.style.padding = '8px';
+            th.style.border = '1px solid #ccc';
+            headerRow.appendChild(th);
+          });
           table.appendChild(headerRow);
 
+          // For each image in the ZIP, build a row
           zip.forEach((relativePath, zipEntry) => {
             if (zipEntry.dir) return;
             if (!/\.(jpe?g|png|gif)$/i.test(relativePath)) return;
 
-            // Derive issue number from file name (strip extension)
             const issueNo = relativePath.replace(/\.[^/.]+$/, '');
+            const info = issueTableInfo.issueInfo[issueNo];
+            if (!info) return;
 
-            // Load image as Blob, then create a row with <img>
+            const row = document.createElement('tr');
+            // Column 1,2,3 from the Issue table
+            [info.col1, info.col2, info.col3].forEach((val) => {
+              const td = document.createElement('td');
+              td.textContent = val;
+              td.style.padding = '8px';
+              td.style.border = '1px solid #ccc';
+              row.appendChild(td);
+            });
+
+            // Column 4: a mini‐map with a 100 m circle
+            const tdMap = document.createElement('td');
+            tdMap.style.padding = '8px';
+            tdMap.style.border = '1px solid #ccc';
+            const miniDiv = document.createElement('div');
+            miniDiv.id = `snapshot-map-${issueNo}`;
+            miniDiv.style.width = '150px';
+            miniDiv.style.height = '150px';
+            tdMap.appendChild(miniDiv);
+            row.appendChild(tdMap);
+
+            // Column 5: the snapshot image
+            const tdImg = document.createElement('td');
+            tdImg.style.padding = '8px';
+            tdImg.style.border = '1px solid #ccc';
             zipEntry.async('blob').then((blob) => {
               const imgURL = URL.createObjectURL(blob);
-              const row = document.createElement('tr');
-
-              const cell1 = document.createElement('td');
-              cell1.textContent = issueNo;
-              cell1.style.padding = '8px';
-              cell1.style.border = '1px solid #ccc';
-
-              const cell2 = document.createElement('td');
-              cell2.style.padding = '8px';
-              cell2.style.border = '1px solid #ccc';
               const img = document.createElement('img');
               img.src = imgURL;
               img.style.maxWidth = '200px';
               img.style.maxHeight = '200px';
-              cell2.appendChild(img);
+              tdImg.appendChild(img);
 
-              row.appendChild(cell1);
-              row.appendChild(cell2);
-              table.appendChild(row);
+              // Initialize the mini-Leaflet map
+              const miniMap = L.map(miniDiv, {
+                attributionControl: false,
+                zoomControl: false,
+              }).setView([info.lat, info.lon], 17);
+              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+              const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
+              miniMap.fitBounds(circle.getBounds());
+              miniMap.invalidateSize();
             });
+            row.appendChild(tdImg);
+
+            table.appendChild(row);
           });
 
-          // Insert the title and table immediately after the map (or its error replacement)
+          // Insert the table directly below the main map
           if (mapDiv) {
             mapDiv.insertAdjacentElement('afterend', title);
             title.insertAdjacentElement('afterend', table);
           } else {
-            // Fallback: append to content
             content.appendChild(title);
             content.appendChild(table);
           }
-        })
-        .catch((err) => {
-          console.warn('Could not load ZIP for snapshots:', err);
-          // (Optional) show a user-facing message if desired:
-          // const noimg = document.createElement('div');
-          // noimg.className = 'error';
-          // noimg.textContent = 'No issue snapshots found.';
-          // content.appendChild(noimg);
         });
     })
     .catch((error) => {
+      console.error('Error in loadFile:', error);
       content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
     });
 }
-
 
     /**
      * parseIssues(sheetId)
