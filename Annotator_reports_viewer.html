@@ -212,11 +212,11 @@
   issueCoords = [];
   samplingCoords = [];
 
-  // This will hold our Issue‐table metadata and values
+  // Will store per‐issue metadata (cols 1,2,13 + lat/lon + issueNo)
   const issueTableInfo = {
     sheetName: null,
     headerNames: { col1: '', col2: '', col3: '' },
-    issueInfo: {}  // { [issueNo]: { col1, col2, col3, lat, lon } }
+    issueInfo: {}  // issueNo → { issueNo, col1, col2, col3, lat, lon }
   };
 
   // 1) XLSX download button
@@ -236,71 +236,57 @@
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
-  // 3) Fetch the XLSX, render sheets, collect issue data
+  // 3) Fetch & parse the XLSX
   fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-    .then((response) => response.arrayBuffer())
-    .then((buffer) => {
+    .then(res => res.arrayBuffer())
+    .then(buffer => {
       const data = new Uint8Array(buffer);
       const wb = XLSX.read(data, { type: 'array' });
 
-      // Parse “Sampling” if present
-      const samplingSheetName = wb.SheetNames.find(
-        (name) => name.toLowerCase() === 'sampling'
-      );
-      if (samplingSheetName) {
-        parseSamplingSheet(wb.Sheets[samplingSheetName]);
-      }
+      // Parse “Sampling” sheet if present
+      const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+      if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
 
       let nonSamplingCount = 0;
       let mapInserted = false;
 
-      wb.SheetNames.forEach((sheet) => {
+      wb.SheetNames.forEach(sheet => {
         if (sheet.toLowerCase() === 'sampling') return;
 
-        // Render the sheet as HTML
+        // Render sheet as HTML
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
         content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-        // Now extract issue data from the first sheet that has lat/lon
-        const tableElem = document.getElementById(sheet);
-        if (tableElem) {
-          const rows = Array.from(tableElem.querySelectorAll('tr'));
+        // Extract issue data from the first lat/lon‐bearing sheet
+        if (!issueTableInfo.sheetName) {
+          const tbl = document.getElementById(sheet);
+          const rows = Array.from(tbl.querySelectorAll('tr'));
           if (rows.length > 1) {
-            const headerCells = Array.from(rows[0].querySelectorAll('th,td'));
-            const headers = headerCells.map((c) =>
-              c.textContent.trim().toLowerCase()
-            );
-            const latIdx = headers.findIndex((h) => h.includes('lat'));
-            const lonIdx = headers.findIndex((h) => h.includes('lon'));
-
+            const hdrs = Array.from(rows[0].querySelectorAll('th,td'))
+                              .map(c => c.textContent.trim().toLowerCase());
+            const latIdx = hdrs.findIndex(h => h.includes('lat'));
+            const lonIdx = hdrs.findIndex(h => h.includes('lon'));
             if (latIdx >= 0 && lonIdx >= 0) {
-              // First lat/lon‐bearing sheet is our Issue table
-              if (!issueTableInfo.sheetName) {
-                issueTableInfo.sheetName = sheet;
-                issueTableInfo.headerNames.col1 = headerCells[0].textContent.trim();
-                issueTableInfo.headerNames.col2 = headerCells[1].textContent.trim();
-                // Column 13 = index 12 (if it exists)
-                issueTableInfo.headerNames.col3 =
-                  headerCells[12]?.textContent.trim() || '';
-              }
+              // Identify this as the Issue table
+              issueTableInfo.sheetName = sheet;
+              const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
+              issueTableInfo.headerNames.col1 = rawHdrs[0].textContent.trim();
+              issueTableInfo.headerNames.col2 = rawHdrs[1].textContent.trim();
+              issueTableInfo.headerNames.col3 = rawHdrs[12]?.textContent.trim() || '';
 
-              // Loop data rows to grab columns 1,2,13 + lat/lon
-              rows.slice(1).forEach((row) => {
+              // Collect each row's info
+              rows.slice(1).forEach(row => {
                 const cells = Array.from(row.querySelectorAll('td'));
                 const issueNo = cells[0].textContent.trim();
-                const col1 = cells[0].textContent.trim();
+                const col1 = issueNo;
                 const col2 = cells[1].textContent.trim();
                 const col3 = cells[12]?.textContent.trim() || '';
                 const lat = parseFloat(cells[latIdx].textContent.trim());
                 const lon = parseFloat(cells[lonIdx].textContent.trim());
-
-                // Collect for the big map
                 if (!isNaN(lat) && !isNaN(lon)) {
-                  issueCoords.push({ lat, lon });
+                  issueCoords.push({ issueNo, lat, lon });
                 }
-
-                // Store in our lookup
-                issueTableInfo.issueInfo[issueNo] = { col1, col2, col3, lat, lon };
+                issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
               });
             }
           }
@@ -320,7 +306,7 @@
       });
     })
     .then(() => {
-      // Ensure a map placeholder if <2 sheets
+      // Ensure map placeholder if <2 sheets
       if (!document.getElementById('issue-map')) {
         const mapDiv = document.createElement('div');
         mapDiv.id = 'issue-map';
@@ -330,71 +316,65 @@
         mapDiv.style.border = '1px solid #aaa';
         content.appendChild(mapDiv);
       }
-      // Draw the main map
-      if (issueCoords.length > 0 || samplingCoords.length > 0) {
+      // Initialize main map
+      if (issueCoords.length || samplingCoords.length) {
         initMap();
       } else {
-        const placeholder = document.getElementById('issue-map');
+        const ph = document.getElementById('issue-map');
         const err = document.createElement('div');
         err.className = 'error';
         err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
-        placeholder.replaceWith(err);
+        ph.replaceWith(err);
       }
     })
     .then(() => {
-      // 4) Fetch & unzip images for the enhanced snapshot table
+      // 4) Fetch & unzip images & build enhanced snapshot table
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
       return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`)
-        .then((resp) => {
+        .then(resp => {
           if (!resp.ok) return Promise.reject('ZIP not found');
           return resp.arrayBuffer();
         })
-        .then((buffer) => JSZip.loadAsync(buffer))
-        .then((zip) => {
+        .then(buf => JSZip.loadAsync(buf))
+        .then(zip => {
           const mapDiv = document.getElementById('issue-map');
-
-          // Build the enhanced Issue-snapshots table
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
           const table = document.createElement('table');
           table.id = 'issue-snapshots';
-          table.style.width = 'auto';               // fit to content
+          table.style.width = 'auto';
           table.style.marginBottom = '2em';
           table.style.borderCollapse = 'collapse';
 
-          // Header row: copy col1/2/13 names, then Map, then Snapshot
-          const headerRow = document.createElement('tr');
-          ['col1', 'col2', 'col3'].forEach((key) => {
+          // Header: cols 1,2,13 + Location + Snapshot
+          const hdrRow = document.createElement('tr');
+          ['col1','col2','col3'].forEach(k => {
             const th = document.createElement('th');
-            th.textContent = issueTableInfo.headerNames[key];
+            th.textContent = issueTableInfo.headerNames[k];
             th.style.backgroundColor = '#f5f5f5';
             th.style.padding = '8px';
             th.style.border = '1px solid #ccc';
-            headerRow.appendChild(th);
+            hdrRow.appendChild(th);
           });
-          ['Location', 'Snapshot'].forEach((txt) => {
+          ['Location','Snapshot'].forEach(txt => {
             const th = document.createElement('th');
             th.textContent = txt;
             th.style.backgroundColor = '#f5f5f5';
             th.style.padding = '8px';
             th.style.border = '1px solid #ccc';
-            headerRow.appendChild(th);
+            hdrRow.appendChild(th);
           });
-          table.appendChild(headerRow);
+          table.appendChild(hdrRow);
 
-          // For each image in the ZIP, build a row
-          zip.forEach((relativePath, zipEntry) => {
-            if (zipEntry.dir) return;
-            if (!/\.(jpe?g|png|gif)$/i.test(relativePath)) return;
-
-            const issueNo = relativePath.replace(/\.[^/.]+$/, '');
+          zip.forEach((path, entry) => {
+            if (entry.dir || !/\.(jpe?g|png|gif)$/i.test(path)) return;
+            const issueNo = path.replace(/\.[^/.]+$/, '');
             const info = issueTableInfo.issueInfo[issueNo];
             if (!info) return;
 
             const row = document.createElement('tr');
-            // Column 1,2,3 from the Issue table
-            [info.col1, info.col2, info.col3].forEach((val) => {
+            [info.col1, info.col2, info.col3].forEach(val => {
               const td = document.createElement('td');
               td.textContent = val;
               td.style.padding = '8px';
@@ -402,7 +382,7 @@
               row.appendChild(td);
             });
 
-            // Column 4: a mini‐map with a 100 m circle
+            // Column 4: mini‐map with badge + 100m circle
             const tdMap = document.createElement('td');
             tdMap.style.padding = '8px';
             tdMap.style.border = '1px solid #ccc';
@@ -413,24 +393,35 @@
             tdMap.appendChild(miniDiv);
             row.appendChild(tdMap);
 
-            // Column 5: the snapshot image
+            // Column 5: image
             const tdImg = document.createElement('td');
             tdImg.style.padding = '8px';
             tdImg.style.border = '1px solid #ccc';
-            zipEntry.async('blob').then((blob) => {
-              const imgURL = URL.createObjectURL(blob);
+            entry.async('blob').then(blob => {
+              const url = URL.createObjectURL(blob);
               const img = document.createElement('img');
-              img.src = imgURL;
+              img.src = url;
               img.style.maxWidth = '200px';
               img.style.maxHeight = '200px';
               tdImg.appendChild(img);
 
-              // Initialize the mini-Leaflet map
+              // Now initialize the mini‐map
               const miniMap = L.map(miniDiv, {
                 attributionControl: false,
-                zoomControl: false,
+                zoomControl: false
               }).setView([info.lat, info.lon], 17);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+
+              // Add a badge marker with the correct issueNo
+              const badgeIcon = L.divIcon({
+                className: 'issue-label',
+                html: `<div class="issue-badge">${issueNo}</div>`,
+                iconSize: [24,24],
+                iconAnchor: [12,12]
+              });
+              L.marker([info.lat, info.lon], { icon: badgeIcon }).addTo(miniMap);
+
+              // Add the 100m circle
               const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
               miniMap.fitBounds(circle.getBounds());
               miniMap.invalidateSize();
@@ -440,7 +431,7 @@
             table.appendChild(row);
           });
 
-          // Insert the table directly below the main map
+          // Insert below the main map
           if (mapDiv) {
             mapDiv.insertAdjacentElement('afterend', title);
             title.insertAdjacentElement('afterend', table);
@@ -450,9 +441,9 @@
           }
         });
     })
-    .catch((error) => {
-      console.error('Error in loadFile:', error);
-      content.innerHTML += `<div class="error">Failed to load ${filename}: ${error}</div>`;
+    .catch(err => {
+      console.error(err);
+      content.innerHTML += `<div class="error">Failed to load ${filename}: ${err}</div>`;
     });
 }
 
