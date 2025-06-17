@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Object Detection and Measurement</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    video, canvas { position: absolute; top: 0; left: 0; }
+    #controls {
+      position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 10px; border-radius: 5px;
+      font-family: Arial, sans-serif; font-size: 14px;
+    }
+    #controls label { margin-right: 10px; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted></video>
+  <canvas id="canvas"></canvas>
+  <div id="controls">
+    <label>Reference Width (cm): <input id="refWidth" type="number" value="15"></label>
+    <label>Reference Distance (cm): <input id="refDist" type="number" value="50"></label>
+    <button id="calibrate">Calibrate</button>
+  </div>
+  <script>
+    let video = document.getElementById('video');
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let model;
+    let focalLength = null;
+    let refWidth = null;
+    let pxWidthRef = null;
+
+    async function setupCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => {
+          video.play();
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          resolve();
+        };
+      });
+    }
+
+    async function loadModel() {
+      model = await cocoSsd.load();
+    }
+
+    async function calibrate() {
+      const preds = await model.detect(video);
+      if (preds.length > 0) {
+        const p = preds[0];
+        pxWidthRef = p.bbox[2];
+        refWidth = parseFloat(document.getElementById('refWidth').value);
+        const refDist = parseFloat(document.getElementById('refDist').value);
+        focalLength = (pxWidthRef * refDist) / refWidth;
+        alert('Calibrated! Focal length: ' + focalLength.toFixed(2));
+      } else {
+        alert('No object detected. Please hold reference object clearly in view.');
+      }
+    }
+
+    async function detect() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const preds = await model.detect(video);
+      preds.forEach(pred => {
+        const [x, y, w, h] = pred.bbox;
+        // Draw bounding box
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, w, h);
+        // Draw label
+        ctx.font = '18px Arial';
+        ctx.fillStyle = 'red';
+        ctx.fillText(pred.class + ' ' + (pred.score*100).toFixed(1) + '%', x, y > 20 ? y-5 : y+20);
+
+        if (focalLength && refWidth && pxWidthRef) {
+          const dist = (refWidth * focalLength) / w; // distance in cm
+          const realW = (w * dist) / focalLength;
+          const realH = (h * dist) / focalLength;
+          // Draw measurements
+          ctx.fillStyle = 'yellow';
+          const txt = 
+            `W: ${realW.toFixed(1)}cm, H: ${realH.toFixed(1)}cm, D: ${dist.toFixed(1)}cm`;
+          ctx.fillText(txt, x, y + h + 20);
+        }
+      });
+      requestAnimationFrame(detect);
+    }
+
+    document.getElementById('calibrate').addEventListener('click', calibrate);
+
+    async function main() {
+      await setupCamera();
+      await loadModel();
+      detect();
+    }
+
+    main();
+  </script>
+</body>
+</html>
