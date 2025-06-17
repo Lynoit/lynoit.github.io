@@ -3,41 +3,65 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Object Detection and Measurement</title>
+  <title>Credit Card Auto-Calibration & Measurement</title>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
   <style>
-    body { margin: 0; overflow: hidden; }
+    body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
     video, canvas { position: absolute; top: 0; left: 0; }
     #controls {
-      position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.8); padding: 10px; border-radius: 5px;
-      font-family: Arial, sans-serif; font-size: 14px;
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 15px; border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      max-width: 320px;
     }
-    #controls label { margin-right: 10px; }
+    #controls h2 { margin: 0 0 10px; font-size: 16px; }
+    #controls p { margin: 5px 0; font-size: 14px; }
+    #controls label { display: block; margin: 8px 0; font-size: 14px; }
+    #controls input { width: 80px; }
   </style>
 </head>
 <body>
   <video id="video" autoplay muted playsinline></video>
   <canvas id="canvas"></canvas>
   <div id="controls">
-    <label>Reference Width (cm): <input id="refWidth" type="number" value="15"></label>
-    <label>Reference Distance (cm): <input id="refDist" type="number" value="50"></label>
-    <button id="calibrate">Calibrate</button>
+    <h2>Auto-Calibration & Measurement</h2>
+    <p><strong>Step:</strong> Hold a credit card (8.56cm×5.398cm) in view until calibration completes.</p>
+    <label>Approx. Distance (cm): <input id="refDist" type="number" value="50" step="0.1"></label>
+    <p id="calibStatus" style="margin-top:8px; color:blue;">Waiting for calibration...</p>
+    <hr/>
+    <p><strong>After calibration:</strong> Bounding boxes show real W×H and distance.</p>
   </div>
   <script>
-    let video = document.getElementById('video');
-    let canvas = document.getElementById('canvas');
-    let ctx = canvas.getContext('2d');
+    const CARD_WIDTH_CM = 8.56;
+    const CARD_HEIGHT_CM = 5.398;
+    const CALIB_FRAMES = 30;
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const calibStatus = document.getElementById('calibStatus');
+    const refDistInput = document.getElementById('refDist');
+
     let model;
     let focalLength = null;
-    let refWidth = null;
-    let pxWidthRef = null;
+    let refDist = parseFloat(refDistInput.value);
+    let calibCount = 0;
+    let sumPx = 0;
+
+    refDistInput.addEventListener('input', () => { refDist = parseFloat(refDistInput.value); resetCalibration(); });
+
+    function resetCalibration() {
+      focalLength = null;
+      calibCount = 0;
+      sumPx = 0;
+      calibStatus.style.color = 'blue';
+      calibStatus.textContent = 'Waiting for calibration...';
+    }
 
     async function setupCamera() {
-      // Request the environment-facing (primary/back) camera when available
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: { ideal: "environment" } }
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
       video.srcObject = stream;
       return new Promise(resolve => {
         video.onloadedmetadata = () => {
@@ -53,54 +77,48 @@
       model = await cocoSsd.load();
     }
 
-    async function calibrate() {
-      const preds = await model.detect(video);
-      if (preds.length > 0) {
-        const p = preds[0];
-        pxWidthRef = p.bbox[2];
-        refWidth = parseFloat(document.getElementById('refWidth').value);
-        const refDist = parseFloat(document.getElementById('refDist').value);
-        focalLength = (pxWidthRef * refDist) / refWidth;
-        alert('Calibrated! Focal length: ' + focalLength.toFixed(2));
-      } else {
-        alert('No object detected. Please hold reference object clearly in view.');
-      }
-    }
-
     async function detect() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const preds = await model.detect(video);
-      preds.forEach(pred => {
-        const [x, y, w, h] = pred.bbox;
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x, y, w, h);
-        ctx.font = '18px Arial';
-        ctx.fillStyle = 'red';
-        ctx.fillText(pred.class + ' ' + (pred.score*100).toFixed(1) + '%', x, y > 20 ? y-5 : y+20);
-
-        if (focalLength && refWidth && pxWidthRef) {
-          const dist = (refWidth * focalLength) / w;
-          const realW = (w * dist) / focalLength;
-          const realH = (h * dist) / focalLength;
-          ctx.fillStyle = 'yellow';
-          const txt = 
-            `W: ${realW.toFixed(1)}cm, H: ${realH.toFixed(1)}cm, D: ${dist.toFixed(1)}cm`;
-          ctx.fillText(txt, x, y + h + 20);
+      if (model) {
+        const preds = await model.detect(video);
+        // Calibration phase
+        if (focalLength === null && preds.length > 0 && refDist > 0) {
+          const largest = preds.reduce((a,b) => (b.bbox[2] > a.bbox[2] ? b : a));
+          sumPx += largest.bbox[2];
+          calibCount++;
+          calibStatus.textContent = `Calibrating... (${calibCount}/${CALIB_FRAMES})`;
+          if (calibCount >= CALIB_FRAMES) {
+            const avgPx = sumPx / CALIB_FRAMES;
+            focalLength = (avgPx * refDist) / CARD_WIDTH_CM;
+            calibStatus.style.color = 'green';
+            calibStatus.textContent = `Calibrated: f = ${focalLength.toFixed(1)} px·cm`;
+          }
         }
-      });
+
+        preds.forEach(pred => {
+          const [x, y, w, h] = pred.bbox;
+          ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
+          ctx.strokeRect(x, y, w, h);
+          ctx.font = '16px Arial'; ctx.fillStyle = 'red';
+          ctx.fillText(`${pred.class} ${(pred.score*100).toFixed(0)}%`, x, y - 5);
+
+          if (focalLength !== null) {
+            const dist = (CARD_WIDTH_CM * focalLength) / w;
+            const realW = (w * dist) / focalLength;
+            const realH = (h * dist) / focalLength;
+            ctx.fillStyle = 'yellow';
+            ctx.fillText(`W:${realW.toFixed(1)}cm H:${realH.toFixed(1)}cm D:${dist.toFixed(1)}cm`, x, y + h + 18);
+          }
+        });
+      }
       requestAnimationFrame(detect);
     }
 
-    document.getElementById('calibrate').addEventListener('click', calibrate);
-
-    async function main() {
+    (async () => {
       await setupCamera();
       await loadModel();
       detect();
-    }
-
-    main();
+    })();
   </script>
 </body>
 </html>
