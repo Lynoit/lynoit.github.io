@@ -16,13 +16,6 @@
       box-shadow: 0 2px 6px rgba(0,0,0,0.2);
       max-width: 320px;
     }
-    #stats {
-      position: absolute; top: 10px; right: 10px;
-      background: rgba(0,0,0,0.5); color: white;
-      padding: 10px; border-radius: 8px;
-      font-size: 14px; line-height: 1.4em;
-      max-width: 200px;
-    }
     #controls h2 { margin: 0 0 10px; font-size: 16px; }
     #controls p { margin: 5px 0; font-size: 14px; }
     #controls label { display: block; margin: 8px 0; font-size: 14px; }
@@ -34,13 +27,15 @@
   <canvas id="canvas"></canvas>
   <div id="controls">
     <h2>Auto-Calibration & Measurement</h2>
-    <p><strong>Step:</strong> Hold a credit card (8.56cm×5.398cm) in view until calibration completes.</p>
-    <label>Approx. Distance (cm): <input id="refDist" type="number" value="15" step="0.1"></label>
+    <p><strong>Step:</strong> Hold a credit card (8.56cm×5.398cm) in view 10cm away until calibration completes.</p>
+    <label>Approx. Distance (cm): <input id="refDist" type="number" value="10" step="0.1"></label>
     <p id="calibStatus" style="margin-top:8px; color:blue;">Waiting for calibration...</p>
+    <hr/>
+    <p><strong>After calibration:</strong> Bounding boxes show real W×H and distance.</p>
   </div>
-  <div id="stats" style="display:none;"></div>
   <script>
     const CARD_WIDTH_CM = 8.56;
+    const CARD_HEIGHT_CM = 5.398;
     const CALIB_FRAMES = 30;
 
     const video = document.getElementById('video');
@@ -49,16 +44,12 @@
     const calibStatus = document.getElementById('calibStatus');
     const refDistInput = document.getElementById('refDist');
     const controls = document.getElementById('controls');
-    const statsDiv = document.getElementById('stats');
 
     let model;
     let focalLength = null;
     let refDist = parseFloat(refDistInput.value);
     let calibCount = 0;
     let sumPx = 0;
-
-    // Stats storage: { [className]: { sumW: number, sumH: number, sumD: number, count: number } }
-    const stats = {};
 
     refDistInput.addEventListener('input', () => { refDist = parseFloat(refDistInput.value); resetCalibration(); });
 
@@ -69,8 +60,6 @@
       calibStatus.style.color = 'blue';
       calibStatus.textContent = 'Waiting for calibration...';
       if (!document.body.contains(controls)) document.body.appendChild(controls);
-      statsDiv.style.display = 'none';
-      Object.keys(stats).forEach(k => delete stats[k]);
     }
 
     async function setupCamera() {
@@ -90,26 +79,6 @@
       model = await cocoSsd.load();
     }
 
-    function updateStats(className, w, h, d) {
-      if (!stats[className]) stats[className] = { sumW: 0, sumH: 0, sumD: 0, count: 0 };
-      stats[className].sumW += w;
-      stats[className].sumH += h;
-      stats[className].sumD += d;
-      stats[className].count += 1;
-    }
-
-    function renderStats() {
-      let html = '<strong>Mean Measurements:</strong><br/>';
-      for (const cls in stats) {
-        const s = stats[cls];
-        const meanW = s.sumW / s.count;
-        const meanH = s.sumH / s.count;
-        const meanD = s.sumD / s.count;
-        html += `${cls}: W=${meanW.toFixed(1)}cm<br/>H=${meanH.toFixed(1)}cm<br/>D=${meanD.toFixed(1)}cm<br/><br/>`;
-      }
-      statsDiv.innerHTML = html;
-    }
-
     async function detect() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (model) {
@@ -125,27 +94,25 @@
             focalLength = (avgPx * refDist) / CARD_WIDTH_CM;
             calibStatus.style.color = 'green';
             calibStatus.textContent = `Calibrated: f = ${focalLength.toFixed(1)} px·cm`;
+            // remove calibration UI
             controls.remove();
-            statsDiv.style.display = 'block';
           }
         }
 
-        if (focalLength !== null) {
-          preds.forEach(pred => {
-            const [x, y, w, h] = pred.bbox;
-            const dist = (CARD_WIDTH_CM * focalLength) / w;
-            const realW = (w * dist) / focalLength;
-            const realH = (h * dist) / focalLength;
-            updateStats(pred.class, realW, realH, dist);
-          });
-          renderStats();
-        }
-
-        // Draw bounding boxes always
         preds.forEach(pred => {
           const [x, y, w, h] = pred.bbox;
           ctx.strokeStyle = 'red'; ctx.lineWidth = 2;
           ctx.strokeRect(x, y, w, h);
+          ctx.font = '16px Arial'; ctx.fillStyle = 'red';
+          ctx.fillText(`${pred.class} ${(pred.score*100).toFixed(0)}%`, x, y - 5);
+
+          if (focalLength !== null) {
+            const dist = (CARD_WIDTH_CM * focalLength) / w;
+            const realW = (w * dist) / focalLength;
+            const realH = (h * dist) / focalLength;
+            ctx.fillStyle = 'yellow';
+            ctx.fillText(`W:${realW.toFixed(1)}cm H:${realH.toFixed(1)}cm D:${dist.toFixed(1)}cm`, x, y + h + 18);
+          }
         });
       }
       requestAnimationFrame(detect);
