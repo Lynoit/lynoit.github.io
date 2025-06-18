@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Road Features Map</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-sA+e2YmG+rqP66cKFxM5fega8oc9V+qF+DnmojX0CGs="
+    crossorigin=""
+  />
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { width: 100%; height: 90%; }
+    #controls {
+      padding: 10px;
+      background: #fff;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    #controls label { margin-right: 15px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label><input type="checkbox" id="roundabout" /> Roundabouts</label>
+    <label><input type="checkbox" id="stop_sign" /> Stop Signs</label>
+    <label><input type="checkbox" id="red_light" /> Red Lights</label>
+    <label><input type="checkbox" id="intersection" /> Intersections/Junctions</label>
+    <label>
+      Range (meters):
+      <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" />
+    </label>
+    <button id="searchBtn">Search</button>
+  </div>
+  <div id="map"></div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-o9N1j7kLkD4f7cHVTpGfDXF5hYK31MbMkYbFj6lY0Xg="
+    crossorigin=""
+  ></script>
+  <script>
+    // Initialize map
+    const map = L.map('map');
+    const layerGroup = L.layerGroup().addTo(map);
+
+    // Add OSM tile layer
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Get user location or default
+    map.locate({setView: true, maxZoom: 16});
+    map.on('locationerror', () => {
+      map.setView([0, 0], 2);
+    });
+
+    document.getElementById('searchBtn').addEventListener('click', () => {
+      layerGroup.clearLayers();
+
+      const latlng = map.getCenter();
+      const lat = latlng.lat;
+      const lon = latlng.lng;
+      const radius = parseInt(document.getElementById('range').value, 10) || 1000;
+
+      // Build Overpass QL filters
+      const queries = [];
+      if (document.getElementById('roundabout').checked) {
+        queries.push(`node["junction"="roundabout"](around:${radius},${lat},${lon});`);
+      }
+      if (document.getElementById('stop_sign').checked) {
+        queries.push(`node["highway"="stop"](around:${radius},${lat},${lon});`);
+      }
+      if (document.getElementById('red_light').checked) {
+        queries.push(`node["highway"="traffic_signals"](around:${radius},${lat},${lon});`);
+      }
+      if (document.getElementById('intersection').checked) {
+        queries.push(`node["junction"="intersection"](around:${radius},${lat},${lon});`);
+      }
+
+      if (queries.length === 0) {
+        alert('Please select at least one road feature to search for.');
+        return;
+      }
+
+      const overpassQuery = `[out:json];(${queries.join('')});out center;`;
+
+      // Fetch data from Overpass API
+      fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: overpassQuery,
+      })
+        .then(response => response.json())
+        .then(data => {
+          data.elements.forEach(el => {
+            const featureType = el.tags.junction === 'roundabout' ? 'Roundabout'
+                              : el.tags.highway === 'stop' ? 'Stop Sign'
+                              : el.tags.highway === 'traffic_signals' ? 'Red Light'
+                              : el.tags.junction === 'intersection' ? 'Intersection' : 'Unknown';
+            const coords = el.type === 'node'
+              ? [el.lat, el.lon]
+              : [el.center.lat, el.center.lon];
+            L.marker(coords)
+             .bindPopup(featureType)
+             .addTo(layerGroup);
+          });
+        })
+        .catch(err => console.error(err));
+    });
+  </script>
+</body>
+</html>
