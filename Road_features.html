@@ -52,14 +52,21 @@
     // Haversine formula to compute distance in meters
     function distanceMeters([lat1, lon1], [lat2, lon2]) {
       const toRad = x => x * Math.PI / 180;
-      const R = 6371000; // Earth radius in m
+      const R = 6371000;
       const dLat = toRad(lat2 - lat1);
       const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // Perform Overpass search for selected features around given center
+    // Update map view: center on pos and set zoom to show range
+    function updateView(latlng) {
+      const range = parseInt(document.getElementById('range').value, 10) || 1000;
+      const circle = L.circle(latlng, { radius: range });
+      map.fitBounds(circle.getBounds());
+    }
+
+    // Perform Overpass search
     function performSearch(center) {
       featuresLayer.clearLayers();
       const [lat, lon] = [center.lat, center.lng];
@@ -103,12 +110,10 @@
       .catch(err => console.error('Overpass error:', err));
     }
 
-    // Search button handler
+    // Initial and manual search
     document.getElementById('searchBtn').addEventListener('click', () => {
       performSearch(map.getCenter());
     });
-
-    // Auto-search when checkbox is checked
     ['roundabout','stop_sign','red_light','intersection'].forEach(id => {
       document.getElementById(id).addEventListener('change', e => {
         if (e.target.checked) performSearch(map.getCenter());
@@ -120,16 +125,19 @@
       navigator.geolocation.watchPosition(position => {
         const latlng = [position.coords.latitude, position.coords.longitude];
 
-        // Center map on first fix
+        // Update view to always center and scale
+        updateView(latlng);
+
+        // Update path
         if (!currentMarker) {
-          map.setView(latlng, 16);
+          pathCoords.push(latlng);
+          pathLine.setLatLngs(pathCoords);
+        } else {
+          pathCoords.push(latlng);
+          pathLine.setLatLngs(pathCoords);
         }
 
-        // Update path polyline
-        pathCoords.push(latlng);
-        pathLine.setLatLngs(pathCoords);
-
-        // Update current position marker
+        // Update current marker
         if (currentMarker) {
           currentMarker.setLatLng(latlng);
         } else {
@@ -138,14 +146,11 @@
             .bindTooltip('Current Position', { permanent: true, direction: 'right' });
         }
 
-        // Initial or movement-based auto-search
+        // Auto-search initial or on >100m move
         if (!lastSearchPos) {
           performSearch({ lat: latlng[0], lng: latlng[1] });
-        } else {
-          const dist = distanceMeters(lastSearchPos, latlng);
-          if (dist > 100) {
-            performSearch({ lat: latlng[0], lng: latlng[1] });
-          }
+        } else if (distanceMeters(lastSearchPos, latlng) > 100) {
+          performSearch({ lat: latlng[0], lng: latlng[1] });
         }
       }, err => {
         console.error('Geolocation error:', err);
