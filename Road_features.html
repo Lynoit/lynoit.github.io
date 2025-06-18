@@ -35,9 +35,15 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Initialize map
+    // Initialize map and layer groups
     const map = L.map('map');
-    const layerGroup = L.layerGroup().addTo(map);
+    const featuresLayer = L.layerGroup().addTo(map);
+    const traceLayer = L.layerGroup().addTo(map);
+
+    // Track user's path
+    let pathCoords = [];
+    let pathLine = L.polyline(pathCoords, { weight: 4 }).addTo(traceLayer);
+    let currentMarker = null;
 
     // Add OSM tile layer
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -45,19 +51,47 @@
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Get user location or default
-    map.locate({setView: true, maxZoom: 16});
-    map.on('locationerror', () => {
+    // Set up geolocation tracking
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(position => {
+        const { latitude, longitude } = position.coords;
+        const latlng = [latitude, longitude];
+
+        // Center map on first fix
+        if (!currentMarker) {
+          map.setView(latlng, 16);
+        }
+
+        // Add to path and update polyline
+        pathCoords.push(latlng);
+        pathLine.setLatLngs(pathCoords);
+
+        // Update current position marker
+        if (currentMarker) {
+          currentMarker.setLatLng(latlng);
+        } else {
+          currentMarker = L.marker(latlng, { title: 'Current Position' })
+            .addTo(traceLayer)
+            .bindTooltip('Current Position', { permanent: true, direction: 'right' });
+        }
+      }, err => {
+        console.error('Geolocation error:', err);
+        map.setView([0, 0], 2);
+      }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+    } else {
+      console.warn('Geolocation not supported');
       map.setView([0, 0], 2);
-    });
+    }
 
+    // Search button handler
     document.getElementById('searchBtn').addEventListener('click', () => {
-      layerGroup.clearLayers();
+      featuresLayer.clearLayers();
 
-      const {lat, lng: lon} = map.getCenter();
+      const center = map.getCenter();
+      const lat = center.lat;
+      const lon = center.lng;
       const radius = parseInt(document.getElementById('range').value, 10) || 1000;
 
-      // Build Overpass QL filters: include both nodes and ways for roundabouts and intersections
       const queries = [];
       if (document.getElementById('roundabout').checked) {
         queries.push(`node["junction"="roundabout"](around:${radius},${lat},${lon});`);
@@ -80,27 +114,25 @@
       }
 
       const overpassQuery = `[out:json][timeout:25];(${queries.join('')});out center;`;
-
-      // Fetch data from Overpass API
       fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: overpassQuery,
       })
-        .then(response => response.json())
-        .then(data => {
-          data.elements.forEach(el => {
-            const featureType = el.tags.junction === 'roundabout' ? 'Roundabout'
-                              : el.tags.highway === 'stop' ? 'Stop Sign'
-                              : el.tags.highway === 'traffic_signals' ? 'Red Light'
-                              : el.tags.junction === 'intersection' ? 'Intersection' : 'Unknown';
-            const coords = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-            L.marker(coords, { title: featureType })
-             .addTo(layerGroup)
-             .bindTooltip(featureType, { permanent: true, direction: 'right' });
-          });
-        })
-        .catch(err => console.error('Overpass error:', err));
+      .then(res => res.json())
+      .then(data => {
+        data.elements.forEach(el => {
+          const featureType = el.tags.junction === 'roundabout' ? 'Roundabout'
+                            : el.tags.highway === 'stop' ? 'Stop Sign'
+                            : el.tags.highway === 'traffic_signals' ? 'Red Light'
+                            : el.tags.junction === 'intersection' ? 'Intersection' : 'Unknown';
+          const coords = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
+          L.marker(coords, { title: featureType })
+           .addTo(featuresLayer)
+           .bindTooltip(featureType, { permanent: true, direction: 'right' });
+        });
+      })
+      .catch(err => console.error('Overpass error:', err));
     });
   </script>
 </body>
