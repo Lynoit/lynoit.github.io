@@ -52,6 +52,20 @@
     <tbody id="places-table"></tbody>
   </table>
 
+  <h2>Cities within 10 000 m</h2>
+<table id="cities-table">
+  <thead>
+    <tr>
+      <th>City Name</th>
+      <th>Distance (m)</th>
+      <th>Population</th>
+      <th>Top Attractions</th>
+      <th>Top Restaurants</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
     // --- Configuration ---
@@ -307,6 +321,84 @@
         return [];
       }
     }
+
+//  ——— fetch cities (place=city or town) within 10 km ———
+async function getNearbyCities() {
+  const [lat, lon] = userPos;
+  // Overpass: nodes of type city or town
+  const q = `[out:json][timeout:8];
+    node(around:10000,${lat},${lon})[place~"city|town"];
+    out body;`
+    .replace(/\s+/g,' ');
+  const data = await (await fetch(qUrl(), { method:'POST', body:q })).json();
+  
+  return data.elements
+    .map(el => {
+      return {
+        name: el.tags.name || 'Unknown',
+        lat: el.lat,
+        lng: el.lon,
+        population: el.tags.population || 'N/A'
+      };
+    })
+    // compute distance for each
+    .map(c => ({ ...c, distance: Math.round(distanceMeters(userPos, [c.lat, c.lng])) }))
+    .sort((a,b) => a.distance - b.distance);
+}
+
+//  ——— generic “top N POIs around a coordinate” ———
+async function getTopPOIs(lat, lng, key, value, limit=3) {
+  const q = `[out:json][timeout:8];
+    node(around:1000,${lat},${lng})[${key}=${value}];
+    out body ${limit};`
+    .replace(/\s+/g,' ');
+  const els = (await (await fetch(qUrl(), { method:'POST', body:q })).json()).elements || [];
+  return els.map(e => e.tags.name || value).slice(0, limit);
+}
+
+//  ——— render the cities table ———
+async function renderCities() {
+  const cities = await getNearbyCities();
+  const tbody = document.querySelector('#cities-table tbody');
+  tbody.innerHTML = '';
+  for (let city of cities) {
+    // fetch top 3 attractions & restaurants in parallel
+    const [attractions, restaurants] = await Promise.all([
+      getTopPOIs(city.lat, city.lng, 'tourism', 'attraction'),
+      getTopPOIs(city.lat, city.lng, 'amenity', 'restaurant')
+    ]);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${city.name}</td>
+      <td>${city.distance}</td>
+      <td>${city.population}</td>
+      <td>${attractions.join(', ') || '–'}</td>
+      <td>${restaurants.join(', ') || '–'}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+//  ——— small helper to keep your Overpass URL DRY ———
+function qUrl() {
+  return 'https://overpass-api.de/api/interpreter';
+}
+
+//  ——— kick it off right after the map is ready ———
+window.onload = () => {
+  if (!navigator.geolocation) {
+    alert('Geolocation not supported');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(pos => {
+    initMap(pos);
+    // once map/userPos is set up, draw the cities table
+    renderCities();
+  }, e => {
+    alert('Location error: ' + e.message);
+  });
+};
+    
   </script>
 </body>
 </html>
