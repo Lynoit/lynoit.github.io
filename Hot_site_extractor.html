@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Nearby Places Explorer (With Upcoming Events from Open-Event API)</title>
+  <title>Nearby Places Explorer (With Upcoming Events + Cities)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { margin:0; font-family:Arial,sans-serif }
@@ -38,18 +38,35 @@
 </head>
 <body>
   <div id="map"></div>
+
+  <!-- Existing Places Table -->
   <table>
     <thead>
       <tr>
         <th>Radius</th>
-        <th>Most Reviewed<br><small>1–10 (OSM tags)</small></th>
-        <th>Most Visited<br><small>1–10 (Wiki pageviews)</small></th>
-        <th>Most Linked<br><small>1–10 (Wiki links)</small></th>
-        <th>Tourism<br><small>1–10 (OSM tourism)</small></th>
-        <th>Upcoming Events<br><small>1–10 (Open-Event API)</small></th>
+        <th>Most Reviewed<br/><small>1–10 (OSM tags)</small></th>
+        <th>Most Visited<br/><small>1–10 (Wiki pageviews)</small></th>
+        <th>Most Linked<br/><small>1–10 (Wiki links)</small></th>
+        <th>Tourism<br/><small>1–10 (OSM tourism)</small></th>
+        <th>Upcoming Events<br/><small>1–10 (Open-Event API)</small></th>
       </tr>
     </thead>
     <tbody id="places-table"></tbody>
+  </table>
+
+  <!-- New Cities Table -->
+  <h2>Nearby Cities (within 10,000 m)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>City</th>
+        <th>Distance</th>
+        <th>Population</th>
+        <th>Top Attractions</th>
+        <th>Top Restaurants</th>
+      </tr>
+    </thead>
+    <tbody id="cities-table"></tbody>
   </table>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -59,6 +76,7 @@
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
     const EVENTYAY_TOKEN = 'YOUR_EVENTYAY_TOKEN';  // ← replace with your JWT
+    const YELP_API_KEY    = 'YOUR_YELP_API_KEY';  // ← replace with your Yelp/Fusion API key
 
     // --- Utilities ---
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
@@ -84,8 +102,7 @@
     // --- Initialization ---
     window.onload = () => {
       if (!navigator.geolocation) {
-        alert('Geolocation not supported');
-        return;
+        alert('Geolocation not supported'); return;
       }
       navigator.geolocation.getCurrentPosition(initMap, e => {
         alert('Location error: ' + e.message);
@@ -113,8 +130,7 @@
     function onPosUpdate(pos) {
       const newPos = [pos.coords.latitude, pos.coords.longitude];
       if (distanceMeters(userPos, newPos) > 50) {
-        userPos = newPos;
-        drawEverything();
+        userPos = newPos; drawEverything();
       }
     }
 
@@ -137,8 +153,7 @@
           {
             icon: L.divIcon({
               className: 'radius-label',
-              html: `${r.toLocaleString()} m`,
-              iconAnchor: ['50%','100%']
+              html: `${r.toLocaleString()} m`, iconAnchor: ['50%','100%']
             }),
             interactive: false
           }
@@ -146,9 +161,10 @@
       });
 
       await processAllRadii();
+      await processCities();
     }
 
-    // --- Main Loop ---
+    // --- Main Loop for Places ---
     async function processAllRadii() {
       const tbody = document.getElementById('places-table');
       tbody.innerHTML = '';
@@ -188,17 +204,36 @@
         if (plotted.has(key)) return;
         plotted.add(key);
         L.marker([p.lat, p.lng], {
-          icon: L.divIcon({
-            className: `num-label radius-${r}`,
-            html: String(i+1)
-          })
+          icon: L.divIcon({ className: `num-label radius-${r}`, html: String(i+1) })
         })
         .addTo(markersLayer)
         .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
       });
     }
 
-    // --- Data Fetchers ---
+    // --- City Processing ---
+    async function processCities() {
+      const cities = await getNearbyCities(10000);
+      cities.forEach(c => c.distance = distanceMeters(userPos, [c.lat, c.lon]));
+      cities.sort((a,b) => a.distance - b.distance);
+      const tbody = document.getElementById('cities-table');
+      tbody.innerHTML = '';
+      for (let city of cities) {
+        const atts = await getCityAttractions(city.lat, city.lon);
+        const rests= await getCityRestaurants(city.lat, city.lon);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${city.name}</td>
+          <td>${Math.round(city.distance)} m</td>
+          <td>${city.population||'N/A'}</td>
+          <td>${atts.map((a,i)=>`${i+1}. ${a}`).join('<br>')}</td>
+          <td>${rests.map((r,i)=>`${i+1}. ${r}`).join('<br>')}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    // --- Data Fetchers: OSM, Wiki, Eventyay ---
     async function getOSMReviewed(r) {
       const [lat,lon] = userPos;
       const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`.replace(/\s+/g,' ');
@@ -206,10 +241,9 @@
         'https://overpass-api.de/api/interpreter',
         { method:'POST', body:q })
       ).json()).elements || [];
-      elems.sort((a,b)=>Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length);
+      elems.sort((a,b) => Object.keys(b.tags||{}).length - Object.keys(a.tags||{}).length);
       return elems.slice(0,10).map(n=>({
-        name: n.tags?.name||n.tags?.amenity||'Unknown',
-        lat: n.lat, lng: n.lon
+        name: n.tags?.name||n.tags?.amenity||'Unknown', lat: n.lat, lng: n.lon
       }));
     }
 
@@ -217,9 +251,7 @@
       const [lat,lon] = userPos;
       const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${r}&gslimit=20&format=json`;
       const data = await (await fetchTimeout(url)).json();
-      return (data.query?.geosearch||[]).map(p=>({
-        title: p.title, lat: p.lat, lng: p.lon
-      }));
+      return (data.query?.geosearch||[]).map(p=>({ title: p.title, lat: p.lat, lng: p.lon }));
     }
 
     async function getWikiVisited(pages) {
@@ -236,8 +268,8 @@
           return {...p, views: 0};
         }
       }));
-      counts.sort((a,b)=>b.views - a.views);
-      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
+      counts.sort((a,b) => b.views - a.views);
+      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
     }
 
     async function getWikiLinked(pages) {
@@ -251,8 +283,8 @@
         const links = Array.isArray(pg.linkshere) ? pg.linkshere.length : 0;
         return {...p, links};
       });
-      counts.sort((a,b)=>b.links - a.links);
-      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lng }));
+      counts.sort((a,b) => b.links - a.links);
+      return counts.slice(0,10).map(p=>({ title:p.title, lat:p.lat, lng:p.lon }));
     }
 
     async function getOSMTourism(r) {
@@ -274,7 +306,6 @@
       });
     }
 
-    // --- Updated: Open-Event via Eventyay ---
     async function getEventyayEvents(r) {
       const [lat, lon] = userPos;
       const withinKm = (r/1000).toFixed(2);
@@ -306,6 +337,46 @@
         console.error('Eventyay fetch failed:', err);
         return [];
       }
+    }
+
+    // --- City Data via Overpass & Yelp ---
+    async function getNearbyCities(r) {
+      const [lat,lon] = userPos;
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[place=city];
+                  way(around:${r},${lat},${lon})[place=city];
+                  rel(around:${r},${lat},${lon})[place=city];
+                  out center;`.replace(/\s+/g,' ');
+      const data = await (await fetchTimeout(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body:q }
+      )).json();
+      return data.elements.map(el=>{
+n        const latc = el.lat || el.center.lat;
+        const lonc = el.lon || el.center.lon;
+        const pop = el.tags.population ? parseInt(el.tags.population.replace(/,/g,''),10) : null;
+        return { name: el.tags.name, lat: latc, lon: lonc, population: pop };
+      });
+    }
+
+    async function getCityAttractions(lat, lon) {
+      const q = `[out:json][timeout:8];(node(around:500,${lat},${lon})[tourism];
+                  way(around:500,${lat},${lon})[tourism];
+                  rel(around:500,${lat},${lon})[tourism];);
+                  out center 5;`.replace(/\s+/g,' ');
+      const data = await (await fetchTimeout(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body:q }
+      )).json();
+      return data.elements.slice(0,5).map(el=>el.tags.name||el.tags.tourism||'Unknown');
+    }
+
+    async function getCityRestaurants(lat, lon) {
+      const url = `https://api.yelp.com/v3/businesses/search?latitude=${lat}&longitude=${lon}&categories=restaurants&sort_by=review_count&limit=5`;
+      const res = await fetchTimeout(url, {
+        headers: { 'Authorization': `Bearer ${YELP_API_KEY}` }
+      });
+      const json = await res.json();
+      return (json.businesses||[]).map(b=>b.name);
     }
   </script>
 </body>
