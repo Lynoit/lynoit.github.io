@@ -75,8 +75,8 @@
     const radii = [100, 500, 1000, 5000, 10000];
     const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
     const TIMEOUT = 8000;
-    const EVENTYAY_TOKEN = 'YOUR_EVENTYAY_TOKEN';  // ← replace with your JWT
-    const YELP_API_KEY    = 'YOUR_YELP_API_KEY';  // ← replace with your Yelp API key
+    const EVENTYAY_TOKEN = 'YOUR_EVENTYAY_TOKEN';
+    const YELP_API_KEY    = 'YOUR_YELP_API_KEY';
 
     // --- Utilities ---
     function fetchTimeout(url, opts={}, t=TIMEOUT) {
@@ -104,9 +104,7 @@
       if (!navigator.geolocation) {
         alert('Geolocation not supported'); return;
       }
-      navigator.geolocation.getCurrentPosition(initMap, e => {
-        alert('Location error: ' + e.message);
-      });
+      navigator.geolocation.getCurrentPosition(initMap, e => alert('Location error: ' + e.message));
     };
 
     function initMap(pos) {
@@ -118,13 +116,10 @@
 
       circlesLayer = L.layerGroup().addTo(map);
       markersLayer = L.layerGroup().addTo(map);
-
       L.marker(userPos).addTo(map);
-      drawEverything();
 
-      navigator.geolocation.watchPosition(onPosUpdate, null, {
-        enableHighAccuracy: true, maximumAge: 5000, timeout: 8000
-      });
+      drawEverything();
+      navigator.geolocation.watchPosition(onPosUpdate, null, {enableHighAccuracy:true,maximumAge:5000,timeout:8000});
     }
 
     function onPosUpdate(pos) {
@@ -137,150 +132,193 @@
 
     // --- Draw Everything ---
     async function drawEverything() {
-      circlesLayer.clearLayers();
-      markersLayer.clearLayers();
-      plotted.clear();
-
+      circlesLayer.clearLayers(); markersLayer.clearLayers(); plotted.clear();
       radii.forEach((r,i) => {
-        L.circle(userPos, {
-          radius: r,
-          color: circleColors[i],
-          className: 'radius-circle',
-          fill: true, fillColor: circleColors[i]
-        }).addTo(circlesLayer);
-        const latOffset = r / 111111;
-        L.marker([userPos[0]+latOffset, userPos[1]], {
-          icon: L.divIcon({
-            className: 'radius-label',
-            html: `${r.toLocaleString()} m`, iconAnchor: ['50%','100%']
-          }),interactive:false
-        }).addTo(circlesLayer);
+        L.circle(userPos, {radius:r, color:circleColors[i], className:'radius-circle', fill:true, fillColor:circleColors[i]}).addTo(circlesLayer);
+        const latOffset = r/111111;
+        L.marker([userPos[0]+latOffset, userPos[1]], {icon:L.divIcon({className:'radius-label',html:`${r} m`,iconAnchor:['50%','100%']}),interactive:false}).addTo(circlesLayer);
       });
-
       await processAllRadii();
       await processCities();
     }
 
-    // --- Places Loop ---
+    // --- Process Places ---
     async function processAllRadii() {
       const tbody = document.getElementById('places-table'); tbody.innerHTML = '';
       for (let r of radii) {
-        const [reviewed,pages,tourism,events] = await Promise.all([
-          getOSMReviewed(r), wikiGeoSearch(r), getOSMTourism(r), getEventyayEvents(r)
-        ]);
-        const visited = await getWikiVisited(pages);
-        const linked = await getWikiLinked(pages);
-
-        renderPOIs(r,reviewed);
-        renderPOIs(r,visited);
-        renderPOIs(r,linked);
-        renderPOIs(r,tourism);
-        renderPOIs(r,events);
-
-        const mk = arr => arr.length? arr.map((p,i)=>`${i+1}. ${p.name||p.title}`).join('<br>'):'N/A';
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${r.toLocaleString()} m</td><td>${mk(reviewed)}</td><td>${mk(visited)}</td><td>${mk(linked)}</td><td>${mk(tourism)}</td><td>${mk(events)}</td>`;
-        tbody.appendChild(tr);
+        try {
+          const [reviewed, pages, tourism, events] = await Promise.all([
+            getOSMReviewed(r), wikiGeoSearch(r), getOSMTourism(r), getEventyayEvents(r)
+          ]);
+          const visited = await getWikiVisited(pages);
+          const linked  = await getWikiLinked(pages);
+          renderRow(r, reviewed, 'name'); renderPOIs(r, reviewed);
+          renderRow(r, visited, 'title'); renderPOIs(r, visited);
+          renderRow(r, linked, 'title'); renderPOIs(r, linked);
+          renderRow(r, tourism, 'name'); renderPOIs(r, tourism);
+          renderRow(r, events, 'name'); renderPOIs(r, events);
+        } catch (e) {
+          console.error('Error processing radius', r, e);
+        }
       }
     }
 
-    // --- Render Markers ---
+    function renderRow(r, arr, key) {
+      const mk = arr.length ? arr.map((p,i)=>`${i+1}. ${p[key]||'Unknown'}`).join('<br>') : 'N/A';
+      const tbody = document.getElementById('places-table');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r} m</td><td>${mk}</td><td>${''}</td><td>${''}</td><td>${''}</td><td>${''}</td>`;
+      tbody.appendChild(tr);
+    }
+
     function renderPOIs(r, list) {
-      list.forEach((p,i)=>{
-        const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+      list.forEach((p,i) => {
+        const lat = p.lat || p.latitude, lng = p.lng || p.longitude;
+        const key = `${lat.toFixed(6)},${lng.toFixed(6)}`;
         if (plotted.has(key)) return;
         plotted.add(key);
-        L.marker([p.lat,p.lng],{icon:L.divIcon({className:`num-label radius-${r}`,html:String(i+1)})})
+        L.marker([lat, lng], {icon:L.divIcon({className:`num-label radius-${r}`,html:String(i+1)})})
          .addTo(markersLayer)
          .bindPopup(`<strong>${i+1}. ${p.name||p.title}</strong>`);
       });
     }
 
-    // --- Cities Processing ---
+    // --- Process Cities ---
     async function processCities() {
-      const cities = await getNearbyCities(10000);
-      cities.forEach(c=>c.distance=distanceMeters(userPos,[c.lat,c.lon]));
-      cities.sort((a,b)=>a.distance-b.distance);
-      const tbody=document.getElementById('cities-table'); tbody.innerHTML='';
-      for(let city of cities) {
-        const atts=await getCityAttractions(city.lat,city.lon);
-        const rests=await getCityRestaurants(city.lat,city.lon);
-        const tr=document.createElement('tr');
-        tr.innerHTML=`<td>${city.name}</td><td>${Math.round(city.distance)} m</td><td>${city.population||'N/A'}</td><td>${atts.map((a,i)=>`${i+1}. ${a}`).join('<br>')}</td><td>${rests.map((r,i)=>`${i+1}. ${r}`).join('<br>')}</td>`;
-        tbody.appendChild(tr);
-      }
+      try {
+        const cities = await getNearbyCities(10000);
+        cities.forEach(c=>c.distance = distanceMeters(userPos,[c.lat,c.lon]));
+        cities.sort((a,b)=>a.distance-b.distance);
+        const tbody = document.getElementById('cities-table'); tbody.innerHTML='';
+        for (let city of cities) {
+          const atts = await getCityAttractions(city.lat, city.lon);
+          const rests = await getCityRestaurants(city.lat, city.lon);
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${city.name}</td>
+            <td>${Math.round(city.distance)} m</td>
+            <td>${city.population||'N/A'}</td>
+            <td>${atts.map((a,i)=>`${i+1}. ${a}`).join('<br>')}</td>
+            <td>${rests.map((r,i)=>`${i+1}. ${r}`).join('<br>')}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      } catch(e) { console.error('Error processing cities', e); }
     }
 
     // --- Data Fetchers ---
     async function getOSMReviewed(r) {
-      const [lat,lon]=userPos;
-      const q=`[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`.replace(/\s+/g,' ');
-      const elems=(await(await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json()).elements||[];
-      elems.sort((a,b)=>Object.keys(b.tags||{}).length-Object.keys(a.tags||{}).length);
-      return elems.slice(0,10).map(n=>({name:n.tags?.name||n.tags?.amenity||'Unknown',lat:n.lat,lng:n.lon}));
+      const [lat,lon] = userPos;
+      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[amenity]; out body 100;`;
+      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
+      const list = data.elements || [];
+      list.sort((a,b)=> (b.tags?Object.keys(b.tags).length:0) - (a.tags?Object.keys(a.tags).length:0));
+      return list.slice(0,10).map(n=>({name:n.tags.name||n.tags.amenity||'Unknown',lat:n.lat,lng:n.lon}));
     }
+
     async function wikiGeoSearch(r) {
-      const [lat,lon]=userPos;
-      const url=`https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${r}&gslimit=20&format=json`;
-      const data=await(await fetchTimeout(url)).json();
-      return(data.query?.geosearch||[]).map(p=>({title:p.title,lat:p.lat,lng:p.lon}));
+      const [lat,lon] = userPos;
+      const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${r}&gslimit=20&format=json`;
+      const data = await (await fetchTimeout(url)).json();
+      return (data.query.geosearch||[]).map(p=>({title:p.title,lat:p.lat,lng:p.lon}));
     }
-    async function getWikiVisited(pages){
-      const end=new Date();end.setDate(end.getDate()-1);
-      const start=new Date(end);start.setDate(start.getDate()-30);
-      const sd=formatDate(start),ed=formatDate(end);
-      const counts=await Promise.all(pages.map(async p=>{
-        const url=`https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/${encodeURIComponent(p.title)}/daily/${sd}/${ed}`;
-        try{const body=await(await fetchTimeout(url)).json();const views=(body.items||[]).reduce((s,x)=>s+x.views,0);return{...p,views};}catch{return{...p,views:0};}
+
+    async function getWikiVisited(pages) {
+      const end = new Date(); end.setDate(end.getDate()-1);
+      const start = new Date(end); start.setDate(start.getDate()-30);
+      const sd = formatDate(start), ed = formatDate(end);
+      const counts = await Promise.all(pages.map(async p=>{
+        const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/${encodeURIComponent(p.title)}/daily/${sd}/${ed}`;
+        try {
+          const body = await (await fetchTimeout(url)).json();
+          const views = (body.items||[]).reduce((s,x)=>s+x.views,0);
+          return {...p,views};
+        } catch { return {...p,views:0}; }
       }));
       counts.sort((a,b)=>b.views-a.views);
       return counts.slice(0,10).map(p=>({title:p.title,lat:p.lat,lng:p.lon}));
     }
-    async function getWikiLinked(pages){
-      if(!pages.length) return[];
-      const titles=pages.map(p=>p.title).join('|');
-      const url=`https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(titles)}&lhlimit=max&format=json`;
-      const data=await(await fetchTimeout(url)).json();
-      const info=data.query?.pages||{};
-      const counts=pages.map(p=>{const pg=Object.values(info).find(x=>x.title===p.title)||{};const links=Array.isArray(pg.linkshere)?pg.linkshere.length:0;return{...p,links};});
+
+    async function getWikiLinked(pages) {
+      if (!pages.length) return [];
+      const titles = pages.map(p=>p.title).join('|');
+      const url = `https://en.wikipedia.org/w/api.php?origin=*&action=query&prop=linkshere&titles=${encodeURIComponent(titles)}&lhlimit=max&format=json`;
+      const data = await (await fetchTimeout(url)).json();
+      const pagesInfo = data.query.pages;
+      const counts = pages.map(p=>{
+        const pageObj = Object.values(pagesInfo).find(x=>x.title===p.title) || {};
+        const links = Array.isArray(pageObj.linkshere)?pageObj.linkshere.length:0;
+        return {...p,links};
+      });
       counts.sort((a,b)=>b.links-a.links);
       return counts.slice(0,10).map(p=>({title:p.title,lat:p.lat,lng:p.lon}));
     }
-    async function getOSMTourism(r){
-      const [lat,lon]=userPos;
-      const q=`[out:json][timeout:8];(node(around:${r},${lat},${lon})[tourism];way(around:${r},${lat},${lon})[tourism];rel(out center 50;`.replace(/\s+/g,' ');
-      const data=await(await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
-      return(data.elements||[]).slice(0,10).map(el=>{const latc=el.lat||el.center?.lat;const lonc=el.lon||el.center?.lon;return{name:el.tags?.name||el.tags?.tourism||'Unknown',lat:latc,lng:lonc};});
-    }
-    async function getEventyayEvents(r){
-      const [lat,lon]=userPos;
-      const withinKm=(r/1000).toFixed(2);
-      const params=new URLSearchParams({'filter[location.latitude]':lat,'filter[location.longitude]':lon,'filter[location.within]':withinKm,'filter[starts-at][gte]':new Date().toISOString(),'page[size]':10});
-      try{const res=await fetchTimeout(`https://api.eventyay.com/v1/events/upcoming?${params}`,{headers:{'Accept':'application/vnd.api+json','Authorization':`JWT ${EVENTYAY_TOKEN}`}});const json=await res.json();return json.data.map(evt=>({name:evt.attributes.name,lat:evt.attributes.latitude,lng:evt.attributes.longitude}));}catch(err){console.error('Eventyay fetch failed:',err);return[];}
-    }
 
-    // --- City Data via Overpass & Yelp ---
-    async function getNearbyCities(r) {
-      const [lat, lon] = userPos;
-      const q = `[out:json][timeout:8]; node(around:${r},${lat},${lon})[place=city]; way(around:${r},${lat},${lon})[place=city]; rel(around:${r},${lat},${lon})[place=city]; out center;`.replace(/\s+/g,' ');
-      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter', {method:'POST', body: q})).json();
-      return (data.elements||[]).map(el => {
+    async function getOSMTourism(r) {
+      const [lat,lon] = userPos;
+      const q = `[out:json][timeout:8];(node(around:${r},${lat},${lon})[tourism];way(around:${r},${lat},${lon})[tourism];rel(around:${r},${lat},${lon})[tourism];);out center 50;`;
+      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
+      const list = data.elements || [];
+      return list.slice(0,10).map(el=>{
         const latc = el.lat || (el.center && el.center.lat);
         const lonc = el.lon || (el.center && el.center.lon);
-        const pop = el.tags && el.tags.population ? parseInt(el.tags.population.replace(/,/g,''), 10) : null;
-        return { name: (el.tags && el.tags.name) || 'Unknown', lat: latc, lon: lonc, population: pop };
+        return {name:el.tags.name||el.tags.tourism||'Unknown',lat:latc,lng:lonc};
       });
     }
-    async function getCityAttractions(lat, lon) {
-      const q = `[out:json][timeout:8];node(around:500,${lat},${lon})[tourism];way(around:500,${lat},${lon})[tourism];rel(around:500,${lat},${lon})[tourism];out center 5;`.replace(/\s+/g,' ');
-      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter', {method:'POST', body: q})).json();
-      return (data.elements||[]).slice(0,5).map(el => el.tags && (el.tags.name||el.tags.tourism) || 'Unknown');
+
+    async function getEventyayEvents(r) {
+      const [lat,lon] = userPos;
+      const withinKm = (r/1000).toFixed(2);
+      const params = new URLSearchParams({
+        'filter[location.latitude]':lat,
+        'filter[location.longitude]':lon,
+        'filter[location.within]':withinKm,
+        'filter[starts-at][gte]':new Date().toISOString(),
+        'page[size]':10
+      });
+      try {
+        const res = await fetchTimeout(
+          `https://api.eventyay.com/v1/events/upcoming?${params}`,
+          {headers:{'Accept':'application/vnd.api+json','Authorization':`JWT ${EVENTYAY_TOKEN}`}}
+        );
+        const json = await res.json();
+        return json.data.map(evt=>({name:evt.attributes.name,lat:evt.attributes.latitude,lng:evt.attributes.longitude}));
+      } catch(e) {
+        console.error('Eventyay error',e);
+        return [];
+      }
     }
+
+    // --- Cities via Overpass & Yelp ---
+    async function getNearbyCities(r) {
+      const [lat,lon] = userPos;
+      const q = `[out:json][timeout:8];(node(around:${r},${lat},${lon})[place=city];way(around:${r},${lat},${lon})[place=city];rel(around:${r},${lat},${lon})[place=city];);out center;`;
+      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
+      const list = data.elements || [];
+      return list.map(el=>{
+        const latc = el.lat || (el.center && el.center.lat);
+        const lonc = el.lon || (el.center && el.center.lon);
+        const pop  = el.tags && el.tags.population ? parseInt(String(el.tags.population).replace(/,/g,''),10) : null;
+        return {name:el.tags.name||'Unknown',lat:latc,lon:lonc,population:pop};
+      });
+    }
+
+    async function getCityAttractions(lat, lon) {
+      const q = `[out:json][timeout:8];(node(around:500,${lat},${lon})[tourism];way(around:500,${lat},${lon})[tourism];rel(around:500,${lat},${lon})[tourism];);out center 5;`;
+      const data = await (await fetchTimeout('https://overpass-api.de/api/interpreter',{method:'POST',body:q})).json();
+      return (data.elements||[]).slice(0,5).map(el=>el.tags.name||el.tags.tourism||'Unknown');
+    }
+
     async function getCityRestaurants(lat, lon) {
       const url = `https://api.yelp.com/v3/businesses/search?latitude=${lat}&longitude=${lon}&categories=restaurants&sort_by=review_count&limit=5`;
-      const res = await fetchTimeout(url, {headers: {'Authorization': `Bearer ${YELP_API_KEY}`}});
-      const json = await res.json();
-      return (json.businesses||[]).map(b => b.name);
+      try {
+        const res = await fetchTimeout(url,{headers:{'Authorization':`Bearer ${YELP_API_KEY}`}});
+        const json = await res.json();
+        return (json.businesses||[]).map(b=>b.name);
+      } catch(e) {
+        console.error('Yelp error', e);
+        return [];
+      }
     }
   </script>
 </body>
