@@ -61,11 +61,19 @@
 
     // Update map view: center on pos and set zoom to show range
     function updateView(latlng) {
+      // Compute bounding box from center and range
       const range = parseInt(document.getElementById('range').value, 10) || 1000;
-      // Create a temporary circle layer to calculate bounds, then remove it
-      const tempCircle = L.circle(latlng, { radius: range }).addTo(map);
-      map.fitBounds(tempCircle.getBounds());
-      map.removeLayer(tempCircle);
+      const R = 6371000; // Earth radius
+      const lat = Array.isArray(latlng) ? latlng[0] : latlng.lat;
+      const lon = Array.isArray(latlng) ? latlng[1] : latlng.lng;
+      const latRad = lat * Math.PI / 180;
+      const deltaLat = (range / R) * (180 / Math.PI);
+      const deltaLon = (range / (R * Math.cos(latRad))) * (180 / Math.PI);
+      const south = lat - deltaLat;
+      const north = lat + deltaLat;
+      const west = lon - deltaLon;
+      const east = lon + deltaLon;
+      map.fitBounds([[south, west], [north, east]]);
     }
 
     // Perform Overpass search
@@ -125,29 +133,30 @@
     // Geolocation tracking
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(position => {
-        const latlng = [position.coords.latitude, position.coords.longitude];
+        const latlngArr = [position.coords.latitude, position.coords.longitude];
+        const latlngObj = { lat: latlngArr[0], lng: latlngArr[1] };
 
         // Update view to always center and scale
-        updateView(latlng);
+        updateView(latlngArr);
 
         // Update path
-        pathCoords.push(latlng);
+        pathCoords.push(latlngArr);
         pathLine.setLatLngs(pathCoords);
 
         // Update current marker
         if (currentMarker) {
-          currentMarker.setLatLng(latlng);
+          currentMarker.setLatLng(latlngArr);
         } else {
-          currentMarker = L.marker(latlng, { title: 'Current Position' })
+          currentMarker = L.marker(latlngArr, { title: 'Current Position' })
             .addTo(traceLayer)
             .bindTooltip('Current Position', { permanent: true, direction: 'right' });
         }
 
         // Auto-search initial or on >100m move
         if (!lastSearchPos) {
-          performSearch({ lat: latlng[0], lng: latlng[1] });
-        } else if (distanceMeters(lastSearchPos, latlng) > 100) {
-          performSearch({ lat: latlng[0], lng: latlng[1] });
+          performSearch(latlngObj);
+        } else if (distanceMeters(lastSearchPos, latlngArr) > 100) {
+          performSearch(latlngObj);
         }
       }, err => {
         console.error('Geolocation error:', err);
