@@ -346,18 +346,33 @@ async function getNearbyCities() {
     .sort((a,b) => a.distance - b.distance);
 }
 
-// fetch up to `limit` nodes around [lat,lng] tagged with a given key (and optional value)
-async function getTopPOIs(lat, lng, key, value = null, limit = 3) {
-  // if value is null, match any tag like [key]
+// fetch up to `limit` features around [lat,lng] tagged with key (and optional value)
+async function getTopPOIs(lat, lng, key, value = null, limit = 3, radius = 5000) {
+  // build a tag filter: either [key=value] or any [key]
   const filter = value
     ? `[${key}=${value}]`
     : `[${key}]`;
+
+  // Overpass query: nodes, ways, relations within `radius` meters
   const q = `[out:json][timeout:8];
-    node(around:1000,${lat},${lng})${filter};
-    out body ${limit};`
+    (
+      node(around:${radius},${lat},${lng})${filter};
+      way(around:${radius},${lat},${lng})${filter};
+      rel(around:${radius},${lat},${lng})${filter};
+    );
+    out center ${limit};`
     .replace(/\s+/g, ' ');
-  const els = (await (await fetch(qUrl(), { method: 'POST', body: q })).json()).elements || [];
+
+  const res  = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    body: q
+  });
+  const data = await res.json();
+  const els  = data.elements || [];
+
+  // grab their names (or fall back to the tag key/value)
   return els
+    .filter(e => e.tags)
     .map(e => e.tags.name || value || key)
     .slice(0, limit);
 }
