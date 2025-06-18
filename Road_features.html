@@ -8,11 +8,7 @@
   <style>
     body, html { margin: 0; padding: 0; height: 100%; }
     #map { width: 100%; height: 90%; }
-    #controls {
-      padding: 10px;
-      background: #fff;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-    }
+    #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
     #controls label { margin-right: 15px; }
   </style>
 </head>
@@ -21,154 +17,94 @@
     <label><input type="checkbox" id="roundabout" /> Roundabouts</label>
     <label><input type="checkbox" id="stop_sign" /> Stop Signs</label>
     <label><input type="checkbox" id="red_light" /> Red Lights</label>
-    <label><input type="checkbox" id="intersection" /> Intersections/Junctions</label>
-    <label>
-      Range (meters):
-      <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" />
-    </label>
+    <label><input type="checkbox" id="intersection" /> Intersections</label>
+    <label>Range (meters): <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" /></label>
     <button id="searchBtn">Search</button>
   </div>
   <div id="map"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // Initialize map and layer groups
     const map = L.map('map');
-    const featuresLayer = L.layerGroup().addTo(map);
-    const traceLayer = L.layerGroup().addTo(map);
+    // LayerGroups per feature type
+    const roundaboutLayer = L.layerGroup().addTo(map);
+    const stopSignLayer   = L.layerGroup().addTo(map);
+    const redLightLayer   = L.layerGroup().addTo(map);
+    const intersectionLayer = L.layerGroup().addTo(map);
+    const traceLayer      = L.layerGroup().addTo(map);
 
-    // Track user's path and search triggers
     let pathCoords = [];
-    // Blue polyline for trace
-    let pathLine = L.polyline(pathCoords, { weight: 4, color: 'blue' }).addTo(traceLayer);
+    let pathLine = L.polyline(pathCoords, { color: 'blue', weight: 4 }).addTo(traceLayer);
     let currentMarker = null;
     let lastSearchPos = null;
 
-    // Add OSM tile layer
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
 
-    // Haversine formula to compute distance in meters
     function distanceMeters([lat1, lon1], [lat2, lon2]) {
       const toRad = x => x * Math.PI / 180;
       const R = 6371000;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
-      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
-    // Update map view: center on pos and set zoom to show range
     function updateView(latlng) {
-      const range = parseInt(document.getElementById('range').value, 10) || 1000;
+      const range = parseInt(document.getElementById('range').value,10) || 1000;
       const R = 6371000;
-      const lat = Array.isArray(latlng) ? latlng[0] : latlng.lat;
-      const lon = Array.isArray(latlng) ? latlng[1] : latlng.lng;
-      const latRad = lat * Math.PI / 180;
-      const deltaLat = (range / R) * (180 / Math.PI);
-      const deltaLon = (range / (R * Math.cos(latRad))) * (180 / Math.PI);
-      const south = lat - deltaLat;
-      const north = lat + deltaLat;
-      const west = lon - deltaLon;
-      const east = lon + deltaLon;
-      map.fitBounds([[south, west], [north, east]]);
+      const lat = latlng[0], lon = latlng[1];
+      const latRad = lat*Math.PI/180;
+      const dLat = (range/R)*(180/Math.PI);
+      const dLon = (range/(R*Math.cos(latRad)))*(180/Math.PI);
+      map.fitBounds([[lat-dLat,lon-dLon],[lat+dLat,lon+dLon]]);
     }
 
-    // Perform Overpass search
-    function performSearch(center) {
-      featuresLayer.clearLayers();
+    // Fetch and plot one feature type
+    function fetchFeature(tagKey, tagVal, layerGroup) {
+      const center = map.getCenter();
       const [lat, lon] = [center.lat, center.lng];
-      const radius = parseInt(document.getElementById('range').value, 10) || 1000;
-      const queries = [];
-      if (document.getElementById('roundabout').checked) {
-        queries.push(`node["junction"="roundabout"](around:${radius},${lat},${lon});`);
-        queries.push(`way["junction"="roundabout"](around:${radius},${lat},${lon});`);
-      }
-      if (document.getElementById('stop_sign').checked) {
-        queries.push(`node["highway"="stop"](around:${radius},${lat},${lon});`);
-      }
-      if (document.getElementById('red_light').checked) {
-        queries.push(`node["highway"="traffic_signals"](around:${radius},${lat},${lon});`);
-      }
-      if (document.getElementById('intersection').checked) {
-        queries.push(`node["junction"="intersection"](around:${radius},${lat},${lon});`);
-        queries.push(`way["junction"="intersection"](around:${radius},${lat},${lon});`);
-      }
-      if (!queries.length) return;
-      const overpassQuery = `[out:json][timeout:25];(${queries.join('')});out center;`;
-      fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: overpassQuery,
-      })
-      .then(res => res.json())
-      .then(data => {
-        data.elements.forEach(el => {
-          const featureType = el.tags.junction === 'roundabout' ? 'Roundabout'
-                            : el.tags.highway === 'stop' ? 'Stop Sign'
-                            : el.tags.highway === 'traffic_signals' ? 'Red Light'
-                            : el.tags.junction === 'intersection' ? 'Intersection' : 'Unknown';
-          const coords = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-          L.marker(coords, { title: featureType })
-           .addTo(featuresLayer)
-           .bindTooltip(featureType, { permanent: true, direction: 'right' });
-        });
-        lastSearchPos = [lat, lon];
-      })
-      .catch(err => console.error('Overpass error:', err));
+      const radius = parseInt(document.getElementById('range').value,10)||1000;
+      const q1 = `node["${tagKey}"="${tagVal}"](around:${radius},${lat},${lon});`;
+      const q2 = `way["${tagKey}"="${tagVal}"](around:${radius},${lat},${lon});`;
+      const query = `[out:json][timeout:25];(${q1}${q2});out center;`;
+      fetch('https://overpass-api.de/api/interpreter', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query })
+        .then(res=>res.json()).then(data=>{
+          layerGroup.clearLayers();
+          data.elements.forEach(el=>{
+            const coords = el.lat&&el.lon?[el.lat,el.lon]:[el.center.lat,el.center.lon];
+            const label = tagVal.replace('_',' ').replace(/\b\w/g,m=>m.toUpperCase());
+            L.marker(coords).addTo(layerGroup).bindTooltip(label,{permanent:true,direction:'right'});
+          });
+        }).catch(console.error);
     }
 
-    // Initial and manual search
-    document.getElementById('searchBtn').addEventListener('click', () => {
-      performSearch(map.getCenter());
-    });
-    ['roundabout','stop_sign','red_light','intersection'].forEach(id => {
-      document.getElementById(id).addEventListener('change', e => {
-        if (e.target.checked) performSearch(map.getCenter());
-      });
-    });
-
-    // Geolocation tracking
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition(position => {
-        const latlngArr = [position.coords.latitude, position.coords.longitude];
-        const latlngObj = { lat: latlngArr[0], lng: latlngArr[1] };
-
-        // Update view to always center and scale
-        updateView(latlngArr);
-
-        // Update path polyline
-        pathCoords.push(latlngArr);
-        pathLine.setLatLngs(pathCoords);
-
-        // Remove old marker and add a big red dot
-        if (currentMarker) {
-          traceLayer.removeLayer(currentMarker);
-        }
-        currentMarker = L.circleMarker(latlngArr, {
-          radius: 8,
-          fillColor: 'red',
-          color: 'red',
-          fillOpacity: 1,
-          weight: 0
-        }).addTo(traceLayer);
-
-        // Auto-search initial or on >100m move
-        if (!lastSearchPos) {
-          performSearch(latlngObj);
-        } else if (distanceMeters(lastSearchPos, latlngArr) > 100) {
-          performSearch(latlngObj);
-        }
-      }, err => {
-        console.error('Geolocation error:', err);
-        map.setView([0, 0], 2);
-      }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
-    } else {
-      console.warn('Geolocation not supported');
-      map.setView([0, 0], 2);
+    // Perform search for all checked
+    function performSearch() {
+      if(document.getElementById('roundabout').checked) fetchFeature('junction','roundabout', roundaboutLayer);
+      else roundaboutLayer.clearLayers();
+      if(document.getElementById('stop_sign').checked) fetchFeature('highway','stop', stopSignLayer);
+      else stopSignLayer.clearLayers();
+      if(document.getElementById('red_light').checked) fetchFeature('highway','traffic_signals', redLightLayer);
+      else redLightLayer.clearLayers();
+      if(document.getElementById('intersection').checked) fetchFeature('junction','intersection', intersectionLayer);
+      else intersectionLayer.clearLayers();
+      lastSearchPos = [map.getCenter().lat, map.getCenter().lng];
     }
+
+    document.getElementById('searchBtn').addEventListener('click', performSearch);
+    ['roundabout','stop_sign','red_light','intersection'].forEach(id=>{
+      document.getElementById(id).addEventListener('change', performSearch);
+    });
+
+    if(navigator.geolocation){
+      navigator.geolocation.watchPosition(pos=>{
+        const latlng = [pos.coords.latitude,pos.coords.longitude];
+        updateView(latlng);
+        pathCoords.push(latlng); pathLine.setLatLngs(pathCoords);
+        traceLayer.clearLayers();
+        currentMarker = L.circleMarker(latlng,{radius:8,fillColor:'red',color:'red',fillOpacity:1,weight:0}).addTo(traceLayer);
+        if(!lastSearchPos||distanceMeters(lastSearchPos,latlng)>100) performSearch();
+      },err=>{console.error(err); map.setView([0,0],2);}, {enableHighAccuracy:true,maximumAge:0,timeout:10000});
+    } else { map.setView([0,0],2); }
   </script>
 </body>
 </html>
