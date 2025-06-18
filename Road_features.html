@@ -4,10 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Road Features Map</title>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body, html { margin: 0; padding: 0; height: 100%; }
     #map { width: 100%; height: 90%; }
@@ -40,10 +37,11 @@
     const featuresLayer = L.layerGroup().addTo(map);
     const traceLayer = L.layerGroup().addTo(map);
 
-    // Track user's path
+    // Track user's path and search triggers
     let pathCoords = [];
     let pathLine = L.polyline(pathCoords, { weight: 4 }).addTo(traceLayer);
     let currentMarker = null;
+    let lastSearchPos = null;
 
     // Add OSM tile layer
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -51,47 +49,21 @@
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
-    // Set up geolocation tracking
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition(position => {
-        const { latitude, longitude } = position.coords;
-        const latlng = [latitude, longitude];
-
-        // Center map on first fix
-        if (!currentMarker) {
-          map.setView(latlng, 16);
-        }
-
-        // Add to path and update polyline
-        pathCoords.push(latlng);
-        pathLine.setLatLngs(pathCoords);
-
-        // Update current position marker
-        if (currentMarker) {
-          currentMarker.setLatLng(latlng);
-        } else {
-          currentMarker = L.marker(latlng, { title: 'Current Position' })
-            .addTo(traceLayer)
-            .bindTooltip('Current Position', { permanent: true, direction: 'right' });
-        }
-      }, err => {
-        console.error('Geolocation error:', err);
-        map.setView([0, 0], 2);
-      }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
-    } else {
-      console.warn('Geolocation not supported');
-      map.setView([0, 0], 2);
+    // Haversine formula to compute distance in meters
+    function distanceMeters([lat1, lon1], [lat2, lon2]) {
+      const toRad = x => x * Math.PI / 180;
+      const R = 6371000; // Earth radius in m
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 
-    // Search button handler
-    document.getElementById('searchBtn').addEventListener('click', () => {
+    // Perform Overpass search for selected features around given center
+    function performSearch(center) {
       featuresLayer.clearLayers();
-
-      const center = map.getCenter();
-      const lat = center.lat;
-      const lon = center.lng;
+      const [lat, lon] = [center.lat, center.lng];
       const radius = parseInt(document.getElementById('range').value, 10) || 1000;
-
       const queries = [];
       if (document.getElementById('roundabout').checked) {
         queries.push(`node["junction"="roundabout"](around:${radius},${lat},${lon});`);
@@ -107,12 +79,7 @@
         queries.push(`node["junction"="intersection"](around:${radius},${lat},${lon});`);
         queries.push(`way["junction"="intersection"](around:${radius},${lat},${lon});`);
       }
-
-      if (!queries.length) {
-        alert('Please select at least one road feature.');
-        return;
-      }
-
+      if (!queries.length) return;
       const overpassQuery = `[out:json][timeout:25];(${queries.join('')});out center;`;
       fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST',
@@ -131,9 +98,57 @@
            .addTo(featuresLayer)
            .bindTooltip(featureType, { permanent: true, direction: 'right' });
         });
+        lastSearchPos = [lat, lon];
       })
       .catch(err => console.error('Overpass error:', err));
+    }
+
+    // Search button handler
+    document.getElementById('searchBtn').addEventListener('click', () => {
+      performSearch(map.getCenter());
     });
+
+    // Geolocation tracking
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(position => {
+        const latlng = [position.coords.latitude, position.coords.longitude];
+
+        // Center map on first fix
+        if (!currentMarker) {
+          map.setView(latlng, 16);
+        }
+
+        // Update path polyline
+        pathCoords.push(latlng);
+        pathLine.setLatLngs(pathCoords);
+
+        // Update current position marker
+        if (currentMarker) {
+          currentMarker.setLatLng(latlng);
+        } else {
+          currentMarker = L.marker(latlng, { title: 'Current Position' })
+            .addTo(traceLayer)
+            .bindTooltip('Current Position', { permanent: true, direction: 'right' });
+        }
+
+        // Initial automatic search once currentMarker is set and if any boxes checked
+        if (!lastSearchPos) {
+          performSearch({ lat: latlng[0], lng: latlng[1] });
+        } else {
+          // If moved >100m, re-search
+          const dist = distanceMeters(lastSearchPos, latlng);
+          if (dist > 100) {
+            performSearch({ lat: latlng[0], lng: latlng[1] });
+          }
+        }
+      }, err => {
+        console.error('Geolocation error:', err);
+        map.setView([0, 0], 2);
+      }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+    } else {
+      console.warn('Geolocation not supported');
+      map.setView([0, 0], 2);
+    }
   </script>
 </body>
 </html>
