@@ -31,18 +31,23 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const map = L.map('map');
-    const roundaboutLayer = L.layerGroup().addTo(map);
-    const stopSignLayer = L.layerGroup().addTo(map);
-    const redLightLayer = L.layerGroup().addTo(map);
+    // Feature layers
+    const roundaboutLayer   = L.layerGroup().addTo(map);
+    const stopSignLayer     = L.layerGroup().addTo(map);
+    const redLightLayer     = L.layerGroup().addTo(map);
     const intersectionLayer = L.layerGroup().addTo(map);
-    const speedBumpLayer = L.layerGroup().addTo(map);
-    const traceLayer = L.layerGroup().addTo(map);
+    const speedBumpLayer    = L.layerGroup().addTo(map);
+    // Trace polyline layer
+    const traceLayer        = L.layerGroup().addTo(map);
+    // Current position marker layer
+    const positionLayer     = L.layerGroup().addTo(map);
 
+    // Path coordinates and polyline
     let pathCoords = [];
     let pathLine = L.polyline(pathCoords, { color: 'blue', weight: 4 }).addTo(traceLayer);
-    let currentMarker = null;
     let lastSearchPos = null;
 
+    // Base map
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
@@ -55,17 +60,17 @@
       const dLon = toRad(b[1] - a[1]);
       const lat1 = toRad(a[0]);
       const lat2 = toRad(b[0]);
-      const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * (Math.sin(dLon / 2) ** 2);
-      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*(Math.sin(dLon/2)**2);
+      return R*2*Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
     }
 
     function updateView(latlng) {
       const range = parseInt(document.getElementById('range').value, 10) || 1000;
       const R = 6371000;
       const lat = latlng[0], lon = latlng[1];
-      const dLat = (range / R) * (180 / Math.PI);
-      const dLon = (range / (R * Math.cos(lat * Math.PI / 180))) * (180 / Math.PI);
-      map.fitBounds([[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]]);
+      const dLat = (range/R)*(180/Math.PI);
+      const dLon = (range/(R*Math.cos(lat*Math.PI/180)))*(180/Math.PI);
+      map.fitBounds([[lat-dLat, lon-dLon], [lat+dLat, lon+dLon]]);
     }
 
     function fetchFeature(tagKey, tagVal, layerGroup, labelOverride) {
@@ -85,7 +90,7 @@
         layerGroup.clearLayers();
         data.elements.forEach(el => {
           const coords = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-          let label = labelOverride || tagVal.replace('_', ' ').replace(/\b\w/g, m => m.toUpperCase());
+          let label = labelOverride || tagVal.replace('_',' ').replace(/\b\w/g, m => m.toUpperCase());
           if (tagKey === 'junction' && tagVal === 'yes') label = 'Intersection';
           const marker = L.marker(coords, { icon: L.divIcon({ className: 'invisible-icon' }), interactive: false }).addTo(layerGroup);
           marker.bindTooltip(label, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
@@ -95,29 +100,34 @@
     }
 
     function performSearch() {
-      document.getElementById('roundabout').checked ? fetchFeature('junction', 'roundabout', roundaboutLayer) : roundaboutLayer.clearLayers();
-      document.getElementById('stop_sign').checked ? fetchFeature('highway', 'stop', stopSignLayer) : stopSignLayer.clearLayers();
-      document.getElementById('red_light').checked ? fetchFeature('highway', 'traffic_signals', redLightLayer) : redLightLayer.clearLayers();
-      document.getElementById('intersection').checked ? fetchFeature('junction', 'yes', intersectionLayer) : intersectionLayer.clearLayers();
-      document.getElementById('speed_bump').checked ? fetchFeature('traffic_calming', 'speed_bump', speedBumpLayer) : speedBumpLayer.clearLayers();
+      document.getElementById('roundabout').checked   ? fetchFeature('junction','roundabout', roundaboutLayer)   : roundaboutLayer.clearLayers();
+      document.getElementById('stop_sign').checked     ? fetchFeature('highway','stop',      stopSignLayer)     : stopSignLayer.clearLayers();
+      document.getElementById('red_light').checked     ? fetchFeature('highway','traffic_signals', redLightLayer) : redLightLayer.clearLayers();
+      document.getElementById('intersection').checked  ? fetchFeature('junction','yes',       intersectionLayer) : intersectionLayer.clearLayers();
+      document.getElementById('speed_bump').checked    ? fetchFeature('traffic_calming','speed_bump', speedBumpLayer) : speedBumpLayer.clearLayers();
       lastSearchPos = [map.getCenter().lat, map.getCenter().lng];
     }
 
     document.getElementById('searchBtn').addEventListener('click', performSearch);
-    ['roundabout', 'stop_sign', 'red_light', 'intersection', 'speed_bump'].forEach(id => document.getElementById(id).addEventListener('change', performSearch));
+    ['roundabout','stop_sign','red_light','intersection','speed_bump']
+      .forEach(id => document.getElementById(id).addEventListener('change', performSearch));
 
     if (navigator.geolocation) {
       navigator.geolocation.watchPosition(pos => {
         const latlng = [pos.coords.latitude, pos.coords.longitude];
         updateView(latlng);
+        // Update trace
         pathCoords.push(latlng);
         pathLine.setLatLngs(pathCoords);
-        traceLayer.clearLayers();
-        currentMarker = L.circleMarker(latlng, { radius: 8, fillColor: 'red', color: 'red', fillOpacity: 1, weight: 0 }).addTo(traceLayer);
+        // Update current position marker only
+        positionLayer.clearLayers();
+        L.circleMarker(latlng, { radius: 8, fillColor: 'red', color: 'red', fillOpacity: 1, weight: 0 })
+          .addTo(positionLayer);
+        // Auto-search
         if (!lastSearchPos || distanceMeters(lastSearchPos, latlng) > 100) performSearch();
-      }, err => { console.error(err); map.setView([0, 0], 2); }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+      }, err => { console.error(err); map.setView([0,0],2); }, { enableHighAccuracy: true, maximumAge: 0, timeout:10000 });
     } else {
-      map.setView([0, 0], 2);
+      map.setView([0,0],2);
     }
   </script>
 </body>
