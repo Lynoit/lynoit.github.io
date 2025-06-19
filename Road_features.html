@@ -69,6 +69,7 @@
     };
     const traceLayer = L.layerGroup().addTo(map);
     const positionLayer = L.layerGroup().addTo(map);
+    const manualLayer = L.layerGroup().addTo(map);
 
     let pathCoords = [], lastSearchPos = null;
     let currentLatLng = null;
@@ -86,7 +87,7 @@
     }
 
     function updateView(latlng) {
-      if (useManual) return; // don't recenter if manual
+      if (useManual) return;
       const range = parseInt(document.getElementById('range').value,10)||1000;
       const R = 6371000, lat = latlng[0], lon = latlng[1];
       const dLat = range/R*(180/Math.PI);
@@ -105,15 +106,15 @@
           layerGroup.clearLayers();
           data.elements.forEach(el=>{
             const coords = el.lat&&el.lon?[el.lat,el.lon]:[el.center.lat,el.center.lon];
-            const m = L.marker(coords,{icon:L.divIcon({className:'invisible-icon'}),interactive:false})
-                       .addTo(layerGroup)
-                       .bindTooltip(label,{permanent:true,direction:'right',offset:[10,0],className:'feature-label'});
+            L.marker(coords,{icon:L.divIcon({className:'invisible-icon'}),interactive:false})
+             .addTo(layerGroup)
+             .bindTooltip(label,{permanent:true,direction:'right',offset:[10,0],className:'feature-label'});
           });
         }).catch(console.error);
     }
 
     function performSearch() {
-      // Road
+      // Road features
       document.getElementById('bridge').checked ? fetchFeature('man_made','bridge',layers.bridge,'Bridge') : layers.bridge.clearLayers();
       document.getElementById('tunnel').checked ? fetchFeature('tunnel','yes',layers.tunnel,'Tunnel') : layers.tunnel.clearLayers();
       document.getElementById('toll_station').checked ? fetchFeature('amenity','toll_booth',layers.toll_station,'Toll Station') : layers.toll_station.clearLayers();
@@ -122,12 +123,12 @@
       document.getElementById('red_light').checked ? fetchFeature('highway','traffic_signals',layers.red_light,'Red Light') : layers.red_light.clearLayers();
       document.getElementById('intersection').checked ? fetchFeature('junction','yes',layers.intersection,'Intersection') : layers.intersection.clearLayers();
       document.getElementById('speed_bump').checked ? fetchFeature('traffic_calming','speed_bump',layers.speed_bump,'Speed Bump') : layers.speed_bump.clearLayers();
-      // Speed
+      // Speed limits
       ['20','30','40','50','60','70','80','90','100','110','120','130','140','none'].forEach(v=>{
         const id='speed_'+v, layer=layers[id];
         if(document.getElementById(id).checked) fetchFeature('maxspeed',v,layer,v==='none'?'Unlimited':v+' kph'); else layer.clearLayers();
       });
-      lastSearchPos = [map.getCenter().lat,map.getCenter().lng];
+      lastSearchPos = useManual && manualLatLng ? manualLatLng.slice() : [map.getCenter().lat,map.getCenter().lng];
     }
 
     document.getElementById('searchBtn').addEventListener('click',performSearch);
@@ -135,20 +136,26 @@
 
     if(navigator.geolocation){
       navigator.geolocation.watchPosition(pos=>{
-        currentLatLng=[pos.coords.latitude,pos.coords.longitude];
-        updateView(currentLatLng);
-        pathCoords.push(currentLatLng);pathLine.setLatLngs(pathCoords);
+        const latlng=[pos.coords.latitude,pos.coords.longitude];
+        currentLatLng=latlng;
+        updateView(latlng);
+        pathCoords.push(latlng); pathLine.setLatLngs(pathCoords);
         positionLayer.clearLayers();
-        L.circleMarker(currentLatLng,{radius:8,fillColor:'red',color:'red',fillOpacity:1,weight:0}).addTo(positionLayer);
-        if(!lastSearchPos||distanceMeters(lastSearchPos,currentLatLng)>100) performSearch();
+        L.circleMarker(latlng,{radius:8,fillColor:'red',color:'red',fillOpacity:1,weight:0}).addTo(positionLayer);
+        if(!lastSearchPos||distanceMeters(lastSearchPos,latlng)>100) performSearch();
       },err=>{console.error(err);map.setView([0,0],2);},{enableHighAccuracy:true,maximumAge:0,timeout:10000});
     } else map.setView([0,0],2);
 
     // Double-click to toggle manual location
-    map.on('dblclick', e => {
+    map.on('dblclick',e=>{
       if(!useManual){
         manualLatLng=[e.latlng.lat,e.latlng.lng]; useManual=true;
-      } else { useManual=false; manualLatLng=null; }
+        manualLayer.clearLayers();
+        L.circleMarker(manualLatLng,{radius:10,fillColor:'blue',color:'blue',fillOpacity:1,weight:2}).addTo(manualLayer);
+      } else {
+        useManual=false; manualLatLng=null;
+        manualLayer.clearLayers();
+      }
       performSearch();
     });
   </script>
