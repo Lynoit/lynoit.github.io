@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Road Features Map with Icons</title>
+  <title>Road Features Map with Icons & Debug</title>
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -13,6 +13,7 @@
     #map { width: 100%; height: 90%; }
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
     #controls label { margin-right: 10px; font-size: 0.9em; }
+
     .status-text-div {
       font-size: 1em;
       color: #333;
@@ -68,12 +69,14 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    // --- Compute the base path to your icons folder dynamically ---
-    const htmlPath  = document.location.href.split('#')[0].split('?')[0];
-    const baseDir   = htmlPath.substring(0, htmlPath.lastIndexOf('/') + 1);
-    const ICON_BASE = baseDir + 'icons/';
+    // debug: ensure script is loaded
+    console.log("🗺️  map script loaded, baseURI =", document.baseURI);
 
-    // --- Initialize map & layers ---
+    // compute ICON_BASE relative to this HTML
+    const ICON_BASE = new URL("./icons/", document.baseURI).href;
+    console.log("ICON_BASE =", ICON_BASE);
+
+    // initialize
     const map = L.map('map');
     const layers = {
       bridge:      L.layerGroup().addTo(map),
@@ -97,7 +100,7 @@
       speed_120:   L.layerGroup().addTo(map),
       speed_130:   L.layerGroup().addTo(map),
       speed_140:   L.layerGroup().addTo(map),
-      speed_none:  L.layerGroup().addTo(map),
+      speed_none:  L.layerGroup().addTo(map)
     };
     const traceLayer    = L.layerGroup().addTo(map);
     const positionLayer = L.layerGroup().addTo(map);
@@ -106,7 +109,7 @@
 
     let pathCoords = [], lastSearchPos = null, useManual = false, manualLatLng = null;
 
-    // --- Prepare feature icons using the dynamic ICON_BASE path ---
+    // prepare icons
     const featureIcons = {
       bridge:         L.icon({ iconUrl: ICON_BASE+'bridge.svg',       iconSize:[32,32], iconAnchor:[16,16] }),
       tunnel:         L.icon({ iconUrl: ICON_BASE+'tunnel.svg',       iconSize:[32,32], iconAnchor:[16,16] }),
@@ -129,148 +132,168 @@
       maxspeed_120:   L.icon({ iconUrl: ICON_BASE+'120.svg',          iconSize:[32,32], iconAnchor:[16,16] }),
       maxspeed_130:   L.icon({ iconUrl: ICON_BASE+'130.svg',          iconSize:[32,32], iconAnchor:[16,16] }),
       maxspeed_140:   L.icon({ iconUrl: ICON_BASE+'140.svg',          iconSize:[32,32], iconAnchor:[16,16] }),
-      maxspeed_none:  L.icon({ iconUrl: ICON_BASE+'unlimited.svg',    iconSize:[32,32], iconAnchor:[16,16] }),
+      maxspeed_none:  L.icon({ iconUrl: ICON_BASE+'unlimited.svg',    iconSize:[32,32], iconAnchor:[16,16] })
     };
 
-    // --- Base tile & view ---
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-      maxZoom:19, attribution:'&copy; OSM contributors'
+    // base tiles + initial view
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
-    map.setView([0,0],2);
+    map.setView([0, 0], 2);
 
-    // --- Helpers ---
-    function distanceMeters(a,b){
-      const toRad = x=>x*Math.PI/180, R=6371000;
-      const dLat = toRad(b[0]-a[0]), dLon = toRad(b[1]-a[1]);
-      const lat1=toRad(a[0]), lat2=toRad(b[0]);
-      const h=Math.sin(dLat/2)**2+
-              Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-      return R*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));
+    // helpers
+    function distanceMeters(a, b) {
+      const toRad = x => x * Math.PI/180, R = 6371000;
+      const dLat = toRad(b[0] - a[0]), dLon = toRad(b[1] - a[1]);
+      const lat1 = toRad(a[0]), lat2 = toRad(b[0]);
+      const h = Math.sin(dLat/2)**2 +
+                Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
     }
-    function updateView(latlng){
-      if(useManual) return;
-      const r=+document.getElementById('range').value||1000,
-            R=6371000, lat=latlng[0], lon=latlng[1],
-            dLat=r/R*(180/Math.PI),
-            dLon=r/(R*Math.cos(lat*Math.PI/180))*(180/Math.PI);
-      map.fitBounds([[lat-dLat,lon-dLon],[lat+dLat,lon+dLon]]);
+    function updateView(latlng) {
+      if (useManual) return;
+      const r = +document.getElementById('range').value || 1000,
+            R = 6371000, lat = latlng[0], lon = latlng[1],
+            dLat = r/R*(180/Math.PI),
+            dLon = r/(R*Math.cos(lat*Math.PI/180))*(180/Math.PI);
+      map.fitBounds([[lat-dLat, lon-dLon], [lat+dLat, lon+dLon]]);
     }
 
-    // --- Fetch & draw each feature type ---
-    function fetchFeature(tagKey,tagVal,layerGroup){
+    // debug-hook some checkboxes
+    ['bridge','tunnel','stop_sign','red_light'].forEach(id => {
+      const cb = document.getElementById(id);
+      console.log('🔗 hooking checkbox', id, 'initially', cb.checked);
+      cb.addEventListener('change', e => {
+        console.log('☑️', id, 'changed to', e.target.checked);
+        performSearch();
+      });
+    });
+
+    // fetch & render
+    function fetchFeature(tagKey, tagVal, layerGroup) {
+      console.log('➤ fetchFeature()', tagKey, tagVal);
       const center = useManual && manualLatLng
-                   ? {lat:manualLatLng[0],lng:manualLatLng[1]}
+                   ? { lat:manualLatLng[0], lng:manualLatLng[1] }
                    : map.getCenter();
-      const radius = +document.getElementById('range').value||1000;
-      const q = `[out:json][timeout:25];
+      const radius = +document.getElementById('range').value || 1000;
+      const query = `[out:json][timeout:25];
         node["${tagKey}"="${tagVal}"](around:${radius},${center.lat},${center.lng});
         way["${tagKey}"="${tagVal}"](around:${radius},${center.lat},${center.lng});
         out center;`;
-      return fetch('https://overpass-api.de/api/interpreter',{
+      return fetch('https://overpass-api.de/api/interpreter', {
         method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'},
-        body:q
+        body: query
       })
-      .then(res=>res.json())
-      .then(data=>{
+      .then(r => r.json())
+      .then(data => {
         layerGroup.clearLayers();
-        data.elements.forEach(el=>{
-          const coords = el.lat&&el.lon
-                       ? [el.lat,el.lon]
-                       : [el.center.lat,el.center.lon];
-          // if tagVal==="yes", use tagKey; else if maxspeed, prefix; else use tagVal
-          const iconKey = tagVal==='yes'
+        data.elements.forEach(el => {
+          const coords = el.lat && el.lon
+                       ? [el.lat, el.lon]
+                       : [el.center.lat, el.center.lon];
+          const iconKey = tagVal === 'yes'
                         ? tagKey
-                        : (tagKey==='maxspeed'
+                        : (tagKey === 'maxspeed'
                              ? `maxspeed_${tagVal}`
                              : tagVal);
-
+          console.log('⚑ adding', iconKey, 'at', coords);
           const icon = featureIcons[iconKey] || L.icon({
             iconUrl: ICON_BASE+'default.svg',
-            iconSize:[32,32],iconAnchor:[16,16]
+            iconSize:[32,32], iconAnchor:[16,16]
           });
-
-          console.log('⚑ adding', iconKey, 'at', coords);
-          L.marker(coords,{icon}).addTo(layerGroup);
+          L.marker(coords, { icon }).addTo(layerGroup);
         });
       })
       .catch(console.error);
     }
 
-    function performSearch(){
+    function performSearch() {
+      console.log('🔍 performSearch()', {
+        manual: useManual,
+        range: document.getElementById('range').value
+      });
       statusLayer.clearLayers();
-      const c = useManual && manualLatLng
-              ? manualLatLng
-              : [map.getCenter().lat,map.getCenter().lng];
-      L.marker(c,{
-        icon:L.divIcon({className:'status-text-div',html:'🔍 Searching…'}),
-        interactive:false
+      const center = useManual && manualLatLng
+                   ? manualLatLng
+                   : [map.getCenter().lat, map.getCenter().lng];
+      L.marker(center, {
+        icon: L.divIcon({ className:'status-text-div', html:'🔍 Searching…' }),
+        interactive: false
       }).addTo(statusLayer);
 
       const tasks = [];
-      if(document.getElementById('bridge').checked)       tasks.push(fetchFeature('man_made','bridge',layers.bridge));       else layers.bridge.clearLayers();
-      if(document.getElementById('tunnel').checked)       tasks.push(fetchFeature('tunnel','yes',layers.tunnel));           else layers.tunnel.clearLayers();
-      if(document.getElementById('toll_station').checked) tasks.push(fetchFeature('amenity','toll_booth',layers.toll_station)); else layers.toll_station.clearLayers();
-      if(document.getElementById('roundabout').checked)   tasks.push(fetchFeature('junction','roundabout',layers.roundabout)); else layers.roundabout.clearLayers();
-      if(document.getElementById('stop_sign').checked)    tasks.push(fetchFeature('highway','stop',layers.stop_sign));         else layers.stop_sign.clearLayers();
-      if(document.getElementById('red_light').checked)    tasks.push(fetchFeature('highway','traffic_signals',layers.red_light)); else layers.red_light.clearLayers();
-      if(document.getElementById('intersection').checked) tasks.push(fetchFeature('junction','yes',layers.intersection));       else layers.intersection.clearLayers();
-      if(document.getElementById('speed_bump').checked)   tasks.push(fetchFeature('traffic_calming','speed_bump',layers.speed_bump)); else layers.speed_bump.clearLayers();
-      
+      if (document.getElementById('bridge').checked)       tasks.push(fetchFeature('man_made','bridge',      layers.bridge));       else layers.bridge.clearLayers();
+      if (document.getElementById('tunnel').checked)       tasks.push(fetchFeature('tunnel','yes',          layers.tunnel));       else layers.tunnel.clearLayers();
+      if (document.getElementById('toll_station').checked) tasks.push(fetchFeature('amenity','toll_booth',  layers.toll_station)); else layers.toll_station.clearLayers();
+      if (document.getElementById('roundabout').checked)   tasks.push(fetchFeature('junction','roundabout', layers.roundabout));   else layers.roundabout.clearLayers();
+      if (document.getElementById('stop_sign').checked)    tasks.push(fetchFeature('highway','stop',        layers.stop_sign));    else layers.stop_sign.clearLayers();
+      if (document.getElementById('red_light').checked)    tasks.push(fetchFeature('highway','traffic_signals', layers.red_light)); else layers.red_light.clearLayers();
+      if (document.getElementById('intersection').checked) tasks.push(fetchFeature('junction','yes',         layers.intersection)); else layers.intersection.clearLayers();
+      if (document.getElementById('speed_bump').checked)   tasks.push(fetchFeature('traffic_calming','speed_bump', layers.speed_bump)); else layers.speed_bump.clearLayers();
+
       ['20','30','40','50','60','70','80','90','100','110','120','130','140','none']
-      .forEach(v=>{
-        const id='speed_'+v, layer=layers[id];
-        if(document.getElementById(id).checked) tasks.push(fetchFeature('maxspeed',v,layer));
-        else layer.clearLayers();
-      });
+        .forEach(v => {
+          const id = 'speed_' + v, layer = layers[id];
+          if (document.getElementById(id).checked) {
+            tasks.push(fetchFeature('maxspeed', v, layer));
+          } else {
+            layer.clearLayers();
+          }
+        });
 
-      Promise.all(tasks).finally(()=>statusLayer.clearLayers());
+      Promise.all(tasks).finally(() => statusLayer.clearLayers());
 
-      if(useManual && manualLatLng){
+      if (useManual && manualLatLng) {
         manualLayer.clearLayers();
-        const r=+document.getElementById('range').value||1000;
-        L.circle(manualLatLng,{radius:r,color:'blue',weight:1,fill:false}).addTo(manualLayer);
-        L.circleMarker(manualLatLng,{radius:10,fillColor:'blue',color:'blue',fillOpacity:1,weight:2})
-         .addTo(manualLayer);
+        const r = +document.getElementById('range').value || 1000;
+        L.circle(manualLatLng, { radius: r, color:'blue', weight:1, fill:false }).addTo(manualLayer);
+        L.circleMarker(manualLatLng, {
+          radius:10, fillColor:'blue', color:'blue', fillOpacity:1, weight:2
+        }).addTo(manualLayer);
       }
+
       lastSearchPos = useManual && manualLatLng
-                    ? manualLatLng.slice()
-                    : [map.getCenter().lat,map.getCenter().lng];
+        ? manualLatLng.slice()
+        : [map.getCenter().lat, map.getCenter().lng];
     }
 
-    // --- Listeners & geolocation ---
-    document.getElementById('searchBtn').addEventListener('click',performSearch);
-    Object.keys(layers).forEach(id=>
-      document.getElementById(id).addEventListener('change',performSearch)
-    );
-    document.getElementById('range').addEventListener('change',performSearch);
+    // hook search button & range change
+    document.getElementById('searchBtn').addEventListener('click', performSearch);
+    document.getElementById('range').addEventListener('change', performSearch);
 
-    if(navigator.geolocation){
-      navigator.geolocation.watchPosition(pos=>{
-        const latlng=[pos.coords.latitude,pos.coords.longitude];
+    // geolocation & trace
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(pos => {
+        const latlng = [pos.coords.latitude, pos.coords.longitude];
         updateView(latlng);
         pathCoords.push(latlng);
-        L.polyline(pathCoords,{color:'blue',weight:4}).addTo(traceLayer);
+        L.polyline(pathCoords, { color:'blue', weight:4 }).addTo(traceLayer);
         positionLayer.clearLayers();
-        L.circleMarker(latlng,{radius:8,fillColor:'red',color:'red',fillOpacity:1})
-         .addTo(positionLayer);
-        if(!lastSearchPos||distanceMeters(lastSearchPos,latlng)>100) performSearch();
-      },console.error,{enableHighAccuracy:true,maximumAge:0,timeout:10000});
+        L.circleMarker(latlng, { radius:8, fillColor:'red', color:'red', fillOpacity:1 }).addTo(positionLayer);
+        if (!lastSearchPos || distanceMeters(lastSearchPos, latlng) > 100) {
+          performSearch();
+        }
+      }, console.error, { enableHighAccuracy:true, maximumAge:0, timeout:10000 });
     }
 
-    map.on('dblclick',e=>{
-      if(!useManual){
-        manualLatLng=[e.latlng.lat,e.latlng.lng];
-        useManual=true;
+    map.on('dblclick', e => {
+      if (!useManual) {
+        manualLatLng = [e.latlng.lat, e.latlng.lng];
+        useManual = true;
       } else {
-        useManual=false;
-        manualLatLng=null;
+        useManual = false;
+        manualLatLng = null;
         manualLayer.clearLayers();
       }
       performSearch();
     });
 
-    // --- Initial draw ---
+    // test marker at [0,0]
+    L.marker([0,0], { icon: featureIcons.traffic_signals }).addTo(map);
+    map.setView([0,0], 2);
+
+    // initial search
     performSearch();
   </script>
 </body>
