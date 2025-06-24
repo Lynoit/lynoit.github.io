@@ -120,15 +120,17 @@
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) return alert('Load a route first');
 
-      // Combine route into a MultiLineString for Turf
-      const lines = [];
+      // Combine route into an array of LineString features for Turf
+      const lineStrings = [];
       gj.features.forEach(f => {
         const geom = f.geometry;
-        if (geom.type === 'LineString') lines.push(geom.coordinates);
-        else if (geom.type === 'MultiLineString') geom.coordinates.forEach(c => lines.push(c));
+        if (geom.type === 'LineString') {
+          lineStrings.push(turf.lineString(geom.coordinates));
+        } else if (geom.type === 'MultiLineString') {
+          geom.coordinates.forEach(c => lineStrings.push(turf.lineString(c)));
+        }
       });
-      if (!lines.length) return alert('Route geometry invalid');
-      const routeLine = turf.multiLineString(lines);
+      if (!lineStrings.length) return alert('Route geometry invalid');
 
       // Build expanded bbox
       let bbox = turf.bbox(gj);
@@ -147,7 +149,9 @@
           const data = await resp.json();
           data.elements.forEach(el => {
             const coord = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-            const dist = turf.pointToLineDistance(turf.point(coord), routeLine, { units:'meters' });
+            // check if point lies within range of any segment
+            const within = lineStrings.some(ls => turf.pointToLineDistance(turf.point(coord), ls, { units:'meters' }) <= range);
+            if (within) {
             if (dist <= range) {
               addFeatureMarker(label, coord);
               document.getElementById('resultsBody')
