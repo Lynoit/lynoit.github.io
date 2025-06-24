@@ -83,20 +83,19 @@
     function onKMZUpload(file) {
       JSZip.loadAsync(file)
         .then(zip => {
-          // find first .kml
           const kfile = Object.keys(zip.files).find(n=>n.toLowerCase().endsWith('.kml'));
           return zip.file(kfile).async('string');
         })
         .then(kmlText => {
           const parser = new DOMParser();
           const kmlDoc = parser.parseFromString(kmlText,'text/xml');
-          // use the correct global from togeojson script
-          const geojson = togeojson.kml(kmlDoc);
+          // use the global provided by togeojson script
+          const geojson = toGeoJSON.kml(kmlDoc);
           routeLayer.clearLayers();
           routeLayer.addData(geojson);
           map.fitBounds(routeLayer.getBounds());
         })
-        .catch(err=>alert('Failed to load KMZ: '+err));
+        .catch(err => alert('Failed to load KMZ: '+ err));
     }
 
     document.getElementById('loadRouteBtn').onclick = () => {
@@ -110,30 +109,29 @@
       const range = parseInt(document.getElementById('range').value,10) || 1000;
       const geojson = routeLayer.toGeoJSON();
       if (!geojson.features.length) return alert('Load a route first');
-      // compute bbox expanded by range
       let bbox = turf.bbox(geojson);
-      // expand bbox by approx degrees
       const expandDeg = (range/1000) / 111;
       bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
-      // build Overpass bbox string
-      const bboxStr = `${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}`;
-      const tasks = featureSettings.map(([k,v,label])=>{
+      const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
+      const tasks = featureSettings.map(([k,v,label]) => {
         const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
-        return fetch('https://overpass-api.de/api/interpreter', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:query})
-          .then(r=>r.json())
-          .then(data=>{
-            data.elements.forEach(el=>{
-              const coord = el.lat&&el.lon?[el.lat, el.lon]:[el.center.lat, el.center.lon];
-              const dist = turf.pointToLineDistance(turf.point(coord), geojson, {units:'meters'});
-              if (dist <= range) {
-                addFeature_marker(label, coord);
-                const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
-                document.getElementById('resultsBody').insertAdjacentHTML('beforeend', row);
-              }
-            });
+        return fetch('https://overpass-api.de/api/interpreter', {
+          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
+        })
+        .then(r => r.json())
+        .then(data => {
+          data.elements.forEach(el => {
+            const coord = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
+            const dist = turf.pointToLineDistance(turf.point(coord), geojson, { units: 'meters' });
+            if (dist <= range) {
+              addFeatureMarker(label, coord);
+              const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
+              document.getElementById('resultsBody').insertAdjacentHTML('beforeend', row);
+            }
           });
+        });
       });
-      Promise.all(tasks).then(()=>console.log('Search complete'));
+      Promise.all(tasks).then(() => console.log('Search complete'));
     };
   </script>
 </body>
