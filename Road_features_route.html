@@ -26,15 +26,22 @@
     <button id="loadRouteBtn">Load Route</button>
     <br/><br/>
     <strong>Road Features:</strong>
-    <!-- feature checkboxes as before -->
     <label><input type="checkbox" id="bridge" /> Bridges</label>
     <label><input type="checkbox" id="tunnel" /> Tunnels</label>
-    <!-- ... other feature checkboxes ... -->
+    <label><input type="checkbox" id="toll_station" /> Toll Stations</label>
+    <label><input type="checkbox" id="roundabout" /> Roundabouts</label>
+    <label><input type="checkbox" id="stop_sign" /> Stop Signs</label>
+    <label><input type="checkbox" id="red_light" /> Traffic Lights</label>
+    <label><input type="checkbox" id="intersection" /> Intersections</label>
+    <label><input type="checkbox" id="speed_bump" /> Speed Bumps</label>
     <div style="margin-top:8px;">
       <strong>Search Range (m):</strong>
       <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" />
     </div>
     <button id="searchBtn">Search Along Route</button>
+    <div style="margin-top:4px; font-size:0.8em;">
+      Double-click map to toggle manual search point.
+    </div>
   </div>
   <div id="map"></div>
   <div id="results">
@@ -50,9 +57,11 @@
   <script src="https://unpkg.com/togeojson@0.16.0/dist/togeojson.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
+    // --- Map init ---
     const map = L.map('map').setView([0,0],2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
 
+    // --- Layers ---
     const routeLayer = L.geoJSON().addTo(map);
     const featureLayers = {};
     const featureSettings = [
@@ -65,37 +74,37 @@
       ['junction','yes','Intersection'],
       ['traffic_calming','speed_bump','Speed Bump']
     ];
-    featureSettings.forEach(([k,v,label])=>{
+    featureSettings.forEach(([k,v,label]) => {
       featureLayers[label] = L.layerGroup().addTo(map);
     });
 
+    // --- Helpers ---
     function addFeatureMarker(label, coord) {
       L.marker(coord, { icon: L.divIcon({ className:'invisible-icon' }), interactive:false })
        .addTo(featureLayers[label])
        .bindTooltip(label, { permanent:true, direction:'right', offset:[10,0], className:'feature-label' });
     }
-
     function clearAllFeatures() {
-      Object.values(featureLayers).forEach(l=>l.clearLayers());
+      Object.values(featureLayers).forEach(l => l.clearLayers());
       document.getElementById('resultsBody').innerHTML = '';
     }
 
+    // --- KMZ Upload & parse ---
     function onKMZUpload(file) {
       JSZip.loadAsync(file)
         .then(zip => {
-          const kfile = Object.keys(zip.files).find(n=>n.toLowerCase().endsWith('.kml'));
+          const kfile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
           return zip.file(kfile).async('string');
         })
         .then(kmlText => {
           const parser = new DOMParser();
-          const kmlDoc = parser.parseFromString(kmlText,'text/xml');
-          // use the global provided by togeojson script
-          const geojson = toGeoJSON.kml(kmlDoc);
-          routeLayer.clearLayers();
-          routeLayer.addData(geojson);
+          const kmlDoc = parser.parseFromString(kmlText, 'application/xml');
+          // use the lowercase global from togeojson
+          const geojson = togeojson.kml(kmlDoc);
+          routeLayer.clearLayers().addData(geojson);
           map.fitBounds(routeLayer.getBounds());
         })
-        .catch(err => alert('Failed to load KMZ: '+ err));
+        .catch(err => alert('Failed to load KMZ: '+err));
     }
 
     document.getElementById('loadRouteBtn').onclick = () => {
@@ -104,25 +113,28 @@
       onKMZUpload(file);
     };
 
+    // --- Search Along Route ---
     document.getElementById('searchBtn').onclick = () => {
       clearAllFeatures();
-      const range = parseInt(document.getElementById('range').value,10) || 1000;
-      const geojson = routeLayer.toGeoJSON();
-      if (!geojson.features.length) return alert('Load a route first');
-      let bbox = turf.bbox(geojson);
+      const range = parseInt(document.getElementById('range').value, 10) || 1000;
+      const gj = routeLayer.toGeoJSON();
+      if (!gj.features.length) return alert('Load a route first');
+      let bbox = turf.bbox(gj);
       const expandDeg = (range/1000) / 111;
       bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
+      // Overpass expects south,west,north,east
       const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
-      const tasks = featureSettings.map(([k,v,label]) => {
+
+      Promise.all(featureSettings.map(([k,v,label]) => {
         const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
         return fetch('https://overpass-api.de/api/interpreter', {
-          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
+          method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: query
         })
         .then(r => r.json())
         .then(data => {
           data.elements.forEach(el => {
             const coord = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-            const dist = turf.pointToLineDistance(turf.point(coord), geojson, { units: 'meters' });
+            const dist = turf.pointToLineDistance(turf.point(coord), gj, { units: 'meters' });
             if (dist <= range) {
               addFeatureMarker(label, coord);
               const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
@@ -130,8 +142,7 @@
             }
           });
         });
-      });
-      Promise.all(tasks).then(() => console.log('Search complete'));
+      })).finally(() => console.log('Search complete'));
     };
   </script>
 </body>
