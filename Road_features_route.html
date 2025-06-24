@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body, html { margin: 0; padding: 0; height: 100%; }
-    #map { width: 100%; height: 75%; }
+    #map { position: relative; width: 100%; height: 75%; }
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
     #controls label { margin-right: 10px; font-size: 0.9em; }
     .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
@@ -17,6 +17,22 @@
     #results { height: 25%; overflow: auto; }
     #results table { width: 100%; border-collapse: collapse; }
     #results th, #results td { border: 1px solid #ccc; padding: 4px; text-align: left; }
+    /* Overlay styling */
+    #searchOverlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 1.5em;
+      z-index: 1000;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -44,7 +60,10 @@
     </div>
   </div>
 
-  <div id="map"></div>
+  <div id="map">
+    <!-- Overlay shown during search -->
+    <div id="searchOverlay" style="display: none;">Searching for road features…</div>
+  </div>
 
   <div id="results">
     <h4>Detected Features</h4>
@@ -59,6 +78,14 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
+    // Show or hide the full-map search overlay
+    function showOverlay() {
+      document.getElementById('searchOverlay').style.display = 'flex';
+    }
+    function hideOverlay() {
+      document.getElementById('searchOverlay').style.display = 'none';
+    }
+
     // Map init
     const map = L.map('map').setView([0,0],2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
@@ -116,11 +143,12 @@
     // Search Along Route
     document.getElementById('searchBtn').onclick = async () => {
       clearAllFeatures();
+      showOverlay();
       const range = parseInt(document.getElementById('range').value, 10) || 1000;
       const gj = routeLayer.toGeoJSON();
-      if (!gj.features.length) return alert('Load a route first');
+      if (!gj.features.length) { hideOverlay(); return alert('Load a route first'); }
 
-      // Combine route into an array of LineString features for Turf
+      // Combine route into LineString features
       const lineStrings = [];
       gj.features.forEach(f => {
         const geom = f.geometry;
@@ -130,7 +158,7 @@
           geom.coordinates.forEach(c => lineStrings.push(turf.lineString(c)));
         }
       });
-      if (!lineStrings.length) return alert('Route geometry invalid');
+      if (!lineStrings.length) { hideOverlay(); return alert('Route geometry invalid'); }
 
       // Build expanded bbox
       let bbox = turf.bbox(gj);
@@ -148,20 +176,13 @@
           if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
           const data = await resp.json();
           data.elements.forEach(el => {
-            // Overpass returns lat,lon in el.lat,el.lon
             const lat = el.lat != null ? el.lat : el.center.lat;
             const lon = el.lon != null ? el.lon : el.center.lon;
-            const coord = [lat, lon];
-            // construct GeoJSON Point with [lon,lat] for Turf
             const pt = turf.point([lon, lat]);
-            // check if point lies within range of any segment
-            const within = lineStrings.some(ls =>
-              turf.pointToLineDistance(pt, ls, { units: 'meters' }) <= range
-            );
+            const within = lineStrings.some(ls => turf.pointToLineDistance(pt, ls, { units:'meters' }) <= range);
             if (within) {
-              addFeatureMarker(label, coord);
-              document.getElementById('resultsBody').insertAdjacentHTML(
-                'beforeend',
+              addFeatureMarker(label, [lat, lon]);
+              document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
                 `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
               );
             }
@@ -170,6 +191,7 @@
           console.warn(`Error fetching ${label}:`, e);
         }
       }
+      hideOverlay();
       console.log('Search complete');
     };
   </script>
