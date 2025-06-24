@@ -22,7 +22,7 @@
         #weather img { vertical-align: middle; width: 50px; height: 50px; }
         #forecast { margin-top: 2rem; display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; }
         .forecast-day { text-align: center; font-size: 1.25rem; }
-        .forecast-day img { display: block; margin: 0.5rem auto; width: 50px; height: 50px; }
+        .forecast-day .day-name { font-weight: bold; margin-bottom: 0.3rem; }
     </style>
 </head>
 <body>
@@ -31,75 +31,79 @@
         <div id="date">Loading date...</div>
         <div id="city">Loading city...</div>
         <div id="weather">Loading weather...</div>
-        <div id="forecast"></div>
+        <div id="forecast">Loading 5-day forecast...</div>
     </div>
     <script>
         // Clock (hours and minutes only)
         function updateClock() {
             const now = new Date();
-            const hours = String(now.getHours()).padStart(2, '0');
-            const minutes = String(now.getMinutes()).padStart(2, '0');
-            document.getElementById('clock').textContent = `${hours}:${minutes}`;
+            document.getElementById('clock').textContent =
+                String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
         }
         updateClock();
         const msUntilNextMinute = (60 - new Date().getSeconds()) * 1000;
-        setTimeout(() => {
-            updateClock();
-            setInterval(updateClock, 60000);
-        }, msUntilNextMinute);
+        setTimeout(() => { updateClock(); setInterval(updateClock, 60000); }, msUntilNextMinute);
 
         // Date
         function updateDate() {
             const now = new Date();
-            const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-            document.getElementById('date').textContent = now.toLocaleDateString(undefined, options);
+            document.getElementById('date').textContent =
+                now.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
         }
         updateDate();
 
-        // Weather & 5-day forecast via WeatherAPI.com
-        const apiKey = 'ad8caecea06c43d1912181938230407';
-        function fetchWeather(lat, lon) {
-            const query = encodeURIComponent(`${lat},${lon}`);
-            // days=6 returns today + next 5 days
-            fetch(`https://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${query}&days=6&aqi=no&alerts=no`)
-                .then(res => res.json())
-                .then(data => {
-                    // City name
-                    document.getElementById('city').textContent = data.location.name;
+        // Weather via WeatherAPI.com (current only)
+        const weatherApiKey = 'ad8caecea06c43d1912181938230407';
+        function fetchCurrent(lat, lon) {
+            const q = encodeURIComponent(`${lat},${lon}`);
+            return fetch(`https://api.weatherapi.com/v1/current.json?key=${weatherApiKey}&q=${q}`)
+                .then(res => res.json());
+        }
+
+        // Forecast via Open-Meteo.com (5-day)
+        function fetchForecast(lat, lon) {
+            return fetch(
+                `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+                `&daily=temperature_2m_max,temperature_2m_min&timezone=auto`
+            ).then(res => res.json());
+        }
+
+        function render(lat, lon) {
+            Promise.all([fetchCurrent(lat, lon), fetchForecast(lat, lon)])
+                .then(([current, fc]) => {
+                    // City
+                    document.getElementById('city').textContent = current.location.name;
                     // Current weather
-                    const temp = Math.round(data.current.temp_c);
-                    const desc = data.current.condition.text;
-                    const iconUrl = `https:${data.current.condition.icon}`;
-                    document.getElementById('weather').innerHTML = 
+                    const temp = Math.round(current.current.temp_c);
+                    const desc = current.current.condition.text;
+                    const iconUrl = `https:${current.current.condition.icon}`;
+                    document.getElementById('weather').innerHTML =
                         `<img src="${iconUrl}" alt="${desc}" /> ${temp}°C ${desc}`;
-                    // Next 5 days forecast
-                    const days = data.forecast.forecastday.slice(1, 6);
-                    document.getElementById('forecast').innerHTML = days.map(d => {
-                        const dt = new Date(d.date);
-                        const weekday = dt.toLocaleDateString(undefined, { weekday: 'short' });
-                        const max = Math.round(d.day.maxtemp_c);
-                        const min = Math.round(d.day.mintemp_c);
-                        const ico = `https:${d.day.condition.icon}`;
+                    // 5-day forecast
+                    const days = fc.daily.time.slice(1, 6);
+                    const maxTemps = fc.daily.temperature_2m_max.slice(1, 6);
+                    const minTemps = fc.daily.temperature_2m_min.slice(1, 6);
+                    const html = days.map((dateStr, i) => {
+                        const dt = new Date(dateStr);
+                        const dayName = dt.toLocaleDateString(undefined, { weekday: 'short' });
                         return `
                             <div class="forecast-day">
-                                <div>${weekday}</div>
-                                <img src="${ico}" alt="" />
-                                <div>${max}°/${min}°</div>
+                                <div class="day-name">${dayName}</div>
+                                <div>${Math.round(maxTemps[i])}° / ${Math.round(minTemps[i])}°</div>
                             </div>`;
                     }).join('');
+                    document.getElementById('forecast').innerHTML = html;
                 })
                 .catch(err => {
                     console.error(err);
-                    document.getElementById('city').textContent = '';
-                    document.getElementById('weather').textContent = 'Unable to fetch weather.';
-                    document.getElementById('forecast').textContent = '';
+                    document.getElementById('forecast').textContent = 'Unable to fetch forecast.';
                 });
         }
+
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
-                pos => fetchWeather(pos.coords.latitude, pos.coords.longitude),
-                err => {
-                    console.error(err);
+                pos => render(pos.coords.latitude, pos.coords.longitude),
+                () => {
                     document.getElementById('city').textContent = '';
                     document.getElementById('weather').textContent = 'Location denied.';
                     document.getElementById('forecast').textContent = '';
