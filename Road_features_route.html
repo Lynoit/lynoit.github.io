@@ -43,7 +43,9 @@
       Double-click map to toggle manual search point.
     </div>
   </div>
+
   <div id="map"></div>
+
   <div id="results">
     <h4>Detected Features</h4>
     <table>
@@ -54,12 +56,12 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
-  <script src="https://unpkg.com/togeojson@0.16.0/dist/togeojson.js"></script>
+  <script src="https://unpkg.com/@tmcw/togeojson@0.16.0/dist/togeojson.min.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
     // --- Map init ---
     const map = L.map('map').setView([0,0],2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19 }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
 
     // --- Layers ---
     const routeLayer = L.geoJSON().addTo(map);
@@ -99,12 +101,17 @@
         .then(kmlText => {
           const parser = new DOMParser();
           const kmlDoc = parser.parseFromString(kmlText, 'application/xml');
-          // use the lowercase global from togeojson
-          const geojson = togeojson.kml(kmlDoc);
-          routeLayer.clearLayers().addData(geojson);
-          map.fitBounds(routeLayer.getBounds());
+          // ensure toGeoJSON global is available
+          if (typeof toGeoJSON !== 'undefined') {
+            const gj = toGeoJSON.kml(kmlDoc);
+            routeLayer.clearLayers().addData(gj);
+            map.fitBounds(routeLayer.getBounds());
+          } else {
+            console.error('toGeoJSON is undefined', window.toGeoJSON);
+            alert('Error: toGeoJSON library not loaded.');
+          }
         })
-        .catch(err => alert('Failed to load KMZ: '+err));
+        .catch(err => alert('Failed to load KMZ: '+ err));
     }
 
     document.getElementById('loadRouteBtn').onclick = () => {
@@ -122,19 +129,18 @@
       let bbox = turf.bbox(gj);
       const expandDeg = (range/1000) / 111;
       bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
-      // Overpass expects south,west,north,east
       const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
 
       Promise.all(featureSettings.map(([k,v,label]) => {
         const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
         return fetch('https://overpass-api.de/api/interpreter', {
-          method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: query
+          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
         })
         .then(r => r.json())
         .then(data => {
           data.elements.forEach(el => {
             const coord = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-            const dist = turf.pointToLineDistance(turf.point(coord), gj, { units: 'meters' });
+            const dist = turf.pointToLineDistance(turf.point(coord), gj, { units:'meters' });
             if (dist <= range) {
               addFeatureMarker(label, coord);
               const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
