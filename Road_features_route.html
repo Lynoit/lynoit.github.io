@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Road Features Map with KMZ Route</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; }
+    #map { width: 100%; height: 75%; }
+    #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    #controls label { margin-right: 10px; font-size: 0.9em; }
+    .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
+    .leaflet-tooltip.feature-label:after { background: white; }
+    .invisible-icon { width: 0; height: 0; }
+    .status-text-div { font-size: 1em; color: #333; background: rgba(255,255,255,0.8); padding: 4px 8px; border-radius: 4px; text-align: center; pointer-events: none; }
+    #results { height: 25%; overflow: auto; }
+    #results table { width: 100%; border-collapse: collapse; }
+    #results th, #results td { border: 1px solid #ccc; padding: 4px; text-align: left; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <strong>Upload Route (KMZ):</strong>
+    <input type="file" id="kmzInput" accept=".kmz" />
+    <button id="loadRouteBtn">Load Route</button>
+    <br/><br/>
+    <strong>Road Features:</strong>
+    <!-- feature checkboxes as before -->
+    <label><input type="checkbox" id="bridge" /> Bridges</label>
+    <label><input type="checkbox" id="tunnel" /> Tunnels</label>
+    <!-- ... other feature checkboxes ... -->
+    <div style="margin-top:8px;">
+      <strong>Search Range (m):</strong>
+      <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" />
+    </div>
+    <button id="searchBtn">Search Along Route</button>
+  </div>
+  <div id="map"></div>
+  <div id="results">
+    <h4>Detected Features</h4>
+    <table>
+      <thead><tr><th>Feature</th><th>Latitude</th><th>Longitude</th></tr></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
+  <script src="https://unpkg.com/togeojson@0.16.0/dist/togeojson.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script>
+    const map = L.map('map').setView([0,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
+
+    const routeLayer = L.geoJSON().addTo(map);
+    const featureLayers = {};
+    const featureSettings = [
+      ['man_made','bridge','Bridge'],
+      ['tunnel','yes','Tunnel'],
+      ['amenity','toll_booth','Toll Station'],
+      ['junction','roundabout','Roundabout'],
+      ['highway','stop','Stop Sign'],
+      ['highway','traffic_signals','Traffic Light'],
+      ['junction','yes','Intersection'],
+      ['traffic_calming','speed_bump','Speed Bump']
+    ];
+    featureSettings.forEach(([k,v,label])=>{
+      featureLayers[label] = L.layerGroup().addTo(map);
+    });
+
+    function addFeatureMarker(label, coord) {
+      L.marker(coord, { icon: L.divIcon({ className:'invisible-icon' }), interactive:false })
+       .addTo(featureLayers[label])
+       .bindTooltip(label, { permanent:true, direction:'right', offset:[10,0], className:'feature-label' });
+    }
+
+    function clearAllFeatures() {
+      Object.values(featureLayers).forEach(l=>l.clearLayers());
+      document.getElementById('resultsBody').innerHTML = '';
+    }
+
+    function onKMZUpload(file) {
+      JSZip.loadAsync(file)
+        .then(zip => {
+          // find first .kml
+          const kfile = Object.keys(zip.files).find(n=>n.toLowerCase().endsWith('.kml'));
+          return zip.file(kfile).async('string');
+        })
+        .then(kmlText => {
+          const parser = new DOMParser();
+          const kmlDoc = parser.parseFromString(kmlText,'text/xml');
+          const geojson = toGeoJSON.kml(kmlDoc);
+          routeLayer.clearLayers();
+          routeLayer.addData(geojson);
+          map.fitBounds(routeLayer.getBounds());
+        })
+        .catch(err=>alert('Failed to load KMZ: '+err));
+    }
+
+    document.getElementById('loadRouteBtn').onclick = () => {
+      const file = document.getElementById('kmzInput').files[0];
+      if (!file) return alert('Select a KMZ file first');
+      onKMZUpload(file);
+    };
+
+    document.getElementById('searchBtn').onclick = () => {
+      clearAllFeatures();
+      const range = parseInt(document.getElementById('range').value,10) || 1000;
+      const geojson = routeLayer.toGeoJSON();
+      if (!geojson.features.length) return alert('Load a route first');
+      // compute bbox expanded by range
+      let bbox = turf.bbox(geojson);
+      // expand bbox by approx degrees
+      const expandDeg = (range/1000) / 111;
+      bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
+      // build Overpass bbox string
+      const bboxStr = `${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}`;
+      const tasks = featureSettings.map(([k,v,label])=>{
+        const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
+        return fetch('https://overpass-api.de/api/interpreter', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:query})
+          .then(r=>r.json())
+          .then(data=>{
+            data.elements.forEach(el=>{
+              const coord = el.lat&&el.lon?[el.lat, el.lon]:[el.center.lat, el.center.lon];
+              const dist = turf.pointToLineDistance(turf.point(coord), geojson, {units:'meters'});
+              if (dist <= range) {
+                addFeatureMarker(label, coord);
+                const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
+                document.getElementById('resultsBody').insertAdjacentHTML('beforeend', row);
+              }
+            });
+          });
+      });
+      Promise.all(tasks).then(()=>console.log('Search complete'));
+    };
+  </script>
+</body>
+</html>
