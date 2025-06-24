@@ -56,15 +56,14 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
-  <!-- Use cdnjs for togeojson to ensure global toGeoJSON is defined -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
-    // --- Map init ---
+    // Map init
     const map = L.map('map').setView([0,0],2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
 
-    // --- Layers ---
+    // Layers
     const routeLayer = L.geoJSON().addTo(map);
     const featureLayers = {};
     const featureSettings = [
@@ -81,7 +80,7 @@
       featureLayers[label] = L.layerGroup().addTo(map);
     });
 
-    // --- Helpers ---
+    // Helpers
     function addFeatureMarker(label, coord) {
       L.marker(coord, { icon: L.divIcon({ className:'invisible-icon' }), interactive:false })
        .addTo(featureLayers[label])
@@ -92,7 +91,7 @@
       document.getElementById('resultsBody').innerHTML = '';
     }
 
-    // --- KMZ Upload & parse ---
+    // KMZ Upload & parse
     function onKMZUpload(file) {
       JSZip.loadAsync(file)
         .then(zip => {
@@ -102,49 +101,64 @@
         .then(kmlText => {
           const parser = new DOMParser();
           const kmlDoc = parser.parseFromString(kmlText, 'application/xml');
-          // Convert KML to GeoJSON
           const gj = toGeoJSON.kml(kmlDoc);
           routeLayer.clearLayers().addData(gj);
           map.fitBounds(routeLayer.getBounds());
         })
-        .catch(err => alert('Failed to load KMZ: '+ err));
+        .catch(err => alert('Failed to load KMZ: '+err));
     }
-
     document.getElementById('loadRouteBtn').onclick = () => {
       const file = document.getElementById('kmzInput').files[0];
       if (!file) return alert('Select a KMZ file first');
       onKMZUpload(file);
     };
 
-    // --- Search Along Route ---
-    document.getElementById('searchBtn').onclick = () => {
+    // Search Along Route
+    document.getElementById('searchBtn').onclick = async () => {
       clearAllFeatures();
       const range = parseInt(document.getElementById('range').value, 10) || 1000;
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) return alert('Load a route first');
+
+      // Combine route into a MultiLineString for Turf
+      const lines = [];
+      gj.features.forEach(f => {
+        const geom = f.geometry;
+        if (geom.type === 'LineString') lines.push(geom.coordinates);
+        else if (geom.type === 'MultiLineString') geom.coordinates.forEach(c => lines.push(c));
+      });
+      if (!lines.length) return alert('Route geometry invalid');
+      const routeLine = turf.multiLineString(lines);
+
+      // Build expanded bbox
       let bbox = turf.bbox(gj);
       const expandDeg = (range/1000) / 111;
       bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
       const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
 
-      Promise.all(featureSettings.map(([k,v,label]) => {
-        const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
-        return fetch('https://overpass-api.de/api/interpreter', {
-          method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
-        })
-        .then(r => r.json())
-        .then(data => {
+      // Fetch & filter features
+      for (const [k,v,label] of featureSettings) {
+        try {
+          const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
+          const resp = await fetch('https://overpass-api.de/api/interpreter', {
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
+          });
+          if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
+          const data = await resp.json();
           data.elements.forEach(el => {
             const coord = el.lat && el.lon ? [el.lat, el.lon] : [el.center.lat, el.center.lon];
-            const dist = turf.pointToLineDistance(turf.point(coord), gj, { units:'meters' });
+            const dist = turf.pointToLineDistance(turf.point(coord), routeLine, { units:'meters' });
             if (dist <= range) {
               addFeatureMarker(label, coord);
-              const row = `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`;
-              document.getElementById('resultsBody').insertAdjacentHTML('beforeend', row);
+              document.getElementById('resultsBody')
+                .insertAdjacentHTML('beforeend', `<tr><td>${label}</td><td>${coord[0].toFixed(6)}</td><td>${coord[1].toFixed(6)}</td></tr>`);
             }
           });
-        });
-      })).finally(() => console.log('Search complete'));
+        } catch (e) {
+          console.warn(`Error fetching ${label}:`, e);
+        }
+      }
+      console.log('Search complete');
     };
   </script>
 </body>
