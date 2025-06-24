@@ -3,17 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Enable full-screen on iOS and Android when added to home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#000000">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Clock & Weather Station</title>
+    <!-- Link to manifest.json for Android PWA full-screen -->
+    <link rel="manifest" href="manifest.json">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body, html { width: 100%; height: 100%; overflow: hidden; background: #000; }
         #container {
-            position: absolute; top: 50%; left: 50%;
-            transform: translate(-50%, -50%);
-            color: #fff; font-family: 'Orbitron', sans-serif;
-            text-align: center;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #fff; font-family: 'Orbitron', sans-serif; text-align: center;
+            padding: env(safe-area-inset);
         }
         #clock { font-size: 14rem; letter-spacing: 4px; }
         #date { margin-top: 0.5rem; font-size: 2rem; }
@@ -24,6 +29,10 @@
         .forecast-day { text-align: center; font-size: 1.25rem; color: #fff; }
         .forecast-day .day-name { font-weight: bold; margin-bottom: 0.3rem; }
         .forecast-day img { display: block; margin: 0.3rem auto; width: 48px; height: 48px; }
+        #fullscreen-prompt {
+            position: absolute; bottom: 20px; width: 100%; text-align: center; color: #888;
+            font-size: 1rem; pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -34,7 +43,18 @@
         <div id="weather">Loading weather...</div>
         <div id="forecast">Loading 5-day forecast...</div>
     </div>
+    <div id="fullscreen-prompt">Tap anywhere to go fullscreen</div>
     <script>
+        // Request fullscreen on first user interaction
+        function enableFullscreen() {
+            const el = document.documentElement;
+            if (el.requestFullscreen) el.requestFullscreen();
+            else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+            document.removeEventListener('click', enableFullscreen);
+            document.getElementById('fullscreen-prompt').style.display = 'none';
+        }
+        document.addEventListener('click', enableFullscreen, { once: true });
+
         // Clock (hours and minutes only)
         function updateClock() {
             const now = new Date();
@@ -42,8 +62,7 @@
                 String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
         }
         updateClock();
-        const msUntilNextMinute = (60 - new Date().getSeconds()) * 1000;
-        setTimeout(() => { updateClock(); setInterval(updateClock, 60000); }, msUntilNextMinute);
+        setTimeout(() => { updateClock(); setInterval(updateClock, 60000); }, (60 - new Date().getSeconds()) * 1000);
 
         // Date
         function updateDate() {
@@ -57,59 +76,35 @@
         const apiKey = 'ad8caecea06c43d1912181938230407';
         function fetchWeather(lat, lon) {
             const q = encodeURIComponent(`${lat},${lon}`);
-            // days=6 gives today + 5-day forecast
             return fetch(`https://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${q}&days=6&aqi=no&alerts=no`)
                 .then(res => res.json());
         }
-
         function render(lat, lon) {
             fetchWeather(lat, lon)
                 .then(data => {
-                    // City
                     document.getElementById('city').textContent = data.location.name;
-                    // Current weather
                     const cur = data.current;
-                    const temp = Math.round(cur.temp_c);
-                    const desc = cur.condition.text;
-                    const iconUrl = `https:${cur.condition.icon}`;
                     document.getElementById('weather').innerHTML =
-                        `<img src="${iconUrl}" alt="${desc}" /> ${temp}°C ${desc}`;
-                    // Forecast days 1-5
-                    const forecastDays = data.forecast.forecastday.slice(1, 6);
-                    const html = forecastDays.map(day => {
-                        const dt = new Date(day.date);
-                        const name = dt.toLocaleDateString(undefined, { weekday: 'short' });
-                        const icon = `https:${day.day.condition.icon}`;
-                        const max = Math.round(day.day.maxtemp_c);
-                        const min = Math.round(day.day.mintemp_c);
-                        return `
-                            <div class="forecast-day">
-                                <div class="day-name">${name}</div>
-                                <img src="${icon}" alt="${day.day.condition.text}" />
-                                <div>${max}° / ${min}°</div>
-                            </div>`;
+                        `<img src=\"https:${cur.condition.icon}\" alt=\"${cur.condition.text}\" /> ${Math.round(cur.temp_c)}°C ${cur.condition.text}`;
+                    const days = data.forecast.forecastday.slice(1, 6);
+                    document.getElementById('forecast').innerHTML = days.map(day => {
+                        const d = new Date(day.date);
+                        return `<div class=\"forecast-day\">` +
+                            `<div class=\"day-name\">${d.toLocaleDateString(undefined,{weekday:'short'})}</div>` +
+                            `<img src=\"https:${day.day.condition.icon}\" alt=\"${day.day.condition.text}\" />` +
+                            `<div>${Math.round(day.day.maxtemp_c)}° / ${Math.round(day.day.mintemp_c)}°</div>` +
+                        `</div>`;
                     }).join('');
-                    document.getElementById('forecast').innerHTML = html;
                 })
-                .catch(err => {
-                    console.error(err);
-                    document.getElementById('forecast').textContent = 'Unable to fetch forecast.';
-                });
+                .catch(err => console.error(err));
         }
-
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
                 pos => render(pos.coords.latitude, pos.coords.longitude),
-                () => {
-                    document.getElementById('city').textContent = '';
-                    document.getElementById('weather').textContent = 'Location denied.';
-                    document.getElementById('forecast').textContent = '';
-                }
+                () => console.error('Location denied.')
             );
         } else {
-            document.getElementById('city').textContent = '';
-            document.getElementById('weather').textContent = 'Geolocation not supported.';
-            document.getElementById('forecast').textContent = '';
+            console.error('Geolocation not supported.');
         }
     </script>
 </body>
