@@ -9,7 +9,6 @@
     body, html { margin: 0; padding: 0; height: 100%; }
     #map { position: relative; width: 100%; height: 75%; }
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-    #controls label { margin-right: 10px; font-size: 0.9em; }
     .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
     .leaflet-tooltip.feature-label:after { background: white; }
     .invisible-icon { width: 0; height: 0; }
@@ -40,20 +39,6 @@
     <strong>Upload Route (KMZ):</strong>
     <input type="file" id="kmzInput" accept=".kmz" />
     <button id="loadRouteBtn">Load Route</button>
-    <br/><br/>
-    <strong>Road Features:</strong>
-    <label><input type="checkbox" id="bridge" /> Bridges</label>
-    <label><input type="checkbox" id="tunnel" /> Tunnels</label>
-    <label><input type="checkbox" id="toll_station" /> Toll Stations</label>
-    <label><input type="checkbox" id="roundabout" /> Roundabouts</label>
-    <label><input type="checkbox" id="stop_sign" /> Stop Signs</label>
-    <label><input type="checkbox" id="red_light" /> Traffic Lights</label>
-    <label><input type="checkbox" id="intersection" /> Intersections</label>
-    <label><input type="checkbox" id="speed_bump" /> Speed Bumps</label>
-    <div style="margin-top:8px;">
-      <strong>Search Range (m):</strong>
-      <input type="number" id="range" value="1000" min="100" step="100" style="width:80px;" />
-    </div>
     <button id="searchBtn">Search Along Route</button>
     <div style="margin-top:4px; font-size:0.8em;">
       Double-click map to toggle manual search point.
@@ -61,7 +46,6 @@
   </div>
 
   <div id="map">
-    <!-- Overlay shown during search -->
     <div id="searchOverlay" style="display: none;">Searching for road features…</div>
   </div>
 
@@ -78,19 +62,12 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
-    // Show or hide the full-map search overlay
-    function showOverlay() {
-      document.getElementById('searchOverlay').style.display = 'flex';
-    }
-    function hideOverlay() {
-      document.getElementById('searchOverlay').style.display = 'none';
-    }
+    function showOverlay() { document.getElementById('searchOverlay').style.display = 'flex'; }
+    function hideOverlay() { document.getElementById('searchOverlay').style.display = 'none'; }
 
-    // Map init
     const map = L.map('map').setView([0,0],2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
 
-    // Layers
     const routeLayer = L.geoJSON().addTo(map);
     const featureLayers = {};
     const featureSettings = [
@@ -107,7 +84,6 @@
       featureLayers[label] = L.layerGroup().addTo(map);
     });
 
-    // Helpers
     function addFeatureMarker(label, coord) {
       L.marker(coord, { icon: L.divIcon({ className:'invisible-icon' }), interactive:false })
        .addTo(featureLayers[label])
@@ -118,7 +94,6 @@
       document.getElementById('resultsBody').innerHTML = '';
     }
 
-    // KMZ Upload & parse
     function onKMZUpload(file) {
       JSZip.loadAsync(file)
         .then(zip => {
@@ -140,33 +115,23 @@
       onKMZUpload(file);
     };
 
-    // Search Along Route
     document.getElementById('searchBtn').onclick = async () => {
       clearAllFeatures();
       showOverlay();
-      const range = parseInt(document.getElementById('range').value, 10) || 1000;
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) { hideOverlay(); return alert('Load a route first'); }
 
-      // Combine route into LineString features
       const lineStrings = [];
       gj.features.forEach(f => {
         const geom = f.geometry;
-        if (geom.type === 'LineString') {
-          lineStrings.push(turf.lineString(geom.coordinates));
-        } else if (geom.type === 'MultiLineString') {
-          geom.coordinates.forEach(c => lineStrings.push(turf.lineString(c)));
-        }
+        if (geom.type === 'LineString') lineStrings.push(turf.lineString(geom.coordinates));
+        else if (geom.type === 'MultiLineString') geom.coordinates.forEach(c => lineStrings.push(turf.lineString(c)));
       });
       if (!lineStrings.length) { hideOverlay(); return alert('Route geometry invalid'); }
 
-      // Build expanded bbox
       let bbox = turf.bbox(gj);
-      const expandDeg = (range/1000) / 111;
-      bbox = [bbox[0]-expandDeg, bbox[1]-expandDeg, bbox[2]+expandDeg, bbox[3]+expandDeg];
       const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
 
-      // Fetch & filter features
       for (const [k,v,label] of featureSettings) {
         try {
           const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
@@ -179,8 +144,8 @@
             const lat = el.lat != null ? el.lat : el.center.lat;
             const lon = el.lon != null ? el.lon : el.center.lon;
             const pt = turf.point([lon, lat]);
-            const within = lineStrings.some(ls => turf.pointToLineDistance(pt, ls, { units:'meters' }) <= range);
-            if (within) {
+            const isOnRoute = lineStrings.some(ls => turf.booleanPointOnLine(pt, ls));
+            if (isOnRoute) {
               addFeatureMarker(label, [lat, lon]);
               document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
                 `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
@@ -194,6 +159,14 @@
       hideOverlay();
       console.log('Search complete');
     };
+
+    // Double-click to toggle manual search point (falls back to center search if no route)
+    let useManual = false, manualLatLng = null, lastSearchPos = null;
+    map.on('dblclick', e => {
+      useManual = !useManual;
+      manualLatLng = useManual ? [e.latlng.lat, e.latlng.lng] : null;
+      document.getElementById('searchBtn').onclick();
+    });
   </script>
 </body>
 </html>
