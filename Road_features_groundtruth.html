@@ -5,10 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Annotation Map App</title>
   <!-- Leaflet CSS -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet/dist/leaflet.css"
-  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     #map { height: 400px; margin-top: 10px; }
@@ -23,7 +20,6 @@
 <body>
   <h1>Annotation Map App</h1>
 
-  <!-- File input for XLSX configuration -->
   <div id="controls">
     <label>Upload button config (XLSX): </label>
     <input type="file" id="xlsxInput" accept=".xlsx" />
@@ -33,24 +29,13 @@
     <button id="loadMapBtn">Load Position & Plot</button>
   </div>
 
-  <!-- Map container -->
   <div id="map"></div>
-
-  <!-- Dynamically generated buttons -->
   <div id="buttonsContainer"></div>
-
-  <!-- Manual annotation input -->
   <div id="manualContainer">
-    <input
-      type="text"
-      id="manualText"
-      placeholder="Enter manual annotation"
-      style="width: 300px;"
-    />
+    <input type="text" id="manualText" placeholder="Enter manual annotation" style="width: 300px;" />
     <button id="manualBtn">Manual annotation</button>
   </div>
 
-  <!-- Annotations table -->
   <table id="annotationsTable">
     <thead>
       <tr>
@@ -66,39 +51,30 @@
     <tbody></tbody>
   </table>
 
-  <!-- Hidden photo input to trigger camera -->
-  <input
-    type="file"
-    id="photoInput"
-    accept="image/*"
-    capture="environment"
-    style="display: none"
-  />
+  <input type="file" id="photoInput" accept="image/*" capture="environment" style="display: none" />
 
-  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <!-- SheetJS for XLSX parsing -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
   <script>
+    const SAMPLE_COUNT = 10; // Reduced for faster sampling
     let map, circle;
     let avgLat = 0, avgLng = 0;
     let annotationCount = 0;
     let pendingAnnotation = null;
 
-    // Compute average position over N samples
-    async function getAveragePosition(samples = 100) {
+    async function getAveragePosition(samples = SAMPLE_COUNT) {
       const coords = [];
-      for (let i = 0; i < samples; i++) {
+      while (coords.length < samples) {
         try {
           const pos = await new Promise((res, rej) => {
             navigator.geolocation.getCurrentPosition(res, rej, {
               enableHighAccuracy: true,
-              timeout: 10000
+              timeout: 5000
             });
           });
           coords.push(pos.coords);
         } catch (e) {
-          console.warn('Position error:', e);
+          console.warn('Position error, retrying:', e);
         }
       }
       const latSum = coords.reduce((sum, c) => sum + c.latitude, 0);
@@ -109,11 +85,12 @@
       };
     }
 
-    // Initialize or update map with average position and circle
     async function loadAndPlot() {
-      document.getElementById('loadMapBtn').disabled = true;
-      document.getElementById('loadMapBtn').textContent = 'Sampling...';
-      const pos = await getAveragePosition(100);
+      const btn = document.getElementById('loadMapBtn');
+      btn.disabled = true;
+      btn.textContent = `Sampling ${SAMPLE_COUNT} points...`;
+
+      const pos = await getAveragePosition();
       avgLat = pos.latitude;
       avgLng = pos.longitude;
 
@@ -129,21 +106,18 @@
       }
 
       circle = L.circle([avgLat, avgLng], { radius }).addTo(map);
-      document.getElementById('loadMapBtn').disabled = false;
-      document.getElementById('loadMapBtn').textContent = 'Load Position & Plot';
+      btn.disabled = false;
+      btn.textContent = 'Load Position & Plot';
     }
 
-    // Create annotation row after photo capture
     function createAnnotation(name, first, second) {
       pendingAnnotation = { name, first, second };
       document.getElementById('photoInput').click();
     }
 
-    // Handle photo input change
     document.getElementById('photoInput').addEventListener('change', function (e) {
       const file = e.target.files[0];
       if (!file || !pendingAnnotation) return;
-
       const reader = new FileReader();
       reader.onload = function (ev) {
         annotationCount++;
@@ -159,14 +133,12 @@
           <td><img src="${imgURL}" /></td>
         `;
         document.querySelector('#annotationsTable tbody').appendChild(tr);
-        // Reset
         pendingAnnotation = null;
         e.target.value = '';
       };
       reader.readAsDataURL(file);
     });
 
-    // Load XLSX and generate buttons
     document.getElementById('xlsxInput').addEventListener('change', function (e) {
       const file = e.target.files[0];
       if (!file) return;
@@ -174,37 +146,33 @@
       reader.onload = function (ev) {
         const data = new Uint8Array(ev.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(sheet);
         const container = document.getElementById('buttonsContainer');
         container.innerHTML = '';
         rows.forEach(row => {
           const btn = document.createElement('button');
-          btn.textContent = row['button name'] || row['Button Name'];
+          const name = row['button name'] || row['Button Name'] || 'Unnamed';
           const first = row['first comment'] || row['First Comment'] || '';
           const second = row['second comment'] || row['Second Comment'] || '';
-          btn.addEventListener('click', () => createAnnotation(btn.textContent, first, second));
+          btn.textContent = name;
+          btn.addEventListener('click', () => createAnnotation(name, first, second));
           container.appendChild(btn);
         });
       };
       reader.readAsArrayBuffer(file);
     });
 
-    // Manual annotation button
     document.getElementById('manualBtn').addEventListener('click', function () {
       const text = document.getElementById('manualText').value.trim();
       if (!text) return alert('Enter annotation text first');
       createAnnotation(text, '', '');
     });
 
-    // Radius input change updates circle
     document.getElementById('radiusInput').addEventListener('change', function () {
-      const r = Number(this.value);
-      if (circle) circle.setRadius(r);
+      if (circle) circle.setRadius(Number(this.value));
     });
 
-    // Load & plot on button click
     document.getElementById('loadMapBtn').addEventListener('click', loadAndPlot);
   </script>
 </body>
