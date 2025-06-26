@@ -7,14 +7,14 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body, html { margin: 0; padding: 0; height: 100%; }
-    #map { position: relative; width: 100%; height: 70%; }
+    #map { position: relative; width: 100%; height: 60%; }
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
     .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
     .leaflet-tooltip.feature-label:after { background: white; }
     .invisible-icon { width: 0; height: 0; }
-    #results { height: 25%; overflow: auto; }
-    #results table { width: 100%; border-collapse: collapse; }
-    #results th, #results td { border: 1px solid #ccc; padding: 4px; text-align: left; }
+    #results, #seqResults { height: 20%; overflow: auto; margin-top: 5px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
     #searchOverlay {
       position: absolute; top: 0; left: 0;
       width: 100%; height: 100%;
@@ -29,13 +29,11 @@
     <strong>Upload Route (KMZ):</strong>
     <input type="file" id="kmzInput" accept=".kmz" />
     <button id="loadRouteBtn">Load Route</button>
-    <button id="searchBtn">Search Along Route</button>
-    <label style="margin-left:10px;">Range (m):
+    <button id="searchBtn">Sequential Search</button>
+    <label style="margin-left:10px;">Radius (m):
       <input type="number" id="range" value="5" min="1" step="1" style="width:80px;" />
     </label>
-    <div style="margin-top:4px; font-size:0.8em;">
-      Double-click map to toggle manual search point.
-    </div>
+    <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
   </div>
 
   <div id="map">
@@ -43,10 +41,17 @@
   </div>
 
   <div id="results">
-    <h4>Detected Features</h4>
+    <h4>Features by Type</h4>
     <table>
-      <thead><tr><th>Feature</th><th>Latitude</th><th>Longitude</th></tr></thead>
+      <thead><tr><th>Feature</th><th>Lat</th><th>Lon</th></tr></thead>
       <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+  <div id="seqResults">
+    <h4>Features by Route Coordinate</h4>
+    <table>
+      <thead><tr><th>#</th><th>Lat</th><th>Lon</th><th>Features</th></tr></thead>
+      <tbody id="seqBody"></tbody>
     </table>
   </div>
 
@@ -55,151 +60,80 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.js"></script>
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
-    function showOverlay() { document.getElementById('searchOverlay').style.display = 'flex'; }
-    function hideOverlay() { document.getElementById('searchOverlay').style.display = 'none'; }
+    const RANGE = () => parseInt(document.getElementById('range').value,10) || 5;
+    function showOverlay(){document.getElementById('searchOverlay').style.display='flex';}
+    function hideOverlay(){document.getElementById('searchOverlay').style.display='none';}
 
     const map = L.map('map').setView([0,0],2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
-
-    // Initialize route layer: draw lines but skip point icons
-    const routeLayer = L.geoJSON(null, {
-      style: { color: 'blue', weight: 4 },
-      pointToLayer: function(feature, latlng) {
-        // suppress point markers from KMZ
-        return L.circleMarker(latlng, { radius: 0 });
-      }
-    }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+    const routeLayer = L.geoJSON(null,{style:{color:'blue',weight:4}}).addTo(map);
     const featureLayers = {};
-    const featureSettings = [
-      ['man_made','bridge','Bridge'],
-      ['tunnel','yes','Tunnel'],
-      ['amenity','toll_booth','Toll Station'],
-      ['junction','roundabout','Roundabout'],
-      ['highway','stop','Stop Sign'],
-      ['highway','traffic_signals','Traffic Light'],
-      ['junction','yes','Intersection'],
-      ['traffic_calming','speed_bump','Speed Bump'],
-      // Speed limits
-      ['maxspeed','20','20 kph'],
-      ['maxspeed','30','30 kph'],
-      ['maxspeed','40','40 kph'],
-      ['maxspeed','50','50 kph'],
-      ['maxspeed','60','60 kph'],
-      ['maxspeed','70','70 kph'],
-      ['maxspeed','80','80 kph'],
-      ['maxspeed','90','90 kph'],
-      ['maxspeed','100','100 kph'],
-      ['maxspeed','110','110 kph'],
-      ['maxspeed','120','120 kph'],
-      ['maxspeed','130','130 kph'],
-      ['maxspeed','140','140 kph'],
-      ['maxspeed','none','Unlimited']
+    const featureSettings=[
+      ['man_made','bridge','Bridge'],['tunnel','yes','Tunnel'],
+      ['amenity','toll_booth','Toll Station'],['junction','roundabout','Roundabout'],
+      ['highway','stop','Stop Sign'],['highway','traffic_signals','Traffic Light'],
+      ['junction','yes','Intersection'],['traffic_calming','speed_bump','Speed Bump'],
+      ['maxspeed','20','20 kph'],['maxspeed','30','30 kph'],['maxspeed','40','40 kph'],
+      ['maxspeed','50','50 kph'],['maxspeed','60','60 kph'],['maxspeed','70','70 kph'],
+      ['maxspeed','80','80 kph'],['maxspeed','90','90 kph'],['maxspeed','100','100 kph'],
+      ['maxspeed','110','110 kph'],['maxspeed','120','120 kph'],['maxspeed','130','130 kph'],
+      ['maxspeed','140','140 kph'],['maxspeed','none','Unlimited']
     ];
-    featureSettings.forEach(([k,v,label]) => {
-      featureLayers[label] = L.layerGroup().addTo(map);
-    });
+    featureSettings.forEach(([, ,label])=> featureLayers[label]=L.layerGroup().addTo(map));
 
-    function addFeatureMarker(label, coord) {
-      // draw a blue dot instead of pin
-      L.circleMarker(coord, {
-        radius: 6,
-        color: 'blue',
-        fillColor: 'blue',
-        fillOpacity: 1,
-        weight: 1,
-        interactive: false
-      })
-      .addTo(featureLayers[label])
-      .bindTooltip(label, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
+    function addMarker(label,coord){
+      L.circleMarker(coord,{radius:6, color:'blue', fillColor:'blue', fillOpacity:1, weight:1, interactive:false})
+        .addTo(featureLayers[label])
+        .bindTooltip(label,{permanent:true,direction:'right',offset:[10,0],className:'feature-label'});
     }
-    function clearAllFeatures() {
-      Object.values(featureLayers).forEach(l => l.clearLayers());
-      document.getElementById('resultsBody').innerHTML = '';
+    function clearAll(){
+      Object.values(featureLayers).forEach(l=>l.clearLayers());
+      ['resultsBody','seqBody'].forEach(id=>document.getElementById(id).innerHTML='');
     }
 
-    function onKMZUpload(file) {
-      JSZip.loadAsync(file)
-        .then(zip => {
-          const kfile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
-          return zip.file(kfile).async('string');
-        })
-        .then(kmlText => {
-          const parser = new DOMParser();
-          const kmlDoc = parser.parseFromString(kmlText, 'application/xml');
-          const gj = toGeoJSON.kml(kmlDoc);
-          routeLayer.clearLayers().addData(gj);
-          map.fitBounds(routeLayer.getBounds());
-        })
-        .catch(err => alert('Failed to load KMZ: '+err));
+    function onKMZ(file){
+      JSZip.loadAsync(file).then(zip=>{
+        const k=Object.keys(zip.files).find(n=>n.toLowerCase().endsWith('.kml'));
+        return zip.file(k).async('string');
+      }).then(txt=>{
+        const doc=new DOMParser().parseFromString(txt,'application/xml');
+        const gj=toGeoJSON.kml(doc);
+        routeLayer.clearLayers().addData(gj);
+        map.fitBounds(routeLayer.getBounds());
+      }).catch(e=>alert('KMZ load failed:'+e));
     }
-    document.getElementById('loadRouteBtn').onclick = () => {
-      const file = document.getElementById('kmzInput').files[0];
-      if (!file) return alert('Select a KMZ file first');
-      onKMZUpload(file);
+    document.getElementById('loadRouteBtn').onclick=()=>{
+      const f=document.getElementById('kmzInput').files[0];
+      if(!f)return alert('Select KMZ');onKMZ(f);
     };
 
-    document.getElementById('searchBtn').onclick = async () => {
-      clearAllFeatures();
-      showOverlay();
-      const gj = routeLayer.toGeoJSON();
-      if (!gj.features.length) { hideOverlay(); return alert('Load a route first'); }
-
-      const lineStrings = [];
-      gj.features.forEach(f => {
-        const geom = f.geometry;
-        if (geom.type === 'LineString') lineStrings.push(turf.lineString(geom.coordinates));
-        else if (geom.type === 'MultiLineString') geom.coordinates.forEach(c => lineStrings.push(turf.lineString(c)));
+    document.getElementById('searchBtn').onclick=async()=>{
+      clearAll();showOverlay();
+      const gj=routeLayer.toGeoJSON();if(!gj.features.length){hideOverlay();return alert('Load route');}
+      // Extract sequential coords
+      let coords=[];
+      gj.features.forEach(f=>{
+        const g=f.geometry;
+        if(g.type==='LineString')coords.push(...g.coordinates);
+        else if(g.type==='MultiLineString')g.coordinates.forEach(c=>coords.push(...c));
       });
-      // Fallback: if no line geometries, but route points exist (e.g., gx:Track), build a LineString from them
-      if (!lineStrings.length) {
-        const pointCoords = gj.features
-          .filter(f => f.geometry.type === 'Point')
-          .map(f => f.geometry.coordinates);
-        if (pointCoords.length > 1) {
-          lineStrings.push(turf.lineString(pointCoords));
+      // Table per coordinate
+      for(let i=0;i<coords.length;i++){
+        const [lon,lat]=coords[i];
+        let found=[];
+        for(const[k,v,label]of featureSettings){
+          const q=`[out:json];(node["${k}"="${v}"](around:${RANGE()},${lat},${lon});way["${k}"="${v}"](around:${RANGE()},${lat},${lon}););out center;`;
+          try{
+            const r=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q});
+            const d=await r.json();
+            d.elements.forEach(el=>{found.push(label);addMarker(label,[lat,el.lat?el.lon:el.center.lat?el.center.lat:lat,el.lon?el.lon:el.center.lon?el.center.lon:lon]);});
+          }catch(e){console.warn(label,e);}
         }
+        document.getElementById('seqBody').insertAdjacentHTML('beforeend',
+          `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td><td>${found.join(', ')}</td></tr>`);
       }
-      if (!lineStrings.length) { hideOverlay(); return alert('Route geometry invalid'); }
-
-      const range = parseInt(document.getElementById('range').value, 10) || 200;
-
-      let bbox = turf.bbox(gj);
-      const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
-
-      for (const [k,v,label] of featureSettings) {
-        try {
-          const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
-          const resp = await fetch('https://overpass-api.de/api/interpreter', {
-            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
-          });
-          if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
-          const data = await resp.json();
-          data.elements.forEach(el => {
-            const lat = el.lat != null ? el.lat : el.center.lat;
-            const lon = el.lon != null ? el.lon : el.center.lon;
-            const pt = turf.point([lon, lat]);
-            const within = lineStrings.some(ls => turf.pointToLineDistance(pt, ls, { units:'meters' }) <= range);
-            if (within) {
-              addFeatureMarker(label, [lat, lon]);
-              document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
-                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
-              );
-            }
-          });
-        } catch (e) {
-          console.warn(`Error fetching ${label}:`, e);
-        }
-      }
-      hideOverlay();
-      console.log('Search complete');
+      hideOverlay();console.log('Sequential search done');
     };
-
-    let useManual = false, manualLatLng = null;
-    map.on('dblclick', e => {
-      useManual = !useManual;
-      manualLatLng = useManual ? [e.latlng.lat, e.latlng.lng] : null;
-      document.getElementById('searchBtn').onclick();
-    });
   </script>
 </body>
 </html>
