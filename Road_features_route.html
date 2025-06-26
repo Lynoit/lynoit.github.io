@@ -29,14 +29,14 @@
     <input type="file" id="kmzInput" accept=".kmz" />
     <button id="loadRouteBtn">Load Route</button>
     <button id="searchBtn">Sequential Search</button>
-    <label style="margin-left:10px;">Radius (m):
-      <input type="number" id="range" value="5" min="1" step="1" style="width:80px;" />
+    <label style="margin-left:10px;">
+      Radius (m): <input type="number" id="range" value="5" min="1" step="1" style="width:80px;" />
     </label>
     <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
   </div>
 
   <div id="map">
-    <div id="searchOverlay" style="display: none;">Searching for road features…</div>
+    <div id="searchOverlay" style="display:none;">Searching for road features…</div>
   </div>
 
   <div id="results">
@@ -46,6 +46,7 @@
       <tbody id="resultsBody"></tbody>
     </table>
   </div>
+
   <div id="seqResults">
     <h4>Features by Route Coordinate</h4>
     <table>
@@ -60,12 +61,16 @@
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
   <script>
     const RANGE = () => parseInt(document.getElementById('range').value, 10) || 5;
-    function showOverlay() { document.getElementById('searchOverlay').style.display = 'flex'; }
-    function hideOverlay() { document.getElementById('searchOverlay').style.display = 'none'; }
+    function showOverlay(){
+      document.getElementById('searchOverlay').style.display = 'flex';
+    }
+    function hideOverlay(){
+      document.getElementById('searchOverlay').style.display = 'none';
+    }
 
     const map = L.map('map').setView([0,0],2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 } }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{ maxZoom:19 }).addTo(map);
+    const routeLayer = L.geoJSON(null, { style: { color:'blue', weight:4 }, pointToLayer: () => null }).addTo(map);
 
     const featureSettings = [
       ['man_made','bridge','Bridge'],['tunnel','yes','Tunnel'],
@@ -79,14 +84,14 @@
       ['maxspeed','140','140 kph'],['maxspeed','none','Unlimited']
     ];
     const featureLayers = {};
-    featureSettings.forEach(([,,label]) => {
+    featureSettings.forEach(([, ,label]) => {
       featureLayers[label] = L.layerGroup().addTo(map);
     });
 
     function addMarker(label, coord) {
-      L.circleMarker(coord, { radius: 6, color: 'blue', fillColor: 'blue', fillOpacity: 1, weight: 1, interactive: false })
-        .addTo(featureLayers[label])
-        .bindTooltip(label, { permanent: true, direction: 'right', offset: [10,0], className: 'feature-label' });
+      L.circleMarker(coord, { radius:6, color:'blue', fillColor:'blue', fillOpacity:1, weight:1, interactive:false })
+       .addTo(featureLayers[label])
+       .bindTooltip(label,{ permanent:true, direction:'right', offset:[10,0], className:'feature-label'});
     }
     function clearAll() {
       Object.values(featureLayers).forEach(l => l.clearLayers());
@@ -94,7 +99,6 @@
       document.getElementById('seqBody').innerHTML = '';
     }
 
-    // KMZ upload and parsing
     document.getElementById('loadRouteBtn').addEventListener('click', () => {
       const file = document.getElementById('kmzInput').files[0];
       if (!file) { alert('Select a KMZ file first'); return; }
@@ -105,89 +109,69 @@
         })
         .then(kmlText => {
           const parser = new DOMParser();
-          const kmlDoc = parser.parseFromString(kmlText, 'application/xml');
+          const kmlDoc = parser.parseFromString(kmlText,'application/xml');
           const gj = toGeoJSON.kml(kmlDoc);
           routeLayer.clearLayers().addData(gj);
           map.fitBounds(routeLayer.getBounds());
         })
-        .catch(err => alert('Failed to load KMZ: ' + err));
+        .catch(err => alert('Failed to load KMZ: '+err));
     });
 
-    // Sequential search handler
     document.getElementById('searchBtn').addEventListener('click', async () => {
-      clearAll();
-      showOverlay();
-
+      clearAll(); showOverlay();
       const gj = routeLayer.toGeoJSON();
-      if (!gj.features.length) {
-        hideOverlay();
-        alert('Load a route first');
-        return;
-      }
+      if (!gj.features.length) { hideOverlay(); alert('Load a route first'); return; }
 
-      // First table: one feature type at a time
       const allElements = [];
-      for (const [k, v, label] of featureSettings) {
+      // Per-feature search for first table
+      for (const [k,v,label] of featureSettings) {
         try {
           const bbox = turf.bbox(gj);
           const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
-          const query = `[out:json][timeout:25];` +
-                        `(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
+          const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
           const resp = await fetch('https://overpass-api.de/api/interpreter', {
-            method: 'POST',
-            headers: {'Content-Type':'application/x-www-form-urlencoded'},
-            body: query
+            method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:query
           });
           if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
           const data = await resp.json();
           data.elements.forEach(el => {
-            const lat = el.lat != null ? el.lat : el.center.lat;
-            const lon = el.lon != null ? el.lon : el.center.lon;
-            const pt = turf.point([lon, lat]);
+            const lat = el.lat!=null?el.lat:el.center.lat;
+            const lon = el.lon!=null?el.lon:el.center.lon;
+            const pt = turf.point([lon,lat]);
             const within = gj.features.some(f => {
-              let line;
-              if (f.geometry.type === 'LineString') line = turf.lineString(f.geometry.coordinates);
-              else if (f.geometry.type === 'MultiLineString') line = turf.lineString([].concat(...f.geometry.coordinates));
-              return line && turf.pointToLineDistance(pt, line, { units: 'meters' }) <= RANGE();
+              const coords = f.geometry.type==='LineString'?f.geometry.coordinates:Array.prototype.concat(...f.geometry.coordinates);
+              const line = turf.lineString(coords);
+              return turf.pointToLineDistance(pt,line,{units:'meters'})<=RANGE();
             });
             if (within) {
-              document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
-                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
-              );
+              document.getElementById('resultsBody').insertAdjacentHTML('beforeend', `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`);
+              allElements.push({el, label});
             }
           });
-          allElements.push(...data.elements);
-        } catch (e) {
-          console.warn(`Error fetching ${label}:`, e);
-        }
+        } catch(e) { console.warn(label,e); }
       }
 
-      // Second table: sequential by coordinate
+      // Sequential table
       const coords = [];
       gj.features.forEach(f => {
-        if (f.geometry.type === 'LineString') coords.push(...f.geometry.coordinates);
-        else if (f.geometry.type === 'MultiLineString') f.geometry.coordinates.forEach(c => coords.push(...c));
+        if(f.geometry.type==='LineString') coords.push(...f.geometry.coordinates);
+        else if(f.geometry.type==='MultiLineString') f.geometry.coordinates.forEach(c=>coords.push(...c));
       });
-      for (let i = 0; i < coords.length; i++) {
-        const [lng, lat] = coords[i];
-        const found = new Set();
-        allElements.forEach(el => {
-          const elLat = el.lat != null ? el.lat : el.center.lat;
-          const elLon = el.lon != null ? el.lon : el.center.lon;
-          const d = turf.distance(turf.point([elLon, elLat]), turf.point([lng, lat]), { units: 'meters' });
-          if (d <= RANGE()) {
-            const label = featureSettings.find(([k,v,l]) => el.tags && el.tags[k] === v)[2];
-            found.add(label);
-            addMarker(label, [elLat, elLon]);
-          }
-        });
-        document.getElementById('seqBody').insertAdjacentHTML('beforeend',
-          `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${Array.from(found).join(', ')}</td></tr>`
-        );
-      }
-
+      coords.forEach((c,i) => {
+        const [lng,lat] = c;
+        const foundLabels = allElements.filter(({el})=>{
+          const elLat = el.lat!=null?el.lat:el.center.lat;
+          const elLon = el.lon!=null?el.lon:el.center.lon;
+          const d = turf.distance(turf.point([elLon,elLat]), turf.point([lng,lat]), {units:'meters'});
+          return d<=RANGE();
+        }).map(item=>item.label);
+        if(foundLabels.length){
+          document.getElementById('seqBody').insertAdjacentHTML('beforeend',
+            `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${[...new Set(foundLabels)].join(', ')}</td></tr>`
+          );
+        }
+      });
       hideOverlay();
-      console.log('Search complete');
     });
   </script>
 </body>
