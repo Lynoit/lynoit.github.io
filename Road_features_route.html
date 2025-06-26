@@ -11,7 +11,6 @@
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
     .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
     .leaflet-tooltip.feature-label:after { background: white; }
-    .invisible-icon { width: 0; height: 0; }
     #results, #seqResults { height: 20%; overflow: auto; margin-top: 5px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
@@ -67,7 +66,7 @@
     const map = L.map('map').setView([0,0],2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
     const routeLayer = L.geoJSON(null,{style:{color:'blue',weight:4}}).addTo(map);
-    const featureLayers = {};
+
     const featureSettings=[
       ['man_made','bridge','Bridge'],['tunnel','yes','Tunnel'],
       ['amenity','toll_booth','Toll Station'],['junction','roundabout','Roundabout'],
@@ -79,9 +78,10 @@
       ['maxspeed','110','110 kph'],['maxspeed','120','120 kph'],['maxspeed','130','130 kph'],
       ['maxspeed','140','140 kph'],['maxspeed','none','Unlimited']
     ];
+    const featureLayers = {};
     featureSettings.forEach(([, ,label])=> featureLayers[label]=L.layerGroup().addTo(map));
 
-    function addMarker(label,coord){
+    function addMarker(label, coord){
       L.circleMarker(coord,{radius:6, color:'blue', fillColor:'blue', fillOpacity:1, weight:1, interactive:false})
         .addTo(featureLayers[label])
         .bindTooltip(label,{permanent:true,direction:'right',offset:[10,0],className:'feature-label'});
@@ -96,43 +96,78 @@
         const k=Object.keys(zip.files).find(n=>n.toLowerCase().endsWith('.kml'));
         return zip.file(k).async('string');
       }).then(txt=>{
-        const doc=new DOMParser().parseFromString(txt,'application/xml');
-        const gj=toGeoJSON.kml(doc);
+        const gj=toGeoJSON.kml(new DOMParser().parseFromString(txt,'application/xml'));
         routeLayer.clearLayers().addData(gj);
         map.fitBounds(routeLayer.getBounds());
       }).catch(e=>alert('KMZ load failed:'+e));
     }
     document.getElementById('loadRouteBtn').onclick=()=>{
-      const f=document.getElementById('kmzInput').files[0];
-      if(!f)return alert('Select KMZ');onKMZ(f);
+      const f=document.getElementById('kmzInput').files[0];if(!f)return alert('Select KMZ');onKMZ(f);
     };
 
     document.getElementById('searchBtn').onclick=async()=>{
       clearAll();showOverlay();
-      const gj=routeLayer.toGeoJSON();if(!gj.features.length){hideOverlay();return alert('Load route');}
-      // Extract sequential coords
+      const gj=routeLayer.toGeoJSON();if(!gj.features.length){hideOverlay();return alert('Load route first');}
+
+      // build bbox
+      const bbox=turf.bbox(gj);
+      const bboxStr=`${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
+
+      // single Overpass query for all features
+      let overpassParts=[];
+      featureSettings.forEach(([k,v])=>{
+        overpassParts.push(`node["${k}"="${v}"](${bboxStr});`);
+        overpassParts.push(`way["${k}"="${v}"](${bboxStr});`);
+      });
+      const combinedQuery=`[out:json][timeout:60];(${overpassParts.join('')});out center;`;
+      let elements=[];
+      try{
+        const resp=await fetch('https://overpass-api.de/api/interpreter',{
+          method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:combinedQuery
+        });
+        const data=await resp.json();elements=data.elements;
+        // plot aggregate table
+        elements.forEach(el=>{
+          const label=featureSettings.find(([k,v,l])=>
+            (el.tags&&el.tags[k]===v)
+          )[2];
+          const lat=el.lat!=null?el.lat:el.center.lat;
+          const lon=el.lon!=null?el.lon:el.center.lon;
+          document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
+            `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`);
+        });
+      }catch(e){console.warn('Overpass bulk fetch error',e);}      
+
+      // sequential per-coordinate check
+      // extract coords
       let coords=[];
       gj.features.forEach(f=>{
         const g=f.geometry;
         if(g.type==='LineString')coords.push(...g.coordinates);
         else if(g.type==='MultiLineString')g.coordinates.forEach(c=>coords.push(...c));
       });
-      // Table per coordinate
+
       for(let i=0;i<coords.length;i++){
-        const [lon,lat]=coords[i];
-        let found=[];
-        for(const[k,v,label]of featureSettings){
-          const q=`[out:json];(node["${k}"="${v}"](around:${RANGE()},${lat},${lon});way["${k}"="${v}"](around:${RANGE()},${lat},${lon}););out center;`;
-          try{
-            const r=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q});
-            const d=await r.json();
-            d.elements.forEach(el=>{found.push(label);addMarker(label,[lat,el.lat?el.lon:el.center.lat?el.center.lat:lat,el.lon?el.lon:el.center.lon?el.center.lon:lon]);});
-          }catch(e){console.warn(label,e);}
-        }
+        const [lng,lat]=coords[i];
+        const found=new Set();
+        elements.forEach(el=>{
+          const elLat=el.lat!=null?el.lat:el.center.lat;
+          const elLon=el.lon!=null?el.lon:el.center.lon;
+          const pt=turf.point([elLon,elLat]);
+          // distance to this coord
+          const d=turf.distance(pt,turf.point([lng,lat]),{units:'meters'});
+          if(d<=RANGE()){
+            const label=featureSettings.find(([k,v,l])=>el.tags&&el.tags[k]===v)[2];
+            found.add(label);
+            addMarker(label,[elLat,elLon]);
+          }
+        });
+        const list=Array.from(found).join(', ');
         document.getElementById('seqBody').insertAdjacentHTML('beforeend',
-          `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td><td>${found.join(', ')}</td></tr>`);
+          `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${list}</td></tr>`);
       }
-      hideOverlay();console.log('Sequential search done');
+
+      hideOverlay();console.log('Search complete');
     };
   </script>
 </body>
