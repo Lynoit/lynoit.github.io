@@ -113,30 +113,37 @@
       const bbox=turf.bbox(gj);
       const bboxStr=`${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
 
-      // single Overpass query for all features
-      let overpassParts=[];
-      featureSettings.forEach(([k,v])=>{
-        overpassParts.push(`node["${k}"="${v}"](${bboxStr});`);
-        overpassParts.push(`way["${k}"="${v}"](${bboxStr});`);
-      });
-      const combinedQuery=`[out:json][timeout:60];(${overpassParts.join('')});out center;`;
-      let elements=[];
-      try{
-        const resp=await fetch('https://overpass-api.de/api/interpreter',{
-          method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:combinedQuery
-        });
-        const data=await resp.json();elements=data.elements;
-        // plot aggregate table
-        elements.forEach(el=>{
-          const label=featureSettings.find(([k,v,l])=>
-            (el.tags&&el.tags[k]===v)
-          )[2];
-          const lat=el.lat!=null?el.lat:el.center.lat;
-          const lon=el.lon!=null?el.lon:el.center.lon;
-          document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
-            `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`);
-        });
-      }catch(e){console.warn('Overpass bulk fetch error',e);}      
+      // First table: search one feature type at a time in order
+      for (const [k, v, label] of featureSettings) {
+        try {
+          const bbox = turf.bbox(gj);
+          const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
+          const query = `[out:json][timeout:25];(node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr}););out center;`;
+          const resp = await fetch('https://overpass-api.de/api/interpreter', {
+            method: 'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body: query
+          });
+          if (!resp.ok) throw new Error(`Overpass ${resp.status}`);
+          const data = await resp.json();
+          data.elements.forEach(el => {
+            const lat = el.lat != null ? el.lat : el.center.lat;
+            const lon = el.lon != null ? el.lon : el.center.lon;
+            // Only include features within range of route (buffered)
+            const pt = turf.point([lon, lat]);
+            const within = gj.features.some(f => {
+              let line;
+              if (f.geometry.type === 'LineString') line = turf.lineString(f.geometry.coordinates);
+              else if (f.geometry.type === 'MultiLineString') line = turf.lineString([].concat(...f.geometry.coordinates));
+              return line && turf.pointToLineDistance(pt, line, { units: 'meters' }) <= RANGE();
+            });
+            if (within) {
+              document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
+                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`);
+            }
+          });
+        } catch (e) {
+          console.warn(`Error fetching ${label}:`, e);
+        }
+      }
 
       // sequential per-coordinate check
       // extract coords
