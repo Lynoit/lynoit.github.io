@@ -16,7 +16,6 @@
     #manualContainer { margin: 20px 0; }
     #annotationsTable { width: 100%; border-collapse: collapse; margin-top: 20px; }
     #annotationsTable th, #annotationsTable td { border: 1px solid #ccc; padding: 8px; text-align: center; }
-    /* Display photos at original size and resolution */
     #annotationsTable img { display: block; }
   </style>
 </head>
@@ -32,7 +31,6 @@
   </div>
 
   <div id="map"></div>
-  <!-- Buttons organized by rows -->
   <div id="buttonsContainer"></div>
   <div id="manualContainer">
     <input type="text" id="manualText" placeholder="Enter manual annotation" style="width: 300px;" />
@@ -45,6 +43,7 @@
         <th>#</th>
         <th>Latitude</th>
         <th>Longitude</th>
+        <th>Accuracy (m)</th>
         <th>Button Name</th>
         <th>Comment</th>
         <th>Photo</th>
@@ -55,7 +54,6 @@
 
   <input type="file" id="photoInput" accept="image/*" capture="environment" style="display: none" />
 
-  <!-- Leaflet & XLSX libraries -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
   <script>
@@ -81,7 +79,12 @@
       if (coords.length === 0) throw new Error('No position samples');
       const latSum = coords.reduce((sum, c) => sum + c.latitude, 0);
       const lngSum = coords.reduce((sum, c) => sum + c.longitude, 0);
-      return { latitude: latSum / coords.length, longitude: lngSum / coords.length };
+      const accSum = coords.reduce((sum, c) => sum + (c.accuracy || 0), 0);
+      return {
+        latitude: latSum / coords.length,
+        longitude: lngSum / coords.length,
+        accuracy: accSum / coords.length
+      };
     }
 
     async function loadConfig() {
@@ -139,7 +142,6 @@
           window._appMap.setView([iLat, iLng], 16);
         }
       } catch (e) {
-        console.warn('Init pos failed:', e.message);
         alert('Enable location permissions.');
         btn.disabled = false;
         btn.textContent = 'Load Position & Plot';
@@ -147,26 +149,12 @@
       }
 
       btn.textContent = `Sampling ${samples} pts...`;
-      let avgLat = 0, avgLng = 0;
-      try {
-        const avg = await getAveragePosition(samples, maxAttempts);
-        avgLat = avg.latitude;
-        avgLng = avg.longitude;
-      } catch (e) {
-        console.warn(e.message);
-      }
+      let avg;
+      try { avg = await getAveragePosition(samples, maxAttempts); } catch (e) { console.warn(e.message); avg = { latitude: window._appMap.getCenter().lat, longitude: window._appMap.getCenter().lng, accuracy: 0 }; }
 
-      const radius = Number(document.getElementById('radiusInput').value);
-      if (window._appCircle) window._appMap.removeLayer(window._appCircle);
-      window._appCircle = L.circle([avgLat || window._appMap.getCenter().lat, avgLng || window._appMap.getCenter().lng], { radius }).addTo(window._appMap);
-
-      if (window._appMarker) window._appMap.removeLayer(window._appMarker);
-      window._appMarker = L.circleMarker([avgLat || window._appMap.getCenter().lat, avgLng || window._appMap.getCenter().lng], {
-        radius: 10,
-        color: 'red',
-        fillColor: 'red',
-        fillOpacity: 1
-      }).addTo(window._appMap);
+      window._appCircle = L.circle([avg.latitude, avg.longitude], { radius: Number(document.getElementById('radiusInput').value) }).addTo(window._appMap);
+      window._appMarker = L.circleMarker([avg.latitude, avg.longitude], { radius: 10, color: 'red', fillColor: 'red', fillOpacity: 1 }).addTo(window._appMap);
+      window._appAccuracy = avg.accuracy;
 
       btn.disabled = false;
       btn.textContent = 'Load Position & Plot';
@@ -180,8 +168,7 @@
     }
 
     document.getElementById('photoInput').addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (!file || !pendingAnnotation) return;
+      const file = e.target.files[0]; if (!file || !pendingAnnotation) return;
       const reader = new FileReader();
       reader.onload = ev => {
         annotationCount++;
@@ -192,6 +179,7 @@
           <td>${annotationCount}</td>
           <td>${latlng.lat.toFixed(6)}</td>
           <td>${latlng.lng.toFixed(6)}</td>
+          <td>${window._appAccuracy.toFixed(2)}</td>
           <td>${pendingAnnotation.name}</td>
           <td>${pendingAnnotation.comment}</td>
           <td><img src="${img}" /></td>
@@ -204,9 +192,7 @@
     });
 
     document.getElementById('manualBtn').addEventListener('click', () => {
-      const txt = document.getElementById('manualText').value.trim();
-      if (!txt) return alert('Enter annotation text');
-      createAnnotation(txt, '');
+      const txt = document.getElementById('manualText').value.trim(); if (!txt) return alert('Enter annotation text'); createAnnotation(txt, '');
     });
 
     document.getElementById('radiusInput').addEventListener('change', () => {
