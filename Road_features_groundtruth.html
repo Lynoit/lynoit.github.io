@@ -53,59 +53,92 @@
 
   <input type="file" id="photoInput" accept="image/*" capture="environment" style="display: none" />
 
+  <!-- Leaflet & XLSX libraries -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
   <script>
-    const SAMPLE_COUNT = 10; // Reduced for faster sampling
-    let map, circle;
+    const SAMPLE_COUNT = 5;
+    const MAX_ATTEMPTS = SAMPLE_COUNT * 3;
+    let map, circle, marker;
     let avgLat = 0, avgLng = 0;
     let annotationCount = 0;
     let pendingAnnotation = null;
 
+    function getSinglePosition(opts = {}) {
+      return new Promise((res, rej) => {
+        if (!navigator.geolocation) return rej(new Error('Geolocation not supported'));
+        navigator.geolocation.getCurrentPosition(res, rej, opts);
+      });
+    }
+
     async function getAveragePosition(samples = SAMPLE_COUNT) {
       const coords = [];
-      while (coords.length < samples) {
+      let attempts = 0;
+      while (coords.length < samples && attempts < MAX_ATTEMPTS) {
+        attempts++;
         try {
-          const pos = await new Promise((res, rej) => {
-            navigator.geolocation.getCurrentPosition(res, rej, {
-              enableHighAccuracy: true,
-              timeout: 5000
-            });
-          });
+          const pos = await getSinglePosition({ enableHighAccuracy: true, timeout: 3000 });
           coords.push(pos.coords);
         } catch (e) {
-          console.warn('Position error, retrying:', e);
+          console.warn('Retrying position:', e.message);
         }
       }
+      if (coords.length === 0) throw new Error('No position samples');
       const latSum = coords.reduce((sum, c) => sum + c.latitude, 0);
       const lngSum = coords.reduce((sum, c) => sum + c.longitude, 0);
-      return {
-        latitude: latSum / coords.length,
-        longitude: lngSum / coords.length
-      };
+      return { latitude: latSum / coords.length, longitude: lngSum / coords.length };
     }
 
     async function loadAndPlot() {
       const btn = document.getElementById('loadMapBtn');
       btn.disabled = true;
-      btn.textContent = `Sampling ${SAMPLE_COUNT} points...`;
+      btn.textContent = 'Getting location...';
 
-      const pos = await getAveragePosition();
-      avgLat = pos.latitude;
-      avgLng = pos.longitude;
-
-      const radius = Number(document.getElementById('radiusInput').value);
-      if (!map) {
-        map = L.map('map').setView([avgLat, avgLng], 16);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap contributors'
-        }).addTo(map);
-      } else {
-        map.setView([avgLat, avgLng], 16);
-        if (circle) circle.remove();
+      // Initial map setup
+      try {
+        const init = await getSinglePosition({ timeout: 5000 });
+        const { latitude: iLat, longitude: iLng } = init.coords;
+        if (!map) {
+          map = L.map('map').setView([iLat, iLng], 16);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
+        } else {
+          map.setView([iLat, iLng], 16);
+        }
+      } catch (e) {
+        console.warn('Init pos failed:', e.message);
+        alert('Enable location permissions.');
+        resetButton(btn);
+        return;
       }
 
-      circle = L.circle([avgLat, avgLng], { radius }).addTo(map);
+      btn.textContent = `Sampling ${SAMPLE_COUNT} pts...`;
+      try {
+        const avg = await getAveragePosition();
+        avgLat = avg.latitude;
+        avgLng = avg.longitude;
+      } catch (e) {
+        console.warn(e.message);
+        // fallback uses map center
+      }
+
+      // Draw circle
+      const radius = Number(document.getElementById('radiusInput').value);
+      if (circle) map.removeLayer(circle);
+      circle = L.circle([avgLat || map.getCenter().lat, avgLng || map.getCenter().lng], { radius }).addTo(map);
+
+      // Add red dot marker
+      if (marker) map.removeLayer(marker);
+      marker = L.circleMarker([avgLat || map.getCenter().lat, avgLng || map.getCenter().lng], {
+        radius: 10,
+        color: 'red',
+        fillColor: 'red',
+        fillOpacity: 1
+      }).addTo(map);
+
+      resetButton(btn);
+    }
+
+    function resetButton(btn) {
       btn.disabled = false;
       btn.textContent = 'Load Position & Plot';
     }
@@ -115,22 +148,22 @@
       document.getElementById('photoInput').click();
     }
 
-    document.getElementById('photoInput').addEventListener('change', function (e) {
+    document.getElementById('photoInput').addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file || !pendingAnnotation) return;
       const reader = new FileReader();
-      reader.onload = function (ev) {
+      reader.onload = ev => {
         annotationCount++;
-        const imgURL = ev.target.result;
+        const img = ev.target.result;
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${annotationCount}</td>
-          <td>${avgLat.toFixed(6)}</td>
-          <td>${avgLng.toFixed(6)}</td>
+          <td>${(avgLat || map.getCenter().lat).toFixed(6)}</td>
+          <td>${(avgLng || map.getCenter().lng).toFixed(6)}</td>
           <td>${pendingAnnotation.name}</td>
           <td>${pendingAnnotation.first}</td>
           <td>${pendingAnnotation.second}</td>
-          <td><img src="${imgURL}" /></td>
+          <td><img src="${img}" /></td>
         `;
         document.querySelector('#annotationsTable tbody').appendChild(tr);
         pendingAnnotation = null;
@@ -139,38 +172,36 @@
       reader.readAsDataURL(file);
     });
 
-    document.getElementById('xlsxInput').addEventListener('change', function (e) {
+    document.getElementById('xlsxInput').addEventListener('change', e => {
       const file = e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = function (ev) {
-        const data = new Uint8Array(ev.target.result);
-        const workbook = XLSX.read(data, { type: 'array' });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet);
-        const container = document.getElementById('buttonsContainer');
-        container.innerHTML = '';
-        rows.forEach(row => {
+      reader.onload = ev => {
+        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+        const ctr = document.getElementById('buttonsContainer');
+        ctr.innerHTML = '';
+        rows.forEach(r => {
           const btn = document.createElement('button');
-          const name = row['button name'] || row['Button Name'] || 'Unnamed';
-          const first = row['first comment'] || row['First Comment'] || '';
-          const second = row['second comment'] || row['Second Comment'] || '';
+          const name = r['button name'] || r['Button Name'] || '';
           btn.textContent = name;
-          btn.addEventListener('click', () => createAnnotation(name, first, second));
-          container.appendChild(btn);
+          const first = r['first comment'] || r['First Comment'] || '';
+          const second = r['second comment'] || r['Second Comment'] || '';
+          btn.onclick = () => createAnnotation(name, first, second);
+          ctr.appendChild(btn);
         });
       };
       reader.readAsArrayBuffer(file);
     });
 
-    document.getElementById('manualBtn').addEventListener('click', function () {
-      const text = document.getElementById('manualText').value.trim();
-      if (!text) return alert('Enter annotation text first');
-      createAnnotation(text, '', '');
+    document.getElementById('manualBtn').addEventListener('click', () => {
+      const txt = document.getElementById('manualText').value.trim();
+      if (!txt) return alert('Enter annotation text');
+      createAnnotation(txt, '', '');
     });
 
-    document.getElementById('radiusInput').addEventListener('change', function () {
-      if (circle) circle.setRadius(Number(this.value));
+    document.getElementById('radiusInput').addEventListener('change', () => {
+      if (circle) circle.setRadius(Number(document.getElementById('radiusInput').value));
     });
 
     document.getElementById('loadMapBtn').addEventListener('click', loadAndPlot);
