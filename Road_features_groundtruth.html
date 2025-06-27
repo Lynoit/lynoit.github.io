@@ -66,6 +66,7 @@
       });
     }
 
+    // Returns avg coords, accuracy, and sample list
     async function getAveragePosition(samples, maxAttempts, updateProgress) {
       const coords = [];
       let attempts = 0;
@@ -76,7 +77,7 @@
           coords.push(pos.coords);
           if (updateProgress) updateProgress(coords.length);
         } catch (e) {
-          console.warn('Retrying position:', e);
+          console.warn('Retrying:', e.message);
         }
       }
       if (coords.length === 0) throw new Error('No position samples');
@@ -86,113 +87,100 @@
       return {
         latitude: latSum / coords.length,
         longitude: lngSum / coords.length,
-        accuracy: accSum / coords.length
+        accuracy: accSum / coords.length,
+        samples: coords
       };
     }
 
     async function loadConfig() {
       try {
-        const resp = await fetch('gt_buttons.xlsx');
-        if (!resp.ok) throw new Error('Could not fetch config');
+        const resp = await fetch('gt_buttons.xlsx'); if (!resp.ok) throw new Error('Fetch failed');
         const data = await resp.arrayBuffer();
         const wb = XLSX.read(new Uint8Array(data), { type: 'array' });
-        const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-        const rows = rawRows.map(r => {
-          const norm = {};
-          Object.keys(r).forEach(key => { norm[key.trim().toLowerCase()] = r[key]; });
-          return norm;
-        });
+        const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+        const rows = raw.map(r => Object.keys(r).reduce((m,k)=>{m[k.trim().toLowerCase()]=r[k];return m;},{}));
         const ctr = document.getElementById('buttonsContainer'); ctr.innerHTML = '';
         const rowMap = {};
         rows.forEach(r => {
-          const rowNum = parseInt(r['row']) || 1;
-          if (!rowMap[rowNum]) {
-            const rowDiv = document.createElement('div');
-            rowDiv.className = 'button-row';
-            rowMap[rowNum] = rowDiv;
-            ctr.appendChild(rowDiv);
+          const row = parseInt(r['row'])||1;
+          if (!rowMap[row]) {
+            rowMap[row] = document.createElement('div');
+            rowMap[row].className = 'button-row';
+            ctr.appendChild(rowMap[row]);
           }
           const btn = document.createElement('button');
-          const name = r['button name'] || '';
-          const comment = r['first comment'] || r['comment'] || '';
-          btn.textContent = name;
-          btn.onclick = () => createAnnotation(name, comment);
-          rowMap[rowNum].appendChild(btn);
+          btn.textContent = r['button name']||'';
+          btn.onclick = ()=>createAnnotation(r['button name'], r['first comment']||r['comment']);
+          rowMap[row].appendChild(btn);
         });
-      } catch (e) {
-        console.error(e);
-        alert('Failed to load button configuration');
-      }
+      } catch (e) { console.error(e); alert('Config load error'); }
     }
 
     async function loadAndPlot() {
-      const btn = document.getElementById('loadMapBtn');
-      const defaultText = btn.textContent;
-      btn.disabled = true; btn.textContent = 'Getting location...';
-
-      const samples = Math.max(1, parseInt(document.getElementById('sampleInput').value) || 10);
-      const maxAttempts = samples * 3;
-
+      const btn = document.getElementById('loadMapBtn'), defaultText=btn.textContent;
+      btn.disabled=true; btn.textContent='Getting location...';
+      const samples = Math.max(1,parseInt(document.getElementById('sampleInput').value)||10);
+      const maxAtt = samples*3;
       try {
-        const init = await getSinglePosition({ timeout: 5000 });
-        const { latitude: iLat, longitude: iLng } = init.coords;
-        if (!window._appMap) {
-          window._appMap = L.map('map').setView([iLat, iLng], 16);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap' }).addTo(window._appMap);
-        } else window._appMap.setView([iLat, iLng], 16);
-      } catch (e) {
-        alert('Enable location permissions.');
-        btn.disabled = false; btn.textContent = defaultText; return;
-      }
+        const init=await getSinglePosition({timeout:5000});
+        const [iLat,iLng]=[init.coords.latitude,init.coords.longitude];
+        if(!window._appMap) {
+          window._appMap=L.map('map').setView([iLat,iLng],16);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(window._appMap);
+        } else window._appMap.setView([iLat,iLng],16);
+      } catch(e){alert('Enable location');btn.disabled=false;btn.textContent=defaultText;return;}
 
-      await getAveragePosition(samples, maxAttempts, count => {
-        btn.textContent = `Sampling ${count}/${samples}`;
-      }).then(avg => {
-        window._appCircle = L.circle([avg.latitude, avg.longitude], { radius: Number(document.getElementById('radiusInput').value) }).addTo(window._appMap);
-        window._appMarker = L.circleMarker([avg.latitude, avg.longitude], { radius: 10, color: 'red', fillColor: 'red', fillOpacity: 1 }).addTo(window._appMap);
-        window._appAccuracy = avg.accuracy;
-      }).catch(e => { console.warn(e); window._appAccuracy = 0; });
+      const photoWidth=document.getElementById('photoWidthInput').value||250;
+      // clear old sample markers
+      (window._appSamples||[]).forEach(m=>window._appMap.removeLayer(m));
+      window._appSamples=[];
 
-      btn.disabled = false; btn.textContent = defaultText;
+      const result = await getAveragePosition(samples,maxAtt,count=>{btn.textContent=`Sampling ${count}/${samples}`});
+      // plot each sample
+      result.samples.forEach(c=>{
+        const mark=L.circleMarker([c.latitude,c.longitude],{radius:4,color:'red',fillColor:'red',fillOpacity:0.3}).addTo(window._appMap);
+        window._appSamples.push(mark);
+      });
+      // plot circle & main marker
+      if(window._appCircle)window._appMap.removeLayer(window._appCircle);
+      window._appCircle=L.circle([result.latitude,result.longitude],{radius:Number(document.getElementById('radiusInput').value)}).addTo(window._appMap);
+      if(window._appMarker)window._appMap.removeLayer(window._appMarker);
+      window._appMarker=L.circleMarker([result.latitude,result.longitude],{radius:10,color:'red',fillColor:'red',fillOpacity:1}).addTo(window._appMap);
+      window._appAccuracy=result.accuracy;
+
+      btn.disabled=false; btn.textContent=defaultText;
     }
 
-    let annotationCount = 0, pendingAnnotation = null;
-    function createAnnotation(name, comment) { pendingAnnotation = { name, comment }; document.getElementById('photoInput').click(); }
-
-    document.getElementById('photoInput').addEventListener('change', e => {
-      const file = e.target.files[0]; if (!file || !pendingAnnotation) return;
-      const photoWidth = Math.max(1, parseInt(document.getElementById('photoWidthInput').value) || 100);
-      const reader = new FileReader();
-      reader.onload = ev => {
+    let annotationCount=0,pendingAnnotation=null;
+    function createAnnotation(name,comment){pendingAnnotation={name,comment};document.getElementById('photoInput').click();}
+    document.getElementById('photoInput').addEventListener('change',e=>{
+      const file=e.target.files[0]; if(!file||!pendingAnnotation)return;
+      const reader=new FileReader();reader.onload=ev=>{
         annotationCount++;
-        const imgData = ev.target.result;
-        const latlng = window._appCircle ? window._appCircle.getLatLng() : { lat:0, lng:0 };
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
+        const imgData=ev.target.result;
+        const [lat,lng]=window._appCircle?Object.values(window._appCircle.getLatLng()):[0,0];
+        const tr=document.createElement('tr');
+        tr.innerHTML=`
           <td>${annotationCount}</td>
-          <td>${latlng.lat.toFixed(6)}</td>
-          <td>${latlng.lng.toFixed(6)}</td>
+          <td>${lat.toFixed(6)}</td>
+          <td>${lng.toFixed(6)}</td>
           <td>${window._appAccuracy.toFixed(2)}</td>
           <td>${pendingAnnotation.name}</td>
           <td>${pendingAnnotation.comment}</td>
-          <td><img src="${imgData}" width="${photoWidth}" /></td>
+          <td><img src="${imgData}" width="${document.getElementById('photoWidthInput').value||250}" /></td>
         `;
         document.querySelector('#annotationsTable tbody').appendChild(tr);
-        pendingAnnotation = null; e.target.value = '';
-      };
-      reader.readAsDataURL(file);
+        pendingAnnotation=null; e.target.value='';
+      };reader.readAsDataURL(file);
     });
-
-    document.getElementById('manualBtn').addEventListener('click', () => {
-      const txt = document.getElementById('manualText').value.trim(); if (!txt) return alert('Enter annotation text'); createAnnotation(txt,'');
+    document.getElementById('manualBtn').addEventListener('click',()=>{
+      const t=document.getElementById('manualText').value.trim(); if(!t)return alert('Enter annotation'); createAnnotation(t,'');
     });
-
-    document.getElementById('radiusInput').addEventListener('change', () => {
-      if (window._appCircle) window._appCircle.setRadius(Number(document.getElementById('radiusInput').value));
+    document.getElementById('radiusInput').addEventListener('change',()=>{
+      if(window._appCircle)window._appCircle.setRadius(Number(document.getElementById('radiusInput').value));
     });
-
-    window.addEventListener('DOMContentLoaded', loadConfig);
-    document.getElementById('loadMapBtn').addEventListener('click', loadAndPlot);
+    window.addEventListener('DOMContentLoaded',loadConfig);
+    document.getElementById('loadMapBtn').addEventListener('click',loadAndPlot);
   </script>
 </body>
 </html>
