@@ -108,88 +108,80 @@
         samples: coords
       };
     }
-    }
-      }
-      if (coords.length === 0) throw new Error('No position samples');
-      const latSum = coords.reduce((sum, c) => sum + c.latitude, 0);
-      const lngSum = coords.reduce((sum, c) => sum + c.longitude, 0);
-      const accSum = coords.reduce((sum, c) => sum + (c.accuracy || 0), 0);
-      return {
-        latitude: latSum / coords.length,
-        longitude: lngSum / coords.length,
-        accuracy: accSum / coords.length,
-        samples: coords
-      };
-    }
 
     async function loadConfig() {
       try {
-        const resp = await fetch('gt_buttons.xlsx'); if (!resp.ok) throw new Error('Fetch failed');
+        const resp = await fetch('gt_buttons.xlsx');
+        if (!resp.ok) throw new Error('Fetch failed');
         const data = await resp.arrayBuffer();
         const wb = XLSX.read(new Uint8Array(data), { type: 'array' });
         const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-        const rows = raw.map(r => Object.keys(r).reduce((m,k)=>{m[k.trim().toLowerCase()]=r[k];return m;},{}));
+        const rows = raw.map(r => Object.keys(r).reduce((m, k) => { m[k.trim().toLowerCase()] = r[k]; return m; }, {}));
         const ctr = document.getElementById('buttonsContainer'); ctr.innerHTML = '';
         const rowMap = {};
         rows.forEach(r => {
-          const row = parseInt(r['row'])||1;
+          const row = parseInt(r['row']) || 1;
           if (!rowMap[row]) {
             rowMap[row] = document.createElement('div');
             rowMap[row].className = 'button-row';
             ctr.appendChild(rowMap[row]);
           }
           const btn = document.createElement('button');
-          btn.textContent = r['button name']||'';
-          btn.onclick = ()=>createAnnotation(r['button name'], r['first comment']||r['comment']);
+          btn.textContent = r['button name'] || '';
+          btn.onclick = () => createAnnotation(r['button name'], r['first comment'] || r['comment']);
           rowMap[row].appendChild(btn);
         });
-      } catch (e) { console.error(e); alert('Config load error'); }
+      } catch (e) {
+        console.error(e);
+        alert('Config load error');
+      }
     }
 
     async function loadAndPlot() {
-      const btn = document.getElementById('loadMapBtn'), defaultText=btn.textContent;
-      btn.disabled=true; btn.textContent='Getting location...';
-      const samples = Math.max(1,parseInt(document.getElementById('sampleInput').value)||10);
-      const maxAtt = samples*3;
+      const btn = document.getElementById('loadMapBtn'), defaultText = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Getting location...';
+      const samples = Math.max(1, parseInt(document.getElementById('sampleInput').value) || 10);
+      const maxAtt = samples * 3;
       try {
-        const init=await getSinglePosition({timeout:5000});
-        const [iLat,iLng]=[init.coords.latitude,init.coords.longitude];
-        if(!window._appMap) {
-          window._appMap=L.map('map').setView([iLat,iLng],16);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(window._appMap);
-        } else window._appMap.setView([iLat,iLng],16);
-      } catch(e){alert('Enable location');btn.disabled=false;btn.textContent=defaultText;return;}
+        const init = await getSinglePosition({ timeout: 5000 });
+        const [iLat, iLng] = [init.coords.latitude, init.coords.longitude];
+        if (!window._appMap) {
+          window._appMap = L.map('map').setView([iLat, iLng], 16);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(window._appMap);
+        } else window._appMap.setView([iLat, iLng], 16);
+      } catch (e) {
+        alert('Enable location'); btn.disabled = false; btn.textContent = defaultText; return;
+      }
 
-      const photoWidth=document.getElementById('photoWidthInput').value||250;
-      (window._appSamples||[]).forEach(m=>window._appMap.removeLayer(m));
-      window._appSamples=[];
+      const photoWidth = parseInt(document.getElementById('photoWidthInput').value) || 250;
+      (window._appSamples || []).forEach(m => window._appMap.removeLayer(m));
+      window._appSamples = [];
 
-      const result = await getAveragePosition(samples,maxAtt,count=>{btn.textContent=`Sampling ${count}/${samples}`});
-      // plot each sample as small red dot
-      result.samples.forEach(c=>{
-        const mark=L.circleMarker([c.latitude,c.longitude],{radius:2,color:'red',fillColor:'red',fillOpacity:0.5}).addTo(window._appMap);
+      const result = await getAveragePosition(samples, maxAtt, count => { btn.textContent = `Sampling ${count}/${samples}`; });
+      result.samples.forEach(c => {
+        const mark = L.circleMarker([c.latitude, c.longitude], { radius: 2, color: 'red', fillColor: 'red', fillOpacity: 0.5 }).addTo(window._appMap);
         window._appSamples.push(mark);
       });
-      // plot circle & averaged marker
-      if(window._appCircle)window._appMap.removeLayer(window._appCircle);
-      window._appCircle=L.circle([result.latitude,result.longitude],{radius:Number(document.getElementById('radiusInput').value)}).addTo(window._appMap);
-      if(window._appMarker)window._appMap.removeLayer(window._appMarker);
-      window._appMarker=L.circleMarker([result.latitude,result.longitude],{radius:6,color:'red',fillColor:'red',fillOpacity:1}).addTo(window._appMap);
-      window._appAccuracy=result.accuracy;
+      if (window._appCircle) window._appMap.removeLayer(window._appCircle);
+      window._appCircle = L.circle([result.latitude, result.longitude], { radius: Number(document.getElementById('radiusInput').value) }).addTo(window._appMap);
+      if (window._appMarker) window._appMap.removeLayer(window._appMarker);
+      window._appMarker = L.circleMarker([result.latitude, result.longitude], { radius: 6, color: 'red', fillColor: 'red', fillOpacity: 1 }).addTo(window._appMap);
+      window._appAccuracy = result.accuracy;
 
-      btn.disabled=false; btn.textContent=defaultText;
+      btn.disabled = false; btn.textContent = defaultText;
     }
 
-    let annotationCount=0,pendingAnnotation=null;
-    function createAnnotation(name,comment){pendingAnnotation={name,comment};document.getElementById('photoInput').click();}
-    document.getElementById('photoInput').addEventListener('change',e=>{
-      const file=e.target.files[0]; if(!file||!pendingAnnotation)return;
-      const reader=new FileReader();reader.onload=ev=>{
+    let annotationCount = 0, pendingAnnotation = null;
+    function createAnnotation(name, comment) { pendingAnnotation = { name, comment }; document.getElementById('photoInput').click(); }
+
+    document.getElementById('photoInput').addEventListener('change', e => {
+      const file = e.target.files[0]; if (!file || !pendingAnnotation) return;
+      const reader = new FileReader(); reader.onload = ev => {
         annotationCount++;
-        const imgData=ev.target.result;
-        const [lat,lng]=window._appCircle?Object.values(window._appCircle.getLatLng()):[0,0];
-        const tr=document.createElement('tr');
-        tr.innerHTML=`
+        const imgData = ev.target.result;
+        const [lat, lng] = window._appCircle ? Object.values(window._appCircle.getLatLng()) : [0, 0];
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
           <td>${annotationCount}</td>
           <td>${lat.toFixed(6)}</td>
           <td>${lng.toFixed(6)}</td>
@@ -199,17 +191,20 @@
           <td><img src="${imgData}" width="${photoWidth}" /></td>
         `;
         document.querySelector('#annotationsTable tbody').appendChild(tr);
-        pendingAnnotation=null; e.target.value='';
-      };reader.readAsDataURL(file);
+        pendingAnnotation = null; e.target.value = '';
+      }; reader.readAsDataURL(file);
     });
-    document.getElementById('manualBtn').addEventListener('click',()=>{
-      const t=document.getElementById('manualText').value.trim(); if(!t)return alert('Enter annotation'); createAnnotation(t,'');
+
+    document.getElementById('manualBtn').addEventListener('click', () => {
+      const t = document.getElementById('manualText').value.trim(); if (!t) return alert('Enter annotation'); createAnnotation(t, '');
     });
-    document.getElementById('radiusInput').addEventListener('change',()=>{
-      if(window._appCircle)window._appCircle.setRadius(Number(document.getElementById('radiusInput').value));
+
+    document.getElementById('radiusInput').addEventListener('change', () => {
+      if (window._appCircle) window._appCircle.setRadius(Number(document.getElementById('radiusInput').value));
     });
-    window.addEventListener('DOMContentLoaded',loadConfig);
-    document.getElementById('loadMapBtn').addEventListener('click',loadAndPlot);
+
+    window.addEventListener('DOMContentLoaded', loadConfig);
+    document.getElementById('loadMapBtn').addEventListener('click', loadAndPlot);
   </script>
 </body>
 </html>
