@@ -21,9 +21,7 @@
   <h1>Annotation Map App</h1>
 
   <div id="controls">
-    <label>Upload button config (XLSX): </label>
-    <input type="file" id="xlsxInput" accept=".xlsx" />
-    <br /><br />
+    <!-- Automatic XLSX loading; remove file input -->
     <label for="radiusInput">Radius (m): </label>
     <input type="number" id="radiusInput" value="100" />
     <button id="loadMapBtn">Load Position & Plot</button>
@@ -63,6 +61,36 @@
     let avgLat = 0, avgLng = 0;
     let annotationCount = 0;
     let pendingAnnotation = null;
+
+    // Fetch and parse the XLSX config automatically on load
+    async function loadConfig() {
+      try {
+        const resp = await fetch('gt_buttons.xlsx');
+        if (!resp.ok) throw new Error('Could not fetch config');
+        const data = await resp.arrayBuffer();
+        const wb = XLSX.read(new Uint8Array(data), { type: 'array' });
+        const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+        const rows = rawRows.map(r => {
+          const norm = {};
+          Object.keys(r).forEach(key => { norm[key.trim().toLowerCase()] = r[key]; });
+          return norm;
+        });
+        const ctr = document.getElementById('buttonsContainer');
+        ctr.innerHTML = '';
+        rows.forEach(r => {
+          const name = r['button name'] || '';
+          const first = r['first comment'] || '';
+          const second = r['second comment'] || '';
+          const btn = document.createElement('button');
+          btn.textContent = name;
+          btn.onclick = () => createAnnotation(name, first, second);
+          ctr.appendChild(btn);
+        });
+      } catch (e) {
+        console.error('Config load error:', e);
+        alert('Failed to load button configuration');
+      }
+    }
 
     function getSinglePosition(opts = {}) {
       return new Promise((res, rej) => {
@@ -172,33 +200,6 @@
       reader.readAsDataURL(file);
     });
 
-    document.getElementById('xlsxInput').addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
-        const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-        const rows = rawRows.map(r => {
-          const norm = {};
-          Object.keys(r).forEach(key => { norm[key.trim().toLowerCase()] = r[key]; });
-          return norm;
-        });
-        const ctr = document.getElementById('buttonsContainer');
-        ctr.innerHTML = '';
-        rows.forEach(r => {
-          const name = r['button name'] || '';
-          const first = r['first comment'] || '';
-          const second = r['second comment'] || '';
-          const btn = document.createElement('button');
-          btn.textContent = name;
-          btn.onclick = () => createAnnotation(name, first, second);
-          ctr.appendChild(btn);
-        });
-      };
-      reader.readAsArrayBuffer(file);
-    });
-
     document.getElementById('manualBtn').addEventListener('click', () => {
       const txt = document.getElementById('manualText').value.trim();
       if (!txt) return alert('Enter annotation text');
@@ -209,6 +210,8 @@
       if (circle) circle.setRadius(Number(document.getElementById('radiusInput').value));
     });
 
+    // Initialize config load
+    window.addEventListener('DOMContentLoaded', loadConfig);
     document.getElementById('loadMapBtn').addEventListener('click', loadAndPlot);
   </script>
 </body>
