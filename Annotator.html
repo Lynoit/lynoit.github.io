@@ -2285,6 +2285,51 @@ let sectionTexts = {};
   }
 }
 
+  async function uploadSnapshotsZip() {
+  console.log('💾 uploadSnapshotsZip() called; logTable.length =', logTable.length);
+  // 1) Build a new JSZip instance
+  const zip = new JSZip();
+
+  // 2) Loop each logTable entry, pick out the image (index 12)
+  logTable.forEach((row, i) => {
+    const dataUrl = row[12];
+    if (!dataUrl) return;  // skip if no snapshot
+
+    // split out the base64 data
+    const [meta, base64] = dataUrl.split(',');
+    // derive extension
+    const ext = meta.includes('png') ? 'png' : 'jpg';
+    // filename: snapshot-01.jpg, snapshot-02.jpg, …
+    const name = `snapshot-${String(i+1).padStart(2,'0')}.${ext}`;
+
+    zip.file(name, base64, { base64: true });
+  });
+
+  // 3) Generate the ZIP blob
+  const content = await zip.generateAsync({ type: 'blob' });
+
+  // 4) Build the Azure upload URL
+  const ts       = formatAppStartTimestamp();           // e.g. "2025-07-01_071530"
+  const blobName = `snapshots-${ts}.zip`;
+  const [baseUrl, token] = containerSasUrl.split('?');
+  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+
+  // 5) PUT to Azure
+  const resp = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type':   'application/zip'
+    },
+    body: content
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Snapshot ZIP upload failed: ${resp.status} ${resp.statusText}`);
+  }
+  console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
+}
+
 
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
@@ -2312,9 +2357,9 @@ uploadNowBtn.addEventListener('click', () => {
     //await exportPDFToAzure();
 
     // upload *your* custom-sections PDF
-    await exportCustomSectionsToAzure();
+    await uploadSnapshotsZip();
 
-    console.log('✔ Manual upload + custom export complete');
+    console.log('✔ All uploads complete');
   });
 });
 
