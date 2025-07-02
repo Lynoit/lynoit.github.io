@@ -63,7 +63,7 @@
   </div>
   <!-- Slider controls row -->
   <div id="controls">
-    <label id="alphaLabel" for="alphaSlider">LPF α:</label>
+    <label id="alphaLabel" for="alphaSlider">Filter α:</label>
     <input type="range" id="alphaSlider" min="0" max="1" step="0.01" value="0.1">
     <input type="text" id="alphaValue" value="0.10" readonly>
   </div>
@@ -82,13 +82,14 @@
     const speedCtx = speedCanvas.getContext('2d');
 
     const margin = { left: 50, bottom: 30 };
-    const maxAcceleration = 20; // static accel y-axis
+    const maxAccel = 20;
     const accTicks = 5;
     const speedTicks = 5;
     const maxPoints = 100;
 
-    let rawAcc = [], lpfAcc = [], prevLPF = 0;
+    let rawAcc = [], lpfAcc = [], prevMagLPF = 0;
     let speedPoints = [], prevSpeedLPF = 0;
+    let gravity = { x: 0, y: 0, z: 0 };
     let prevPos = null;
 
     function resizeAll() {
@@ -121,88 +122,99 @@
     function drawAcc() {
       const w = accCanvas.clientWidth, h = accCanvas.clientHeight;
       accCtx.clearRect(0, 0, w, h);
-      drawAxes(accCtx, w, h, maxAcceleration, accTicks);
+      drawAxes(accCtx, w, h, maxAccel, accTicks);
       const graphW = w - margin.left, graphH = h - margin.bottom;
       accCtx.beginPath(); accCtx.strokeStyle = '#4caf50'; accCtx.lineWidth = 2;
-      rawAcc.forEach((v,i) => {
-        const x = margin.left + (graphW/(maxPoints-1))*i;
-        const y = graphH - (v/maxAcceleration)*graphH;
-        i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y);
+      rawAcc.forEach((v, i) => {
+        const x = margin.left + (graphW / (maxPoints - 1)) * i;
+        const y = graphH - (v / maxAccel) * graphH;
+        i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y);
       }); accCtx.stroke();
       accCtx.beginPath(); accCtx.strokeStyle = '#ff9800'; accCtx.lineWidth = 2;
-      lpfAcc.forEach((v,i) => {
-        const x = margin.left + (graphW/(maxPoints-1))*i;
-        const y = graphH - (v/maxAcceleration)*graphH;
-        i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y);
+      lpfAcc.forEach((v, i) => {
+        const x = margin.left + (graphW / (maxPoints - 1)) * i;
+        const y = graphH - (v / maxAccel) * graphH;
+        i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y);
       }); accCtx.stroke();
     }
 
     function drawSpeed() {
       const w = speedCanvas.clientWidth, h = speedCanvas.clientHeight;
       speedCtx.clearRect(0, 0, w, h);
-      // autoscale max
       const maxVal = Math.max(...speedPoints, 10);
-      const axisMax = Math.ceil(maxVal/10)*10;
+      const axisMax = Math.ceil(maxVal / 10) * 10;
       drawAxes(speedCtx, w, h, axisMax, speedTicks);
       const graphW = w - margin.left, graphH = h - margin.bottom;
       speedCtx.beginPath(); speedCtx.strokeStyle = '#03a9f4'; speedCtx.lineWidth = 2;
-      speedPoints.forEach((v,i) => {
-        const x = margin.left + (graphW/(maxPoints-1))*i;
-        const y = graphH - (v/axisMax)*graphH;
-        i===0?speedCtx.moveTo(x,y):speedCtx.lineTo(x,y);
+      speedPoints.forEach((v, i) => {
+        const x = margin.left + (graphW / (maxPoints - 1)) * i;
+        const y = graphH - (v / axisMax) * graphH;
+        i === 0 ? speedCtx.moveTo(x, y) : speedCtx.lineTo(x, y);
       }); speedCtx.stroke();
     }
 
     function handleMotion(e) {
-      let ax=e.acceleration.x, ay=e.acceleration.y, az=e.acceleration.z;
-      if(ax==null||ay==null||az==null){
-        ax=e.accelerationIncludingGravity.x;
-        ay=e.accelerationIncludingGravity.y;
-        az=e.accelerationIncludingGravity.z-9.80665;
-      }
-      const mag=Math.sqrt(ax*ax+ay*ay+az*az);
-      accValueEl.textContent=`Accel: ${mag.toFixed(2)} m/s²`;
-      rawAcc.push(mag); if(rawAcc.length>maxPoints) rawAcc.shift();
-      const alpha=parseFloat(alphaSlider.value);
-      if(!lpfAcc.length) prevLPF=mag;
-      const filt=alpha*mag+(1-alpha)*prevLPF; prevLPF=filt;
-      lpfAcc.push(filt); if(lpfAcc.length>maxPoints) lpfAcc.shift();
+      // Estimate gravity with low-pass on accelerationIncludingGravity
+      const aX = e.accelerationIncludingGravity.x;
+      const aY = e.accelerationIncludingGravity.y;
+      const aZ = e.accelerationIncludingGravity.z;
+      const alpha = parseFloat(alphaSlider.value);
+      gravity.x = alpha * gravity.x + (1 - alpha) * aX;
+      gravity.y = alpha * gravity.y + (1 - alpha) * aY;
+      gravity.z = alpha * gravity.z + (1 - alpha) * aZ;
+      // Remove gravity component
+      const linX = aX - gravity.x;
+      const linY = aY - gravity.y;
+      const linZ = aZ - gravity.z;
+      const magnitude = Math.sqrt(linX * linX + linY * linY + linZ * linZ);
+      // Display and smooth magnitude
+      accValueEl.textContent = `Accel: ${magnitude.toFixed(2)} m/s²`;
+      rawAcc.push(magnitude);
+      if (rawAcc.length > maxPoints) rawAcc.shift();
+      const magFilt = alpha * magnitude + (1 - alpha) * prevMagLPF;
+      prevMagLPF = magFilt;
+      lpfAcc.push(magFilt);
+      if (lpfAcc.length > maxPoints) lpfAcc.shift();
       drawAcc();
     }
 
     function onGeo(pos) {
-      const {latitude:lat, longitude:lon} = pos.coords;
+      const { latitude: lat, longitude: lon } = pos.coords;
       const timestamp = pos.timestamp;
-      if(prevPos) {
-        const dLat=(lat-prevPos.lat)*Math.PI/180;
-        const dLon=(lon-prevPos.lon)*Math.PI/180;
-        const a=Math.sin(dLat/2)**2+Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
-        const dist=6371000*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
-        const dt=(timestamp-prevPos.time)/1000;
-        const speedMps=dt>0?dist/dt:0;
-        const speedKph=speedMps*3.6;
-        // low-pass filter speed
-        const alpha=parseFloat(alphaSlider.value);
-        if(!speedPoints.length) prevSpeedLPF=speedKph;
-        const filtSpeed=alpha*speedKph+(1-alpha)*prevSpeedLPF;
-        prevSpeedLPF=filtSpeed;
-        speedValueEl.textContent=`Speed: ${filtSpeed.toFixed(2)} km/h`;
-        speedPoints.push(filtSpeed);
-        if(speedPoints.length>maxPoints) speedPoints.shift();
+      if (prevPos) {
+        const dLat = (lat - prevPos.lat) * Math.PI / 180;
+        const dLon = (lon - prevPos.lon) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(prevPos.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const dt = (timestamp - prevPos.time) / 1000;
+        const speedMps = dt > 0 ? dist / dt : 0;
+        const speedKph = speedMps * 3.6;
+        const speedFilt = alpha * speedKph + (1 - alpha) * prevSpeedLPF;
+        prevSpeedLPF = speedFilt;
+        speedValueEl.textContent = `Speed: ${speedFilt.toFixed(2)} km/h`;
+        speedPoints.push(speedFilt);
+        if (speedPoints.length > maxPoints) speedPoints.shift();
         drawSpeed();
       }
-      prevPos={lat,lon,time:timestamp};
+      prevPos = { lat, lon, time: timestamp };
     }
 
-    alphaSlider.addEventListener('input',()=>{
-      alphaValueEl.value=parseFloat(alphaSlider.value).toFixed(2);
+    // Update alpha display
+    alphaSlider.addEventListener('input', () => {
+      alphaValueEl.value = parseFloat(alphaSlider.value).toFixed(2);
     });
 
-    function init(){
-      if(typeof DeviceMotionEvent.requestPermission==='function'){
-        DeviceMotionEvent.requestPermission().then(s=>{if(s==='granted')window.addEventListener('devicemotion',handleMotion);}).catch(console.error);
-      } else window.addEventListener('devicemotion',handleMotion);
-      if(navigator.geolocation){navigator.geolocation.watchPosition(onGeo,console.error,{enableHighAccuracy:true,maximumAge:1000});}
+    function init() {
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission().then(state => {
+          if (state === 'granted') window.addEventListener('devicemotion', handleMotion);
+        }).catch(console.error);
+      } else {
+        window.addEventListener('devicemotion', handleMotion);
+      }
+      if (navigator.geolocation) {
+        navigator.geolocation.watchPosition(onGeo, console.error, { enableHighAccuracy: true, maximumAge: 1000 });
+      }
     }
     init();
   </script>
