@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Accelerometer Visualizer</title>
+  <title>Motion & Speed Visualizer</title>
   <style>
     /* Dark mode styling */
     body {
@@ -32,12 +32,13 @@
       width: 50px;
       text-align: right;
     }
-    #graph {
+    .graph {
       border: 1px solid #444;
       background-color: #1e1e1e;
       width: 90%;
       max-width: 600px;
-      height: 300px;
+      height: 200px;
+      margin-bottom: 24px;
     }
   </style>
 </head>
@@ -48,137 +49,143 @@
     <input type="range" id="alphaSlider" min="0" max="1" step="0.01" value="0.1">
     <input type="text" id="alphaValue" value="0.10" readonly>
   </div>
-  <canvas id="graph"></canvas>
+  <canvas id="accGraph" class="graph"></canvas>
+  <canvas id="speedGraph" class="graph"></canvas>
 
   <script>
     const accValueEl = document.getElementById('accValue');
     const alphaSlider = document.getElementById('alphaSlider');
     const alphaValueEl = document.getElementById('alphaValue');
-    const canvas = document.getElementById('graph');
-    const ctx = canvas.getContext('2d');
+    const accCanvas = document.getElementById('accGraph');
+    const speedCanvas = document.getElementById('speedGraph');
+    const accCtx = accCanvas.getContext('2d');
+    const speedCtx = speedCanvas.getContext('2d');
 
-    // Layout margins for axes
+    // Graph settings
     const margin = { left: 50, bottom: 30 };
-    const maxAcceleration = 20; // max displayed on y-axis
-    const yTicks = 5; // number of ticks
-
-    function resizeCanvas() {
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = canvas.clientWidth * dpr;
-      canvas.height = canvas.clientHeight * dpr;
-      ctx.scale(dpr, dpr);
-    }
-    resizeCanvas();
-    window.addEventListener('resize', () => {
-      resizeCanvas();
-      drawGraph();
-    });
-
-    let rawPoints = [];
-    let lpfPoints = [];
+    const maxAcceleration = 20;
+    const accTicks = 5;
+    const maxSpeed = 30; // m/s (~108 km/h)
+    const speedTicks = 5;
     const maxPoints = 100;
-    let prevLPF = 0;
 
-    function drawAxes() {
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      ctx.beginPath();
-      ctx.strokeStyle = '#888';
-      ctx.lineWidth = 1;
-      ctx.moveTo(margin.left, 0);
-      ctx.lineTo(margin.left, h - margin.bottom);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(margin.left, h - margin.bottom);
-      ctx.lineTo(w, h - margin.bottom);
-      ctx.stroke();
-      ctx.fillStyle = '#ccc';
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      const graphHeight = h - margin.bottom;
-      for (let i = 0; i <= yTicks; i++) {
-        const value = (maxAcceleration / yTicks) * i;
-        const y = graphHeight - (value / maxAcceleration) * graphHeight;
-        ctx.beginPath();
-        ctx.moveTo(margin.left - 5, y);
-        ctx.lineTo(margin.left, y);
-        ctx.stroke();
-        ctx.fillText(value.toFixed(0), margin.left - 10, y);
+    let rawAcc = [], lpfAcc = [], prevLPF = 0;
+    let speedPoints = [];
+    let prevPos = null;
+
+    function resizeAll() {
+      [accCanvas, speedCanvas].forEach((canvas, i) => {
+        const ctx = i === 0 ? accCtx : speedCtx;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = canvas.clientWidth * dpr;
+        canvas.height = canvas.clientHeight * dpr;
+        ctx.scale(dpr, dpr);
+      });
+      drawAcc(); drawSpeed();
+    }
+    window.addEventListener('resize', resizeAll);
+    resizeAll();
+
+    // Draw axes helper
+    function drawAxes(ctx, width, height, maxValue, ticks) {
+      ctx.beginPath(); ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+      ctx.moveTo(margin.left, 0); ctx.lineTo(margin.left, height - margin.bottom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(margin.left, height - margin.bottom); ctx.lineTo(width, height - margin.bottom); ctx.stroke();
+      ctx.fillStyle = '#ccc'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      const graphH = height - margin.bottom;
+      for (let i = 0; i <= ticks; i++) {
+        const val = (maxValue / ticks)*i;
+        const y = graphH - (val / maxValue)*graphH;
+        ctx.beginPath(); ctx.moveTo(margin.left - 5, y); ctx.lineTo(margin.left, y); ctx.stroke();
+        ctx.fillText(val.toFixed(0), margin.left - 10, y);
       }
     }
 
-    function drawGraph() {
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      ctx.clearRect(0, 0, w, h);
-      drawAxes();
-      const graphWidth = w - margin.left;
-      const graphHeight = h - margin.bottom;
-
-      // Draw raw acceleration
-      ctx.beginPath();
-      ctx.strokeStyle = '#4caf50';
-      ctx.lineWidth = 2;
-      rawPoints.forEach((val, i) => {
-        const x = margin.left + (graphWidth / (maxPoints - 1)) * i;
-        const y = graphHeight - (val / maxAcceleration) * graphHeight;
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-
-      // Draw LPF
-      ctx.beginPath();
-      ctx.strokeStyle = '#ff9800';
-      ctx.lineWidth = 2;
-      lpfPoints.forEach((val, i) => {
-        const x = margin.left + (graphWidth / (maxPoints - 1)) * i;
-        const y = graphHeight - (val / maxAcceleration) * graphHeight;
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.stroke();
+    function drawAcc() {
+      const w = accCanvas.clientWidth, h = accCanvas.clientHeight;
+      accCtx.clearRect(0, 0, w, h);
+      drawAxes(accCtx, w, h, maxAcceleration, accTicks);
+      const graphW = w - margin.left, graphH = h - margin.bottom;
+      // raw
+      accCtx.beginPath(); accCtx.strokeStyle = '#4caf50'; accCtx.lineWidth = 2;
+      rawAcc.forEach((v,i)=>{
+        const x = margin.left + (graphW/(maxPoints-1))*i;
+        const y = graphH - (v/maxAcceleration)*graphH;
+        i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y);
+      }); accCtx.stroke();
+      // lpf
+      accCtx.beginPath(); accCtx.strokeStyle = '#ff9800'; accCtx.lineWidth = 2;
+      lpfAcc.forEach((v,i)=>{
+        const x = margin.left + (graphW/(maxPoints-1))*i;
+        const y = graphH - (v/maxAcceleration)*graphH;
+        i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y);
+      }); accCtx.stroke();
     }
 
-    function handleMotion(event) {
-      let ax = event.acceleration.x;
-      let ay = event.acceleration.y;
-      let az = event.acceleration.z;
-      if (ax === null || ay === null || az === null) {
-        ax = event.accelerationIncludingGravity.x;
-        ay = event.accelerationIncludingGravity.y;
-        az = event.accelerationIncludingGravity.z - 9.80665;
-      }
-      const magnitude = Math.sqrt(ax*ax + ay*ay + az*az);
-      accValueEl.textContent = `Accel: ${magnitude.toFixed(2)} m/s²`;
-      rawPoints.push(magnitude);
-      if (rawPoints.length > maxPoints) rawPoints.shift();
+    function drawSpeed() {
+      const w = speedCanvas.clientWidth, h = speedCanvas.clientHeight;
+      speedCtx.clearRect(0, 0, w, h);
+      drawAxes(speedCtx, w, h, maxSpeed, speedTicks);
+      const graphW = w - margin.left, graphH = h - margin.bottom;
+      speedCtx.beginPath(); speedCtx.strokeStyle = '#03a9f4'; speedCtx.lineWidth = 2;
+      speedPoints.forEach((v,i)=>{
+        const x = margin.left + (graphW/(maxPoints-1))*i;
+        const y = graphH - (v/maxSpeed)*graphH;
+        i===0?speedCtx.moveTo(x,y):speedCtx.lineTo(x,y);
+      }); speedCtx.stroke();
+    }
 
-      // Low-pass filter
+    // Accelerometer handler
+    function handleMotion(e) {
+      let ax = e.acceleration.x, ay = e.acceleration.y, az = e.acceleration.z;
+      if (ax==null||ay==null||az==null) {
+        ax = e.accelerationIncludingGravity.x;
+        ay = e.accelerationIncludingGravity.y;
+        az = e.accelerationIncludingGravity.z - 9.80665;
+      }
+      const mag = Math.sqrt(ax*ax+ay*ay+az*az);
+      accValueEl.textContent = `Accel: ${mag.toFixed(2)} m/s²`;
+      rawAcc.push(mag); if(rawAcc.length>maxPoints) rawAcc.shift();
       const alpha = parseFloat(alphaSlider.value);
-      if (lpfPoints.length === 0) prevLPF = magnitude;
-      const filtered = alpha * magnitude + (1 - alpha) * prevLPF;
-      prevLPF = filtered;
-      lpfPoints.push(filtered);
-      if (lpfPoints.length > maxPoints) lpfPoints.shift();
-
-      drawGraph();
+      if (!lpfAcc.length) prevLPF = mag;
+      const filt = alpha*mag + (1-alpha)*prevLPF;
+      prevLPF = filt; lpfAcc.push(filt);
+      if(lpfAcc.length>maxPoints) lpfAcc.shift();
+      drawAcc();
     }
 
-    // Update alpha display
-    alphaSlider.addEventListener('input', () => {
+    // GPS speed handler
+    function onGeo(pos) {
+      const { latitude:lat, longitude:lon, timestamp } = pos.coords;
+      if (prevPos) {
+        const dLat = (lat-prevPos.lat)*Math.PI/180;
+        const dLon = (lon-prevPos.lon)*Math.PI/180;
+        const a = Math.sin(dLat/2)**2 + Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        const dt = (timestamp - prevPos.time)/1000;
+        const speed = dt>0 ? dist/dt : 0;
+        speedPoints.push(speed);
+        if (speedPoints.length>maxPoints) speedPoints.shift();
+        drawSpeed();
+      }
+      prevPos = { lat, lon, time: timestamp };
+    }
+    function onGeoError(err) { console.error(err); }
+
+    // Slider update
+    alphaSlider.addEventListener('input', ()=>{
       alphaValueEl.value = parseFloat(alphaSlider.value).toFixed(2);
     });
 
     function init() {
-      if (typeof DeviceMotionEvent.requestPermission === 'function') {
-        DeviceMotionEvent.requestPermission()
-          .then(state => {
-            if (state === 'granted') window.addEventListener('devicemotion', handleMotion);
-            else accValueEl.textContent = 'Permission denied';
-          })
-          .catch(console.error);
-      } else {
-        window.addEventListener('devicemotion', handleMotion);
-      }
+      // DeviceMotion
+      if (typeof DeviceMotionEvent.requestPermission==='function') {
+        DeviceMotionEvent.requestPermission().then(s=>{
+          if(s==='granted') window.addEventListener('devicemotion', handleMotion);
+        }).catch(console.error);
+      } else window.addEventListener('devicemotion', handleMotion);
+      // Geolocation
+      if(navigator.geolocation) navigator.geolocation.watchPosition(onGeo, onGeoError, { enableHighAccuracy: true, maximumAge: 1000 });
     }
     init();
   </script>
