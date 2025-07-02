@@ -18,9 +18,19 @@
       justify-content: flex-start;
       height: 100vh;
     }
-    #accValue {
+    #controls {
       margin: 16px;
-      font-size: 2rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #accValue {
+      font-size: 1.5rem;
+    }
+    #alphaValue {
+      font-size: 1.2rem;
+      width: 50px;
+      text-align: right;
     }
     #graph {
       border: 1px solid #444;
@@ -32,11 +42,18 @@
   </style>
 </head>
 <body>
-  <div id="accValue">Acceleration: 0.00 m/s²</div>
+  <div id="controls">
+    <div id="accValue">Accel: 0.00 m/s²</div>
+    <label for="alphaSlider">LPF α:</label>
+    <input type="range" id="alphaSlider" min="0" max="1" step="0.01" value="0.1">
+    <input type="text" id="alphaValue" value="0.10" readonly>
+  </div>
   <canvas id="graph"></canvas>
 
   <script>
     const accValueEl = document.getElementById('accValue');
+    const alphaSlider = document.getElementById('alphaSlider');
+    const alphaValueEl = document.getElementById('alphaValue');
     const canvas = document.getElementById('graph');
     const ctx = canvas.getContext('2d');
 
@@ -57,25 +74,24 @@
       drawGraph();
     });
 
-    let dataPoints = [];
+    let rawPoints = [];
+    let lpfPoints = [];
     const maxPoints = 100;
+    let prevLPF = 0;
 
     function drawAxes() {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      // Draw y-axis
       ctx.beginPath();
       ctx.strokeStyle = '#888';
       ctx.lineWidth = 1;
       ctx.moveTo(margin.left, 0);
       ctx.lineTo(margin.left, h - margin.bottom);
       ctx.stroke();
-      // Draw x-axis
       ctx.beginPath();
       ctx.moveTo(margin.left, h - margin.bottom);
       ctx.lineTo(w, h - margin.bottom);
       ctx.stroke();
-      // Draw y-axis ticks and labels
       ctx.fillStyle = '#ccc';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
@@ -83,12 +99,10 @@
       for (let i = 0; i <= yTicks; i++) {
         const value = (maxAcceleration / yTicks) * i;
         const y = graphHeight - (value / maxAcceleration) * graphHeight;
-        // Tick
         ctx.beginPath();
         ctx.moveTo(margin.left - 5, y);
         ctx.lineTo(margin.left, y);
         ctx.stroke();
-        // Label
         ctx.fillText(value.toFixed(0), margin.left - 10, y);
       }
     }
@@ -96,21 +110,30 @@
     function drawGraph() {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      // Clear
       ctx.clearRect(0, 0, w, h);
-      // Draw axes first
       drawAxes();
-      // Draw acceleration line
+      const graphWidth = w - margin.left;
+      const graphHeight = h - margin.bottom;
+
+      // Draw raw acceleration
       ctx.beginPath();
       ctx.strokeStyle = '#4caf50';
       ctx.lineWidth = 2;
-      const graphWidth = w - margin.left;
-      const graphHeight = h - margin.bottom;
-      dataPoints.forEach((val, i) => {
+      rawPoints.forEach((val, i) => {
         const x = margin.left + (graphWidth / (maxPoints - 1)) * i;
         const y = graphHeight - (val / maxAcceleration) * graphHeight;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Draw LPF
+      ctx.beginPath();
+      ctx.strokeStyle = '#ff9800';
+      ctx.lineWidth = 2;
+      lpfPoints.forEach((val, i) => {
+        const x = margin.left + (graphWidth / (maxPoints - 1)) * i;
+        const y = graphHeight - (val / maxAcceleration) * graphHeight;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
       });
       ctx.stroke();
     }
@@ -125,21 +148,32 @@
         az = event.accelerationIncludingGravity.z - 9.80665;
       }
       const magnitude = Math.sqrt(ax*ax + ay*ay + az*az);
-      accValueEl.textContent = `Acceleration: ${magnitude.toFixed(2)} m/s²`;
-      dataPoints.push(magnitude);
-      if (dataPoints.length > maxPoints) dataPoints.shift();
+      accValueEl.textContent = `Accel: ${magnitude.toFixed(2)} m/s²`;
+      rawPoints.push(magnitude);
+      if (rawPoints.length > maxPoints) rawPoints.shift();
+
+      // Low-pass filter
+      const alpha = parseFloat(alphaSlider.value);
+      if (lpfPoints.length === 0) prevLPF = magnitude;
+      const filtered = alpha * magnitude + (1 - alpha) * prevLPF;
+      prevLPF = filtered;
+      lpfPoints.push(filtered);
+      if (lpfPoints.length > maxPoints) lpfPoints.shift();
+
       drawGraph();
     }
+
+    // Update alpha display
+    alphaSlider.addEventListener('input', () => {
+      alphaValueEl.value = parseFloat(alphaSlider.value).toFixed(2);
+    });
 
     function init() {
       if (typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission()
-          .then(permissionState => {
-            if (permissionState === 'granted') {
-              window.addEventListener('devicemotion', handleMotion);
-            } else {
-              accValueEl.textContent = 'Permission denied';
-            }
+          .then(state => {
+            if (state === 'granted') window.addEventListener('devicemotion', handleMotion);
+            else accValueEl.textContent = 'Permission denied';
           })
           .catch(console.error);
       } else {
