@@ -109,14 +109,63 @@
       speedPoints.forEach((v,i)=>{ const x=margin.left+(gw/(maxPoints-1))*i; const y=gh-(v/axisMax)*gh; i===0?speedCtx.moveTo(x,y):speedCtx.lineTo(x,y); }); speedCtx.stroke();
     }
 
-    // Draw GPS acceleration
+    // Draw GPS acceleration plot
     function drawGpsAcc() {
       const w = gpsAccCanvas.clientWidth, h = gpsAccCanvas.clientHeight;
-      gpsAccCtx.clearRect(0,0,w,h);
-      drawAxes(gpsAccCtx,w,h,maxAccel,accTicks);
-      const gw=w-margin.left, gh=h-margin.bottom;
-      gpsAccCtx.beginPath(); gpsAccCtx.strokeStyle='#e91e63'; gpsAccCtx.lineWidth=2;
-      gpsAccPoints.forEach((v,i)=>{ const x=margin.left+(gw/(maxPoints-1))*i; const y=gh-(v/maxAccel)*gh; i===0?gpsAccCtx.moveTo(x,y):gpsAccCtx.lineTo(x,y); }); gpsAccCtx.stroke();
+      gpsAccCtx.clearRect(0, 0, w, h);
+      // autoscale axis based on gpsAccPoints
+      const maxVal = Math.max(...gpsAccPoints.map(v => Math.abs(v)), 0.1);
+      const axisMax = Math.ceil(maxVal * 10) / 10; // round up to nearest 0.1 m/s²
+      drawAxes(gpsAccCtx, w, h, axisMax, accTicks);
+      const gw = w - margin.left, gh = h - margin.bottom;
+      gpsAccCtx.beginPath(); gpsAccCtx.strokeStyle = '#e91e63'; gpsAccCtx.lineWidth = 2;
+      gpsAccPoints.forEach((v, i) => {
+        const x = margin.left + (gw / (maxPoints - 1)) * i;
+        const y = gh - (Math.abs(v) / axisMax) * gh;
+        if (i === 0) gpsAccCtx.moveTo(x, y);
+        else gpsAccCtx.lineTo(x, y);
+      });
+      gpsAccCtx.stroke();
+    }
+
+    // Handle geolocation
+    function onGeo(pos) {
+      const {latitude: lat, longitude: lon} = pos.coords;
+      const t = pos.timestamp;
+      const alpha = parseFloat(alphaSlider.value);
+      if (prevPos) {
+        const dLat = (lat - prevPos.lat) * Math.PI / 180;
+        const dLon = (lon - prevPos.lon) * Math.PI / 180;
+        const a = Math.sin(dLat/2)**2 + Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const dt = (t - prevPos.time) / 1000;
+        if (dt > 0) {
+          const mps = dist / dt;
+          let kph = mps * 3.6;
+          kph = Math.min(kph, 150);
+          // speed filter
+          const speedFilt = alpha * kph + (1 - alpha) * prevSpeedLPF;
+          prevSpeedLPF = speedFilt;
+          speedValueEl.textContent = `Speed: ${speedFilt.toFixed(2)} km/h`;
+          speedPoints.push(speedFilt);
+          if (speedPoints.length > maxPoints) speedPoints.shift();
+          drawSpeed();
+
+          // GPS-based acceleration calculation (absolute)
+          const rawGpsAcc = Math.abs(mps - prevSpeedMps) / dt;
+          prevSpeedMps = mps;
+          // low-pass filter
+          const gpsAccFilt = alpha * rawGpsAcc + (1 - alpha) * prevGpsAccLPF;
+          prevGpsAccLPF = gpsAccFilt;
+          gpsAccPoints.push(gpsAccFilt);
+          if (gpsAccPoints.length > maxPoints) gpsAccPoints.shift();
+          drawGpsAcc(); drawScatter();
+        }
+      } else {
+        prevSpeedMps = 0;
+      }
+      prevPos = {lat, lon, time: t};
+    }); gpsAccCtx.stroke();
     }
 
     // Draw scatter
@@ -154,3 +203,29 @@
       const alpha=parseFloat(alphaSlider.value);
       if(prevPos) {
         const dLat=(lat-prevPos.lat)*Math.PI/180, dLon=(lon-prevPos.lon)*Math.PI/180;
+        const a=Math.sin(dLat/2)**2+Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+        const dist=6371000*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); const dt=(t-prevPos.time)/1000;
+        const mps=dt>0?dist/dt:0; let kph=mps*3.6; kph=Math.min(kph,150);
+        const speedFilt=alpha*kph+(1-alpha)*prevSpeedLPF; prevSpeedLPF=speedFilt;
+        speedValueEl.textContent=`Speed: ${speedFilt.toFixed(2)} km/h`;
+        speedPoints.push(speedFilt); if(speedPoints.length>maxPoints) speedPoints.shift(); drawSpeed();
+        // GPS-based acceleration
+        const rawGpsAcc = dt>0?(mps-prevSpeedMps)/dt:0; prevSpeedMps=mps;
+        const gpsAccFilt=alpha*rawGpsAcc+(1-alpha)*prevGpsAccLPF; prevGpsAccLPF=gpsAccFilt;
+        gpsAccPoints.push(gpsAccFilt); if(gpsAccPoints.length>maxPoints) gpsAccPoints.shift(); drawGpsAcc(); drawScatter();
+      } else { prevSpeedMps=0; }
+      prevPos={lat,lon,time:t};
+    }
+
+    alphaSlider.addEventListener('input',()=>{ alphaValueEl.value=parseFloat(alphaSlider.value).toFixed(2); });
+
+    function init() {
+      if(typeof DeviceMotionEvent.requestPermission==='function') {
+        DeviceMotionEvent.requestPermission().then(s=>{ if(s==='granted') window.addEventListener('devicemotion',handleMotion); }).catch(console.error);
+      } else window.addEventListener('devicemotion',handleMotion);
+      if(navigator.geolocation) navigator.geolocation.watchPosition(onGeo,console.error,{enableHighAccuracy:true,maximumAge:1000});
+    }
+    init();
+  </script>
+</body>
+</html>
