@@ -164,16 +164,33 @@
           const speedFilt=alpha*kph+(1-alpha)*prevSpeedLPF; prevSpeedLPF=speedFilt;
           speedValueEl.textContent=`Speed: ${speedFilt.toFixed(2)} km/h`;
           speedPoints.push(speedFilt); if(speedPoints.length>maxPoints) speedPoints.shift();
-          // fetch speed limit
-          fetch(`https://api.speedlimit.io/v1/limits?lat=${lat}&lon=${lon}`)
-            .then(res=>res.json())
-            .then(data=>{
-              const limit=data.limit_kph; // assume API returns limit_kph
-              limitValueEl.textContent=`Limit: ${limit} km/h`;
-              limitPoints.push(limit);
-              if(limitPoints.length>maxPoints) limitPoints.shift();
-              drawSpeed();
-            }).catch(console.error);
+          // fetch speed limit from OSM Overpass API
+          const overpassQuery = `[out:json];way(around:50,${lat},${lon})["highway"]["maxspeed"];out tags;`;
+          fetch('https://overpass-api.de/api/interpreter', {
+            method: 'POST',
+            body: overpassQuery
+          })
+          .then(res => res.json())
+          .then(json => {
+            let limit = prevLimit;
+            if (json.elements && json.elements.length > 0) {
+              const el = json.elements[0];
+              const ms = el.tags.maxspeed;
+              if (ms) {
+                if (ms.includes('mph')) {
+                  limit = parseFloat(ms) * 1.60934;
+                } else {
+                  limit = parseFloat(ms);
+                }
+              }
+            }
+            prevLimit = limit;
+            limitValueEl.textContent = `Limit: ${limit.toFixed(0)} km/h`;
+            limitPoints.push(limit);
+            if (limitPoints.length > maxPoints) limitPoints.shift();
+            drawSpeed();
+          })
+          .catch(console.error);
 
           const rawGpsAcc=(mps-prevSpeedMps)/dt; prevSpeedMps=mps;
           const gpsAccFilt=alpha*rawGpsAcc+(1-alpha)*prevGpsAccLPF; prevGpsAccLPF=gpsAccFilt;
