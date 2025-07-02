@@ -8,13 +8,14 @@
     body { margin: 0; font-family: sans-serif; background: #121212; color: #fff; display: flex; flex-direction: column; align-items: center; }
     #displayRow { width: 90%; max-width: 600px; display: flex; justify-content: space-between; margin: 16px 0; }
     #controls { width: 90%; max-width: 600px; display: flex; align-items: center; gap: 8px; margin-bottom: 24px; }
-    #speedValue, #accValue { font-size: 1.5rem; }
+    #speedValue, #accValue, #limitValue { font-size: 1.5rem; }
     .graph { border: 1px solid #444; background: #1e1e1e; width: 90%; max-width: 600px; height: 200px; margin-bottom: 24px; }
   </style>
 </head>
 <body>
   <div id="displayRow">
     <div id="speedValue">Speed: 0.00 km/h</div>
+    <div id="limitValue">Limit: N/A</div>
     <div id="accValue">Accel: 0.00 m/s²</div>
   </div>
   <div id="controls">
@@ -29,6 +30,7 @@
 
   <script>
     const speedValueEl = document.getElementById('speedValue');
+    const limitValueEl = document.getElementById('limitValue');
     const accValueEl = document.getElementById('accValue');
     const alphaSlider = document.getElementById('alphaSlider');
     const alphaValueEl = document.getElementById('alphaValue');
@@ -50,6 +52,7 @@
 
     let rawAcc = [], lpfAcc = [], prevMagLPF = 0;
     let speedPoints = [], prevSpeedLPF = 0;
+    let limitPoints = [], prevLimit = 0;
     let gpsAccPoints = [], prevGpsAccLPF = 0;
     let prevPos = null, prevSpeedMps = 0;
 
@@ -76,7 +79,7 @@
         const val = (maxValue / ticks) * i;
         const y = graphH - (val / maxValue) * graphH;
         ctx.beginPath(); ctx.moveTo(margin.left - 5, y); ctx.lineTo(margin.left, y); ctx.stroke();
-        ctx.fillText(val.toFixed(1), margin.left - 10, y);
+        ctx.fillText(val.toFixed(0), margin.left - 10, y);
       }
     }
 
@@ -86,158 +89,108 @@
       drawAxes(accCtx, w, h, maxAccel, accTicks);
       const gw = w - margin.left, gh = h - margin.bottom;
       accCtx.beginPath(); accCtx.strokeStyle = '#4caf50'; accCtx.lineWidth = 2;
-      rawAcc.forEach((v, i) => { const x = margin.left + (gw / (maxPoints - 1)) * i; const y = gh - (v / maxAccel) * gh; i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y); });
-      accCtx.stroke();
+      rawAcc.forEach((v, i) => { const x = margin.left + (gw/(maxPoints-1))*i; const y = gh-(v/maxAccel)*gh; i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y); }); accCtx.stroke();
       accCtx.beginPath(); accCtx.strokeStyle = '#ff9800'; accCtx.lineWidth = 2;
-      lpfAcc.forEach((v, i) => { const x = margin.left + (gw / (maxPoints - 1)) * i; const y = gh - (v / maxAccel) * gh; i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y); });
-      accCtx.stroke();
+      lpfAcc.forEach((v, i) => { const x = margin.left+(gw/(maxPoints-1))*i; const y = gh-(v/maxAccel)*gh; i===0?accCtx.moveTo(x,y):accCtx.lineTo(x,y); }); accCtx.stroke();
     }
 
     function drawSpeed() {
       const w = speedCanvas.clientWidth, h = speedCanvas.clientHeight;
       speedCtx.clearRect(0, 0, w, h);
-      const maxVal = Math.max(...speedPoints, 10);
-      const axisMax = Math.min(Math.ceil(maxVal / 10) * 10, 150);
+      const maxVal = Math.max(...speedPoints, ...limitPoints, 10);
+      const axisMax = Math.min(Math.ceil(maxVal/10)*10, 150);
       drawAxes(speedCtx, w, h, axisMax, speedTicks);
       const gw = w - margin.left, gh = h - margin.bottom;
+      // GPS speed line
       speedCtx.beginPath(); speedCtx.strokeStyle = '#03a9f4'; speedCtx.lineWidth = 2;
-      speedPoints.forEach((v, i) => { const x = margin.left + (gw / (maxPoints - 1)) * i; const y = gh - (v / axisMax) * gh; i === 0 ? speedCtx.moveTo(x, y) : speedCtx.lineTo(x, y); });
-      speedCtx.stroke();
+      speedPoints.forEach((v, i) => { const x = margin.left+(gw/(maxPoints-1))*i; const y = gh-(v/axisMax)*gh; i===0?speedCtx.moveTo(x,y):speedCtx.lineTo(x,y); }); speedCtx.stroke();
+      // Speed limit line
+      speedCtx.beginPath(); speedCtx.strokeStyle = '#ffff00'; speedCtx.lineWidth = 2; speedCtx.setLineDash([5,5]);
+      limitPoints.forEach((v, i) => { const x = margin.left+(gw/(maxPoints-1))*i; const y = gh-(v/axisMax)*gh; i===0?speedCtx.moveTo(x,y):speedCtx.lineTo(x,y); }); speedCtx.stroke(); speedCtx.setLineDash([]);
     }
 
     function drawGpsAcc() {
       const w = gpsAccCanvas.clientWidth, h = gpsAccCanvas.clientHeight;
       gpsAccCtx.clearRect(0, 0, w, h);
-      // fixed axis from -5 to +5 m/s²
       const axisMax = 5;
-      const graphH = h - margin.bottom;
-      const graphW = w - margin.left;
-      // vertical axis line
+      const graphH = h - margin.bottom, graphW = w - margin.left;
       gpsAccCtx.strokeStyle = '#888'; gpsAccCtx.lineWidth = 1;
       gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left, 0); gpsAccCtx.lineTo(margin.left, graphH); gpsAccCtx.stroke();
-      // horizontal zero line
-      const zeroY = graphH / 2;
+      const zeroY = graphH/2;
       gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left, zeroY); gpsAccCtx.lineTo(w, zeroY); gpsAccCtx.stroke();
-      // y-axis ticks and labels from -5 to +5
-      gpsAccCtx.fillStyle = '#ccc'; gpsAccCtx.textAlign = 'right'; gpsAccCtx.textBaseline = 'middle';
       const ticks = accTicks;
-      for (let i = -ticks; i <= ticks; i++) {
-        const val = axisMax * (i / ticks);
-        const y = zeroY - (val / axisMax) * (graphH / 2);
-        gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left - 5, y); gpsAccCtx.lineTo(margin.left, y); gpsAccCtx.stroke();
-        gpsAccCtx.fillText(val.toFixed(1), margin.left - 10, y);
-      }
-      // plot GPS acceleration
+      gpsAccCtx.fillStyle = '#ccc'; gpsAccCtx.textAlign = 'right'; gpsAccCtx.textBaseline = 'middle';
+      for (let i=-ticks; i<=ticks; i++){ const val=axisMax*(i/ticks); const y=zeroY-(val/axisMax)*(graphH/2); gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left-5,y); gpsAccCtx.lineTo(margin.left,y); gpsAccCtx.stroke(); gpsAccCtx.fillText(val.toFixed(1),margin.left-10,y);}      
       gpsAccCtx.beginPath(); gpsAccCtx.strokeStyle = '#e91e63'; gpsAccCtx.lineWidth = 2;
-      gpsAccPoints.forEach((v, i) => {
-        const x = margin.left + (graphW / (maxPoints - 1)) * i;
-        const y = zeroY - (v / axisMax) * (graphH / 2);
-        if (i === 0) gpsAccCtx.moveTo(x, y);
-        else gpsAccCtx.lineTo(x, y);
-      });
-      gpsAccCtx.stroke();
+      gpsAccPoints.forEach((v,i)=>{ const x=margin.left+(graphW/(maxPoints-1))*i; const y=zeroY-(v/axisMax)*(graphH/2); i===0?gpsAccCtx.moveTo(x,y):gpsAccCtx.lineTo(x,y); }); gpsAccCtx.stroke();
     }
 
     function drawScatter() {
       const w = scatterCanvas.clientWidth, h = scatterCanvas.clientHeight;
-      scatterCtx.clearRect(0, 0, w, h);
-      scatterCtx.strokeStyle = '#888'; scatterCtx.lineWidth = 1;
-      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left, 0); scatterCtx.lineTo(margin.left, h - margin.bottom); scatterCtx.stroke();
-      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left, h - margin.bottom); scatterCtx.lineTo(w, h - margin.bottom); scatterCtx.stroke();
-      scatterCtx.fillStyle = '#ccc'; scatterCtx.textAlign = 'right'; scatterCtx.textBaseline = 'middle';
-      const gh = h - margin.bottom;
-      for (let i = 0; i <= accTicks; i++) {
-        const val = (maxAccel / accTicks) * i;
-        const y = gh - (val / maxAccel) * gh;
-        scatterCtx.beginPath(); scatterCtx.moveTo(margin.left - 5, y); scatterCtx.lineTo(margin.left, y); scatterCtx.stroke();
-        scatterCtx.fillText(val.toFixed(0), margin.left - 10, y);
-      }
-      scatterCtx.textAlign = 'center'; scatterCtx.textBaseline = 'top';
-      const gw = w - margin.left;
-      for (let i = 0; i <= speedTicks; i++) {
-        const val = (maxScatterSpeed / speedTicks) * i;
-        const x = margin.left + (gw / speedTicks) * i;
-        scatterCtx.beginPath(); scatterCtx.moveTo(x, h - margin.bottom); scatterCtx.lineTo(x, h - margin.bottom + 5); scatterCtx.stroke();
-        scatterCtx.fillText(val.toFixed(0), x, h - margin.bottom + 8);
-      }
-      scatterCtx.fillStyle = 'red';
-      const len = Math.min(lpfAcc.length, speedPoints.length);
-      for (let i = 0; i < len; i++) {
-        const sx = margin.left + (speedPoints[i] / maxScatterSpeed) * gw;
-        const sy = gh - (lpfAcc[i] / maxAccel) * gh;
-        scatterCtx.beginPath(); scatterCtx.arc(sx, sy, 2, 0, 2 * Math.PI); scatterCtx.fill();
-      }
+      scatterCtx.clearRect(0,0,w,h);
+      scatterCtx.strokeStyle='#888'; scatterCtx.lineWidth=1;
+      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left,0); scatterCtx.lineTo(margin.left,h-margin.bottom); scatterCtx.stroke();
+      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left,h-margin.bottom); scatterCtx.lineTo(w,h-margin.bottom); scatterCtx.stroke();
+      scatterCtx.fillStyle='#ccc'; scatterCtx.textAlign='right'; scatterCtx.textBaseline='middle';
+      const gh=h-margin.bottom; const gw=w-margin.left;
+      for(let i=0;i<=accTicks;i++){ const val=(maxAccel/accTicks)*i; const y=gh-(val/maxAccel)*gh; scatterCtx.beginPath(); scatterCtx.moveTo(margin.left-5,y); scatterCtx.lineTo(margin.left,y); scatterCtx.stroke(); scatterCtx.fillText(val.toFixed(0),margin.left-10,y);}      
+      scatterCtx.textAlign='center'; scatterCtx.textBaseline='top';
+      for(let i=0;i<=speedTicks;i++){ const val=(maxScatterSpeed/speedTicks)*i; const x=margin.left+(gw/speedTicks)*i; scatterCtx.beginPath(); scatterCtx.moveTo(x,h-margin.bottom); scatterCtx.lineTo(x,h-margin.bottom+5); scatterCtx.stroke(); scatterCtx.fillText(val.toFixed(0),x,h-margin.bottom+8);}      
+      scatterCtx.fillStyle='red'; const len=Math.min(lpfAcc.length,speedPoints.length);
+      for(let i=0;i<len;i++){ const sx=margin.left+(speedPoints[i]/maxScatterSpeed)*gw; const sy=gh-(lpfAcc[i]/maxAccel)*gh; scatterCtx.beginPath(); scatterCtx.arc(sx,sy,2,0,2*Math.PI); scatterCtx.fill();}
     }
 
     function handleMotion(e) {
-      let magnitude = 0;
-      if (e.acceleration.x !== null) {
-        magnitude = Math.hypot(e.acceleration.x, e.acceleration.y, e.acceleration.z);
-      } else {
-        const gx = e.accelerationIncludingGravity.x;
-        const gy = e.accelerationIncludingGravity.y;
-        const gz = e.accelerationIncludingGravity.z - 9.80665;
-        magnitude = Math.hypot(gx, gy, gz);
-      }
-      accValueEl.textContent = `Accel: ${magnitude.toFixed(2)} m/s²`;
-      rawAcc.push(magnitude);
-      if (rawAcc.length > maxPoints) rawAcc.shift();
-      const alpha = parseFloat(alphaSlider.value);
-      const magFilt = alpha * magnitude + (1 - alpha) * prevMagLPF;
-      prevMagLPF = magFilt;
-      lpfAcc.push(magFilt);
-      if (lpfAcc.length > maxPoints) lpfAcc.shift();
+      let magnitude=0;
+      if(e.acceleration.x!==null) magnitude=Math.hypot(e.acceleration.x,e.acceleration.y,e.acceleration.z);
+      else { const gx=e.accelerationIncludingGravity.x,gy=e.accelerationIncludingGravity.y,gz=e.accelerationIncludingGravity.z-9.80665; magnitude=Math.hypot(gx,gy,gz);}      
+      accValueEl.textContent=`Accel: ${magnitude.toFixed(2)} m/s²`;
+      rawAcc.push(magnitude); if(rawAcc.length>maxPoints) rawAcc.shift();
+      const alpha=parseFloat(alphaSlider.value);
+      const magFilt=alpha*magnitude+(1-alpha)*prevMagLPF; prevMagLPF=magFilt;
+      lpfAcc.push(magFilt); if(lpfAcc.length>maxPoints) lpfAcc.shift();
       drawAcc(); drawScatter();
     }
 
     function onGeo(pos) {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      const t = pos.timestamp;
-      const alpha = parseFloat(alphaSlider.value);
-      if (prevPos) {
-        const dLat = (lat - prevPos.lat) * Math.PI / 180;
-        const dLon = (lon - prevPos.lon) * Math.PI / 180;
-        const a = Math.sin(dLat/2)**2 + Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
-        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const dt = (t - prevPos.time) / 1000;
-        if (dt > 0) {
-          const mps = dist / dt;
-          let kph = mps * 3.6;
-          kph = Math.min(kph, 150);
-          const speedFilt = alpha * kph + (1 - alpha) * prevSpeedLPF;
-          prevSpeedLPF = speedFilt;
-          speedValueEl.textContent = `Speed: ${speedFilt.toFixed(2)} km/h`;
-          speedPoints.push(speedFilt);
-          if (speedPoints.length > maxPoints) speedPoints.shift();
-          drawSpeed();
+      const {latitude:lat,longitude:lon}=pos.coords; const t=pos.timestamp;
+      const alpha=parseFloat(alphaSlider.value);
+      if(prevPos) {
+        const dLat=(lat-prevPos.lat)*Math.PI/180, dLon=(lon-prevPos.lon)*Math.PI/180;
+        const a=Math.sin(dLat/2)**2+Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+        const dist=6371000*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)); const dt=(t-prevPos.time)/1000;
+        if(dt>0) {
+          const mps=dist/dt; let kph=mps*3.6; kph=Math.min(kph,150);
+          const speedFilt=alpha*kph+(1-alpha)*prevSpeedLPF; prevSpeedLPF=speedFilt;
+          speedValueEl.textContent=`Speed: ${speedFilt.toFixed(2)} km/h`;
+          speedPoints.push(speedFilt); if(speedPoints.length>maxPoints) speedPoints.shift();
+          // fetch speed limit
+          fetch(`https://api.speedlimit.io/v1/limits?lat=${lat}&lon=${lon}`)
+            .then(res=>res.json())
+            .then(data=>{
+              const limit=data.limit_kph; // assume API returns limit_kph
+              limitValueEl.textContent=`Limit: ${limit} km/h`;
+              limitPoints.push(limit);
+              if(limitPoints.length>maxPoints) limitPoints.shift();
+              drawSpeed();
+            }).catch(console.error);
 
-          const rawGpsAcc = (mps - prevSpeedMps) / dt;
-          prevSpeedMps = mps;
-          const gpsAccFilt = alpha * rawGpsAcc + (1 - alpha) * prevGpsAccLPF;
-          prevGpsAccLPF = gpsAccFilt;
-          gpsAccPoints.push(gpsAccFilt);
-          if (gpsAccPoints.length > maxPoints) gpsAccPoints.shift();
+          const rawGpsAcc=(mps-prevSpeedMps)/dt; prevSpeedMps=mps;
+          const gpsAccFilt=alpha*rawGpsAcc+(1-alpha)*prevGpsAccLPF; prevGpsAccLPF=gpsAccFilt;
+          gpsAccPoints.push(gpsAccFilt); if(gpsAccPoints.length>maxPoints) gpsAccPoints.shift();
           drawGpsAcc(); drawScatter();
         }
-      } else {
-        prevSpeedMps = 0;
-      }
-      prevPos = { lat, lon, time: t };
+      } else { prevSpeedMps=0; }
+      prevPos={lat,lon,time:t};
     }
 
-    alphaSlider.addEventListener('input', () => {
-      alphaValueEl.value = parseFloat(alphaSlider.value).toFixed(2);
-    });
+    alphaSlider.addEventListener('input',()=>{ alphaValueEl.value=parseFloat(alphaSlider.value).toFixed(2);} );
 
-    function init() {
-      if (typeof DeviceMotionEvent.requestPermission === 'function') {
-        DeviceMotionEvent.requestPermission().then(s => { if (s === 'granted') window.addEventListener('devicemotion', handleMotion); }).catch(console.error);
-      } else {
-        window.addEventListener('devicemotion', handleMotion);
-      }
-      if (navigator.geolocation) {
-        navigator.geolocation.watchPosition(onGeo, console.error, { enableHighAccuracy: true, maximumAge: 1000 });
-      }
+    function init(){
+      if(typeof DeviceMotionEvent.requestPermission==='function'){
+        DeviceMotionEvent.requestPermission().then(s=>{if(s==='granted')window.addEventListener('devicemotion',handleMotion);} ).catch(console.error);
+      } else window.addEventListener('devicemotion',handleMotion);
+      if(navigator.geolocation) navigator.geolocation.watchPosition(onGeo,console.error,{enableHighAccuracy:true,maximumAge:1000});
     }
     init();
   </script>
