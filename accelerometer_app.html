@@ -283,44 +283,51 @@
       const t = pos.timestamp;
       const alpha = parseFloat(alphaSlider.value);
       if (prevPos) {
-        const dLat = (lat - prevPos.lat) * Math.PI/180;
-        const dLon = (lon - prevPos.lon) * Math.PI/180;
-        const a = Math.sin(dLat/2)**2 + Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
-        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-        const dt = (t - prevPos.time)/1000;
+        const dLat = (lat - prevPos.lat) * Math.PI / 180;
+        const dLon = (lon - prevPos.lon) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(prevPos.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const dt = (t - prevPos.time) / 1000;
         if (dt > 0) {
+          // compute GPS speed
           const mps = dist / dt;
           let kph = mps * 3.6; kph = Math.min(kph, 150);
           const speedFilt = alpha * kph + (1 - alpha) * prevSpeedLPF; prevSpeedLPF = speedFilt;
           speedValueEl.textContent = `Speed: ${speedFilt.toFixed(2)} km/h`;
-          speedPoints.push(speedFilt); if (speedPoints.length > maxPoints) speedPoints.shift();
+          // synchronous limit and optimal using last known prevLimit
+          const limitSync = prevLimit;
+          limitValueEl.textContent = `Limit: ${limitSync.toFixed(0)} km/h`;
+          limitPoints.push(limitSync); if (limitPoints.length > maxPoints) limitPoints.shift();
+          const optSync = Math.max(Math.min(speedFilt, limitSync) - 5, 0);
+          optimalValueEl.textContent = `Optimal: ${optSync.toFixed(2)} km/h`;
+          optimalPoints.push(optSync); if (optimalPoints.length > maxPoints) optimalPoints.shift();
+          drawSpeed();
+
+          // asynchronous update of prevLimit
           const query = `[out:json];way(around:50,${lat},${lon})[\"highway\"][\"maxspeed\"];out tags;`;
           fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query })
             .then(r => r.json())
             .then(data => {
-              let limit = prevLimit;
               if (data.elements && data.elements.length) {
                 const ms = data.elements[0].tags.maxspeed;
-                if (ms) limit = ms.includes('mph') ? parseFloat(ms)*1.60934 : parseFloat(ms);
+                if (ms) prevLimit = ms.includes('mph') ? parseFloat(ms) * 1.60934 : parseFloat(ms);
               }
-              prevLimit = limit;
-              limitValueEl.textContent = `Limit: ${limit.toFixed(0)} km/h`;
-              limitPoints.push(limit); if (limitPoints.length > maxPoints) limitPoints.shift();
-              const opt = Math.max(Math.min(speedFilt, limit) - 5, 0);
-              optimalValueEl.textContent = `Optimal: ${opt.toFixed(2)} km/h`;
-              optimalPoints.push(opt); if (optimalPoints.length > maxPoints) optimalPoints.shift();
-              drawSpeed();
-              const accelValue = lpfAcc[lpfAcc.length - 1] || 0;
-              const p1 = mass * accelValue * (speedFilt/3.6) / 1000;
-              const p2 = mass * accelValue * (opt/3.6) / 1000;
-              power1.push(p1); if (power1.length > maxPoints) power1.shift();
-              power2.push(p2); if (power2.length > maxPoints) power2.shift();
-              drawEnergy();
+              limitValueEl.textContent = `Limit: ${prevLimit.toFixed(0)} km/h`;
             }).catch(console.error);
+
+          // GPS-based acceleration
           const rawGpsAcc = (mps - prevSpeedMps) / dt; prevSpeedMps = mps;
           const gpsAccFilt = alpha * rawGpsAcc + (1 - alpha) * prevGpsAccLPF; prevGpsAccLPF = gpsAccFilt;
           gpsAccPoints.push(gpsAccFilt); if (gpsAccPoints.length > maxPoints) gpsAccPoints.shift();
           drawGpsAcc(); drawScatter();
+
+          // energy calculation
+          const accelValue = lpfAcc[lpfAcc.length - 1] || 0;
+          const p1 = mass * accelValue * (speedFilt / 3.6) / 1000;
+          const p2 = mass * accelValue * (optSync / 3.6) / 1000;
+          power1.push(p1); if (power1.length > maxPoints) power1.shift();
+          power2.push(p2); if (power2.length > maxPoints) power2.shift();
+          drawEnergy();
         }
       } else {
         prevSpeedMps = 0;
@@ -328,7 +335,7 @@
       prevPos = { lat, lon, time: t };
     }
 
-    alphaSlider.addEventListener('input', () => { alphaValueEl.value = alphaSlider.value; });
+    alphaSlider.addEventListener('input', () => { alphaValueEl.value = alphaSlider.value; });('input', () => { alphaValueEl.value = alphaSlider.value; });
     function init() {
       if (typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission().then(s => { if (s === 'granted') window.addEventListener('devicemotion', handleMotion); }).catch(console.error);
