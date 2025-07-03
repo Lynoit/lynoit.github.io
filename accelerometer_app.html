@@ -29,6 +29,8 @@
   <canvas id="gpsAccGraph" class="graph"></canvas>
   <canvas id="scatterGraph" class="graph"></canvas>
   <canvas id="energyGraph" class="graph"></canvas>
+  <!-- Sixth plot: ratio of actual vs optimal power -->
+  <canvas id="ratioGraph" class="graph"></canvas>
 
   <script>
     const mass = 1500;
@@ -43,11 +45,13 @@
     const gpsAccCanvas = document.getElementById('gpsAccGraph');
     const scatterCanvas = document.getElementById('scatterGraph');
     const energyCanvas = document.getElementById('energyGraph');
+    const ratioCanvas = document.getElementById('ratioGraph');
     const accCtx = accCanvas.getContext('2d');
     const speedCtx = speedCanvas.getContext('2d');
     const gpsAccCtx = gpsAccCanvas.getContext('2d');
     const scatterCtx = scatterCanvas.getContext('2d');
     const energyCtx = energyCanvas.getContext('2d');
+    const ratioCtx = ratioCanvas.getContext('2d');
 
     const margin = { left: 50, bottom: 30 };
     const maxAccel = 20;
@@ -60,13 +64,14 @@
     let speedPoints = [], limitPoints = [], optimalPoints = [];
     let gpsAccPoints = [];
     let power1 = [], power2 = [];
+    let ratioPoints = [];
     let prevMagLPF = 0, prevSpeedLPF = 0, prevGpsAccLPF = 0;
     let prevLimit = 0, prevSpeedMps = 0;
     let prevPos = null;
 
     function resizeAll() {
-      const canvases = [accCanvas, speedCanvas, gpsAccCanvas, scatterCanvas, energyCanvas];
-      const ctxs = [accCtx, speedCtx, gpsAccCtx, scatterCtx, energyCtx];
+      const canvases = [accCanvas, speedCanvas, gpsAccCanvas, scatterCanvas, energyCanvas, ratioCanvas];
+      const ctxs = [accCtx, speedCtx, gpsAccCtx, scatterCtx, energyCtx, ratioCtx];
       canvases.forEach((c, i) => {
         const ctx = ctxs[i];
         const dpr = window.devicePixelRatio || 1;
@@ -74,189 +79,75 @@
         c.height = c.clientHeight * dpr;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       });
-      drawAcc();
-      drawSpeed();
-      drawGpsAcc();
-      drawScatter();
-      drawEnergy();
+      drawAcc(); drawSpeed(); drawGpsAcc(); drawScatter(); drawEnergy(); drawRatio();
     }
     window.addEventListener('resize', resizeAll);
     resizeAll();
 
-    function drawAxes(ctx, w, h, maxV, ticks) {
+    function drawAxes(ctx, w, h, minV, maxV, ticks) {
       ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(margin.left, 0); ctx.lineTo(margin.left, h - margin.bottom); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(margin.left, h - margin.bottom); ctx.lineTo(w, h - margin.bottom); ctx.stroke();
       ctx.fillStyle = '#ccc'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
       const gh = h - margin.bottom;
       for (let i = 0; i <= ticks; i++) {
-        const val = maxV / ticks * i;
-        const y = gh - (val / maxV) * gh;
+        const val = minV + (maxV - minV) / ticks * i;
+        const y = gh - ((val - minV) / (maxV - minV)) * gh;
         ctx.beginPath(); ctx.moveTo(margin.left - 5, y); ctx.lineTo(margin.left, y); ctx.stroke();
-        ctx.fillText(val.toFixed(0), margin.left - 10, y);
+        ctx.fillText(val.toFixed(1), margin.left - 10, y);
       }
     }
 
-    function drawAcc() {
-      const w = accCanvas.clientWidth;
-      const h = accCanvas.clientHeight;
-      accCtx.clearRect(0, 0, w, h);
+    function drawRatio() {
+      const w = ratioCanvas.clientWidth;
+      const h = ratioCanvas.clientHeight;
+      ratioCtx.clearRect(0, 0, w, h);
       // Legend
-      accCtx.font = '12px sans-serif';
-      accCtx.fillStyle = '#4caf50'; accCtx.fillRect(60, 10, 10, 10);
-      accCtx.fillStyle = '#fff'; accCtx.fillText('Raw Acc', 75, 20);
-      accCtx.fillStyle = '#ff9800'; accCtx.fillRect(160, 10, 10, 10);
-      accCtx.fillStyle = '#fff'; accCtx.fillText('Filtered Acc', 175, 20);
-      drawAxes(accCtx, w, h, maxAccel, accTicks);
-      const gw = w - margin.left;
-      const gh = h - margin.bottom;
-      accCtx.beginPath(); accCtx.strokeStyle = '#4caf50'; accCtx.lineWidth = 2;
-      rawAcc.forEach((v, i) => {
-        const x = margin.left + gw / (maxPoints - 1) * i;
-        const y = gh - v / maxAccel * gh;
-        i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y);
-      });
-      accCtx.stroke();
-      accCtx.beginPath(); accCtx.strokeStyle = '#ff9800'; accCtx.lineWidth = 2;
-      lpfAcc.forEach((v, i) => {
-        const x = margin.left + gw / (maxPoints - 1) * i;
-        const y = gh - v / maxAccel * gh;
-        i === 0 ? accCtx.moveTo(x, y) : accCtx.lineTo(x, y);
-      });
-      accCtx.stroke();
-    }
+      ratioCtx.font = '12px sans-serif';
+      ratioCtx.fillStyle = '#4caf50'; ratioCtx.fillRect(60, 10, 10, 10);
+      ratioCtx.fillStyle = '#fff'; ratioCtx.fillText('P₁/P₂ Ratio', 75, 20);
 
-    function drawSpeed() {
-      const w = speedCanvas.clientWidth;
-      const h = speedCanvas.clientHeight;
-      speedCtx.clearRect(0, 0, w, h);
-      // Legend
-      speedCtx.font = '12px sans-serif';
-      speedCtx.fillStyle = '#03a9f4'; speedCtx.fillRect(60, 10, 10, 10);
-      speedCtx.fillStyle = '#fff'; speedCtx.fillText('GPS Speed', 75, 20);
-      speedCtx.fillStyle = '#ffff00'; speedCtx.fillRect(160, 10, 10, 10);
-      speedCtx.fillStyle = '#fff'; speedCtx.fillText('Speed Limit', 175, 20);
-      speedCtx.fillStyle = '#4caf50'; speedCtx.fillRect(260, 10, 10, 10);
-      speedCtx.fillStyle = '#fff'; speedCtx.fillText('Optimal Speed', 275, 20);
-      const axisMax = Math.min(Math.ceil(Math.max(...speedPoints, ...limitPoints, ...optimalPoints, 10) / 10) * 10, 150);
-      drawAxes(speedCtx, w, h, axisMax, speedTicks);
-      const gw = w - margin.left;
-      const gh = h - margin.bottom;
-      speedCtx.beginPath(); speedCtx.strokeStyle = '#03a9f4'; speedCtx.lineWidth = 2;
-      speedPoints.forEach((v, i) => {
-        const x = margin.left + gw / (maxPoints - 1) * i;
-        const y = gh - v / axisMax * gh;
-        i === 0 ? speedCtx.moveTo(x, y) : speedCtx.lineTo(x, y);
-      });
-      speedCtx.stroke();
-      speedCtx.beginPath(); speedCtx.setLineDash([5, 5]); speedCtx.strokeStyle = '#ffff00'; speedCtx.lineWidth = 2;
-      limitPoints.forEach((v, i) => {
-        const x = margin.left + gw / (maxPoints - 1) * i;
-        const y = gh - v / axisMax * gh;
-        i === 0 ? speedCtx.moveTo(x, y) : speedCtx.lineTo(x, y);
-      });
-      speedCtx.stroke(); speedCtx.setLineDash([]);
-      speedCtx.beginPath(); speedCtx.strokeStyle = '#4caf50'; speedCtx.lineWidth = 2;
-      optimalPoints.forEach((v, i) => {
-        const x = margin.left + gw / (maxPoints - 1) * i;
-        const y = gh - v / axisMax * gh;
-        i === 0 ? speedCtx.moveTo(x, y) : speedCtx.lineTo(x, y);
-      });
-      speedCtx.stroke();
-    }
-
-    function drawGpsAcc() {
-      const w = gpsAccCanvas.clientWidth;
-      const h = gpsAccCanvas.clientHeight;
-      gpsAccCtx.clearRect(0, 0, w, h);
-      // Legend
-      gpsAccCtx.font = '12px sans-serif';
-      gpsAccCtx.fillStyle = '#e91e63'; gpsAccCtx.fillRect(60, 10, 10, 10);
-      gpsAccCtx.fillStyle = '#fff'; gpsAccCtx.fillText('GPS Accel', 75, 20);
+      // Axes
+      const xMin = 0, xMax = 150;
+      const yMin = -3, yMax = 3;
+      drawAxes(ratioCtx, w, h, yMin, yMax, accTicks);
+      // x-axis ticks
+      ratioCtx.textAlign = 'center'; ratioCtx.textBaseline = 'top';
       const graphH = h - margin.bottom;
       const graphW = w - margin.left;
-      const zeroY = graphH / 2;
-      gpsAccCtx.strokeStyle = '#888'; gpsAccCtx.lineWidth = 1;
-      gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left, 0); gpsAccCtx.lineTo(margin.left, graphH); gpsAccCtx.stroke();
-      gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left, zeroY); gpsAccCtx.lineTo(w, zeroY); gpsAccCtx.stroke();
-      gpsAccCtx.fillStyle = '#ccc'; gpsAccCtx.textAlign = 'right'; gpsAccCtx.textBaseline = 'middle';
-      for (let i = -accTicks; i <= accTicks; i++) {
-        const val = 5 * (i / accTicks);
-        const y = zeroY - val / 5 * (graphH / 2);
-        gpsAccCtx.beginPath(); gpsAccCtx.moveTo(margin.left - 5, y); gpsAccCtx.lineTo(margin.left, y); gpsAccCtx.stroke();
-        gpsAccCtx.fillText(val.toFixed(1), margin.left - 10, y);
-      }
-      gpsAccCtx.beginPath(); gpsAccCtx.strokeStyle = '#e91e63'; gpsAccCtx.lineWidth = 2;
-      gpsAccPoints.forEach((v, i) => {
-        const x = margin.left + graphW / (maxPoints - 1) * i;
-        const y = zeroY - v / 5 * (graphH / 2);
-        i === 0 ? gpsAccCtx.moveTo(x, y) : gpsAccCtx.lineTo(x, y);
-      });
-      gpsAccCtx.stroke();
-    }
-
-    function drawScatter() {
-      const w = scatterCanvas.clientWidth;
-      const h = scatterCanvas.clientHeight;
-      scatterCtx.clearRect(0, 0, w, h);
-      // Legend
-      scatterCtx.font = '12px sans-serif';
-      scatterCtx.fillStyle = 'red'; scatterCtx.fillRect(60, 10, 10, 10);
-      scatterCtx.fillStyle = '#fff'; scatterCtx.fillText('Accel vs Speed', 75, 20);
-      const graphH = h - margin.bottom;
-      const graphW = w - margin.left;
-      scatterCtx.strokeStyle = '#888'; scatterCtx.lineWidth = 1;
-      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left, 0); scatterCtx.lineTo(margin.left, graphH); scatterCtx.stroke();
-      scatterCtx.beginPath(); scatterCtx.moveTo(margin.left, graphH); scatterCtx.lineTo(w, graphH); scatterCtx.stroke();
-      scatterCtx.fillStyle = '#ccc'; scatterCtx.textAlign = 'right'; scatterCtx.textBaseline = 'middle';
-      for (let i=0; i<=accTicks; i++) {
-        const val = maxAccel / accTicks * i;
-        const y = graphH - val / maxAccel * graphH;
-        scatterCtx.beginPath(); scatterCtx.moveTo(margin.left - 5, y); scatterCtx.lineTo(margin.left, y); scatterCtx.stroke();
-        scatterCtx.fillText(val.toFixed(0), margin.left - 10, y);
-      }
-      scatterCtx.textAlign = 'center'; scatterCtx.textBaseline = 'top';
-      for (let i=0; i<=speedTicks; i++) {
-        const val = maxScatterSpeed / speedTicks * i;
+      for (let i = 0; i <= speedTicks; i++) {
+        const val = xMin + (xMax - xMin) / speedTicks * i;
         const x = margin.left + graphW / speedTicks * i;
-        scatterCtx.beginPath(); scatterCtx.moveTo(x, graphH); scatterCtx.lineTo(x, graphH + 5); scatterCtx.stroke();
-        scatterCtx.fillText(val.toFixed(0), x, graphH + 8);
+        ratioCtx.beginPath(); ratioCtx.moveTo(x, graphH); ratioCtx.lineTo(x, graphH + 5); ratioCtx.stroke();
+        ratioCtx.fillText(val.toFixed(0), x, graphH + 8);
       }
-      scatterCtx.fillStyle = 'red';
-      const len = Math.min(lpfAcc.length, speedPoints.length);
-      for (let i=0; i<len; i++) {
-        const sx = margin.left + speedPoints[i] / maxScatterSpeed * graphW;
-        const sy = graphH - lpfAcc[i] / maxAccel * graphH;
-        scatterCtx.beginPath(); scatterCtx.arc(sx, sy, 2, 0, 2*Math.PI); scatterCtx.fill();
-      }
-    }
 
-    function drawEnergy() {
-      const w = energyCanvas.clientWidth;
-      const h = energyCanvas.clientHeight;
-      energyCtx.clearRect(0, 0, w, h);
-      // Legend
-      energyCtx.font = '12px sans-serif';
-      energyCtx.fillStyle = '#03a9f4'; energyCtx.fillRect(60, 10, 10, 10);
-      energyCtx.fillStyle = '#fff'; energyCtx.fillText('Power a·v', 75, 20);
-      energyCtx.fillStyle = '#4caf50'; energyCtx.fillRect(160, 10, 10, 10);
-      energyCtx.fillStyle = '#fff'; energyCtx.fillText('Power 0.9a·opt', 175, 20);
-      const maxP = Math.max(...power1, ...power2, 0.1);
-      drawAxes(energyCtx, w, h, Math.ceil(maxP), 5);
-      const graphH = h - margin.bottom;
-      const graphW = w - margin.left;
-      energyCtx.beginPath(); energyCtx.strokeStyle = '#03a9f4'; energyCtx.lineWidth = 2;
-      power1.forEach((v, i) => {
-        const x = margin.left + graphW / (maxPoints - 1) * i;
-        const y = graphH - v / Math.ceil(maxP) * graphH;
-        i===0?energyCtx.moveTo(x, y):energyCtx.lineTo(x, y);
-      }); energyCtx.stroke();
-      energyCtx.beginPath(); energyCtx.strokeStyle = '#4caf50'; energyCtx.lineWidth = 2;
-      power2.forEach((v, i) => {
-        const x = margin.left + graphW / (maxPoints - 1) * i;
-        const y = graphH - v / Math.ceil(maxP) * graphH;
-        i===0?energyCtx.moveTo(x, y):energyCtx.lineTo(x, y);
-      }); energyCtx.stroke();
+      // draw dots
+      const now = Date.now();
+      ratioPoints = ratioPoints.filter(p => now - p.t <= 30000);
+      ratioPoints.forEach(p => {
+        const sx = margin.left + (p.speed / xMax) * graphW;
+        const sy = graphH - ((p.acc - yMin) / (yMax - yMin)) * graphH;
+        // color gradient
+        let color;
+        if (p.ratio <= 1) color = 'rgb(0,255,0)';
+        else if (p.ratio >= 1.5) color = 'rgb(255,0,0)';
+        else if (p.ratio <= 1.25) {
+          const t = (p.ratio - 1) / 0.25;
+          const r = Math.round(t * 255);
+          const g = 255;
+          const b = 0;
+          color = `rgb(${r},${g},${b})`;
+        } else {
+          const t = (p.ratio - 1.25) / 0.25;
+          const r = 255;
+          const g = Math.round((1 - t) * 255);
+          const b = 0;
+          color = `rgb(${r},${g},${b})`;
+        }
+        ratioCtx.fillStyle = color;
+        ratioCtx.beginPath(); ratioCtx.arc(sx, sy, 3, 0, 2 * Math.PI); ratioCtx.fill();
+      });
     }
 
     function handleMotion(e) {
@@ -274,7 +165,7 @@
       const alpha = parseFloat(alphaSlider.value);
       const magFilt = alpha * mag + (1 - alpha) * prevMagLPF; prevMagLPF = magFilt;
       lpfAcc.push(magFilt); if (lpfAcc.length > maxPoints) lpfAcc.shift();
-      drawAcc(); drawScatter();
+      drawAcc(); drawScatter(); drawRatio();
     }
 
     function onGeo(pos) {
@@ -285,49 +176,48 @@
       if (prevPos) {
         const dLat = (lat - prevPos.lat) * Math.PI / 180;
         const dLon = (lon - prevPos.lon) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos(prevPos.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const dt = (t - prevPos.time) / 1000;
+        const a = Math.sin(dLat/2)**2 + Math.cos(prevPos.lat*Math.PI/180)*Math.cos(lat*Math.PI/180)*Math.sin(dLon/2)**2;
+        const dist = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        const dt = (t - prevPos.time)/1000;
         if (dt > 0) {
-          // compute GPS speed
-          const mps = dist / dt;
-          let kph = mps * 3.6; kph = Math.min(kph, 150);
-          const speedFilt = alpha * kph + (1 - alpha) * prevSpeedLPF; prevSpeedLPF = speedFilt;
+          const mps = dist/dt;
+          let kph = Math.min(mps*3.6, 150);
+          const speedFilt = alpha*kph + (1-alpha)*prevSpeedLPF; prevSpeedLPF = speedFilt;
           speedValueEl.textContent = `Speed: ${speedFilt.toFixed(2)} km/h`;
-          // synchronous limit and optimal using last known prevLimit
           const limitSync = prevLimit;
           limitValueEl.textContent = `Limit: ${limitSync.toFixed(0)} km/h`;
-          limitPoints.push(limitSync); if (limitPoints.length > maxPoints) limitPoints.shift();
-          const optSync = Math.max(Math.min(speedFilt, limitSync) - 5, 0);
+          limitPoints.push(limitSync); if(limitPoints.length>maxPoints) limitPoints.shift();
+          const optSync = Math.max(Math.min(speedFilt, limitSync)-5,0);
           optimalValueEl.textContent = `Optimal: ${optSync.toFixed(2)} km/h`;
-          optimalPoints.push(optSync); if (optimalPoints.length > maxPoints) optimalPoints.shift();
+          optimalPoints.push(optSync); if(optimalPoints.length>maxPoints) optimalPoints.shift();
           drawSpeed();
 
-          // asynchronous update of prevLimit
-          const query = `[out:json];way(around:50,${lat},${lon})[\"highway\"][\"maxspeed\"];out tags;`;
-          fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query })
-            .then(r => r.json())
-            .then(data => {
-              if (data.elements && data.elements.length) {
-                const ms = data.elements[0].tags.maxspeed;
-                if (ms) prevLimit = ms.includes('mph') ? parseFloat(ms) * 1.60934 : parseFloat(ms);
-              }
-              limitValueEl.textContent = `Limit: ${prevLimit.toFixed(0)} km/h`;
-            }).catch(console.error);
+          fetch('https://overpass-api.de/api/interpreter', {
+            method:'POST', body:`[out:json];way(around:50,${lat},${lon})[\"highway\"][\"maxspeed\"];out tags;`
+          }).then(r=>r.json()).then(data=>{
+            if(data.elements?.length){
+              const ms = data.elements[0].tags.maxspeed;
+              if(ms) prevLimit = ms.includes('mph')?parseFloat(ms)*1.60934:parseFloat(ms);
+            }
+            limitValueEl.textContent = `Limit: ${prevLimit.toFixed(0)} km/h`;
+          }).catch(console.error);
 
-          // GPS-based acceleration
-          const rawGpsAcc = (mps - prevSpeedMps) / dt; prevSpeedMps = mps;
-          const gpsAccFilt = alpha * rawGpsAcc + (1 - alpha) * prevGpsAccLPF; prevGpsAccLPF = gpsAccFilt;
-          gpsAccPoints.push(gpsAccFilt); if (gpsAccPoints.length > maxPoints) gpsAccPoints.shift();
-          drawGpsAcc(); drawScatter();
+          const rawGpsAcc = (mps - prevSpeedMps)/dt; prevSpeedMps = mps;
+          const gpsAccFilt = alpha*rawGpsAcc + (1-alpha)*prevGpsAccLPF; prevGpsAccLPF = gpsAccFilt;
+          gpsAccPoints.push(gpsAccFilt); if(gpsAccPoints.length>maxPoints) gpsAccPoints.shift();
+          drawGpsAcc(); drawScatter(); drawRatio();
 
-          // energy calculation
-          const accelValue = lpfAcc[lpfAcc.length - 1] || 0;
-          const p1 = mass * accelValue * (speedFilt / 3.6) / 1000;
-          const p2 = mass * accelValue * (optSync / 3.6) / 1000;
-          power1.push(p1); if (power1.length > maxPoints) power1.shift();
-          power2.push(p2); if (power2.length > maxPoints) power2.shift();
-          drawEnergy();
+          // energy and ratio
+          const accelValue = lpfAcc[lpfAcc.length-1]||0;
+          const p1 = mass*accelValue*(speedFilt/3.6)/1000;
+          const p2 = mass*accelValue*(optSync/3.6)/1000;
+          power1.push(p1); if(power1.length>maxPoints) power1.shift();
+          power2.push(p2); if(power2.length>maxPoints) power2.shift();
+          // ratio tracking
+          const ratio = p2>0? p1/p2 : 0;
+          ratioPoints.push({ speed: speedFilt, acc: accelValue, ratio, t: Date.now() });
+          if(ratioPoints.length>maxPoints) ratioPoints.shift();
+          drawEnergy(); drawRatio();
         }
       } else {
         prevSpeedMps = 0;
@@ -335,14 +225,14 @@
       prevPos = { lat, lon, time: t };
     }
 
-    alphaSlider.addEventListener('input', () => { alphaValueEl.value = alphaSlider.value; });('input', () => { alphaValueEl.value = alphaSlider.value; });
+    alphaSlider.addEventListener('input', () => { alphaValueEl.value = alphaSlider.value; });
     function init() {
       if (typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission().then(s => { if (s === 'granted') window.addEventListener('devicemotion', handleMotion); }).catch(console.error);
       } else {
         window.addEventListener('devicemotion', handleMotion);
       }
-      if (navigator.geolocation) navigator.geolocation.watchPosition(onGeo, console.error, { enableHighAccuracy: true, maximumAge:1000 });
+      if (navigator.geolocation) navigator.geolocation.watchPosition(onGeo, console.error, { enableHighAccuracy:true, maximumAge:1000 });
     }
     init();
   </script>
