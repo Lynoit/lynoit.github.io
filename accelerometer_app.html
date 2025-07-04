@@ -319,20 +319,54 @@
       energyCtx.stroke();
     }
 
-   function drawEfficiency() {
+  function drawEfficiency() {
   const w = efficiencyCanvas.clientWidth;
   const h = efficiencyCanvas.clientHeight;
   efficiencyCtx.clearRect(0, 0, w, h);
 
-  // fixed axis ranges
-  const xMin = 0,   xMax = 130;
-  const yMin = -3,  yMax =   3;
-  const gh   = h - margin.bottom;
-  const gw   = w - margin.left;
+  const gh = h - margin.bottom;
+  const gw = w - margin.left;
 
-  // draw axes
+  // ─── 1) Mean‐ratio meter over last 10 km ───────────────────────────
+  // compute mean ratio for points ≥ cumulativeDist–10 000 m
+  const minDist = cumulativeDist - 10_000;
+  const last10  = efficiencyData.filter(pt => pt.cumDist >= minDist);
+  const meanRatio = last10.length
+    ? last10.reduce((sum, pt) => sum + pt.ratio, 0) / last10.length
+    : 0;
+
+  // draw gradient bar
+  const meterHeight = 10;
+  const meterY      = 5;
+  const meterX      = margin.left;
+  const meterW      = gw;
+  const grad = efficiencyCtx.createLinearGradient(meterX, 0, meterX + meterW, 0);
+  grad.addColorStop(0,             'hsl(120,100%,50%)'); // green at low ratio
+  grad.addColorStop(1/1.5,         'hsl(60,100%,50%)');  // yellow at ratio=1
+  grad.addColorStop(1,             'hsl(0,100%,50%)');   // red at ratio=1.5+
+  efficiencyCtx.fillStyle = grad;
+  efficiencyCtx.fillRect(meterX, meterY, meterW, meterHeight);
+
+  // draw pointer triangle
+  const normPos = Math.min(meanRatio / 1.5, 1) * meterW + meterX;
+  efficiencyCtx.fillStyle = '#fff';
+  efficiencyCtx.beginPath();
+  efficiencyCtx.moveTo(normPos,               meterY + meterHeight + 2);
+  efficiencyCtx.lineTo(normPos - 5,           meterY + meterHeight + 12);
+  efficiencyCtx.lineTo(normPos + 5,           meterY + meterHeight + 12);
+  efficiencyCtx.closePath();
+  efficiencyCtx.fill();
+
+  // draw numeric label
+  efficiencyCtx.fillStyle    = '#fff';
+  efficiencyCtx.textAlign    = 'center';
+  efficiencyCtx.textBaseline = 'bottom';
+  efficiencyCtx.fillText(meanRatio.toFixed(2), normPos, meterY - 2);
+  // ────────────────────────────────────────────────────────────
+
+  // draw axes (X: 0→130 km/h, Y: –3→+3 m/s²)
   efficiencyCtx.strokeStyle = '#888';
-  efficiencyCtx.lineWidth = 1;
+  efficiencyCtx.lineWidth   = 1;
   // Y axis
   efficiencyCtx.beginPath();
   efficiencyCtx.moveTo(margin.left, 0);
@@ -344,14 +378,14 @@
   efficiencyCtx.lineTo(w, gh);
   efficiencyCtx.stroke();
 
-  // X ticks (0 → 130)
+  // X ticks
   efficiencyCtx.fillStyle = '#ccc';
-  efficiencyCtx.textAlign = 'center';
+  efficiencyCtx.textAlign  = 'center';
   efficiencyCtx.textBaseline = 'top';
   const xTicks = 6;
   for (let i = 0; i <= xTicks; i++) {
-    const val = xMin + (xMax - xMin) / xTicks * i;
-    const x   = margin.left + (val - xMin) / (xMax - xMin) * gw;
+    const val = (130 / xTicks) * i;
+    const x   = margin.left + (val / 130) * gw;
     efficiencyCtx.beginPath();
     efficiencyCtx.moveTo(x, gh);
     efficiencyCtx.lineTo(x, gh + 5);
@@ -359,45 +393,43 @@
     efficiencyCtx.fillText(val.toFixed(0), x, gh + 8);
   }
 
-  // Y ticks (-3 → +3)
-  efficiencyCtx.textAlign = 'right';
+  // Y ticks
+  efficiencyCtx.textAlign    = 'right';
   efficiencyCtx.textBaseline = 'middle';
   const yTicks = 6;
   for (let i = 0; i <= yTicks; i++) {
-    const val = yMax - (yMax - yMin) / yTicks * i;
-    const y   = gh - (val - yMin) / (yMax - yMin) * gh;
+    const val = 3 - (6 / yTicks) * i;
+    const y   = gh - ((val + 3) / 6) * gh;
     efficiencyCtx.beginPath();
     efficiencyCtx.moveTo(margin.left - 5, y);
-    efficiencyCtx.lineTo(margin.left,      y);
+    efficiencyCtx.lineTo(margin.left,     y);
     efficiencyCtx.stroke();
     efficiencyCtx.fillText(val.toFixed(1), margin.left - 8, y);
   }
 
-  // plot points with age‐based sizing
+  // plot each efficiency point
   const now = Date.now();
   efficiencyData.forEach(pt => {
     const ageMs = now - pt.t;
-    if (ageMs >= 30_000) return;            // skip old points
+    if (ageMs >= 30_000) return;               // skip >30 s old
 
-    const ageNorm = ageMs / 30_000;         // 0 at new → 1 at 30s
-    const radius  = 6 * (1 - ageNorm);      // 6px → 0px
+    const ageNorm = ageMs / 30_000;            // 0 → new, 1 → old
+    const radius  = 6 * (1 - ageNorm);
 
-    // color mapping (green→yellow→red for ratio 1→1.5)
+    // color mapping
     let hue;
     if (pt.ratio <= 1)       hue = 120;
     else if (pt.ratio >= 1.5) hue =   0;
     else if (pt.ratio <= 1.25) {
-      const f = (pt.ratio - 1) / 0.25;
-      hue = 120 - 60 * f;
+      hue = 120 - 60 * ((pt.ratio - 1) / 0.25);
     } else {
-      const f = (pt.ratio - 1.25) / 0.25;
-      hue = 60 - 60 * f;
+      hue = 60 - 60 * ((pt.ratio - 1.25) / 0.25);
     }
     efficiencyCtx.fillStyle = `hsl(${hue},100%,50%)`;
 
-    // map data → canvas coords
-    const x = margin.left + (pt.speed - xMin) / (xMax - xMin) * gw;
-    const y = gh - (pt.acc   - yMin) / (yMax - yMin) * gh;
+    // coords
+    const x = margin.left + (pt.speed / 130) * gw;
+    const y = gh - ((pt.acc + 3) / 6)   * gh;
 
     efficiencyCtx.beginPath();
     efficiencyCtx.arc(x, y, radius, 0, 2 * Math.PI);
@@ -495,13 +527,15 @@
           power2.push(p2); if (power2.length>maxPoints) power2.shift();
           drawEnergy();
 
+          cumulativeDist += dist;      // ← now we know how far we’ve traveled total
          // efficiency ratio & pruning (now using GPS accel)
          const ratio = p2 > 0 ? p1 / p2 : 0;
          efficiencyData.push({
-           t: Date.now(),
-           speed: speedFilt,
-           acc:   gpsAccFilt,
-           ratio
+         t:       Date.now(),
+         speed:   speedFilt,
+         acc:     gpsAccFilt,
+         ratio,
+        cumDist: cumulativeDist
           });
           const cutoff = Date.now() - 30_000;
           efficiencyData = efficiencyData.filter(pt => pt.t >= cutoff);
