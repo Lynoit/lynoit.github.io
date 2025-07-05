@@ -328,53 +328,42 @@
   const gh = h - margin.bottom;
   const gw = w - margin.left;
 
-  // ─── 1) Mean‐ratio meter over last 10 km ───────────────────────────
-  // compute mean ratio for points ≥ cumulativeDist–10 000 m
-  const minDist = cumulativeDist - 10_000;
-  const last10  = efficiencyData.filter(pt => pt.cumDist >= minDist);
+  // ─── 1) Mean-ratio meter over last 10 km (50% width, centered) ──────────
+  const minDist   = cumulativeDist - 10_000;
+  const last10    = efficiencyData.filter(pt => pt.cumDist >= minDist);
   const meanRatio = last10.length
     ? last10.reduce((sum, pt) => sum + pt.ratio, 0) / last10.length
     : 0;
 
-  // meter dimensions: 50% width of the plot, centered
   const meterHeight = 10;
   const meterW      = gw * 0.5;
   const meterX      = margin.left + (gw - meterW) / 2;
   const meterY      = 5;
 
-  // draw gradient bar  
-const grad = efficiencyCtx.createLinearGradient(meterX, 0, meterX + meterW, 0);
-
-// flat green from ratio=0 → 1
-grad.addColorStop(0,            'hsl(120,100%,50%)');  // ratio 0
-grad.addColorStop(1   / 1.5,    'hsl(120,100%,50%)');  // ratio 1 → 1/1.5 ≈ 0.667
-
-// gradient green → yellow from ratio=1 → 1.25
-grad.addColorStop(1.25 / 1.5,   'hsl(60,100%,50%)');   // ratio 1.25 → ≈ 0.833
-
-// gradient yellow → red from ratio=1.25 → 1.5
-grad.addColorStop(1,            'hsl(0,100%,50%)');    // ratio 1.5 → 1
+  // gradient stops: green up to 1.0, yellow at 1.25, red at 1.5
+  const grad = efficiencyCtx.createLinearGradient(meterX, 0, meterX + meterW, 0);
+  grad.addColorStop(0,            'hsl(120,100%,50%)');         // green @ 0
+  grad.addColorStop(1   / 1.5,    'hsl(120,100%,50%)');         // green @ 1.0 (1/1.5≈0.667)
+  grad.addColorStop(1.25/ 1.5,    'hsl(60,100%,50%)');          // yellow @ 1.25 (≈0.833)
+  grad.addColorStop(1,            'hsl(0,100%,50%)');           // red @ 1.5
   efficiencyCtx.fillStyle = grad;
   efficiencyCtx.fillRect(meterX, meterY, meterW, meterHeight);
 
-  // draw pointer triangle
-  const normPos = Math.min(meanRatio / 1.5, 1) * meterW + meterX;
+  // pointer + label
+  const pos = Math.min(meanRatio / 1.5, 1) * meterW + meterX;
   efficiencyCtx.fillStyle = '#fff';
   efficiencyCtx.beginPath();
-  efficiencyCtx.moveTo(normPos,               meterY + meterHeight + 2);
-  efficiencyCtx.lineTo(normPos - 5,           meterY + meterHeight + 12);
-  efficiencyCtx.lineTo(normPos + 5,           meterY + meterHeight + 12);
+  efficiencyCtx.moveTo(pos,               meterY + meterHeight + 2);
+  efficiencyCtx.lineTo(pos - 5,           meterY + meterHeight + 12);
+  efficiencyCtx.lineTo(pos + 5,           meterY + meterHeight + 12);
   efficiencyCtx.closePath();
   efficiencyCtx.fill();
 
-  // draw numeric label
-  efficiencyCtx.fillStyle    = '#fff';
   efficiencyCtx.textAlign    = 'center';
   efficiencyCtx.textBaseline = 'bottom';
-  efficiencyCtx.fillText(meanRatio.toFixed(2), normPos, meterY - 2);
-  // ────────────────────────────────────────────────────────────
+  efficiencyCtx.fillText(meanRatio.toFixed(2), pos, meterY - 2);
 
-  // draw axes (X: 0→130 km/h, Y: –3→+3 m/s²)
+  // ─── 2) Draw axes ────────────────────────────────────────────────────────
   efficiencyCtx.strokeStyle = '#888';
   efficiencyCtx.lineWidth   = 1;
   // Y axis
@@ -389,9 +378,9 @@ grad.addColorStop(1,            'hsl(0,100%,50%)');    // ratio 1.5 → 1
   efficiencyCtx.stroke();
 
   // X ticks
-  efficiencyCtx.fillStyle = '#ccc';
-  efficiencyCtx.textAlign  = 'center';
-  efficiencyCtx.textBaseline = 'top';
+  efficiencyCtx.fillStyle     = '#ccc';
+  efficiencyCtx.textAlign     = 'center';
+  efficiencyCtx.textBaseline  = 'top';
   const xTicks = 6;
   for (let i = 0; i <= xTicks; i++) {
     const val = (130 / xTicks) * i;
@@ -417,34 +406,71 @@ grad.addColorStop(1,            'hsl(0,100%,50%)');    // ratio 1.5 → 1
     efficiencyCtx.fillText(val.toFixed(1), margin.left - 8, y);
   }
 
-  // plot each efficiency point
-  const now = Date.now();
+  // ─── 3) Plot efficiency points ───────────────────────────────────────────
+  const now       = Date.now();
   efficiencyData.forEach(pt => {
     const ageMs = now - pt.t;
-    if (ageMs >= 30_000) return;               // skip >30 s old
+    if (ageMs >= 30_000) return;     // drop >30 s old
 
-    const ageNorm = ageMs / 30_000;            // 0 → new, 1 → old
+    const ageNorm = ageMs / 30_000;
     const radius  = 6 * (1 - ageNorm);
 
-    // color mapping
+    // hue mapping exactly as gradient stops
     let hue;
-    if (pt.ratio <= 1)       hue = 120;
-    else if (pt.ratio >= 1.5) hue =   0;
-    else if (pt.ratio <= 1.25) {
-      hue = 120 - 60 * ((pt.ratio - 1) / 0.25);
-    } else {
-      hue = 60 - 60 * ((pt.ratio - 1.25) / 0.25);
-    }
+    if (pt.ratio <= 1)         hue = 120;
+    else if (pt.ratio >= 1.5)  hue =   0;
+    else if (pt.ratio <= 1.25) hue = 120 - (pt.ratio - 1) * (120 - 60) / 0.25;
+    else                        hue = 60  - (pt.ratio - 1.25) * (60 - 0) / 0.25;
+
     efficiencyCtx.fillStyle = `hsl(${hue},100%,50%)`;
 
-    // coords
     const x = margin.left + (pt.speed / 130) * gw;
-    const y = gh - ((pt.acc + 3) / 6)   * gh;
+    const y = gh - ((pt.acc + 3) / 6) * gh;
 
     efficiencyCtx.beginPath();
     efficiencyCtx.arc(x, y, radius, 0, 2 * Math.PI);
     efficiencyCtx.fill();
   });
+
+  // ─── 4) Overlay text messages ───────────────────────────────────────────
+  const currentLimit = prevLimit;  // latest fetched speed limit
+
+  const speedTooHigh = efficiencyData.some(pt =>
+    pt.ratio > 1.25 &&
+    pt.speed > currentLimit &&
+    pt.acc < 0.5
+  );
+
+  const accelTooHigh = efficiencyData.some(pt =>
+    pt.ratio > 1.25 &&
+    pt.speed <= currentLimit &&
+    pt.acc > 1
+  );
+
+  efficiencyCtx.fillStyle    = '#fff';
+  efficiencyCtx.font         = '14px sans-serif';
+
+  if (speedTooHigh) {
+    efficiencyCtx.textAlign    = 'left';
+    efficiencyCtx.textBaseline = 'middle';
+    // to the right of the dots, centered vertically
+    efficiencyCtx.fillText(
+      'Speed too high',
+      margin.left + gw + 10,
+      gh / 2
+    );
+  }
+
+  if (accelTooHigh) {
+    efficiencyCtx.textAlign    = 'center';
+    efficiencyCtx.textBaseline = 'bottom';
+    // above the dots, centered horizontally
+    efficiencyCtx.fillText(
+      'Acceleration too high',
+      margin.left + gw / 2,
+      meterY  // just above the scatter area
+    );
+  }
 }
 
     function handleMotion(e) {
