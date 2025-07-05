@@ -336,50 +336,56 @@
   function drawEfficiency() {
   const w = efficiencyCanvas.clientWidth;
   const h = efficiencyCanvas.clientHeight;
-  efficiencyCtx.fillStyle = '#1e1e1e';  
+  // 1) Paint dark background
+  efficiencyCtx.fillStyle = '#1e1e1e';
   efficiencyCtx.fillRect(0, 0, w, h);
 
   const gh = h - margin.bottom;
   const gw = w - margin.left;
 
-  // detect fullscreen on this canvas
+  // detect fullscreen
   const isFull = (document.fullscreenElement === efficiencyCanvas);
 
-  // ─── 1) 10 km meter for ratio ∈ [1, 1.5] ────────────────────────────────
+  // ─── 2) Compute mean ratio over last 10 km, domain [1,1.5] ───────────
   const minDist   = cumulativeDist - 10_000;
   const last10    = efficiencyData.filter(pt => pt.cumDist >= minDist);
   const domainPts = last10.filter(pt => pt.ratio >= 1 && pt.ratio <= 1.5);
   const meanRatio = domainPts.length
-    ? domainPts.reduce((sum, pt) => sum + pt.ratio, 0) / domainPts.length
+    ? domainPts.reduce((sum,pt) => sum + pt.ratio, 0) / domainPts.length
     : 1;
 
+  // meter geometry (50% width, centered)
   const meterHeight = 10;
   const meterW      = gw * 0.5;
   const meterX      = margin.left + (gw - meterW) / 2;
   const meterY      = 5;
 
-  // draw gradient from green (@1) to red (@1.5)
+  // ─── 3) Draw green→red gradient bar ─────────────────────────────────
   const grad = efficiencyCtx.createLinearGradient(meterX, 0, meterX + meterW, 0);
-  grad.addColorStop(0, 'hsl(120,100%,50%)');  // green at ratio=1
-  grad.addColorStop(1, 'hsl(0,100%,50%)');    // red   at ratio=1.5
+  grad.addColorStop(0, 'hsl(120,100%,50%)');  // green @ ratio=1
+  grad.addColorStop(1, 'hsl(0,100%,50%)');    // red   @ ratio=1.5
   efficiencyCtx.fillStyle = grad;
   efficiencyCtx.fillRect(meterX, meterY, meterW, meterHeight);
 
-  // ECO label at start
-  efficiencyCtx.fillStyle    = 'hsl(120,100%,50%)';
-  efficiencyCtx.textAlign    = 'left';
-  efficiencyCtx.textBaseline = 'bottom';
-  efficiencyCtx.fillText('ECO', meterX, meterY - 2);
+  // ─── 4) “ECO” & “DYNAMIC” labels ─────────────────────────────────────
+  efficiencyCtx.font         = '12px sans-serif';
+  efficiencyCtx.textBaseline = 'middle';
 
-  // DYNAMIC label at end
-  efficiencyCtx.fillStyle    = 'hsl(0,100%,50%)';
-  efficiencyCtx.textAlign    = 'right';
-  efficiencyCtx.textBaseline = 'bottom';
-  efficiencyCtx.fillText('DYNAMIC', meterX + meterW, meterY - 2);
+  // ECO at left
+  efficiencyCtx.fillStyle = 'hsl(120,100%,50%)';  // green
+  efficiencyCtx.textAlign = 'left';
+  efficiencyCtx.fillText('ECO', meterX, meterY + meterHeight/2);
 
-  // pointer triangle
+  // DYNAMIC at right
+  efficiencyCtx.fillStyle = 'hsl(0,100%,50%)';    // red
+  efficiencyCtx.textAlign = 'right';
+  efficiencyCtx.fillText('DYNAMIC', meterX + meterW, meterY + meterHeight/2);
+
+  // ─── 5) Pointer & numeric mean-ratio ────────────────────────────────
   const norm = Math.min(Math.max((meanRatio - 1) / 0.5, 0), 1);
   const ptrX = meterX + norm * meterW;
+
+  // triangle
   efficiencyCtx.fillStyle = '#fff';
   efficiencyCtx.beginPath();
   efficiencyCtx.moveTo(ptrX,               meterY + meterHeight + 2);
@@ -388,13 +394,12 @@
   efficiencyCtx.closePath();
   efficiencyCtx.fill();
 
-  // mean-ratio label
-  efficiencyCtx.fillStyle    = '#fff';
+  // label
   efficiencyCtx.textAlign    = 'center';
   efficiencyCtx.textBaseline = 'bottom';
   efficiencyCtx.fillText(meanRatio.toFixed(2), ptrX, meterY - 2);
 
-  // ─── 2) Axes & ticks (only when NOT fullscreen) ────────────────────────
+  // ─── 6) Axes & ticks (skip in fullscreen) ────────────────────────────
   if (!isFull) {
     efficiencyCtx.strokeStyle = '#888';
     efficiencyCtx.lineWidth   = 1;
@@ -439,7 +444,7 @@
     }
   }
 
-  // ─── 3) Plot efficiency points ───────────────────────────────────────────
+  // ─── 7) Plot efficiency points ────────────────────────────────────────
   const now = Date.now();
   efficiencyData.forEach(pt => {
     const ageMs = now - pt.t;
@@ -448,11 +453,11 @@
     const ageNorm = ageMs / 30_000;
     const radius  = 6 * (1 - ageNorm);
 
-    // hue interpolation over [1→1.5] → [120→0]
+    // hue over [1→1.5] → [120→0]
     let hue;
-    if (pt.ratio <= 1)         hue = 120;
-    else if (pt.ratio >= 1.5)  hue =   0;
-    else                        hue = 120 - ((pt.ratio - 1) / 0.5) * 120;
+    if (pt.ratio <= 1)        hue = 120;
+    else if (pt.ratio >= 1.5) hue =   0;
+    else                      hue = 120 - ((pt.ratio - 1) / 0.5) * 120;
 
     efficiencyCtx.fillStyle = `hsl(${hue},100%,50%)`;
 
@@ -464,16 +469,12 @@
     efficiencyCtx.fill();
   });
 
-  // ─── 4) Conditional text messages ───────────────────────────────────────
+  // ─── 8) Conditional text messages ─────────────────────────────────────
   const speedTooHigh = efficiencyData.some(pt =>
-    pt.ratio > 1.25 &&
-    pt.speed > prevLimit &&
-    pt.acc < 0.5
+    pt.ratio > 1.25 && pt.speed > prevLimit && pt.acc < 0.5
   );
   const accelTooHigh = efficiencyData.some(pt =>
-    pt.ratio > 1.25 &&
-    pt.speed <= prevLimit &&
-    pt.acc > 1
+    pt.ratio > 1.25 && pt.speed <= prevLimit && pt.acc > 1
   );
 
   efficiencyCtx.fillStyle = '#fff';
@@ -488,7 +489,6 @@
       gh / 2
     );
   }
-
   if (accelTooHigh) {
     efficiencyCtx.textAlign    = 'center';
     efficiencyCtx.textBaseline = 'bottom';
