@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Nearby Camping Explorer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body { margin:0; font-family:Arial,sans-serif }
+    #map { height:60vh; width:100% }
+    table { width:100%; border-collapse:collapse; margin-top:1rem }
+    th, td { border:1px solid #ccc; padding:0.5rem; vertical-align:top }
+    th { background:#f4f4f4 }
+    .num-label {
+      display:inline-block; width:1.8em; height:1.8em;
+      line-height:1.8em; text-align:center;
+      color:#fff; font-weight:bold; border-radius:50%;
+      margin-right:4px; border:2px solid #000;
+      font-size:0.9em;
+    }
+    .radius-100   { background:#e6194b; }
+    .radius-500   { background:#3cb44b; }
+    .radius-1000  { background:#4363d8; }
+    .radius-5000  { background:#f58231; }
+    .radius-10000 { background:#911eb4; }
+    .radius-circle {
+      stroke-opacity:1!important; stroke-width:4!important;
+      fill-opacity:0.1!important;
+    }
+    .radius-label {
+      background: transparent!important;
+      border: none!important;
+      white-space: nowrap;
+      font-size: 1.1em;
+      padding: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Radius</th>
+        <th>Camping<br><small>Top 1–10 (OSM camp sites & shelters)</small></th>
+      </tr>
+    </thead>
+    <tbody id="places-table"></tbody>
+  </table>
+
+  <h2>Cities within 10 000 m</h2>
+  <table id="cities-table">
+    <thead>
+      <tr>
+        <th>City Name</th>
+        <th>Distance (km)</th>
+        <th>Population</th>
+        <th>Top Attractions</th>
+        <th>Top Restaurants</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // --- Configuration ---
+    const radii = [100, 500, 1000, 5000, 10000];
+    const circleColors = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4'];
+    const TIMEOUT = 8000;
+
+    // --- Utilities ---
+    function fetchTimeout(url, opts={}, t=TIMEOUT) {
+      return Promise.race([
+        fetch(url, opts),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), t))
+      ]);
+    }
+    function distanceMeters(a, b) {
+      const toRad = x => x * Math.PI/180;
+      const dLat = toRad(b[0]-a[0]), dLon = toRad(b[1]-a[1]);
+      const la1 = toRad(a[0]), la2 = toRad(b[0]);
+      const A = Math.sin(dLat/2)**2
+              + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2;
+      const C = 2 * Math.atan2(Math.sqrt(A), Math.sqrt(1-A));
+      return 6371000 * C;
+    }
+
+    // --- State ---
+    let map, userPos, circlesLayer, markersLayer;
+    const plotted = new Set();
+
+    // --- Initialization ---
+    window.onload = () => {
+      if (!navigator.geolocation) {
+        alert('Geolocation not supported');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(pos => {
+        initMap(pos);
+        renderCities();
+      }, e => {
+        alert('Location error: ' + e.message);
+      });
+    };
+
+    function initMap(pos) {
+      userPos = [pos.coords.latitude, pos.coords.longitude];
+      map = L.map('map').setView(userPos, 14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      circlesLayer = L.layerGroup().addTo(map);
+      markersLayer = L.layerGroup().addTo(map);
+      L.marker(userPos).addTo(map);
+
+      drawEverything();
+      navigator.geolocation.watchPosition(onPosUpdate, null, {
+        enableHighAccuracy: true, maximumAge: 5000, timeout: TIMEOUT
+      });
+    }
+
+    function onPosUpdate(pos) {
+      const newPos = [pos.coords.latitude, pos.coords.longitude];
+      if (distanceMeters(userPos, newPos) > 50) {
+        userPos = newPos;
+        drawEverything();
+      }
+    }
+
+    // --- Draw Everything ---
+    function drawEverything() {
+      circlesLayer.clearLayers();
+      markersLayer.clearLayers();
+      plotted.clear();
+      radii.forEach((r,i) => {
+        L.circle(userPos, {
+          radius: r,
+          color: circleColors[i],
+          className: 'radius-circle',
+          fill: true, fillColor: circleColors[i]
+        }).addTo(circlesLayer);
+        const latOffset = r / 111111;
+        L.marker(
+          [userPos[0] + latOffset, userPos[1]],
+          {
+            icon: L.divIcon({
+              className: 'radius-label',
+              html: `${r.toLocaleString()} m`,
+              iconAnchor: ['50%','100%']
+            }),
+            interactive: false
+          }
+        ).addTo(circlesLayer);
+      });
+      processAllRadii();
+    }
+
+    async function processAllRadii() {
+      const tbody = document.getElementById('places-table');
+      tbody.innerHTML = '';
+      for (let r of radii) {
+        const camping = await getOSMCamping(r);
+        renderPOIs(r, camping);
+
+        const mk = arr => arr.length
+          ? arr.map((p,i)=>`${i+1}. ${p.name}`).join('<br>')
+          : 'N/A';
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.toLocaleString()} m</td>
+          <td>${mk(camping)}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderPOIs(r, list) {
+      list.forEach((p,i) => {
+        const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+        if (plotted.has(key)) return;
+        plotted.add(key);
+        L.marker([p.lat, p.lng], {
+          icon: L.divIcon({
+            className: `num-label radius-${r}`,
+            html: String(i+1)
+          })
+        })
+        .addTo(markersLayer)
+        .bindPopup(`<strong>${i+1}. ${p.name}</strong>`);
+      });
+    }
+
+    // --- Camping Fetcher ---
+    async function getOSMCamping(r) {
+      const [lat, lon] = userPos;
+      const q = `[out:json][timeout:8];
+        (
+          node(around:${r},${lat},${lon})[tourism=camp_site];
+          way(around:${r},${lat},${lon})[tourism=camp_site];
+          rel(around:${r},${lat},${lon})[tourism=camp_site];
+          node(around:${r},${lat},${lon})[amenity=shelter];
+          way(around:${r},${lat},${lon})[amenity=shelter];
+          rel(around:${r},${lat},${lon})[amenity=shelter];
+        );
+        out center 100;`.replace(/\s+/g,' ');
+      const data = await (await fetchTimeout(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body:q }
+      )).json();
+      const elems = data.elements || [];
+      elems.sort((a,b)=>
+        (Object.keys(b.tags||{}).length) -
+        (Object.keys(a.tags||{}).length)
+      );
+      return elems.slice(0,10).map(el=>({
+        name: el.tags.name
+              || el.tags.tourism
+              || el.tags.amenity
+              || 'Unknown',
+        lat:  el.lat  || el.center.lat,
+        lng:  el.lon  || el.center.lon
+      }));
+    }
+
+    // --- Nearby Cities ---
+    async function getNearbyCities() {
+      const [lat, lon] = userPos;
+      const q = `[out:json][timeout:8];
+        node(around:10000,${lat},${lon})[place~"city|town"];
+        out body;`.replace(/\s+/g,' ');
+      const data = await (await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', body: q
+      })).json();
+      return (data.elements||[]).map(el=>{
+        const dist = Math.round(distanceMeters(
+          userPos, [el.lat, el.lon]
+        ));
+        return {
+          name: el.tags.name || 'Unknown',
+          lat:  el.lat,
+          lng:  el.lon,
+          population: el.tags.population || 'N/A',
+          distance: dist
+        };
+      }).sort((a,b)=>a.distance-b.distance);
+    }
+
+    async function getTopPOIs(lat, lng, key, value=null, limit=3) {
+      const filter = value ? `[${key}=${value}]` : `[${key}]`;
+      const q = `[out:json][timeout:8];
+        (
+          node(around:5000,${lat},${lng})${filter};
+          way(around:5000,${lat},${lng})${filter};
+          rel(around:5000,${lat},${lng})${filter};
+        );
+        out center ${limit};`.replace(/\s+/g,' ');
+      const data = await (await fetch(
+        'https://overpass-api.de/api/interpreter',
+        { method:'POST', body: q }
+      )).json();
+      return (data.elements||[])
+        .filter(e=>e.tags)
+        .map(e=>e.tags.name || value || key)
+        .slice(0,limit);
+    }
+
+    async function renderCities() {
+      const cities = await getNearbyCities();
+      const tbody = document.querySelector('#cities-table tbody');
+      tbody.innerHTML = '';
+      for (let c of cities) {
+        const km = (c.distance/1000).toFixed(2);
+        const [attractions, restaurants] = await Promise.all([
+          getTopPOIs(c.lat, c.lng, 'tourism','attraction'),
+          getTopPOIs(c.lat, c.lng, 'amenity','restaurant')
+        ]);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${c.name}</td>
+          <td>${km}</td>
+          <td>${c.population}</td>
+          <td>${attractions.join(', ') || '–'}</td>
+          <td>${restaurants.join(', ') || '–'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+  </script>
+</body>
+</html>
