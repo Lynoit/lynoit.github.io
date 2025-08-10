@@ -1,0 +1,331 @@
+<!--
+App: Most Discussed & Most Linked (Stockholm/Nasdaq)
+Files in this single document:
+1) server.js   – Node.js backend (Express + Cheerio). Run:  npm i express node-fetch@2 cheerio cors  &&  node server.js
+2) public/index.html – Frontend dashboard. Open at http://localhost:3000
+
+Notes:
+• "Official sources" adapter scrapes: Nasdaq Nordic (shares + ETFs pages), FI short-selling register (as a sanity cross-check of ticker presence), and Morningstar Nordic funds page. These aren’t perfect proxies for “most discussed/linked,” but we approximate by counting ticker/fund mentions and link anchors on official pages.
+• "Forums" adapter uses Reddit (r/Aktier, r/Aktiemarknaden, r/PrivatEkonomi). We pull hot & new posts and count mentions of Swedish tickers/fund names and count outbound links.
+• Add or remove sources easily inside the adapters array.
+• All requests go through the backend to avoid CORS issues.
+• Output: top-5 lists for stocks and funds, separately for Official vs Forums, plus raw counts.
+-->
+
+<!-- ============================ server.js ============================ -->
+<script type="text/plain" data-filename="server.js">
+const express = require('express');
+const fetch = require('node-fetch'); // v2
+const cheerio = require('cheerio');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+// --- Basic Swedish ticker & fund dictionaries (extend as needed) ---
+const TICKERS = [
+  'VOLV B','HM B','ERIC B','EVO','INVE B','ATCO A','ATCO B','HEX A','HEXA B','SAND','SWED A','SEB A','SHB A','TELIA','TEL2 B','SAAB B','BOL','ESSITY B','NIBE B','AZN','EQT','SSAB A','SSAB B','ALFA','SKF B','ASSA B','SCA B','KINV B','SINCH','EMBRAC B','HUSQ B','KIND SDB','SAGA B','VNV','INDU C','INDU B','HEXATRONIC','MIPS','STORYTEL B'
+];
+
+const FUNDS = [
+  'Avanza Zero','Spiltan Aktiefond Investmentbolag','Länsförsäkringar Global Indexnära','Swedbank Robur Ny Teknik','Tin Ny Teknik','Handelsbanken Sverige Index','SEB Sverige Index','AMF Aktiefond Småbolag','Nordnet Indexfond Sverige','XACT OMXS30','XACT Norden','Spiltan Räntefond Sverige'
+];
+
+// --- Utility: normalize & count mentions ---
+function countMentions(text, list) {
+  const counts = new Map();
+  if (!text) return counts;
+  const hay = text.toUpperCase();
+  for (const key of list) {
+    const k = key.toUpperCase();
+    // simple contains; can be replaced with word-boundary regex per key
+    const regex = new RegExp(escapeRegex(k), 'g');
+    const matches = hay.match(regex);
+    if (matches) counts.set(key, (counts.get(key) || 0) + matches.length);
+  }
+  return counts;
+}
+function escapeRegex(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+function mergeCounts(a, b){
+  for (const [k,v] of b) a.set(k, (a.get(k)||0)+v);
+  return a;
+}
+function topN(map, n=5){
+  return Array.from(map.entries()).sort((x,y)=>y[1]-x[1]).slice(0,n);
+}
+
+// ======================= OFFICIAL SOURCES ADAPTERS =======================
+// We approximate "most discussed/linked" by counting ticker/fund mentions and
+// anchor href occurrences on official pages (Nasdaq Nordic + FI + Morningstar).
+
+async function scrapeNasdaqShares() {
+  const url = 'https://www.nasdaq.com/european-market-activity/shares';
+  const res = await fetch(url);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const text = $('body').text();
+  const linkHrefs = $('a').map((_,a)=>$(a).attr('href')||'').get().join('\n');
+
+  const stockCounts = countMentions(text + '\n' + linkHrefs, TICKERS);
+  return { source: 'Nasdaq Europe – Shares', url, stockCounts, fundCounts: new Map() };
+}
+
+async function scrapeNasdaqETFs() {
+  const url = 'https://www.nasdaq.com/european-market-activity/etf';
+  const res = await fetch(url);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const text = $('body').text();
+  const linkHrefs = $('a').map((_,a)=>$(a).attr('href')||'').get().join('\n');
+
+  const fundCounts = countMentions(text + '\n' + linkHrefs, FUNDS);
+  return { source: 'Nasdaq Europe – ETFs', url, stockCounts: new Map(), fundCounts };
+}
+
+async function scrapeFIShortSelling() {
+  const url = 'https://www.fi.se/sv/vara-register/blankningsregistret/';
+  const res = await fetch(url);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const text = $('body').text();
+
+  const stockCounts = countMentions(text, TICKERS);
+  return { source: 'Finansinspektionen – Blankningsregistret', url, stockCounts, fundCounts: new Map() };
+}
+
+async function scrapeMorningstarNordicFunds(){
+  const url = 'https://global.morningstar.com/en-nd/investments/best-investments/medalist-nordic-equity-funds';
+  const res = await fetch(url);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const text = $('body').text();
+
+  const fundCounts = countMentions(text, FUNDS);
+  return { source: 'Morningstar – Nordic Equity Funds', url, stockCounts: new Map(), fundCounts };
+}
+
+// ======================= FORUM SOURCES (Reddit) ==========================
+async function fetchReddit(sub, sort='hot', limit=50) {
+  const url = `https://www.reddit.com/r/${sub}/${sort}.json?limit=${limit}`;
+  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
+  if (!res.ok) throw new Error(`Reddit ${sub} ${sort} failed: ${res.status}`);
+  const json = await res.json();
+  const posts = (json.data?.children || []).map(c=>c.data||{});
+  let text = '';
+  for (const p of posts) {
+    const t = [p.title, p.selftext, p.url_overridden_by_dest, (p.crosspost_parent_list?.[0]?.title)||'']
+      .filter(Boolean).join('\n');
+    text += '\n' + t;
+  }
+  return text;
+}
+
+async function scrapeRedditForums(){
+  const subs = ['Aktier','Aktiemarknaden','PrivatEkonomi'];
+  let combinedText = '';
+  for (const s of subs) {
+    try {
+      combinedText += '\n' + await fetchReddit(s, 'hot', 75);
+      combinedText += '\n' + await fetchReddit(s, 'new', 75);
+    } catch(e){
+      console.warn('Reddit fetch error', s, e.message);
+    }
+  }
+  const stockCounts = countMentions(combinedText, TICKERS);
+  const fundCounts = countMentions(combinedText, FUNDS);
+  return { source: 'Reddit (r/Aktier, r/Aktiemarknaden, r/PrivatEkonomi)', stockCounts, fundCounts };
+}
+
+// ============================= API ROUTES ===============================
+app.get('/api/scan', async (req, res) => {
+  try {
+    const officialTasks = [scrapeNasdaqShares(), scrapeNasdaqETFs(), scrapeFIShortSelling(), scrapeMorningstarNordicFunds()];
+    const forumTasks = [scrapeRedditForums()];
+
+    const officialResults = await Promise.allSettled(officialTasks);
+    const forumResults = await Promise.allSettled(forumTasks);
+
+    // Merge counts
+    const officialStock = new Map();
+    const officialFund  = new Map();
+    for (const r of officialResults) if (r.status==='fulfilled') {
+      mergeCounts(officialStock, r.value.stockCounts);
+      mergeCounts(officialFund,  r.value.fundCounts);
+    }
+
+    const forumStock = new Map();
+    const forumFund  = new Map();
+    for (const r of forumResults) if (r.status==='fulfilled') {
+      mergeCounts(forumStock, r.value.stockCounts);
+      mergeCounts(forumFund,  r.value.fundCounts);
+    }
+
+    res.json({
+      sources: {
+        official: officialResults.map(r=>({status:r.status, ...(r.value?{source:r.value.source,url:r.value.url||null}: {error:r.reason?.message})})),
+        forums: forumResults.map(r=>({status:r.status, source: r.value?.source || 'forums', error: r.reason?.message }))
+      },
+      top5: {
+        stocks: {
+          official: topN(officialStock, 5),
+          forums:   topN(forumStock, 5)
+        },
+        funds: {
+          official: topN(officialFund, 5),
+          forums:   topN(forumFund, 5)
+        }
+      },
+      raw: {
+        stocks: {
+          official: Array.from(officialStock.entries()),
+          forums:   Array.from(forumStock.entries())
+        },
+        funds: {
+          official: Array.from(officialFund.entries()),
+          forums:   Array.from(forumFund.entries())
+        }
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=> console.log(`Server running: http://localhost:${PORT}`));
+</script>
+
+
+<!-- ======================== public/index.html ========================= -->
+<script type="text/plain" data-filename="public/index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Most Discussed & Linked – Stockholm/Nasdaq</title>
+  <style>
+    :root {
+      --bg: #0f1115; --card:#171923; --text:#e8eaf0; --muted:#9aa4b2; --accent:#83b6ff; --good:#4ade80; --warn:#facc15; --bad:#fb7185;
+    }
+    html,body{height:100%}
+    body{margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text);}
+    .wrap{max-width:1100px; margin:0 auto; padding:24px}
+    .title{font-size:28px; font-weight:700; letter-spacing:.2px;}
+    .row{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px}
+    .card{background:var(--card); border-radius:16px; padding:16px; box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    button{background:var(--accent); color:#0b1020; border:none; padding:10px 14px; border-radius:12px; font-weight:700; cursor:pointer}
+    button:disabled{opacity:.6; cursor:not-allowed}
+    table{width:100%; border-collapse:collapse; margin-top:8px}
+    th,td{padding:8px 10px; border-bottom:1px solid rgba(255,255,255,.06); font-size:14px}
+    th{text-align:left; color:var(--muted); font-weight:600}
+    .kpi{display:flex; gap:12px; align-items:center; margin:16px 0}
+    .badge{background:#0a0d14; border:1px solid rgba(255,255,255,.08); padding:6px 10px; border-radius:999px; font-size:12px; color:var(--muted)}
+    .src{font-size:12px; color:var(--muted)}
+    .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+    .pill{display:inline-block; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.06); font-size:12px; margin-right:6px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">Most Discussed & Most Linked — Stockholm/Nasdaq</div>
+    <div class="kpi">
+      <button id="scanBtn">Run scan</button>
+      <div id="status" class="badge">Idle</div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h3>Stocks — Top 5</h3>
+        <div class="grid2">
+          <div>
+            <h4>Official sources</h4>
+            <table id="tbl-stock-official"><thead><tr><th>#</th><th>Ticker</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
+          </div>
+          <div>
+            <h4>Forums</h4>
+            <table id="tbl-stock-forums"><thead><tr><th>#</th><th>Ticker</th><th>Mentions</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Funds — Top 5</h3>
+        <div class="grid2">
+          <div>
+            <h4>Official sources</h4>
+            <table id="tbl-fund-official"><thead><tr><th>#</th><th>Fund</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
+          </div>
+          <div>
+            <h4>Forums</h4>
+            <table id="tbl-fund-forums"><thead><tr><th>#</th><th>Fund</th><th>Mentions</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>Sources (what was scanned)</h3>
+      <div id="sources"></div>
+      <p class="src">Tip: Edit sources in <code>server.js</code> to add Avanza/Placera Shareville endpoints or more RSS feeds. Everything proxies through the backend to avoid CORS.</p>
+    </div>
+  </div>
+
+  <script>
+    async function runScan(){
+      setStatus('Scanning...');
+      try{
+        const res = await fetch('/api/scan');
+        const data = await res.json();
+        fillTable('tbl-stock-official', data.top5.stocks.official);
+        fillTable('tbl-stock-forums',   data.top5.stocks.forums);
+        fillTable('tbl-fund-official',  data.top5.funds.official);
+        fillTable('tbl-fund-forums',    data.top5.funds.forums);
+        renderSources(data.sources);
+        setStatus('Done');
+      }catch(e){
+        console.error(e);
+        setStatus('Error: '+ e.message);
+      }
+    }
+
+    function setStatus(t){
+      document.getElementById('status').textContent = t;
+    }
+
+    function fillTable(id, rows){
+      const tbody = document.querySelector(`#${id} tbody`);
+      tbody.innerHTML='';
+      rows.forEach((r,i)=>{
+        const [label, count] = r;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${label}</td><td>${count}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderSources(s){
+      const el = document.getElementById('sources');
+      const mk = (arr)=> arr.map(o=>{
+        if(o.status==='fulfilled'){
+          const u = o.url? `<span class="pill">${o.url}</span>`:'';
+          return `<div class="pill">${o.source}</div> ${u}`;
+        } else {
+          return `<div class="pill">Error</div>`;
+        }
+      }).join(' ');
+      el.innerHTML = `
+        <h4>Official</h4>
+        <div>${mk(s.official)}</div>
+        <h4>Forums</h4>
+        <div>${mk(s.forums)}</div>
+      `;
+    }
+
+    document.getElementById('scanBtn').addEventListener('click', runScan);
+  </script>
+</body>
+</html>
+</script>
