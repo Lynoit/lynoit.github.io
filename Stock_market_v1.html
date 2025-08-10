@@ -1,214 +1,18 @@
-<!--
-GitHub Pages build: Most Discussed & Most Linked (Stockholm/Nasdaq)
-
-This repo layout runs 100% on GitHub Pages (no localhost, no server).
-A GitHub Action (cron) scrapes sources on GitHub’s servers and commits a
-JSON snapshot into /docs/data/top5.json. The static site (in /docs)
-reads that JSON and renders the Top 5 lists.
-
-Files in this single document:
-1) .github/workflows/scrape.yml   – Scheduled scraper (runs every 30 min)
-2) scripts/scrape.js              – Node scraper used by the workflow
-3) docs/index.html                – Static dashboard (served by GitHub Pages)
-4) docs/README-setup.txt          – One-time setup steps
-
-Customize sources and ticker/fund dictionaries in scripts/scrape.js.
+<!-- Single-file HTML that runs on GitHub Pages and shows results directly in the app.
+ - Live forums (Reddit) are fetched client-side (CORS-friendly) and rendered on load.
+ - Optional: if you host a JSON at data/top5.json (e.g., via GitHub Action) or set a Cloudflare Worker endpoint in localStorage,
+   the page will also show/override "Official" results.
+ - To set a Worker endpoint in the browser console: localStorage.setItem('workerEndpoint','https://<your>.workers.dev')
 -->
 
-<!-- ====================== .github/workflows/scrape.yml ====================== -->
-<script type="text/plain" data-filename=".github/workflows/scrape.yml">
-name: Scrape Top Discussed/Linked (Stockholm/Nasdaq)
-
-on:
-  schedule:
-    - cron: "*/30 * * * *" # every 30 minutes
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install deps
-        run: |
-          npm init -y >/dev/null 2>&1 || true
-          npm i node-fetch@2 cheerio
-
-      - name: Run scraper
-        run: |
-          node scripts/scrape.js
-
-      - name: Commit & push data
-        uses: EndBug/add-and-commit@v9
-        with:
-          add: "docs/data/top5.json"
-          message: "chore(data): update top5 snapshot"
-          default_author: github_actions
-</script>
-
-
-<!-- =========================== scripts/scrape.js =========================== -->
-<script type="text/plain" data-filename="scripts/scrape.js">
-const fs = require('fs');
-const path = require('path');
-const fetch = require('node-fetch'); // v2
-const cheerio = require('cheerio');
-
-// ------------------------ Dictionaries (extend) -------------------------
-const TICKERS = [
-  'VOLV B','HM B','ERIC B','EVO','INVE B','ATCO A','ATCO B','HEX A','HEXA B','SAND','SWED A','SEB A','SHB A','TELIA','TEL2 B','SAAB B','BOL','ESSITY B','NIBE B','AZN','EQT','SSAB A','SSAB B','ALFA','SKF B','ASSA B','SCA B','KINV B','SINCH','EMBRAC B','HUSQ B','KIND SDB','SAGA B','VNV','INDU C','INDU B','HEXATRONIC','MIPS','STORYTEL B'
-];
-
-const FUNDS = [
-  'Avanza Zero','Spiltan Aktiefond Investmentbolag','Länsförsäkringar Global Indexnära','Swedbank Robur Ny Teknik','Tin Ny Teknik','Handelsbanken Sverige Index','SEB Sverige Index','AMF Aktiefond Småbolag','Nordnet Indexfond Sverige','XACT OMXS30','XACT Norden','Spiltan Räntefond Sverige'
-];
-
-// ------------------------ Helpers ------------------------
-function escapeRegex(s){return s.replace(/[.*+?^${}()|[\]\]/g,'\$&');}
-function countMentions(text, list) {
-  const counts = new Map();
-  if (!text) return counts;
-  const hay = text.toUpperCase();
-  for (const key of list) {
-    const k = key.toUpperCase();
-    const regex = new RegExp(escapeRegex(k), 'g');
-    const n = (hay.match(regex)||[]).length;
-    if (n) counts.set(key, (counts.get(key)||0)+n);
-  }
-  return counts;
-}
-function mergeCounts(a,b){ for (const [k,v] of b) a.set(k,(a.get(k)||0)+v); return a; }
-function topN(map, n=5){ return Array.from(map.entries()).sort((x,y)=>y[1]-x[1]).slice(0,n); }
-
-// ------------------------ Official sources ------------------------
-async function scrapeNasdaqShares(){
-  const url = 'https://www.nasdaq.com/european-market-activity/shares';
-  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
-  const html = await res.text();
-  const $ = cheerio.load(html);
-  const text = $('body').text();
-  const links = $('a').map((_,a)=>$(a).attr('href')||'').get().join('
-');
-  return {source:'Nasdaq Europe – Shares', url, stock: countMentions(text+'
-'+links, TICKERS), fund: new Map()};
-}
-async function scrapeNasdaqETFs(){
-  const url = 'https://www.nasdaq.com/european-market-activity/etf';
-  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
-  const html = await res.text();
-  const $ = cheerio.load(html);
-  const text = $('body').text();
-  const links = $('a').map((_,a)=>$(a).attr('href')||'').get().join('
-');
-  return {source:'Nasdaq Europe – ETFs', url, stock: new Map(), fund: countMentions(text+'
-'+links, FUNDS)};
-}
-async function scrapeFI(){
-  const url = 'https://www.fi.se/sv/vara-register/blankningsregistret/';
-  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
-  const html = await res.text();
-  const $ = cheerio.load(html);
-  const text = $('body').text();
-  return {source:'Finansinspektionen – Blankningsregistret', url, stock: countMentions(text, TICKERS), fund: new Map()};
-}
-async function scrapeMorningstar(){
-  const url = 'https://global.morningstar.com/en-nd/investments/best-investments/medalist-nordic-equity-funds';
-  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
-  const html = await res.text();
-  const $ = cheerio.load(html);
-  const text = $('body').text();
-  return {source:'Morningstar – Nordic Equity Funds', url, stock: new Map(), fund: countMentions(text, FUNDS)};
-}
-
-// ------------------------ Forums (Reddit) ------------------------
-async function grabReddit(sub, sort='hot', limit=75){
-  const url = `https://www.reddit.com/r/${sub}/${sort}.json?limit=${limit}`;
-  const res = await fetch(url, { headers: { 'User-Agent':'Mozilla/5.0' }});
-  if(!res.ok) throw new Error(`Reddit ${sub} ${sort}: ${res.status}`);
-  const json = await res.json();
-  const posts = (json.data?.children||[]).map(c=>c.data||{});
-  let text='';
-  for(const p of posts){
-    const t = [p.title,p.selftext,p.url_overridden_by_dest,(p.crosspost_parent_list?.[0]?.title)||''].filter(Boolean).join('
-');
-    text += '
-'+ t;
-  }
-  return text;
-}
-async function scrapeForums(){
-  const subs = ['Aktier','Aktiemarknaden','PrivatEkonomi'];
-  let combined='';
-  for(const s of subs){
-    try{ combined += '
-' + await grabReddit(s,'hot',75); combined += '
-' + await grabReddit(s,'new',75);}catch(e){console.warn('Reddit error',s,e.message);}
-  }
-  return {source:'Reddit (Aktier/Aktiemarknaden/PrivatEkonomi)', stock: countMentions(combined,TICKERS), fund: countMentions(combined,FUNDS)};
-}
-
-// ------------------------ Run all, write JSON ------------------------
-(async ()=>{
-  const officialTasks = [scrapeNasdaqShares(), scrapeNasdaqETFs(), scrapeFI(), scrapeMorningstar()];
-  const forumTasks = [scrapeForums()];
-
-  const [officialResults, forumResults] = await Promise.all([
-    Promise.allSettled(officialTasks),
-    Promise.allSettled(forumTasks)
-  ]);
-
-  const officialStock = new Map();
-  const officialFund = new Map();
-  for(const r of officialResults){ if(r.status==='fulfilled'){ mergeCounts(officialStock,r.value.stock); mergeCounts(officialFund,r.value.fund);} }
-
-  const forumStock = new Map();
-  const forumFund = new Map();
-  for(const r of forumResults){ if(r.status==='fulfilled'){ mergeCounts(forumStock,r.value.stock); mergeCounts(forumFund,r.value.fund);} }
-
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    sources: {
-      official: officialResults.map(x=>x.status==='fulfilled'? {status:'ok', source:x.value.source, url:x.value.url||null}: {status:'error', error:String(x.reason)}),
-      forums: forumResults.map(x=>x.status==='fulfilled'? {status:'ok', source:x.value.source}: {status:'error', error:String(x.reason)})
-    },
-    top5: {
-      stocks: { official: topN(officialStock,5), forums: topN(forumStock,5) },
-      funds:  { official: topN(officialFund,5),  forums: topN(forumFund,5) }
-    },
-    raw: {
-      stocks: { official: Array.from(officialStock.entries()), forums: Array.from(forumStock.entries()) },
-      funds:  { official: Array.from(officialFund.entries()),  forums: Array.from(forumFund.entries()) }
-    }
-  };
-
-  const outDir = path.join(process.cwd(),'docs','data');
-  fs.mkdirSync(outDir,{recursive:true});
-  fs.writeFileSync(path.join(outDir,'top5.json'), JSON.stringify(payload,null,2));
-  console.log('Wrote', path.join('docs','data','top5.json'));
-})();
-</script>
-
-
-<!-- =========================== docs/index.html =========================== -->
-<script type="text/plain" data-filename="docs/index.html">
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Most Discussed & Linked — Stockholm/Nasdaq</title>
+  <title>Most Discussed & Linked — Stockholm/Nasdaq (Live)</title>
   <style>
-    :root { --bg:#0f1115; --card:#171923; --text:#e8eaf0; --muted:#9aa4b2; --accent:#83b6ff; }
+    :root { --bg:#0f1115; --card:#171923; --text:#e8eaf0; --muted:#9aa4b2; --accent:#83b6ff; --good:#4ade80; --warn:#facc15; --bad:#fb7185 }
     html,body{height:100%}
     body{margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text)}
     .wrap{max-width:1100px; margin:0 auto; padding:24px}
@@ -222,12 +26,16 @@ async function scrapeForums(){
     .pill{display:inline-block; padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.08); font-size:12px; margin:0 6px 6px 0}
     .grid2{display:grid; grid-template-columns:1fr 1fr; gap:12px}
     .footer{margin-top:16px; color:var(--muted); font-size:12px}
+    .badgelive{display:inline-block; margin-left:8px; padding:4px 10px; border-radius:999px; background:rgba(76,175,80,.15); border:1px solid rgba(76,175,80,.35); font-size:12px}
+    .error{color:#ffb4b4}
+    .spinner{display:inline-block; width:1em; height:1em; border:2px solid rgba(255,255,255,.2); border-top-color:#fff; border-radius:50%; animation:spin 1s linear infinite; vertical-align:-2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="title">Most Discussed & Most Linked — Stockholm/Nasdaq</div>
-    <div class="muted" id="stamp">Loading…</div>
+    <div class="title">Most Discussed & Most Linked — Stockholm/Nasdaq <span id="liveBadge" class="badgelive" style="display:none">LIVE</span></div>
+    <div class="muted" id="stamp"><span class="spinner"></span> Loading…</div>
 
     <div class="row">
       <div class="card">
@@ -236,10 +44,12 @@ async function scrapeForums(){
           <div>
             <h4>Official sources</h4>
             <table id="tbl-stock-official"><thead><tr><th>#</th><th>Ticker</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
+            <div class="muted" id="officialStockMsg"></div>
           </div>
           <div>
-            <h4>Forums</h4>
+            <h4>Forums (live)</h4>
             <table id="tbl-stock-forums"><thead><tr><th>#</th><th>Ticker</th><th>Mentions</th></tr></thead><tbody></tbody></table>
+            <div class="muted" id="forumStockMsg"></div>
           </div>
         </div>
       </div>
@@ -249,76 +59,136 @@ async function scrapeForums(){
           <div>
             <h4>Official sources</h4>
             <table id="tbl-fund-official"><thead><tr><th>#</th><th>Fund</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
+            <div class="muted" id="officialFundMsg"></div>
           </div>
           <div>
-            <h4>Forums</h4>
+            <h4>Forums (live)</h4>
             <table id="tbl-fund-forums"><thead><tr><th>#</th><th>Fund</th><th>Mentions</th></tr></thead><tbody></tbody></table>
+            <div class="muted" id="forumFundMsg"></div>
           </div>
         </div>
       </div>
     </div>
 
     <div class="card" style="margin-top:16px">
-      <h3>Sources (last run)</h3>
+      <h3>Sources</h3>
       <div id="sources"></div>
+      <div class="muted" style="margin-top:8px">Tip: set a Cloudflare Worker endpoint via <code>localStorage.setItem('workerEndpoint','https://...workers.dev')</code> to fetch Official sources live. Without it, Official falls back to optional <code>data/top5.json</code> if present.</div>
     </div>
 
-    <div class="footer">© Lynoit 2025 · Data auto-updates ~every 30 minutes via GitHub Actions.</div>
+    <div class="footer">© Lynoit 2025</div>
   </div>
 
   <script>
-    async function load(){
-      try{
-        const res = await fetch('data/top5.json', {cache:'no-cache'});
-        const data = await res.json();
-        document.getElementById('stamp').textContent = `Snapshot: ${new Date(data.generatedAt).toLocaleString()}`;
-        fill('tbl-stock-official', data.top5.stocks.official);
-        fill('tbl-stock-forums',   data.top5.stocks.forums);
-        fill('tbl-fund-official',  data.top5.funds.official);
-        fill('tbl-fund-forums',    data.top5.funds.forums);
-        renderSources(data.sources);
-      }catch(e){
-        document.getElementById('stamp').textContent = 'Failed to load data. First run may still be in progress.';
-        console.error(e);
+    // ===== Config =====
+    const WORKER_ENDPOINT = localStorage.getItem('workerEndpoint') || '';
+
+    // ===== Dictionaries (extend as needed) =====
+    const TICKERS = [
+      'VOLV B','HM B','ERIC B','EVO','INVE B','ATCO A','ATCO B','SAND','SWED A','SEB A','SHB A','TELIA','TEL2 B','SAAB B','BOL','ESSITY B','NIBE B','AZN','EQT','SSAB A','SSAB B','ALFA','SKF B','ASSA B','SCA B','KINV B','SINCH','EMBRAC B','HUSQ B','KIND SDB','INDU C','INDU B','HEXATRONIC','MIPS','STORYTEL B'
+    ];
+    const FUNDS = [
+      'Avanza Zero','Spiltan Aktiefond Investmentbolag','Länsförsäkringar Global Indexnära','Swedbank Robur Ny Teknik','Tin Ny Teknik','Handelsbanken Sverige Index','SEB Sverige Index','AMF Aktiefond Småbolag','Nordnet Indexfond Sverige','XACT OMXS30','XACT Norden','Spiltan Räntefond Sverige'
+    ];
+
+    // ===== Helpers =====
+    function escapeRegex(s){return s.replace(/[.*+?^${}()|[\]\]/g,'\$&');}
+    function countMentions(text, list){
+      const counts = new Map();
+      if(!text) return counts;
+      const hay = text.toUpperCase();
+      for(const key of list){
+        const re = new RegExp(escapeRegex(key.toUpperCase()), 'g');
+        const n = (hay.match(re)||[]).length;
+        if(n) counts.set(key, (counts.get(key)||0) + n);
       }
+      return counts;
     }
-    function fill(id, rows){
+    function topN(map, n=5){ return [...map.entries()].sort((a,b)=>b[1]-a[1]).slice(0,n); }
+    function fillTable(id, rows){
       const tbody = document.querySelector(`#${id} tbody`);
-      tbody.innerHTML='';
-      (rows||[]).forEach((r,i)=>{
-        const [label,count] = r; const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${i+1}</td><td>${label}</td><td>${count}</td>`; tbody.appendChild(tr);
+      tbody.innerHTML = '';
+      (rows||[]).forEach(([label,count],i)=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${label}</td><td>${count}</td>`;
+        tbody.appendChild(tr);
       });
     }
-    function renderSources(s){
+    function setText(id, text){ document.getElementById(id).textContent = text; }
+
+    // ===== Forums (live in-browser) =====
+    async function fetchReddit(sub){
+      const url = `https://www.reddit.com/r/${sub}/hot.json?limit=75&raw_json=1`;
+      const r = await fetch(url, {cache:'no-cache'});
+      if(!r.ok) throw new Error(`${sub} ${r.status}`);
+      const j = await r.json();
+      const posts = (j.data?.children||[]).map(c=>c.data||{});
+      return posts.map(p => [p.title, p.selftext, p.url_overridden_by_dest, p.permalink].filter(Boolean).join(' '));
+    }
+    async function runForumsScan(){
+      setText('stamp','Scanning forums…');
+      let combined = '';
+      const subs = ['Aktier','Aktiemarknaden','PrivatEkonomi'];
+      let okCount = 0;
+      for(const s of subs){
+        try{ const posts = await fetchReddit(s); combined += ' ' + posts.join(' '); okCount++; console.log(`Fetched ${posts.length} from r/${s}`);} catch(e){ console.warn('Reddit fail', s, e); }
+      }
+      if(!combined){
+        setText('forumStockMsg','No forum data (Reddit blocked or rate limited).');
+        setText('forumFundMsg','');
+      } else {
+        const stockCounts = countMentions(combined, TICKERS);
+        const fundCounts  = countMentions(combined, FUNDS);
+        fillTable('tbl-stock-forums', topN(stockCounts));
+        fillTable('tbl-fund-forums',  topN(fundCounts));
+        setText('forumStockMsg', `Loaded from ${okCount}/${subs.length} subreddits.`);
+        setText('forumFundMsg', '');
+      }
+    }
+
+    // ===== Official (live via Worker OR fallback JSON) =====
+    async function runOfficial(){
+      // Try Worker endpoint first
+      if (WORKER_ENDPOINT){
+        try{
+          const r = await fetch(WORKER_ENDPOINT + '/scan', {cache:'no-cache'});
+          if(r.ok){
+            const data = await r.json();
+            document.getElementById('liveBadge').style.display = 'inline-block';
+            renderFromPayload(data);
+            return; // done
+          }
+        }catch(e){ console.warn('Worker fetch failed', e); }
+      }
+      // Fallback: optional cached JSON from /data/top5.json
+      try{
+        const r2 = await fetch('data/top5.json', {cache:'no-cache'});
+        if(r2.ok){ const data = await r2.json(); renderFromPayload(data); return; }
+      }catch(e){ /* ignore */ }
+      // No official data available
+      setText('officialStockMsg','No official data (set Worker endpoint or provide data/top5.json).');
+      setText('officialFundMsg','');
+    }
+
+    function renderFromPayload(data){
+      if(!data) return;
+      setText('stamp', `Snapshot: ${new Date(data.generatedAt||Date.now()).toLocaleString()}`);
+      fillTable('tbl-stock-official', data.top5?.stocks?.official || []);
+      fillTable('tbl-fund-official',  data.top5?.funds?.official  || []);
+      // If Worker returned forums too, prefer its forum results
+      if (data.top5?.stocks?.forums) fillTable('tbl-stock-forums', data.top5.stocks.forums);
+      if (data.top5?.funds?.forums)  fillTable('tbl-fund-forums',  data.top5.funds.forums);
+      // Sources list
       const el = document.getElementById('sources');
       const mk = arr => (arr||[]).map(o=> o.status==='ok' ? `<span class="pill">${o.source}</span>` : `<span class="pill">Error</span>`).join(' ');
-      el.innerHTML = `<h4>Official</h4><div>${mk(s.official)}</div><h4>Forums</h4><div>${mk(s.forums)}</div>`;
+      el.innerHTML = `<h4>Official</h4><div>${mk(data.sources?.official)}</div><h4>Forums</h4><div>${mk(data.sources?.forums)}</div>`;
     }
-    load();
+
+    // ===== Boot =====
+    (async function init(){
+      try{ await Promise.all([runForumsScan(), runOfficial()]); }
+      finally{ if(document.getElementById('stamp').textContent.startsWith('Loading')) setText('stamp','Ready'); }
+    })();
   </script>
 </body>
 </html>
-</script>
-
-
-<!-- ======================== docs/README-setup.txt ======================== -->
-<script type="text/plain" data-filename="docs/README-setup.txt">
-# GitHub Pages setup (no localhost)
-
-1) Create a repo, commit these files.
-2) In GitHub → Settings → Pages:
-   - Source: **Deploy from a branch**
-   - Branch: **main** (or your default), Folder: **/docs**
-3) Wait for the Pages deploy. Your site will be at https://<your-user>.github.io/<repo>/
-4) The Action runs every 30 minutes and writes **docs/data/top5.json**.
-   On the first run you can trigger it manually: **Actions → Scrape Top Discussed/Linked → Run workflow**.
-5) Edit ticker/fund lists or add more adapters in **scripts/scrape.js**.
-
-Notes:
-• Everything runs on GitHub’s servers. The public site is static and simply fetches the generated JSON.
-• To add more sources (e.g., Placera/Shareville pages, Avanza trending):
-  - Implement another async function in scripts/scrape.js that fetches & parses HTML with cheerio,
-    returns {source, url?, stock:Map, fund:Map} and include it in the officialTasks or forumTasks arrays.
-• If a site blocks bots, consider slowing requests or using RSS endpoints when available.
-</script>
