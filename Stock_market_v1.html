@@ -27,7 +27,7 @@
   <div class="wrap">
     <div class="title">
       Most Discussed — Stockholm/Nasdaq (Forums only)
-      <span id="liveBadge" class="badgelive">LIVE</span>
+      <span class="badgelive">LIVE</span>
     </div>
     <div class="muted" id="stamp"><span class="spinner"></span> Scanning forums…</div>
 
@@ -55,7 +55,7 @@
       <h3>Sources (Forums)</h3>
       <div id="sources"></div>
       <div class="muted" style="margin-top:8px">
-        Pulls hot posts from: <code>r/Aktier</code>, <code>r/Arktiemarknaden</code>, <code>r/PrivatEkonomi</code> (editable in code).
+        Pulls hot posts from: <code>r/Aktier</code>, <code>r/Aktiemarknaden</code>, <code>r/PrivatEkonomi</code> (edit in code).
       </div>
     </div>
 
@@ -63,7 +63,7 @@
   </div>
 
   <script>
-    // ===== Subreddits to scan (edit if you like) =====
+    // ===== Forums to scan =====
     const SUBREDDITS = ['Aktier','Aktiemarknaden','PrivatEkonomi'];
 
     // ===== Dictionaries =====
@@ -72,29 +72,61 @@
       'SAAB B','BOL','ESSITY B','NIBE B','AZN','EQT','SSAB A','SSAB B','ALFA','SKF B','ASSA B','SCA B','KINV B',
       'SINCH','EMBRAC B','HUSQ B','KIND SDB','INDU C','INDU B','HEXATRONIC','MIPS','STORYTEL B'
     ];
-    const FUNDS = [
-      'Avanza Zero','Spiltan Aktiefond Investmentbolag','Länsförsäkringar Global Indexnära',
-      'Swedbank Robur Ny Teknik','Tin Ny Teknik','Handelsbanken Sverige Index','SEB Sverige Index',
-      'AMF Aktiefond Småbolag','Nordnet Indexfond Sverige','XACT OMXS30','XACT Norden','Spiltan Räntefond Sverige'
-    ];
 
-    // ===== Helpers =====
+    // Canonical fund name → list of aliases/variants (accent-insensitive match)
+    const FUND_ALIASES = {
+      "Avanza Zero": ["Avanza Zero","AZERO"],
+      "Länsförsäkringar Global Indexnära": [
+        "Länsförsäkringar Global Indexnära","Lansforsakringar Global Indexnara",
+        "LF Global Indexnära","LF Global Indexnara","LF Global","LF Indexnära","LF Indexnara"
+      ],
+      "Spiltan Aktiefond Investmentbolag": [
+        "Spiltan Aktiefond Investmentbolag","Spiltan Investmentbolag","Spiltan IB"
+      ],
+      "AMF Aktiefond Småbolag": ["AMF Aktiefond Småbolag","AMF Smabolag","AMF Småbolag"],
+      "XACT OMXS30": ["XACT OMXS30","OMXS30 ETF","XACT30"],
+      "Nordnet Indexfond Sverige": ["Nordnet Indexfond Sverige","Nordnet Sverige Index"],
+      "SEB Sverige Index": ["SEB Sverige Index","SEB Sverige Indexfond"],
+      "Handelsbanken Sverige Index": ["Handelsbanken Sverige Index","Handelsbanken Sverige Indexfond","SHB Sverige Index"],
+      "Tin Ny Teknik": ["Tin Ny Teknik","TIN Ny Teknik","TIN Teknik"],
+      "Swedbank Robur Ny Teknik": ["Swedbank Robur Ny Teknik","Robur Ny Teknik"],
+      "XACT Norden": ["XACT Norden","XACT Nordic"],
+      "Spiltan Räntefond Sverige": ["Spiltan Räntefond Sverige","Spiltan Rantefond Sverige","Spiltan Rantefond"]
+    };
+
+    // ===== Helpers (accent-insensitive + smart boundaries) =====
     const dom = id => document.getElementById(id);
     function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-    // Smart boundaries: A–Z and 0–9 treated as word chars; others as boundaries.
-    function buildSmartRegex(keyUpper){
-      const core = escapeRegex(keyUpper);
+    function normalize(s){
+      // remove accents and uppercase for uniform matching
+      return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+    }
+    function buildSmartRegex(key){
+      const core = escapeRegex(normalize(key));
+      // treat A–Z and 0–9 as word chars; others as boundaries
       return new RegExp(`(^|[^A-Z0-9])${core}($|[^A-Z0-9])`, 'g');
     }
     function countMentionsSmart(text, list){
       const counts = new Map();
-      if(!text) return counts;
-      const hay = text.toUpperCase();
+      const hay = normalize(text);
       for(const key of list){
-        const re = buildSmartRegex(key.toUpperCase());
+        const re = buildSmartRegex(key);
         let n = 0, m;
         while((m = re.exec(hay)) !== null){ n++; }
         if(n) counts.set(key, (counts.get(key)||0) + n);
+      }
+      return counts;
+    }
+    function countWithAliases(text, aliasMap){
+      const counts = new Map();
+      const hay = normalize(text);
+      for (const [canon, aliases] of Object.entries(aliasMap)){
+        let n = 0;
+        for (const a of aliases){
+          const re = buildSmartRegex(a);
+          let m; while((m = re.exec(hay)) !== null) n++;
+        }
+        if (n) counts.set(canon, n);
       }
       return counts;
     }
@@ -109,7 +141,7 @@
       });
     }
 
-    // ===== Forums (live in-browser) =====
+    // ===== Reddit fetch =====
     async function fetchReddit(sub){
       const url = `https://www.reddit.com/r/${sub}/hot.json?limit=75&raw_json=1`;
       const ac = new AbortController();
@@ -119,13 +151,14 @@
         if(!r.ok) throw new Error(`${sub} HTTP ${r.status}`);
         const j = await r.json();
         const posts = (j.data?.children||[]).map(c=>c.data||{});
-        // title, selftext, outbound link, and comments permalink as text
+        // concatenate title, selftext, outbound link, and subreddit/permalink as plain text
         return posts.map(p => [p.title, p.selftext, p.url_overridden_by_dest, p.permalink].filter(Boolean).join(' '));
       } finally {
         clearTimeout(timeout);
       }
     }
 
+    // ===== Scan forums =====
     async function runForumsScan(){
       dom('forumStockMsg').textContent = 'Scanning forums…';
       dom('forumFundMsg').textContent  = '';
@@ -161,8 +194,11 @@
         return;
       }
 
+      // Stocks: direct labels (accent-insensitive)
       const stockCounts = countMentionsSmart(combined, TICKERS);
-      const fundCounts  = countMentionsSmart(combined, FUNDS);
+
+      // Funds: use aliases (captures LF Global, etc.)
+      const fundCounts  = countWithAliases(combined, FUND_ALIASES);
 
       fillTable('tbl-stock-forums', topN(stockCounts));
       fillTable('tbl-fund-forums',  topN(fundCounts));
