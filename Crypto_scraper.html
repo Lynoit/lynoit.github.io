@@ -1,22 +1,22 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>BTC & ETH Forum Sentiment (Client-Only)</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BTC & ETH Forum Sentiment (via CORS Worker)</title>
 <style>
   :root {
-    --bg:#0f1220; --card:#171a2b; --ink:#e7e9ff; --muted:#9aa3b2; --accent:#6ea8ff; --good:#2ecc71; --bad:#ff5c5c;
-    --border:#272a3d;
+    --bg:#0f1220; --card:#171a2b; --ink:#e7e9ff; --muted:#9aa3b2; --accent:#6ea8ff; --good:#2ecc71; --bad:#ff5c5c; --border:#272a3d;
   }
   *{box-sizing:border-box}
-  body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial; background:var(--bg); color:var(--ink)}
+  body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Arial; background:var(--bg); color:var(--ink)}
   header{padding:18px 16px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,#14172a,#0f1220)}
   h1{margin:0; font-size:20px}
   .muted{color:var(--muted)}
   main{max-width:1200px; margin:18px auto; padding:0 12px}
   .controls{display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:14px}
   .controls > *{background:var(--card); border:1px solid var(--border); color:var(--ink); border-radius:10px; padding:10px 12px}
+  .controls input[type="text"]{min-width:340px}
   button{cursor:pointer}
   .grid{display:grid; grid-template-columns:1fr 1fr; gap:16px}
   .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px}
@@ -28,7 +28,6 @@
   .tag{display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2136; border:1px solid var(--border); color:var(--muted); font-size:12px; margin-right:6px}
   .row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
   .status{min-height:24px}
-  .pill{padding:2px 8px; border-radius:999px; border:1px solid var(--border); background:#121428; color:var(--muted); font-size:12px}
   .good{color:var(--good); font-weight:600}
   .bad{color:var(--bad); font-weight:600}
   .spinner{display:inline-block; width:16px; height:16px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; vertical-align:-3px}
@@ -42,10 +41,18 @@
 <body>
 <header>
   <h1>Bitcoin & Ethereum — Forum Sentiment (last N days)</h1>
-  <div class="muted small">Client-only fetch from Reddit JSON (r/Bitcoin, r/Ethereum, r/CryptoCurrency). No server required.</div>
+  <div class="muted small">Fetches Reddit via your Cloudflare Worker (CORS-safe).</div>
 </header>
 
 <main>
+  <div class="controls">
+    <label>Worker URL:
+      <input id="workerUrl" type="text" placeholder="https://rough-waterfall-6032.thomaslyngfelt.workers.dev" />
+    </label>
+    <button id="saveWorker">Save</button>
+    <span class="muted small">Saved to localStorage</span>
+  </div>
+
   <div class="controls">
     <label>Days:
       <input id="days" type="number" min="1" max="30" value="7" style="width:80px; margin-left:6px; background:transparent; border:none; outline:none; color:var(--ink);">
@@ -80,24 +87,22 @@
   </div>
 
   <div class="foot">
-    Tips: reduce “Days” or check “Titles only” if rate-limited. Extend sources later with a tiny Cloudflare Worker or RSS via a CORS proxy.
+    If you get errors, confirm your Worker URL is correct and public, then reduce “Days” or tick “Titles only”.
   </div>
 </main>
 
 <script>
 /** ----------------------------
- *  Config
+ *  Config & helpers
  *  ---------------------------- */
 const SUBS_CORE = ["Bitcoin","Ethereum"];
 const SUB_CRYPTOCURRENCY = "CryptoCurrency";
 const SEARCH_LIMIT = 100; // per request
-const MAX_PAGES = 5;      // safety: up to 5*100 per subreddit
+const MAX_PAGES = 5;      // up to ~500 posts per subreddit
 const KEYWORDS = {
   btc: /(bitcoin|btc|\$btc|\bXBT\b)/i,
   eth: /(ethereum|eth|\$eth)/i
 };
-
-// super-simple lexicon; tweak freely
 const POSITIVE_WORDS = [
   "bull","bullish","buy","accumulate","moon","pump","surge","rally","breakout","support",
   "undervalued","strong","uptrend","green","optimistic","positive","booming","soaring","rocket","rebound"
@@ -107,7 +112,13 @@ const NEGATIVE_WORDS = [
   "downtrend","red","fear","negative","panic","recession","fraud","scam","rug","ban"
 ];
 
-// score text: +1 per positive hit, -1 per negative hit
+function getWorker(){
+  return (localStorage.getItem("workerEndpoint") || "").trim();
+}
+function setWorker(url){
+  if(!/^https?:\/\//i.test(url)) throw new Error("Worker URL must start with http(s)://");
+  localStorage.setItem("workerEndpoint", url.replace(/\/+$/,""));
+}
 function sentimentScore(text){
   if(!text) return 0;
   const t = text.toLowerCase();
@@ -116,22 +127,17 @@ function sentimentScore(text){
   for(const w of NEGATIVE_WORDS){ if(t.includes(w)) s--; }
   return s;
 }
-
 function utcDateStr(tsSeconds){
   const d = new Date(tsSeconds*1000);
-  return d.toISOString().slice(0,10); // YYYY-MM-DD
+  return d.toISOString().slice(0,10);
 }
-
 function setStatus(msg, spinning=false){
   const el = document.getElementById('status');
   el.innerHTML = spinning ? `<span class="spinner"></span> ${msg}` : msg;
 }
-
 function row(html){ const tr=document.createElement('tr'); tr.innerHTML=html; return tr; }
-
 function fillTable(tbody, byDate){
   tbody.innerHTML = "";
-  // sort ascending by date
   const dates = Object.keys(byDate).sort();
   for(const d of dates){
     const {pos, neg} = byDate[d];
@@ -141,9 +147,31 @@ function fillTable(tbody, byDate){
   }
 }
 
-// fetch a page of subreddit search results (new)
+/** ----------------------------
+ *  Reddit fetch via Worker
+ *  ---------------------------- */
+async function fetchViaWorker(targetUrl){
+  const worker = getWorker();
+  if(!worker) throw new Error("Set your Worker URL first.");
+  const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
+
+  // small retry helper for transient hiccups
+  const tries = 2;
+  let lastErr;
+  for(let i=0;i<tries;i++){
+    try {
+      const resp = await fetch(proxied, { headers: { "Accept":"application/json" } });
+      if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      await new Promise(r=>setTimeout(r, 400));
+    }
+  }
+  throw lastErr || new Error("Fetch failed");
+}
+
 async function fetchRedditSub(sub, q, after=null, titlesOnly=false){
-  // Use Reddit search endpoint; restrict to last N days via q timestamp filter (we’ll approximate by sorting new)
   const url = new URL(`https://www.reddit.com/r/${sub}/search.json`);
   url.searchParams.set('q', q);
   url.searchParams.set('restrict_sr', '1');
@@ -151,9 +179,7 @@ async function fetchRedditSub(sub, q, after=null, titlesOnly=false){
   url.searchParams.set('limit', SEARCH_LIMIT);
   if(after) url.searchParams.set('after', after);
 
-  const resp = await fetch(url.toString(), {headers:{'Accept':'application/json'}});
-  if(!resp.ok) throw new Error(`Reddit ${sub} HTTP ${resp.status}`);
-  const data = await resp.json();
+  const data = await fetchViaWorker(url.toString());
   const posts = (data.data?.children || []).map(c => c.data).map(p => ({
       id: p.name,
       title: p.title || "",
@@ -164,7 +190,6 @@ async function fetchRedditSub(sub, q, after=null, titlesOnly=false){
 }
 
 async function fetchAcross(sub, query, days, titlesOnly){
-  // Pull pages until MAX_PAGES or older than N days
   const cutoff = Date.now()/1000 - days*86400;
   let after=null, all=[];
   for(let i=0;i<MAX_PAGES;i++){
@@ -173,30 +198,30 @@ async function fetchAcross(sub, query, days, titlesOnly){
     all.push(...fresh);
     if(!nextAfter || posts.length===0 || (posts[posts.length-1].created_utc < cutoff)) break;
     after = nextAfter;
-    // be polite: tiny delay
-    await new Promise(r=>setTimeout(r, 350));
+    await new Promise(r=>setTimeout(r, 300)); // be polite
   }
   return all;
 }
 
 function aggregateByDateForAsset(posts, which){
-  // which: 'btc' or 'eth'
-  const byDate = {}; // { 'YYYY-MM-DD': {pos:n, neg:n} }
+  const byDate = {};
   const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
 
   for(const p of posts){
     const text = `${p.title} ${p.selftext}`.trim();
-    if(!kw.test(text)) continue; // must mention asset
+    if(!kw.test(text)) continue;
     const score = sentimentScore(text);
     const d = utcDateStr(p.created_utc);
     if(!byDate[d]) byDate[d] = {pos:0, neg:0};
     if(score > 0) byDate[d].pos++;
     else if(score < 0) byDate[d].neg++;
-    // score==0 ignored
   }
   return byDate;
 }
 
+/** ----------------------------
+ *  UI wiring
+ *  ---------------------------- */
 async function run(){
   const days = Math.max(1, Math.min(30, Number(document.getElementById('days').value || 7)));
   const titlesOnly = document.getElementById('titlesOnly').checked;
@@ -206,14 +231,11 @@ async function run(){
   setStatus(`Fetching last ${days} day(s)…`, true);
 
   try{
-    // Build queries that bias toward each asset
     const qBTC = "(bitcoin OR btc) timestamp:new";
     const qETH = "(ethereum OR eth) timestamp:new";
 
-    // Collect posts from core subs
     let posts = [];
     for(const s of SUBS_CORE){
-      // For r/Bitcoin, use qBTC; for r/Ethereum, use qETH
       const q = (s.toLowerCase()==='bitcoin') ? qBTC : qETH;
       const got = await fetchAcross(s, q, days, titlesOnly);
       posts.push(...got);
@@ -223,11 +245,9 @@ async function run(){
       posts.push(...gotMix);
     }
 
-    // Aggregate separately
     const btcByDate = aggregateByDateForAsset(posts, 'btc');
     const ethByDate = aggregateByDateForAsset(posts, 'eth');
 
-    // Fill tables
     fillTable(document.querySelector('#btcTable tbody'), btcByDate);
     fillTable(document.querySelector('#ethTable tbody'), ethByDate);
 
@@ -239,13 +259,26 @@ async function run(){
     setStatus(`Done. BTC +${totalBtcPos}/-${totalBtcNeg} • ETH +${totalEthPos}/-${totalEthNeg}`);
   }catch(err){
     console.error(err);
-    setStatus(`Error: ${err.message}. Tip: reduce "Days" or enable "Titles only".`);
+    setStatus(`Error: ${err.message}. Check Worker URL, then try fewer days or Titles only.`);
   }
 }
 
 document.getElementById('runBtn').addEventListener('click', run);
-// auto-run once
-run();
+
+// Worker URL persistence
+const workerInput = document.getElementById('workerUrl');
+workerInput.value = getWorker();
+document.getElementById('saveWorker').addEventListener('click', ()=>{
+  try {
+    setWorker(workerInput.value || "");
+    setStatus("Worker URL saved.", false);
+  } catch (e) {
+    setStatus(e.message, false);
+  }
+});
+
+// autorun if Worker is already saved
+if(getWorker()){ run(); }
 </script>
 </body>
 </html>
