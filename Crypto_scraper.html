@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BTC & ETH Forum Sentiment (Client-Only)</title>
+<style>
+  :root {
+    --bg:#0f1220; --card:#171a2b; --ink:#e7e9ff; --muted:#9aa3b2; --accent:#6ea8ff; --good:#2ecc71; --bad:#ff5c5c;
+    --border:#272a3d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial; background:var(--bg); color:var(--ink)}
+  header{padding:18px 16px; border-bottom:1px solid var(--border); background:linear-gradient(180deg,#14172a,#0f1220)}
+  h1{margin:0; font-size:20px}
+  .muted{color:var(--muted)}
+  main{max-width:1200px; margin:18px auto; padding:0 12px}
+  .controls{display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:14px}
+  .controls > *{background:var(--card); border:1px solid var(--border); color:var(--ink); border-radius:10px; padding:10px 12px}
+  button{cursor:pointer}
+  .grid{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px}
+  .card h2{margin:4px 0 10px; font-size:16px}
+  table{width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums}
+  th, td{border-bottom:1px solid var(--border); padding:8px 10px; text-align:left}
+  th{color:var(--muted); font-weight:600}
+  td.num{text-align:right}
+  .tag{display:inline-block; padding:2px 8px; border-radius:999px; background:#1d2136; border:1px solid var(--border); color:var(--muted); font-size:12px; margin-right:6px}
+  .row{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+  .status{min-height:24px}
+  .pill{padding:2px 8px; border-radius:999px; border:1px solid var(--border); background:#121428; color:var(--muted); font-size:12px}
+  .good{color:var(--good); font-weight:600}
+  .bad{color:var(--bad); font-weight:600}
+  .spinner{display:inline-block; width:16px; height:16px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 1s linear infinite; vertical-align:-3px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .foot{margin-top:16px; font-size:12px; color:var(--muted)}
+  a {color: var(--accent); text-decoration: none}
+  a:hover {text-decoration: underline}
+  .small{font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Bitcoin & Ethereum — Forum Sentiment (last N days)</h1>
+  <div class="muted small">Client-only fetch from Reddit JSON (r/Bitcoin, r/Ethereum, r/CryptoCurrency). No server required.</div>
+</header>
+
+<main>
+  <div class="controls">
+    <label>Days:
+      <input id="days" type="number" min="1" max="30" value="7" style="width:80px; margin-left:6px; background:transparent; border:none; outline:none; color:var(--ink);">
+    </label>
+    <label><input id="includeCryptoSub" type="checkbox" checked /> Include r/CryptoCurrency</label>
+    <label><input id="titlesOnly" type="checkbox" /> Titles only (faster)</label>
+    <button id="runBtn">Run scan</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <div class="row" style="margin-bottom:8px;">
+    <span class="tag">Sources: reddit.com/r/Bitcoin, /r/Ethereum <span id="srcExtra"></span></span>
+    <span class="tag">Naive lexicon sentiment</span>
+    <span class="tag">Aggregation: per UTC date</span>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Bitcoin</h2>
+      <table id="btcTable">
+        <thead><tr><th>Date (UTC)</th><th class="good">Positive</th><th class="bad">Negative</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section class="card">
+      <h2>Ethereum</h2>
+      <table id="ethTable">
+        <thead><tr><th>Date (UTC)</th><th class="good">Positive</th><th class="bad">Negative</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="foot">
+    Tips: reduce “Days” or check “Titles only” if rate-limited. Extend sources later with a tiny Cloudflare Worker or RSS via a CORS proxy.
+  </div>
+</main>
+
+<script>
+/** ----------------------------
+ *  Config
+ *  ---------------------------- */
+const SUBS_CORE = ["Bitcoin","Ethereum"];
+const SUB_CRYPTOCURRENCY = "CryptoCurrency";
+const SEARCH_LIMIT = 100; // per request
+const MAX_PAGES = 5;      // safety: up to 5*100 per subreddit
+const KEYWORDS = {
+  btc: /(bitcoin|btc|\$btc|\bXBT\b)/i,
+  eth: /(ethereum|eth|\$eth)/i
+};
+
+// super-simple lexicon; tweak freely
+const POSITIVE_WORDS = [
+  "bull","bullish","buy","accumulate","moon","pump","surge","rally","breakout","support",
+  "undervalued","strong","uptrend","green","optimistic","positive","booming","soaring","rocket","rebound"
+];
+const NEGATIVE_WORDS = [
+  "bear","bearish","sell","dump","crash","plunge","collapse","resistance","overvalued","weak",
+  "downtrend","red","fear","negative","panic","recession","fraud","scam","rug","ban"
+];
+
+// score text: +1 per positive hit, -1 per negative hit
+function sentimentScore(text){
+  if(!text) return 0;
+  const t = text.toLowerCase();
+  let s = 0;
+  for(const w of POSITIVE_WORDS){ if(t.includes(w)) s++; }
+  for(const w of NEGATIVE_WORDS){ if(t.includes(w)) s--; }
+  return s;
+}
+
+function utcDateStr(tsSeconds){
+  const d = new Date(tsSeconds*1000);
+  return d.toISOString().slice(0,10); // YYYY-MM-DD
+}
+
+function setStatus(msg, spinning=false){
+  const el = document.getElementById('status');
+  el.innerHTML = spinning ? `<span class="spinner"></span> ${msg}` : msg;
+}
+
+function row(html){ const tr=document.createElement('tr'); tr.innerHTML=html; return tr; }
+
+function fillTable(tbody, byDate){
+  tbody.innerHTML = "";
+  // sort ascending by date
+  const dates = Object.keys(byDate).sort();
+  for(const d of dates){
+    const {pos, neg} = byDate[d];
+    tbody.appendChild(row(
+      `<td>${d}</td><td class="num good">${pos||0}</td><td class="num bad">${neg||0}</td>`
+    ));
+  }
+}
+
+// fetch a page of subreddit search results (new)
+async function fetchRedditSub(sub, q, after=null, titlesOnly=false){
+  // Use Reddit search endpoint; restrict to last N days via q timestamp filter (we’ll approximate by sorting new)
+  const url = new URL(`https://www.reddit.com/r/${sub}/search.json`);
+  url.searchParams.set('q', q);
+  url.searchParams.set('restrict_sr', '1');
+  url.searchParams.set('sort', 'new');
+  url.searchParams.set('limit', SEARCH_LIMIT);
+  if(after) url.searchParams.set('after', after);
+
+  const resp = await fetch(url.toString(), {headers:{'Accept':'application/json'}});
+  if(!resp.ok) throw new Error(`Reddit ${sub} HTTP ${resp.status}`);
+  const data = await resp.json();
+  const posts = (data.data?.children || []).map(c => c.data).map(p => ({
+      id: p.name,
+      title: p.title || "",
+      selftext: titlesOnly ? "" : (p.selftext || ""),
+      created_utc: p.created_utc || 0
+  }));
+  return {posts, after: data.data?.after || null};
+}
+
+async function fetchAcross(sub, query, days, titlesOnly){
+  // Pull pages until MAX_PAGES or older than N days
+  const cutoff = Date.now()/1000 - days*86400;
+  let after=null, all=[];
+  for(let i=0;i<MAX_PAGES;i++){
+    const {posts, after:nextAfter} = await fetchRedditSub(sub, query, after, titlesOnly);
+    const fresh = posts.filter(p => p.created_utc >= cutoff);
+    all.push(...fresh);
+    if(!nextAfter || posts.length===0 || (posts[posts.length-1].created_utc < cutoff)) break;
+    after = nextAfter;
+    // be polite: tiny delay
+    await new Promise(r=>setTimeout(r, 350));
+  }
+  return all;
+}
+
+function aggregateByDateForAsset(posts, which){
+  // which: 'btc' or 'eth'
+  const byDate = {}; // { 'YYYY-MM-DD': {pos:n, neg:n} }
+  const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
+
+  for(const p of posts){
+    const text = `${p.title} ${p.selftext}`.trim();
+    if(!kw.test(text)) continue; // must mention asset
+    const score = sentimentScore(text);
+    const d = utcDateStr(p.created_utc);
+    if(!byDate[d]) byDate[d] = {pos:0, neg:0};
+    if(score > 0) byDate[d].pos++;
+    else if(score < 0) byDate[d].neg++;
+    // score==0 ignored
+  }
+  return byDate;
+}
+
+async function run(){
+  const days = Math.max(1, Math.min(30, Number(document.getElementById('days').value || 7)));
+  const titlesOnly = document.getElementById('titlesOnly').checked;
+  const includeCrypto = document.getElementById('includeCryptoSub').checked;
+
+  document.getElementById('srcExtra').textContent = includeCrypto ? ", /r/CryptoCurrency" : "";
+  setStatus(`Fetching last ${days} day(s)…`, true);
+
+  try{
+    // Build queries that bias toward each asset
+    const qBTC = "(bitcoin OR btc) timestamp:new";
+    const qETH = "(ethereum OR eth) timestamp:new";
+
+    // Collect posts from core subs
+    let posts = [];
+    for(const s of SUBS_CORE){
+      // For r/Bitcoin, use qBTC; for r/Ethereum, use qETH
+      const q = (s.toLowerCase()==='bitcoin') ? qBTC : qETH;
+      const got = await fetchAcross(s, q, days, titlesOnly);
+      posts.push(...got);
+    }
+    if(includeCrypto){
+      const gotMix = await fetchAcross(SUB_CRYPTOCURRENCY, "(bitcoin OR btc OR ethereum OR eth) timestamp:new", days, titlesOnly);
+      posts.push(...gotMix);
+    }
+
+    // Aggregate separately
+    const btcByDate = aggregateByDateForAsset(posts, 'btc');
+    const ethByDate = aggregateByDateForAsset(posts, 'eth');
+
+    // Fill tables
+    fillTable(document.querySelector('#btcTable tbody'), btcByDate);
+    fillTable(document.querySelector('#ethTable tbody'), ethByDate);
+
+    const totalBtcPos = Object.values(btcByDate).reduce((a,x)=>a+(x.pos||0),0);
+    const totalBtcNeg = Object.values(btcByDate).reduce((a,x)=>a+(x.neg||0),0);
+    const totalEthPos = Object.values(ethByDate).reduce((a,x)=>a+(x.pos||0),0);
+    const totalEthNeg = Object.values(ethByDate).reduce((a,x)=>a+(x.neg||0),0);
+
+    setStatus(`Done. BTC +${totalBtcPos}/-${totalBtcNeg} • ETH +${totalEthPos}/-${totalEthNeg}`);
+  }catch(err){
+    console.error(err);
+    setStatus(`Error: ${err.message}. Tip: reduce "Days" or enable "Titles only".`);
+  }
+}
+
+document.getElementById('runBtn').addEventListener('click', run);
+// auto-run once
+run();
+</script>
+</body>
+</html>
