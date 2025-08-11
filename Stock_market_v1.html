@@ -1,8 +1,8 @@
 <!-- Single-file HTML that runs on GitHub Pages and shows results directly in the app.
- - Live forums (Reddit) are fetched client-side (CORS-friendly) and rendered on load.
- - Optional: if you host a JSON at data/top5.json (e.g., via GitHub Action) or set a Cloudflare Worker endpoint in localStorage,
+ - Forums (Reddit) are fetched client-side (CORS-friendly) and rendered on load.
+ - Optional: If you host a JSON at data/top5.json (e.g., via GitHub Action) or set a Cloudflare Worker endpoint,
    the page will also show/override "Official" results.
- - To set a Worker endpoint in the browser console: localStorage.setItem('workerEndpoint','https://<your>.workers.dev')
+ - You can now set the Worker endpoint from the UI (persisted in localStorage).
 -->
 
 <!DOCTYPE html>
@@ -30,12 +30,31 @@
     .error{color:#ffb4b4}
     .spinner{display:inline-block; width:1em; height:1em; border:2px solid rgba(255,255,255,.2); border-top-color:#fff; border-radius:50%; animation:spin 1s linear infinite; vertical-align:-2px}
     @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* mini settings */
+    .settings{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px}
+    .settings input{background:#0c0e14; color:var(--text); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:8px 10px; min-width:320px}
+    .btn{background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); color:var(--text); padding:8px 12px; border-radius:10px; cursor:pointer}
+    .btn:disabled{opacity:.5; cursor:not-allowed}
+    .ok{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="title">Most Discussed & Most Linked — Stockholm/Nasdaq <span id="liveBadge" class="badgelive" style="display:none">LIVE</span></div>
     <div class="muted" id="stamp"><span class="spinner"></span> Loading…</div>
+
+    <div class="card" style="margin-top:12px">
+      <h3>Settings</h3>
+      <div class="muted">Optional Cloudflare Worker endpoint for “Official” live scans. You can also commit a static fallback to <code>data/top5.json</code>.</div>
+      <div class="settings">
+        <input id="endpoint" placeholder="https://your.workers.dev" />
+        <button class="btn" id="saveBtn">Save</button>
+        <button class="btn" id="testBtn">Test</button>
+        <button class="btn" id="clearBtn">Clear</button>
+        <span id="epStatus" class="muted"></span>
+      </div>
+    </div>
 
     <div class="row">
       <div class="card">
@@ -44,12 +63,12 @@
           <div>
             <h4>Official sources</h4>
             <table id="tbl-stock-official"><thead><tr><th>#</th><th>Ticker</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
-            <div class="muted" id="officialStockMsg"></div>
+            <div class="muted" id="officialStockMsg"><span class="spinner"></span> Waiting…</div>
           </div>
           <div>
             <h4>Forums (live)</h4>
             <table id="tbl-stock-forums"><thead><tr><th>#</th><th>Ticker</th><th>Mentions</th></tr></thead><tbody></tbody></table>
-            <div class="muted" id="forumStockMsg"></div>
+            <div class="muted" id="forumStockMsg"><span class="spinner"></span> Waiting…</div>
           </div>
         </div>
       </div>
@@ -59,12 +78,12 @@
           <div>
             <h4>Official sources</h4>
             <table id="tbl-fund-official"><thead><tr><th>#</th><th>Fund</th><th>Mentions/Links</th></tr></thead><tbody></tbody></table>
-            <div class="muted" id="officialFundMsg"></div>
+            <div class="muted" id="officialFundMsg"><span class="spinner"></span> Waiting…</div>
           </div>
           <div>
             <h4>Forums (live)</h4>
             <table id="tbl-fund-forums"><thead><tr><th>#</th><th>Fund</th><th>Mentions</th></tr></thead><tbody></tbody></table>
-            <div class="muted" id="forumFundMsg"></div>
+            <div class="muted" id="forumFundMsg"><span class="spinner"></span> Waiting…</div>
           </div>
         </div>
       </div>
@@ -73,15 +92,55 @@
     <div class="card" style="margin-top:16px">
       <h3>Sources</h3>
       <div id="sources"></div>
-      <div class="muted" style="margin-top:8px">Tip: set a Cloudflare Worker endpoint via <code>localStorage.setItem('workerEndpoint','https://...workers.dev')</code> to fetch Official sources live. Without it, Official falls back to optional <code>data/top5.json</code> if present.</div>
+      <div class="muted" style="margin-top:8px">Tip: set a Cloudflare Worker endpoint above to fetch Official sources live. Without it, Official falls back to optional <code>data/top5.json</code> if present.</div>
     </div>
 
     <div class="footer">© Lynoit 2025</div>
   </div>
 
   <script>
-    // ===== Config =====
+    // ===== Config / Storage =====
+    const dom = id => document.getElementById(id);
     const WORKER_ENDPOINT = localStorage.getItem('workerEndpoint') || '';
+    dom('endpoint').value = WORKER_ENDPOINT || '';
+
+    dom('saveBtn').addEventListener('click', () => {
+      const v = dom('endpoint').value.trim();
+      if (v) {
+        localStorage.setItem('workerEndpoint', v);
+        setStatus('epStatus', 'Saved. Reloading…', 'ok');
+        location.reload();
+      } else {
+        setStatus('epStatus', 'Enter a URL first.', 'warn');
+      }
+    });
+    dom('clearBtn').addEventListener('click', () => {
+      localStorage.removeItem('workerEndpoint');
+      dom('endpoint').value = '';
+      setStatus('epStatus', 'Cleared. Reloading…', 'ok');
+      location.reload();
+    });
+    dom('testBtn').addEventListener('click', async () => {
+      const url = (dom('endpoint').value || '').trim();
+      if (!url) { setStatus('epStatus','Enter a URL first.','warn'); return; }
+      setStatus('epStatus','Testing…');
+      try{
+        const ac = new AbortController(); setTimeout(()=>ac.abort(), 8000);
+        const r = await fetch(url.replace(/\/+$/,'') + '/scan', {signal: ac.signal, cache:'no-cache'});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        setStatus('epStatus','OK — received data.','ok');
+        console.debug('Worker sample:', j);
+      } catch(e){
+        setStatus('epStatus','Failed: ' + e.message, 'bad');
+      }
+    });
+
+    function setStatus(id, msg, kind){
+      const el = dom(id);
+      el.textContent = msg;
+      el.className = 'muted ' + (kind || '');
+    }
 
     // ===== Dictionaries (extend as needed) =====
     const TICKERS = [
@@ -93,18 +152,29 @@
 
     // ===== Helpers =====
     function escapeRegex(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-    function countMentions(text, list){
+
+    // Matches with "custom word boundaries": we consider A–Z and 0–9 as "word chars".
+    // This avoids counting "INVE B" inside longer tokens and handles spaces/dashes in names.
+    function buildSmartRegex(keyUpper){
+      const core = escapeRegex(keyUpper);
+      return new RegExp(`(^|[^A-Z0-9])${core}($|[^A-Z0-9])`, 'g');
+    }
+
+    function countMentionsSmart(text, list){
       const counts = new Map();
       if(!text) return counts;
       const hay = text.toUpperCase();
       for(const key of list){
-        const re = new RegExp(escapeRegex(key.toUpperCase()), 'g');
-        const n = (hay.match(re)||[]).length;
+        const re = buildSmartRegex(key.toUpperCase());
+        let n = 0, m;
+        while((m = re.exec(hay)) !== null){ n++; }
         if(n) counts.set(key, (counts.get(key)||0) + n);
       }
       return counts;
     }
+
     function topN(map, n=5){ return [...map.entries()].sort((a,b)=>b[1]-a[1]).slice(0,n); }
+
     function fillTable(id, rows){
       const tbody = document.querySelector(`#${id} tbody`);
       tbody.innerHTML = '';
@@ -114,60 +184,99 @@
         tbody.appendChild(tr);
       });
     }
-    function setText(id, text){ document.getElementById(id).textContent = text; }
+
+    function setText(id, text){ dom(id).textContent = text; }
 
     // ===== Forums (live in-browser) =====
     async function fetchReddit(sub){
       const url = `https://www.reddit.com/r/${sub}/hot.json?limit=75&raw_json=1`;
-      const r = await fetch(url, {cache:'no-cache'});
-      if(!r.ok) throw new Error(`${sub} ${r.status}`);
-      const j = await r.json();
-      const posts = (j.data?.children||[]).map(c=>c.data||{});
-      return posts.map(p => [p.title, p.selftext, p.url_overridden_by_dest, p.permalink].filter(Boolean).join(' '));
+      const ac = new AbortController();
+      const timeout = setTimeout(()=>ac.abort(), 9000);
+      try{
+        const r = await fetch(url, {cache:'no-cache', signal: ac.signal});
+        if(!r.ok) throw new Error(`${sub} HTTP ${r.status}`);
+        const j = await r.json();
+        const posts = (j.data?.children||[]).map(c=>c.data||{});
+        return posts.map(p => [p.title, p.selftext, p.url_overridden_by_dest, p.permalink].filter(Boolean).join(' '));
+      } finally {
+        clearTimeout(timeout);
+      }
     }
+
     async function runForumsScan(){
-      setText('stamp','Scanning forums…');
+      setText('forumStockMsg','Scanning forums…');
+      setText('forumFundMsg','');
       let combined = '';
       const subs = ['Aktier','Aktiemarknaden','PrivatEkonomi'];
       let okCount = 0;
       for(const s of subs){
-        try{ const posts = await fetchReddit(s); combined += ' ' + posts.join(' '); okCount++; console.log(`Fetched ${posts.length} from r/${s}`);} catch(e){ console.warn('Reddit fail', s, e); }
+        try{
+          const posts = await fetchReddit(s);
+          combined += ' ' + posts.join(' ');
+          okCount++;
+          console.log(`Fetched ${posts.length} from r/${s}`);
+        } catch(e){
+          console.warn('Reddit fail', s, e);
+        }
       }
       if(!combined){
         setText('forumStockMsg','No forum data (Reddit blocked or rate limited).');
         setText('forumFundMsg','');
-      } else {
-        const stockCounts = countMentions(combined, TICKERS);
-        const fundCounts  = countMentions(combined, FUNDS);
-        fillTable('tbl-stock-forums', topN(stockCounts));
-        fillTable('tbl-fund-forums',  topN(fundCounts));
-        setText('forumStockMsg', `Loaded from ${okCount}/${subs.length} subreddits.`);
-        setText('forumFundMsg', '');
+        // Clear tables to avoid "Waiting…" forever
+        fillTable('tbl-stock-forums', []);
+        fillTable('tbl-fund-forums',  []);
+        return;
       }
+      const stockCounts = countMentionsSmart(combined, TICKERS);
+      const fundCounts  = countMentionsSmart(combined, FUNDS);
+      fillTable('tbl-stock-forums', topN(stockCounts));
+      fillTable('tbl-fund-forums',  topN(fundCounts));
+      setText('forumStockMsg', `Loaded from ${okCount}/${subs.length} subreddits.`);
+      setText('forumFundMsg', '');
     }
 
     // ===== Official (live via Worker OR fallback JSON) =====
     async function runOfficial(){
       // Try Worker endpoint first
-      if (WORKER_ENDPOINT){
+      const ep = (localStorage.getItem('workerEndpoint') || '').replace(/\/+$/,'');
+      if (ep){
         try{
-          const r = await fetch(WORKER_ENDPOINT + '/scan', {cache:'no-cache'});
+          const ac = new AbortController(); setTimeout(()=>ac.abort(), 9000);
+          const r = await fetch(ep + '/scan', {cache:'no-cache', signal: ac.signal});
           if(r.ok){
             const data = await r.json();
-            document.getElementById('liveBadge').style.display = 'inline-block';
+            dom('liveBadge').style.display = 'inline-block';
             renderFromPayload(data);
+            setText('officialStockMsg','');
+            setText('officialFundMsg','');
             return; // done
+          } else {
+            setText('officialStockMsg', `Worker error: HTTP ${r.status}`);
+            setText('officialFundMsg', '');
           }
-        }catch(e){ console.warn('Worker fetch failed', e); }
+        }catch(e){
+          console.warn('Worker fetch failed', e);
+          setText('officialStockMsg', `Worker failed: ${e.message}`);
+          setText('officialFundMsg', '');
+        }
       }
       // Fallback: optional cached JSON from /data/top5.json
       try{
         const r2 = await fetch('data/top5.json', {cache:'no-cache'});
-        if(r2.ok){ const data = await r2.json(); renderFromPayload(data); return; }
+        if(r2.ok){
+          const data = await r2.json();
+          renderFromPayload(data);
+          setText('officialStockMsg','(from data/top5.json)');
+          setText('officialFundMsg','');
+          return;
+        }
       }catch(e){ /* ignore */ }
       // No official data available
       setText('officialStockMsg','No official data (set Worker endpoint or provide data/top5.json).');
       setText('officialFundMsg','');
+      // Clear tables to avoid "Waiting…" stuck
+      fillTable('tbl-stock-official', []);
+      fillTable('tbl-fund-official',  []);
     }
 
     function renderFromPayload(data){
@@ -179,15 +288,24 @@
       if (data.top5?.stocks?.forums) fillTable('tbl-stock-forums', data.top5.stocks.forums);
       if (data.top5?.funds?.forums)  fillTable('tbl-fund-forums',  data.top5.funds.forums);
       // Sources list
-      const el = document.getElementById('sources');
-      const mk = arr => (arr||[]).map(o=> o.status==='ok' ? `<span class="pill">${o.source}</span>` : `<span class="pill">Error</span>`).join(' ');
+      const el = dom('sources');
+      const mk = arr => (arr||[]).map(o=> {
+        const label = o.status==='ok' ? o.source : (o.source ? `${o.source} (error)` : 'Error');
+        return `<span class="pill">${label}</span>`;
+      }).join(' ');
       el.innerHTML = `<h4>Official</h4><div>${mk(data.sources?.official)}</div><h4>Forums</h4><div>${mk(data.sources?.forums)}</div>`;
     }
 
     // ===== Boot =====
     (async function init(){
-      try{ await Promise.all([runForumsScan(), runOfficial()]); }
-      finally{ if(document.getElementById('stamp').textContent.startsWith('Loading')) setText('stamp','Ready'); }
+      try{
+        await Promise.allSettled([runForumsScan(), runOfficial()]);
+      } finally {
+        // Only change the stamp if it wasn't already set by renderFromPayload
+        if (dom('stamp').textContent.includes('Loading…')) {
+          setText('stamp','Ready');
+        }
+      }
     })();
   </script>
 </body>
