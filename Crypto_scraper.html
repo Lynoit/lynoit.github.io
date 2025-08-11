@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BTC & ETH Forum Sentiment (via CORS Worker)</title>
+<title>BTC & ETH Sentiment (Reddit + RSS via CORS Worker)</title>
 <style>
   :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
   *{box-sizing:border-box}
@@ -38,14 +38,14 @@
 </head>
 <body>
 <header>
-  <h1>Bitcoin & Ethereum — Forum Sentiment (last N days)</h1>
-  <div class="muted small">Fetches Reddit /new via your Cloudflare Worker (CORS-safe).</div>
+  <h1>Bitcoin & Ethereum — Forum + News Sentiment (last N days)</h1>
+  <div class="muted small">Reddit + RSS (CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News) via your Cloudflare Worker.</div>
 </header>
 
 <main>
   <div class="controls">
     <label>Worker URL:
-      <input id="workerUrl" type="text" placeholder="https://your-name.workers.dev" />
+      <input id="workerUrl" type="text" placeholder="https://your-name.workers.dev"/>
     </label>
     <button id="saveWorker">Save</button>
     <span class="muted small">Saved to localStorage</span>
@@ -56,14 +56,16 @@
       <input id="days" type="number" min="1" max="30" value="7" style="width:80px;margin-left:6px;background:transparent;border:none;outline:none;color:var(--ink);">
     </label>
     <label><input id="includeCryptoSub" type="checkbox" checked> Include r/CryptoCurrency</label>
+    <label><input id="includeNews" type="checkbox" checked> Include News RSS</label>
     <label><input id="titlesOnly" type="checkbox"> Titles only (faster)</label>
     <button id="runBtn">Run scan</button>
     <span id="status" class="status"></span>
   </div>
 
   <div class="row" style="margin-bottom:8px;">
-    <span class="tag">Sources: reddit.com/r/Bitcoin, /r/Ethereum <span id="srcExtra"></span></span>
-    <span class="tag">Naive lexicon sentiment</span>
+    <span class="tag">Reddit: r/Bitcoin, r/Ethereum <span id="srcExtra"></span></span>
+    <span class="tag" id="newsTag">RSS: CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News</span>
+    <span class="tag">Naive sentiment w/ keyword filter</span>
     <span class="tag">Aggregation: per UTC date</span>
   </div>
 
@@ -85,20 +87,34 @@
   </div>
 
   <div class="foot">
-    If you get empty results, try more days or tick “Include r/CryptoCurrency”.
+    Tip: If counts seem low, increase “Days”, enable both Reddit and News, and untick “Titles only” to include descriptions/self-text.
   </div>
 </main>
 
 <script>
-/* ==================== Config & helpers ==================== */
+/* ==================== Config ==================== */
 const SUBS_CORE = ["Bitcoin","Ethereum"];
 const SUB_CRYPTOCURRENCY = "CryptoCurrency";
-const PAGE_LIMIT = 100;    // items per call
-const MAX_PAGES  = 8;      // up to ~800 posts per subreddit
+const REDDIT_PAGE_LIMIT = 100;
+const REDDIT_MAX_PAGES = 8;
+
+const RSS_SOURCES = [
+  // CoinDesk
+  "https://www.coindesk.com/arc/outboundfeeds/rss/",
+  // CoinTelegraph
+  "https://cointelegraph.com/rss",
+  // Bitcoin Magazine
+  "https://bitcoinmagazine.com/.rss",
+  // Google News RSS searches
+  "https://news.google.com/rss/search?q=bitcoin",
+  "https://news.google.com/rss/search?q=ethereum"
+];
+
 const KEYWORDS = {
   btc: /(bitcoin|btc|\$btc|\bXBT\b)/i,
   eth: /(ethereum|eth|\$eth)/i
 };
+
 const POSITIVE_WORDS = [
   "bull","bullish","buy","accumulate","moon","pump","surge","rally","breakout","support",
   "undervalued","strong","uptrend","green","optimistic","positive","booming","soaring","rocket","rebound"
@@ -113,21 +129,13 @@ function setWorker(url){
   if(!/^https?:\/\//i.test(url)) throw new Error("Worker URL must start with http(s)://");
   localStorage.setItem("workerEndpoint", url.replace(/\/+$/,""));
 }
-function sentimentScore(text){
-  if(!text) return 0;
-  const t = text.toLowerCase();
-  let s = 0;
-  for(const w of POSITIVE_WORDS){ if(t.includes(w)) s++; }
-  for(const w of NEGATIVE_WORDS){ if(t.includes(w)) s--; }
-  return s;
+function setStatus(msg, spinning=false){
+  const el = document.getElementById('status');
+  el.innerHTML = spinning ? `<span class="spinner"></span> ${msg}` : msg;
 }
 function utcDateStr(tsSeconds){
   const d = new Date(tsSeconds*1000);
   return d.toISOString().slice(0,10);
-}
-function setStatus(msg, spinning=false){
-  const el = document.getElementById('status');
-  el.innerHTML = spinning ? `<span class="spinner"></span> ${msg}` : msg;
 }
 function row(html){ const tr=document.createElement('tr'); tr.innerHTML=html; return tr; }
 function fillTable(tbody, byDate){
@@ -139,40 +147,47 @@ function fillTable(tbody, byDate){
   }
 }
 
+/* ==================== Sentiment ==================== */
+function sentimentScore(text){
+  if(!text) return 0;
+  const t = text.toLowerCase();
+  let s = 0;
+  for(const w of POSITIVE_WORDS){ if(t.includes(w)) s++; }
+  for(const w of NEGATIVE_WORDS){ if(t.includes(w)) s--; }
+  return s;
+}
+
 /* ==================== Fetch via Worker ==================== */
-async function fetchViaWorker(targetUrl){
+async function fetchJSONViaWorker(targetUrl){
   const worker = getWorker();
   if(!worker) throw new Error("Set your Worker URL first.");
   const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
-
-  const tries = 2;
-  let lastErr;
-  for(let i=0;i<tries;i++){
-    try{
-      const resp = await fetch(proxied, { headers:{ "Accept":"application/json" }});
-      if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      return await resp.json();
-    }catch(e){
-      lastErr = e;
-      await new Promise(r=>setTimeout(r, 350));
-    }
-  }
-  throw lastErr || new Error("Fetch failed");
+  const resp = await fetch(proxied, { headers:{ "Accept":"application/json" }});
+  if(!resp.ok) throw new Error(`HTTP ${resp.status} for ${targetUrl}`);
+  return await resp.json();
+}
+async function fetchTextViaWorker(targetUrl){
+  const worker = getWorker();
+  if(!worker) throw new Error("Set your Worker URL first.");
+  const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
+  const resp = await fetch(proxied);
+  if(!resp.ok) throw new Error(`HTTP ${resp.status} for ${targetUrl}`);
+  return await resp.text();
 }
 
-/* ==================== Pull /new.json (not search) ==================== */
+/* ==================== Reddit (/new.json) ==================== */
 async function fetchSubNew(sub, after=null){
   const url = new URL(`https://www.reddit.com/r/${sub}/new.json`);
-  url.searchParams.set('limit', PAGE_LIMIT);
+  url.searchParams.set('limit', REDDIT_PAGE_LIMIT);
   if(after) url.searchParams.set('after', after);
-  return await fetchViaWorker(url.toString());
+  return await fetchJSONViaWorker(url.toString());
 }
 
-async function fetchAcross(sub, days, titlesOnly){
+async function fetchRedditAcross(sub, days, titlesOnly){
   const cutoff = Date.now()/1000 - days*86400;
   let after = null, all = [], pages = 0;
 
-  while(pages < MAX_PAGES){
+  while(pages < REDDIT_MAX_PAGES){
     const data = await fetchSubNew(sub, after);
     const children = data?.data?.children || [];
     if(children.length === 0) break;
@@ -188,21 +203,63 @@ async function fetchAcross(sub, days, titlesOnly){
     after = data?.data?.after || null;
     pages++;
 
-    // stop if the last item on this page is already older than cutoff
     const lastTs = posts[posts.length-1]?.created_utc || 0;
     if(!after || lastTs < cutoff) break;
 
-    await new Promise(r=>setTimeout(r, 250)); // be polite
+    await new Promise(r=>setTimeout(r, 220));
   }
   return all;
 }
 
+/* ==================== RSS (no API key) ==================== */
+function parseRssItems(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+  // RSS 2.0: <item>
+  let items = Array.from(doc.querySelectorAll("item"));
+  if(items.length === 0){
+    // Atom: <entry>
+    items = Array.from(doc.querySelectorAll("entry"));
+  }
+  return items.map(el => {
+    const title = (el.querySelector("title")?.textContent || "").trim();
+    const desc = (el.querySelector("description, summary, content")?.textContent || "").trim();
+    const pub = (el.querySelector("pubDate, updated, published")?.textContent || "").trim();
+    const ts = pub ? Math.floor(Date.parse(pub)/1000) : Math.floor(Date.now()/1000);
+    return { title, desc, created_utc: isFinite(ts) ? ts : Math.floor(Date.now()/1000) };
+  });
+}
+
+async function fetchAllRss(days){
+  const cutoff = Date.now()/1000 - days*86400;
+  const out = [];
+  for(const url of RSS_SOURCES){
+    try{
+      const text = await fetchTextViaWorker(url);
+      const items = parseRssItems(text);
+      for(const it of items){
+        if(it.created_utc >= cutoff){
+          out.push({
+            title: it.title,
+            selftext: it.desc,
+            created_utc: it.created_utc
+          });
+        }
+      }
+      await new Promise(r=>setTimeout(r, 200));
+    }catch(e){
+      console.warn("RSS failed", url, e);
+    }
+  }
+  return out;
+}
+
+/* ==================== Aggregation ==================== */
 function aggregateByDateForAsset(posts, which){
   const byDate = {};
   const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
 
   for(const p of posts){
-    const text = `${p.title} ${p.selftext}`.trim();
+    const text = `${p.title} ${p.selftext || ""}`.trim();
     if(!kw.test(text)) continue;
     const score = sentimentScore(text);
     const d = utcDateStr(p.created_utc);
@@ -218,38 +275,47 @@ async function run(){
   const days = Math.max(1, Math.min(30, Number(document.getElementById('days').value || 7)));
   const titlesOnly = document.getElementById('titlesOnly').checked;
   const includeCrypto = document.getElementById('includeCryptoSub').checked;
+  const includeNews = document.getElementById('includeNews').checked;
 
-  document.getElementById('srcExtra').textContent = includeCrypto ? ", /r/CryptoCurrency" : "";
+  document.getElementById('srcExtra').textContent = includeCrypto ? ", r/CryptoCurrency" : "";
+  document.getElementById('newsTag').style.display = includeNews ? "inline-block" : "none";
   setStatus(`Fetching last ${days} day(s)…`, true);
 
   try{
     let posts = [];
+
+    // Reddit
     for(const s of SUBS_CORE){
-      const got = await fetchAcross(s, days, titlesOnly);
+      const got = await fetchRedditAcross(s, days, titlesOnly);
       posts.push(...got);
     }
     if(includeCrypto){
-      const gotMix = await fetchAcross(SUB_CRYPTOCURRENCY, days, titlesOnly);
+      const gotMix = await fetchRedditAcross(SUB_CRYPTOCURRENCY, days, titlesOnly);
       posts.push(...gotMix);
     }
 
-    // Debug counts in status
-    const totalPulled = posts.length;
+    // RSS
+    if(includeNews){
+      const rssItems = await fetchAllRss(days);
+      posts.push(...rssItems);
+    }
+
     const btcByDate = aggregateByDateForAsset(posts, 'btc');
     const ethByDate = aggregateByDateForAsset(posts, 'eth');
 
     fillTable(document.querySelector('#btcTable tbody'), btcByDate);
     fillTable(document.querySelector('#ethTable tbody'), ethByDate);
 
+    const totalPulled = posts.length;
     const totalBtcPos = Object.values(btcByDate).reduce((a,x)=>a+(x.pos||0),0);
     const totalBtcNeg = Object.values(btcByDate).reduce((a,x)=>a+(x.neg||0),0);
     const totalEthPos = Object.values(ethByDate).reduce((a,x)=>a+(x.pos||0),0);
     const totalEthNeg = Object.values(ethByDate).reduce((a,x)=>a+(x.neg||0),0);
 
-    setStatus(`Pulled ${totalPulled} posts. BTC +${totalBtcPos}/-${totalBtcNeg} • ETH +${totalEthPos}/-${totalEthNeg}`);
+    setStatus(`Pulled ${totalPulled} items. BTC +${totalBtcPos}/-${totalBtcNeg} • ETH +${totalEthPos}/-${totalEthNeg}`);
   }catch(err){
     console.error(err);
-    setStatus(`Error: ${err.message}. Check Worker URL, then try more days or Titles only.`);
+    setStatus(`Error: ${err.message}. Check Worker URL and try again.`);
   }
 }
 
@@ -267,7 +333,7 @@ document.getElementById('saveWorker').addEventListener('click', ()=>{
   }
 });
 
-// autorun if Worker is already saved
+// autorun if Worker already saved
 if(getWorker()){ run(); }
 </script>
 </body>
