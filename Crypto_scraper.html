@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BTC & ETH Sentiment (Reddit + RSS via CORS Worker)</title>
+<title>BTC & ETH Sentiment + Price Change (Reddit + RSS via CORS Worker)</title>
 <style>
   :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
   *{box-sizing:border-box}
@@ -18,7 +18,8 @@
   button{cursor:pointer}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px}
-  .card h2{margin:4px 0 10px;font-size:16px}
+  .card h2{margin:4px 0 10px;font-size:16px;display:flex;gap:10px;align-items:baseline}
+  .priceTag{font-size:12px;color:var(--muted)}
   table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
   th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left}
   th{color:var(--muted);font-weight:600}
@@ -38,8 +39,8 @@
 </head>
 <body>
 <header>
-  <h1>Bitcoin & Ethereum — Forum + News Sentiment (last N days)</h1>
-  <div class="muted small">Reddit + RSS (CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News) via your Cloudflare Worker.</div>
+  <h1>Bitcoin & Ethereum — Sentiment + Price Change (last N days)</h1>
+  <div class="muted small">Reddit + RSS (CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News) via your Cloudflare Worker. Prices via CoinGecko.</div>
 </header>
 
 <main>
@@ -71,16 +72,31 @@
 
   <div class="grid">
     <section class="card">
-      <h2>Bitcoin</h2>
+      <h2>Bitcoin <span id="btcPrice" class="priceTag"></span></h2>
       <table id="btcTable">
-        <thead><tr><th>Date (UTC)</th><th class="good">Positive</th><th class="bad">Negative</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Date (UTC)</th>
+            <th class="good">Positive</th>
+            <th class="bad">Negative</th>
+            <th>% Change vs prev day</th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </section>
+
     <section class="card">
-      <h2>Ethereum</h2>
+      <h2>Ethereum <span id="ethPrice" class="priceTag"></span></h2>
       <table id="ethTable">
-        <thead><tr><th>Date (UTC)</th><th class="good">Positive</th><th class="bad">Negative</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Date (UTC)</th>
+            <th class="good">Positive</th>
+            <th class="bad">Negative</th>
+            <th>% Change vs prev day</th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </section>
@@ -99,13 +115,9 @@ const REDDIT_PAGE_LIMIT = 100;
 const REDDIT_MAX_PAGES = 8;
 
 const RSS_SOURCES = [
-  // CoinDesk
   "https://www.coindesk.com/arc/outboundfeeds/rss/",
-  // CoinTelegraph
   "https://cointelegraph.com/rss",
-  // Bitcoin Magazine
   "https://bitcoinmagazine.com/.rss",
-  // Google News RSS searches
   "https://news.google.com/rss/search?q=bitcoin",
   "https://news.google.com/rss/search?q=ethereum"
 ];
@@ -124,6 +136,7 @@ const NEGATIVE_WORDS = [
   "downtrend","red","fear","negative","panic","recession","fraud","scam","rug","ban"
 ];
 
+/* ==================== Helpers ==================== */
 function getWorker(){ return (localStorage.getItem("workerEndpoint") || "").trim(); }
 function setWorker(url){
   if(!/^https?:\/\//i.test(url)) throw new Error("Worker URL must start with http(s)://");
@@ -138,14 +151,6 @@ function utcDateStr(tsSeconds){
   return d.toISOString().slice(0,10);
 }
 function row(html){ const tr=document.createElement('tr'); tr.innerHTML=html; return tr; }
-function fillTable(tbody, byDate){
-  tbody.innerHTML = "";
-  const dates = Object.keys(byDate).sort().reverse();
-  for(const d of dates){
-    const {pos, neg} = byDate[d];
-    tbody.appendChild(row(`<td>${d}</td><td class="num good">${pos||0}</td><td class="num bad">${neg||0}</td>`));
-  }
-}
 
 /* ==================== Sentiment ==================== */
 function sentimentScore(text){
@@ -214,12 +219,8 @@ async function fetchRedditAcross(sub, days, titlesOnly){
 /* ==================== RSS (no API key) ==================== */
 function parseRssItems(xmlText){
   const doc = new DOMParser().parseFromString(xmlText, "text/xml");
-  // RSS 2.0: <item>
   let items = Array.from(doc.querySelectorAll("item"));
-  if(items.length === 0){
-    // Atom: <entry>
-    items = Array.from(doc.querySelectorAll("entry"));
-  }
+  if(items.length === 0){ items = Array.from(doc.querySelectorAll("entry")); }
   return items.map(el => {
     const title = (el.querySelector("title")?.textContent || "").trim();
     const desc = (el.querySelector("description, summary, content")?.textContent || "").trim();
@@ -238,11 +239,7 @@ async function fetchAllRss(days){
       const items = parseRssItems(text);
       for(const it of items){
         if(it.created_utc >= cutoff){
-          out.push({
-            title: it.title,
-            selftext: it.desc,
-            created_utc: it.created_utc
-          });
+          out.push({ title: it.title, selftext: it.desc, created_utc: it.created_utc });
         }
       }
       await new Promise(r=>setTimeout(r, 200));
@@ -253,7 +250,35 @@ async function fetchAllRss(days){
   return out;
 }
 
-/* ==================== Aggregation ==================== */
+/* ==================== Prices (CoinGecko) ==================== */
+async function fetchCurrentPrices(){
+  try{
+    const url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd";
+    const data = await fetchJSONViaWorker(url);
+    const btc = data?.bitcoin?.usd ?? null;
+    const eth = data?.ethereum?.usd ?? null;
+    if(btc!=null) document.getElementById("btcPrice").textContent = `$${Number(btc).toLocaleString()}`;
+    if(eth!=null) document.getElementById("ethPrice").textContent = `$${Number(eth).toLocaleString()}`;
+  }catch(e){
+    console.warn("Current price fetch failed", e);
+  }
+}
+
+async function fetchHistoricPrices(symbol, days){
+  // Use daily interval; fetch a bit extra to ensure we have "previous day"
+  const url = `https://api.coingecko.com/api/v3/coins/${symbol}/market_chart?vs_currency=usd&days=${days+2}&interval=daily`;
+  const data = await fetchJSONViaWorker(url);
+  const out = {};
+  for(const [ts, price] of (data?.prices || [])){
+    // CoinGecko timestamps are in ms; UTC-normalize to YYYY-MM-DD
+    const d = new Date(ts);
+    const dateStr = d.toISOString().slice(0,10);
+    out[dateStr] = price;
+  }
+  return out; // { 'YYYY-MM-DD': price }
+}
+
+/* ==================== Aggregation & Table Fill ==================== */
 function aggregateByDateForAsset(posts, which){
   const byDate = {};
   const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
@@ -270,6 +295,32 @@ function aggregateByDateForAsset(posts, which){
   return byDate;
 }
 
+// NEW: includes prices map and shows % change vs previous day. Newest first.
+function fillTable(tbody, byDate, prices){
+  tbody.innerHTML = "";
+  const dates = Object.keys(byDate).sort().reverse(); // newest first
+
+  for(let i=0; i<dates.length; i++){
+    const d = dates[i];
+    const {pos, neg} = byDate[d];
+    let changeText = "-";
+
+    if (prices && prices[d] != null) {
+      // previous day is the next index (since we reversed to newest-first)
+      const prevDate = dates[i+1];
+      if (prevDate && prices[prevDate] != null && prices[prevDate] !== 0) {
+        const change = ((prices[d] - prices[prevDate]) / prices[prevDate]) * 100;
+        const color = change > 0 ? "var(--good)" : change < 0 ? "var(--bad)" : "var(--muted)";
+        changeText = `<span style="color:${color}">${change.toFixed(2)}%</span>`;
+      }
+    }
+
+    tbody.appendChild(row(
+      `<td>${d}</td><td class="num good">${pos||0}</td><td class="num bad">${neg||0}</td><td class="num">${changeText}</td>`
+    ));
+  }
+}
+
 /* ==================== UI wiring ==================== */
 async function run(){
   const days = Math.max(1, Math.min(30, Number(document.getElementById('days').value || 7)));
@@ -279,9 +330,12 @@ async function run(){
 
   document.getElementById('srcExtra').textContent = includeCrypto ? ", r/CryptoCurrency" : "";
   document.getElementById('newsTag').style.display = includeNews ? "inline-block" : "none";
-  setStatus(`Fetching last ${days} day(s)…`, true);
+  setStatus(`Fetching prices & content for last ${days} day(s)…`, true);
 
   try{
+    // Current prices (for header)
+    await fetchCurrentPrices();
+
     let posts = [];
 
     // Reddit
@@ -300,11 +354,17 @@ async function run(){
       posts.push(...rssItems);
     }
 
+    // Sentiment aggregates
     const btcByDate = aggregateByDateForAsset(posts, 'btc');
     const ethByDate = aggregateByDateForAsset(posts, 'eth');
 
-    fillTable(document.querySelector('#btcTable tbody'), btcByDate);
-    fillTable(document.querySelector('#ethTable tbody'), ethByDate);
+    // Historic prices for % change column
+    const btcPrices = await fetchHistoricPrices("bitcoin", days);
+    const ethPrices = await fetchHistoricPrices("ethereum", days);
+
+    // Fill tables (newest first + % change)
+    fillTable(document.querySelector('#btcTable tbody'), btcByDate, btcPrices);
+    fillTable(document.querySelector('#ethTable tbody'), ethByDate, ethPrices);
 
     const totalPulled = posts.length;
     const totalBtcPos = Object.values(btcByDate).reduce((a,x)=>a+(x.pos||0),0);
