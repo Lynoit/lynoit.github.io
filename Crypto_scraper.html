@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BTC & ETH Sentiment + Daily Price & Change (Reddit + RSS via CORS Worker)</title>
+<title>BTC & ETH Sentiment + Daily Price & Change</title>
 <style>
   :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
   *{box-sizing:border-box}
@@ -32,15 +32,12 @@
   .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:-3px}
   @keyframes spin{to{transform:rotate(360deg)}}
   .foot{margin-top:16px;font-size:12px;color:var(--muted)}
-  a{color:var(--accent);text-decoration:none}
-  a:hover{text-decoration:underline}
-  .small{font-size:12px}
 </style>
 </head>
 <body>
 <header>
   <h1>Bitcoin & Ethereum — Sentiment + Daily Price & Change (last N days)</h1>
-  <div class="muted small">Reddit + RSS (CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News) via your Cloudflare Worker. Prices via CoinGecko with Binance fallback.</div>
+  <div class="muted small">Reddit + RSS via your Cloudflare Worker. Prices via CoinGecko with Binance fallback. Auto-fallback to direct fetch if Worker blocks.</div>
 </header>
 
 <main>
@@ -105,7 +102,7 @@
   </div>
 
   <div class="foot">
-    Tip: If counts seem low, increase “Days”, enable both Reddit and News, and untick “Titles only” to include descriptions/self-text.
+    Tip: If prices still don’t appear, verify your Worker allowlist includes <code>api.coingecko.com</code> and <code>api.binance.com</code>, or just leave the Worker box empty and it will fetch prices directly.
   </div>
 </main>
 
@@ -171,22 +168,46 @@ function sentimentScore(text){
   return s;
 }
 
-/* ==================== Fetch via Worker ==================== */
-async function fetchJSONViaWorker(targetUrl){
+/* ==================== Fetch helpers (Worker → direct fallback) ==================== */
+async function fetchJSONSmart(targetUrl){
   const worker = getWorker();
-  if(!worker) throw new Error("Set your Worker URL first.");
-  const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
-  const resp = await fetch(proxied, { headers:{ "Accept":"application/json" }});
-  if(!resp.ok) throw new Error(`HTTP ${resp.status} for ${targetUrl}`);
-  return await resp.json();
+  const tryDirect = async ()=>{
+    const r = await fetch(targetUrl, { headers:{ "Accept":"application/json" } });
+    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    return await r.json();
+  };
+  if(worker){
+    try{
+      const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
+      const r = await fetch(proxied, { headers:{ "Accept":"application/json" } });
+      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      return await r.json();
+    }catch(e){
+      console.warn("Worker JSON fetch failed, trying direct:", e);
+      return await tryDirect();
+    }
+  }
+  return await tryDirect();
 }
-async function fetchTextViaWorker(targetUrl){
+async function fetchTextSmart(targetUrl){
   const worker = getWorker();
-  if(!worker) throw new Error("Set your Worker URL first.");
-  const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
-  const resp = await fetch(proxied);
-  if(!resp.ok) throw new Error(`HTTP ${resp.status} for ${targetUrl}`);
-  return await resp.text();
+  const tryDirect = async ()=>{
+    const r = await fetch(targetUrl);
+    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    return await r.text();
+  };
+  if(worker){
+    try{
+      const proxied = `${worker}/?url=${encodeURIComponent(targetUrl)}`;
+      const r = await fetch(proxied);
+      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      return await r.text();
+    }catch(e){
+      console.warn("Worker TEXT fetch failed, trying direct:", e);
+      return await tryDirect();
+    }
+  }
+  return await tryDirect();
 }
 
 /* ==================== Reddit (/new.json) ==================== */
@@ -194,13 +215,12 @@ async function fetchSubNew(sub, after=null){
   const url = new URL(`https://www.reddit.com/r/${sub}/new.json`);
   url.searchParams.set('limit', REDDIT_PAGE_LIMIT);
   if(after) url.searchParams.set('after', after);
-  return await fetchJSONViaWorker(url.toString());
+  return await fetchJSONSmart(url.toString());
 }
 
 async function fetchRedditAcross(sub, days, titlesOnly){
   const cutoff = Date.now()/1000 - days*86400;
   let after = null, all = [], pages = 0;
-
   while(pages < REDDIT_MAX_PAGES){
     const data = await fetchSubNew(sub, after);
     const children = data?.data?.children || [];
@@ -219,7 +239,6 @@ async function fetchRedditAcross(sub, days, titlesOnly){
 
     const lastTs = posts[posts.length-1]?.created_utc || 0;
     if(!after || lastTs < cutoff) break;
-
     await delay(220);
   }
   return all;
@@ -244,7 +263,7 @@ async function fetchAllRss(days){
   const out = [];
   for(const url of RSS_SOURCES){
     try{
-      const text = await fetchTextViaWorker(url);
+      const text = await fetchTextSmart(url);
       const items = parseRssItems(text);
       for(const it of items){
         if(it.created_utc >= cutoff){
@@ -259,13 +278,13 @@ async function fetchAllRss(days){
   return out;
 }
 
-/* ==================== Prices (CG first, Binance fallback) ==================== */
+/* ==================== Prices (CG → Binance; Worker → direct) ==================== */
 async function fetchCurrentPrices(){
   window.__currentPrices = window.__currentPrices || {};
-  // Try CoinGecko first
+  // Try CoinGecko
   try{
     const url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd";
-    const data = await fetchJSONViaWorker(url);
+    const data = await fetchJSONSmart(url);
     const btc = data?.bitcoin?.usd ?? null;
     const eth = data?.ethereum?.usd ?? null;
     if(btc!=null){ document.getElementById("btcPrice").textContent = fmtUSD(btc); window.__currentPrices.btc = Number(btc); }
@@ -274,11 +293,11 @@ async function fetchCurrentPrices(){
   }catch(e){
     console.warn("CoinGecko current price failed, will try Binance", e);
   }
-  // Fallback: Binance
+  // Binance fallback
   try{
     const url = new URL("https://api.binance.com/api/v3/ticker/price");
     url.searchParams.set("symbols", JSON.stringify(["BTCUSDT","ETHUSDT"]));
-    const data = await fetchJSONViaWorker(url.toString());
+    const data = await fetchJSONSmart(url.toString());
     const map = {};
     (Array.isArray(data)?data:[data]).forEach(d => map[d.symbol]=Number(d.price));
     if(map.BTCUSDT!=null){ document.getElementById("btcPrice").textContent = fmtUSD(map.BTCUSDT); window.__currentPrices.btc = map.BTCUSDT; }
@@ -289,10 +308,10 @@ async function fetchCurrentPrices(){
 }
 
 async function fetchHistoricPrices(symbol, days){
-  // 1) Try CoinGecko
+  // CoinGecko
   try{
     const url = `https://api.coingecko.com/api/v3/coins/${symbol}/market_chart?vs_currency=usd&days=${days+2}&interval=daily`;
-    const data = await fetchJSONViaWorker(url);
+    const data = await fetchJSONSmart(url);
     const out = {};
     for(const [ts, price] of (data?.prices || [])){
       const d = new Date(ts);
@@ -303,17 +322,17 @@ async function fetchHistoricPrices(symbol, days){
   }catch(e){
     console.warn(`CoinGecko historic (${symbol}) failed, will try Binance`, e);
   }
-  // 2) Fallback: Binance klines
+  // Binance fallback (klines)
   try{
     const binanceSymbol = MAP_CG_TO_BINANCE[symbol];
     const url = new URL("https://api.binance.com/api/v3/klines");
     url.searchParams.set("symbol", binanceSymbol);
     url.searchParams.set("interval", "1d");
     url.searchParams.set("limit", String(days+2));
-    const data = await fetchJSONViaWorker(url.toString());
+    const data = await fetchJSONSmart(url.toString());
     const out = {};
     for(const k of data){
-      const openTime = k[0];   // ms
+      const openTime = k[0];
       const closePrice = Number(k[4]);
       const dateStr = new Date(openTime).toISOString().slice(0,10);
       out[dateStr] = closePrice;
@@ -325,7 +344,7 @@ async function fetchHistoricPrices(symbol, days){
   }
 }
 
-/* ==== Price helpers: inject today's price and find nearest previous date ==== */
+/* Inject today's live quote if daily candle missing; find nearest previous priced date */
 function injectTodayPrice(prices, symbolKey){
   const todayStr = new Date().toISOString().slice(0,10);
   const cur = window.__currentPrices?.[symbolKey];
@@ -356,7 +375,6 @@ function aggregateByDateForAsset(posts, which){
   return byDate;
 }
 
-// NEW: prints Price (USD) column and % change vs nearest previous priced day. Newest first.
 function fillTable(tbody, byDate, prices){
   tbody.innerHTML = "";
   const dates = Object.keys(byDate).sort().reverse(); // newest first
@@ -364,11 +382,9 @@ function fillTable(tbody, byDate, prices){
     const d = dates[i];
     const {pos, neg} = byDate[d];
 
-    // Price column
     const priceVal = prices ? prices[d] : null;
     const priceText = fmtUSD(priceVal);
 
-    // % change column
     let changeText = "-";
     if (prices && priceVal != null) {
       const prevD = prevDateWithPrice(prices, dates, i);
@@ -392,6 +408,11 @@ function fillTable(tbody, byDate, prices){
 }
 
 /* ==================== UI wiring ==================== */
+function coverage(prices, dates){
+  let hit=0; for(const d of dates){ if(prices[d]!=null) hit++; }
+  return `${hit}/${dates.length}`;
+}
+
 async function run(){
   const days = Math.max(1, Math.min(30, Number(document.getElementById('days').value || 7)));
   const titlesOnly = document.getElementById('titlesOnly').checked;
@@ -403,7 +424,6 @@ async function run(){
   setStatus(`Fetching prices & content for last ${days} day(s)…`, true);
 
   try{
-    // Current prices for header + to inject today's price if daily candle missing
     await fetchCurrentPrices();
 
     let posts = [];
@@ -423,15 +443,13 @@ async function run(){
     const btcByDate = aggregateByDateForAsset(posts, 'btc');
     const ethByDate = aggregateByDateForAsset(posts, 'eth');
 
-    // Historic prices & ensure today's price exists
     const btcPricesRaw = await fetchHistoricPrices("bitcoin", days);
-    await delay(150);
+    await delay(120);
     const ethPricesRaw = await fetchHistoricPrices("ethereum", days);
 
     const btcPrices = injectTodayPrice(btcPricesRaw, 'btc');
     const ethPrices = injectTodayPrice(ethPricesRaw, 'eth');
 
-    // Fill tables (newest first + price + % change)
     fillTable(document.querySelector('#btcTable tbody'), btcByDate, btcPrices);
     fillTable(document.querySelector('#ethTable tbody'), ethByDate, ethPrices);
 
@@ -441,10 +459,16 @@ async function run(){
     const totalEthPos = Object.values(ethByDate).reduce((a,x)=>a+(x.pos||0),0);
     const totalEthNeg = Object.values(ethByDate).reduce((a,x)=>a+(x.neg||0),0);
 
-    setStatus(`Pulled ${totalPulled} items. BTC +${totalBtcPos}/-${totalBtcNeg} • ETH +${totalEthPos}/-${totalEthNeg}`);
+    const btcDates = Object.keys(btcByDate).sort().reverse();
+    const ethDates = Object.keys(ethByDate).sort().reverse();
+    setStatus(
+      `Pulled ${totalPulled} items. `+
+      `BTC +${totalBtcPos}/-${totalBtcNeg} (prices ${coverage(btcPrices, btcDates)}) • `+
+      `ETH +${totalEthPos}/-${totalEthNeg} (prices ${coverage(ethPrices, ethDates)})`
+    );
   }catch(err){
     console.error(err);
-    setStatus(`Error: ${err.message}. Check Worker URL and try again.`);
+    setStatus(`Error: ${err.message}. If Worker blocks, clear the Worker URL (uses direct fetch for prices).`);
   }
 }
 
