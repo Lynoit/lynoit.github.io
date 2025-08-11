@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BTC & ETH Sentiment + Price Change (Reddit + RSS via CORS Worker)</title>
+<title>BTC & ETH Sentiment + Daily Price & Change (Reddit + RSS via CORS Worker)</title>
 <style>
   :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
   *{box-sizing:border-box}
@@ -39,7 +39,7 @@
 </head>
 <body>
 <header>
-  <h1>Bitcoin & Ethereum — Sentiment + Price Change (last N days)</h1>
+  <h1>Bitcoin & Ethereum — Sentiment + Daily Price & Change (last N days)</h1>
   <div class="muted small">Reddit + RSS (CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News) via your Cloudflare Worker. Prices via CoinGecko with Binance fallback.</div>
 </header>
 
@@ -79,6 +79,7 @@
             <th>Date (UTC)</th>
             <th class="good">Positive</th>
             <th class="bad">Negative</th>
+            <th>Price (USD)</th>
             <th>% Change vs prev day</th>
           </tr>
         </thead>
@@ -94,6 +95,7 @@
             <th>Date (UTC)</th>
             <th class="good">Positive</th>
             <th class="bad">Negative</th>
+            <th>Price (USD)</th>
             <th>% Change vs prev day</th>
           </tr>
         </thead>
@@ -154,6 +156,10 @@ function utcDateStr(tsSeconds){
 }
 function row(html){ const tr=document.createElement('tr'); tr.innerHTML=html; return tr; }
 const delay = (ms)=> new Promise(r=>setTimeout(r, ms));
+function fmtUSD(n){
+  if(n==null || !isFinite(n)) return "—";
+  return `$${Number(n).toLocaleString(undefined,{maximumFractionDigits:2})}`;
+}
 
 /* ==================== Sentiment ==================== */
 function sentimentScore(text){
@@ -254,7 +260,6 @@ async function fetchAllRss(days){
 }
 
 /* ==================== Prices (CG first, Binance fallback) ==================== */
-// Current prices
 async function fetchCurrentPrices(){
   window.__currentPrices = window.__currentPrices || {};
   // Try CoinGecko first
@@ -263,8 +268,8 @@ async function fetchCurrentPrices(){
     const data = await fetchJSONViaWorker(url);
     const btc = data?.bitcoin?.usd ?? null;
     const eth = data?.ethereum?.usd ?? null;
-    if(btc!=null){ document.getElementById("btcPrice").textContent = `$${Number(btc).toLocaleString()}`; window.__currentPrices.btc = Number(btc); }
-    if(eth!=null){ document.getElementById("ethPrice").textContent = `$${Number(eth).toLocaleString()}`; window.__currentPrices.eth = Number(eth); }
+    if(btc!=null){ document.getElementById("btcPrice").textContent = fmtUSD(btc); window.__currentPrices.btc = Number(btc); }
+    if(eth!=null){ document.getElementById("ethPrice").textContent = fmtUSD(eth); window.__currentPrices.eth = Number(eth); }
     if(btc!=null && eth!=null) return;
   }catch(e){
     console.warn("CoinGecko current price failed, will try Binance", e);
@@ -276,16 +281,15 @@ async function fetchCurrentPrices(){
     const data = await fetchJSONViaWorker(url.toString());
     const map = {};
     (Array.isArray(data)?data:[data]).forEach(d => map[d.symbol]=Number(d.price));
-    if(map.BTCUSDT!=null){ document.getElementById("btcPrice").textContent = `$${map.BTCUSDT.toLocaleString()}`; window.__currentPrices.btc = map.BTCUSDT; }
-    if(map.ETHUSDT!=null){ document.getElementById("ethPrice").textContent = `$${map.ETHUSDT.toLocaleString()}`; window.__currentPrices.eth = map.ETHUSDT; }
+    if(map.BTCUSDT!=null){ document.getElementById("btcPrice").textContent = fmtUSD(map.BTCUSDT); window.__currentPrices.btc = map.BTCUSDT; }
+    if(map.ETHUSDT!=null){ document.getElementById("ethPrice").textContent = fmtUSD(map.ETHUSDT); window.__currentPrices.eth = map.ETHUSDT; }
   }catch(e){
     console.warn("Binance current price failed", e);
   }
 }
 
-// Historic daily close prices mapped to YYYY-MM-DD
 async function fetchHistoricPrices(symbol, days){
-  // 1) Try CoinGecko market_chart
+  // 1) Try CoinGecko
   try{
     const url = `https://api.coingecko.com/api/v3/coins/${symbol}/market_chart?vs_currency=usd&days=${days+2}&interval=daily`;
     const data = await fetchJSONViaWorker(url);
@@ -293,13 +297,13 @@ async function fetchHistoricPrices(symbol, days){
     for(const [ts, price] of (data?.prices || [])){
       const d = new Date(ts);
       const dateStr = d.toISOString().slice(0,10);
-      out[dateStr] = price;
+      out[dateStr] = Number(price);
     }
     if(Object.keys(out).length) return out;
   }catch(e){
     console.warn(`CoinGecko historic (${symbol}) failed, will try Binance`, e);
   }
-  // 2) Fallback: Binance Klines (1d)
+  // 2) Fallback: Binance klines
   try{
     const binanceSymbol = MAP_CG_TO_BINANCE[symbol];
     const url = new URL("https://api.binance.com/api/v3/klines");
@@ -310,7 +314,7 @@ async function fetchHistoricPrices(symbol, days){
     const out = {};
     for(const k of data){
       const openTime = k[0];   // ms
-      const closePrice = Number(k[4]); // string -> number
+      const closePrice = Number(k[4]);
       const dateStr = new Date(openTime).toISOString().slice(0,10);
       out[dateStr] = closePrice;
     }
@@ -321,11 +325,25 @@ async function fetchHistoricPrices(symbol, days){
   }
 }
 
+/* ==== Price helpers: inject today's price and find nearest previous date ==== */
+function injectTodayPrice(prices, symbolKey){
+  const todayStr = new Date().toISOString().slice(0,10);
+  const cur = window.__currentPrices?.[symbolKey];
+  if (cur!=null && prices[todayStr]==null) prices[todayStr] = Number(cur);
+  return prices;
+}
+function prevDateWithPrice(prices, dates, startIndex){
+  for(let j=startIndex+1; j<dates.length; j++){
+    const dj = dates[j];
+    if(prices[dj] != null) return dj;
+  }
+  return null;
+}
+
 /* ==================== Aggregation & Table Fill ==================== */
 function aggregateByDateForAsset(posts, which){
   const byDate = {};
   const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
-
   for(const p of posts){
     const text = `${p.title} ${p.selftext || ""}`.trim();
     if(!kw.test(text)) continue;
@@ -338,23 +356,37 @@ function aggregateByDateForAsset(posts, which){
   return byDate;
 }
 
+// NEW: prints Price (USD) column and % change vs nearest previous priced day. Newest first.
 function fillTable(tbody, byDate, prices){
   tbody.innerHTML = "";
   const dates = Object.keys(byDate).sort().reverse(); // newest first
   for(let i=0; i<dates.length; i++){
     const d = dates[i];
     const {pos, neg} = byDate[d];
+
+    // Price column
+    const priceVal = prices ? prices[d] : null;
+    const priceText = fmtUSD(priceVal);
+
+    // % change column
     let changeText = "-";
-    if (prices && prices[d] != null) {
-      const prevDate = dates[i+1];
-      if (prevDate && prices[prevDate] != null && prices[prevDate] !== 0) {
-        const change = ((prices[d] - prices[prevDate]) / prices[prevDate]) * 100;
+    if (prices && priceVal != null) {
+      const prevD = prevDateWithPrice(prices, dates, i);
+      const prevVal = prevD ? prices[prevD] : null;
+      if (prevVal != null && prevVal !== 0){
+        const change = ((priceVal - prevVal) / prevVal) * 100;
         const color = change > 0 ? "var(--good)" : change < 0 ? "var(--bad)" : "var(--muted)";
-        changeText = `<span style="color:${color}">${change.toFixed(2)}%</span>`;
+        const sign  = change > 0 ? "+" : (change < 0 ? "" : "");
+        changeText = `<span style="color:${color}">${sign}${change.toFixed(2)}%</span>`;
       }
     }
+
     tbody.appendChild(row(
-      `<td>${d}</td><td class="num good">${pos||0}</td><td class="num bad">${neg||0}</td><td class="num">${changeText}</td>`
+      `<td>${d}</td>`+
+      `<td class="num good">${pos||0}</td>`+
+      `<td class="num bad">${neg||0}</td>`+
+      `<td class="num">${priceText}</td>`+
+      `<td class="num">${changeText}</td>`
     ));
   }
 }
@@ -371,6 +403,7 @@ async function run(){
   setStatus(`Fetching prices & content for last ${days} day(s)…`, true);
 
   try{
+    // Current prices for header + to inject today's price if daily candle missing
     await fetchCurrentPrices();
 
     let posts = [];
@@ -390,11 +423,15 @@ async function run(){
     const btcByDate = aggregateByDateForAsset(posts, 'btc');
     const ethByDate = aggregateByDateForAsset(posts, 'eth');
 
-    // Historic prices (CG -> Binance fallback)
-    const btcPrices = await fetchHistoricPrices("bitcoin", days);
-    await delay(150); // tiny spacing to be polite
-    const ethPrices = await fetchHistoricPrices("ethereum", days);
+    // Historic prices & ensure today's price exists
+    const btcPricesRaw = await fetchHistoricPrices("bitcoin", days);
+    await delay(150);
+    const ethPricesRaw = await fetchHistoricPrices("ethereum", days);
 
+    const btcPrices = injectTodayPrice(btcPricesRaw, 'btc');
+    const ethPrices = injectTodayPrice(ethPricesRaw, 'eth');
+
+    // Fill tables (newest first + price + % change)
     fillTable(document.querySelector('#btcTable tbody'), btcByDate, btcPrices);
     fillTable(document.querySelector('#ethTable tbody'), ethByDate, ethPrices);
 
