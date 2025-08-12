@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BTC & ETH — Sentence-Level Sentiment (Last N Days)</title>
+<style>
+  :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Arial;background:var(--bg);color:var(--ink)}
+  header{padding:18px 16px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#14172a,#0f1220)}
+  h1{margin:0;font-size:20px}
+  .muted{color:var(--muted)}
+  main{max-width:1200px;margin:18px auto;padding:0 12px}
+  .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .controls>*{background:var(--card);border:1px solid var(--border);color:var(--ink);border-radius:10px;padding:10px 12px}
+  .controls input[type="text"]{min-width:340px}
+  button{cursor:pointer}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px}
+  .card h2{margin:4px 0 10px;font-size:16px;display:flex;gap:10px;align-items:baseline}
+  .priceTag{font-size:12px;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left}
+  th{color:var(--muted);font-weight:600}
+  td.num{text-align:right}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#1d2136;border:1px solid var(--border);color:var(--muted);font-size:12px;margin-right:6px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .status{min-height:24px}
+  .good{color:var(--good);font-weight:600}
+  .bad{color:var(--bad);font-weight:600}
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:-3px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .foot{margin-top:16px;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Bitcoin & Ethereum — Sentence-Level Sentiment (last N days)</h1>
+  <div class="muted small">Counts sentences classified as positive/negative (negation-aware) per day, for BTC & ETH. Prices via CoinGecko with Binance fallback.</div>
+</header>
+
+<main>
+  <div class="controls">
+    <label>Worker URL:
+      <input id="workerUrl" type="text" placeholder="https://your-name.workers.dev"/>
+    </label>
+    <button id="saveWorker">Save</button>
+    <span class="muted small">Leave empty to attempt direct fetch.</span>
+  </div>
+
+  <div class="controls">
+    <label>Days:
+      <input id="days" type="number" min="7" max="120" value="60" style="width:90px;margin-left:6px;background:transparent;border:none;outline:none;color:var(--ink);">
+    </label>
+    <label><input id="includeCryptoSub" type="checkbox" checked> Include r/CryptoCurrency</label>
+    <label><input id="includeNews" type="checkbox" checked> Include News RSS</label>
+    <label><input id="titlesOnly" type="checkbox"> Titles only (faster)</label>
+    <button id="runBtn">Run</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <div class="row" style="margin-bottom:8px;">
+    <span class="tag">Reddit: r/Bitcoin, r/Ethereum <span id="srcExtra"></span></span>
+    <span class="tag" id="newsTag">RSS: CoinDesk, CoinTelegraph, Bitcoin Magazine, Google News</span>
+    <span class="tag">Sentence-level, negation-aware</span>
+    <span class="tag">Aggregation: per UTC date</span>
+  </div>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Bitcoin <span id="btcPrice" class="priceTag"></span></h2>
+      <table id="btcTable">
+        <thead>
+          <tr>
+            <th>Date (UTC)</th>
+            <th class="good">Positive sentences</th>
+            <th class="bad">Negative sentences</th>
+            <th>Price (USD)</th>
+            <th>% vs prev day</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Ethereum <span id="ethPrice" class="priceTag"></span></h2>
+      <table id="ethTable">
+        <thead>
+          <tr>
+            <th>Date (UTC)</th>
+            <th class="good">Positive sentences</th>
+            <th class="bad">Negative sentences</th>
+            <th>Price (USD)</th>
+            <th>% vs prev day</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="foot">
+    Tip: if counts look low, untick “Titles only” and increase “Days”.
+  </div>
+</main>
+
+<script>
+/* ==================== Config ==================== */
+const SUBS_CORE = ["Bitcoin","Ethereum"];
+const SUB_CRYPTOCURRENCY = "CryptoCurrency";
+const REDDIT_PAGE_LIMIT = 100;
+const REDDIT_MAX_PAGES = 10;
+
+const RSS_SOURCES = [
+  "https://www.coindesk.com/arc/outboundfeeds/rss/",
+  "https://cointelegraph.com/rss",
+  "https://bitcoinmagazine.com/.rss",
+  "https://news.google.com/rss/search?q=bitcoin",
+  "https://news.google.com/rss/search?q=ethereum"
+];
+
+const KEYWORDS = {
+  btc: /(bitcoin|btc|\$btc|\bxbt\b)/i,
+  eth: /(ethereum|eth|\$eth)/i
+};
+
+const MAP_CG_TO_BINANCE = { bitcoin:"BTCUSDT", ethereum:"ETHUSDT" };
+
+/* ==================== UX helpers ==================== */
+function getWorker(){ return (localStorage.getItem("workerEndpoint") || "").trim(); }
+function setWorker(url){
+  if(url && !/^https?:\/\//i.test(url)) throw new Error("Worker URL must start with http(s)://");
+  localStorage.setItem("workerEndpoint", (url||"").replace(/\/+$/,""));
+}
+function setStatus(msg, spin=false){
+  const el = document.getElementById('status');
+  el.innerHTML = spin ? `<span class="spinner"></span> ${msg}` : msg;
+}
+const delay = (ms)=> new Promise(r=>setTimeout(r, ms));
+function fmtUSD(n){ return (n==null||!isFinite(n)) ? "—" : `$${Number(n).toLocaleString(undefined,{maximumFractionDigits:2})}`; }
+function utcDateStr(tsSec){ return new Date(tsSec*1000).toISOString().slice(0,10); }
+
+/* ==================== Fetch (Worker → direct fallback) ==================== */
+async function fetchJSONSmart(targetUrl){
+  const worker = getWorker();
+  const tryDirect = async ()=>{
+    const r = await fetch(targetUrl, { headers:{ "Accept":"application/json" }});
+    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    return await r.json();
+  };
+  if(worker){
+    try{
+      const r = await fetch(`${worker}/?url=${encodeURIComponent(targetUrl)}`, { headers:{ "Accept":"application/json" }});
+      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      return await r.json();
+    }catch(e){
+      console.warn("Worker JSON failed, trying direct:", e);
+      return await tryDirect();
+    }
+  }else{
+    return await tryDirect();
+  }
+}
+async function fetchTextSmart(targetUrl){
+  const worker = getWorker();
+  const tryDirect = async ()=>{
+    const r = await fetch(targetUrl);
+    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    return await r.text();
+  };
+  if(worker){
+    try{
+      const r = await fetch(`${worker}/?url=${encodeURIComponent(targetUrl)}`);
+      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      return await r.text();
+    }catch(e){
+      console.warn("Worker TEXT failed, trying direct:", e)
