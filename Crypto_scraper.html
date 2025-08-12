@@ -126,14 +126,245 @@ const KEYWORDS = {
   eth: /(ethereum|eth|\$eth)/i
 };
 
-const POSITIVE_WORDS = [
-  "bull","bullish","buy","accumulate","moon","pump","surge","rally","breakout","support",
-  "undervalued","strong","uptrend","green","optimistic","positive","booming","soaring","rocket","rebound"
-];
-const NEGATIVE_WORDS = [
-  "bear","bearish","sell","dump","crash","plunge","collapse","resistance","overvalued","weak",
-  "downtrend","red","fear","negative","panic","recession","fraud","scam","rug","ban"
-];
+/***** Multilingual crypto sentiment lexicon + scorer *****/
+
+/* 1) Term lists (single words and short phrases).
+   NOTE: Keep items lowercase; phrases can include spaces. */
+
+const LEX_POS = {
+  // English
+  en: [
+    "bull","bullish","buy","accumulate","long","support","breakout","break out","bounce",
+    "rally","moon","to the moon","mooning","pump","surge","spike","rip","squeeze",
+    "green","uptrend","up trend","ath","all time high","rebound","recovery","strong",
+    "undervalued","discount","cheap","oversold","momentum","rocket","lfg","hodl",
+    "wagmi","diamond hands","flippening"
+  ],
+  // Swedish
+  sv: [
+    "tjur","bullish","köp","köpa","stark","upptrend","upp trend","grön","hausse",
+    "raket","till månen","återhämtning","ath","all time high","billig","över såld","momentum","stöd"
+  ],
+  // Norwegian
+  no: [
+    "bullish","kjøp","kjøpe","sterk","opptrend","opp trend","grønn","rally","brudd opp",
+    "støtte","til månen","ath","all time high","momentum"
+  ],
+  // Danish
+  da: [
+    "bullish","køb","stærk","optrend","op trend","grøn","rally","brud op",
+    "støtte","til månen","ath","all time high","momentum"
+  ],
+  // Finnish
+  fi: [
+    "härkä","nouseva","osta","ostaa","vahva","nousutrendi","vihreä","ralli","läpimurto",
+    "tuki","kuuhun","ath","kaikkien aikojen huippu","toipuminen","momentum"
+  ],
+  // German
+  de: [
+    "bulle","bullisch","kaufen","stark","aufwärtstrend","grün","rallye","ausbruch",
+    "unterstützung","zum mond","ath","allzeithoch","erholung","impuls","günstig","unterbewertet"
+  ],
+  // French
+  fr: [
+    "taureau","haussier","achat","fort","tendance haussière","vert","rallye","cassure",
+    "support","vers la lune","ath","plus haut historique","rebond","reprise","optimiste","positif","momentum"
+  ],
+  // Spanish
+  es: [
+    "toro","alcista","comprar","fuerte","tendencia alcista","verde","rally","ruptura",
+    "soporte","a la luna","ath","máximo histórico","recuperación","impulso","barato","infravalorado","hodl"
+  ],
+  // Portuguese
+  pt: [
+    "touro","altista","comprar","forte","tendência de alta","verde","rali","rompimento",
+    "suporte","à lua","ath","máxima histórica","recuperação","otimista","positivo","barato","subvalorizado"
+  ],
+  // Italian
+  it: [
+    "toro","rialzista","comprare","forte","trend rialzista","verde","rally","breakout",
+    "supporto","verso la luna","ath","massimo storico","ripresa","slancio","sottovalutato"
+  ],
+  // Dutch
+  nl: [
+    "stier","bullish","kopen","sterk","opwaartse trend","groen","rally","uitbraak",
+    "steun","naar de maan","ath","all time high","herstel","momentum"
+  ],
+  // Turkish
+  tr: [
+    "boğa","boğa piyasası","al","alım","güçlü","yükseliş","yeşil","ralli","kırılma",
+    "destek","aya","ath","tüm zamanların en yüksek","toparlanma","momentum","ucuz","değerinin altında"
+  ],
+  // Russian
+  ru: [
+    "бык","бычий","покупать","сильный","восходящий тренд","зелёный","ралли","пробой",
+    "поддержка","на луну","ath","исторический максимум","восстановление","импульс","недооценённый","дёшево","ходл"
+  ],
+  // Slang/emojis/symbols (language-agnostic)
+  slang: [
+    "wagmi","hodl","diamond hands","gm","gf",
+    "🚀","📈","🟢","✅","🔥","💎🙌","💎","🙌","🐂","😎","✨","lfg"
+  ]
+};
+
+const LEX_NEG = {
+  en: [
+    "bear","bearish","sell","dump","crash","plunge","collapse","capitulation","liquidation",
+    "resistance","overvalued","weak","downtrend","down trend","red","fear","negative","panic",
+    "fraud","scam","scammy","rug","rug pull","ponzi","exploit","hack","ban","crackdown",
+    "rekt","ngmi","paper hands","selloff","sell-off"
+  ],
+  sv: [
+    "björn","björnmarknad","sälj","sälja","dump","krasch","ras","kollaps","kapitulation",
+    "likvidation","motstånd","övervärderad","svag","nedtrend","röd","rädsla","negativ","panik",
+    "bedrägeri","bluff","scam","rug pull","ponzi","intrång","hack","förbud","nedslag","rekt","ngmi","papper händer"
+  ],
+  no: [
+    "bjørn","bearish","selg","dump","krakk","fall","kollaps","kapitulasjon","likvidasjon",
+    "motstand","overvurdert","svak","nedtrend","rød","frykt","negativ","panikk",
+    "svindel","scam","rug pull","ponzi","hack","forbud","nedslag","rekt","ngmi","paper hands"
+  ],
+  da: [
+    "bjørn","bearish","sælg","dump","krak","fald","kollaps","kapitulation","likvidation",
+    "modstand","overvurderet","svag","nedtrend","rød","frygt","negativ","panik",
+    "bedrageri","svindel","rug pull","ponzi","hack","forbud","nedslag","rekt","ngmi","paper hands"
+  ],
+  fi: [
+    "karhu","laskutrendi","myy","dump","romahdus","lasku","kollapsi","kapitulaatio","likvidointi",
+    "vastus","yliarvostettu","heikko","punainen","pelko","negatiivinen","paniikki",
+    "petos","huijaus","rug pull","ponzi","hakkerointi","kielto","likvidaatio","rekt","ngmi","paperikädet"
+  ],
+  de: [
+    "bär","bärisch","verkaufen","dumpen","crash","einbruch","kollaps","kapitulation","liquidation",
+    "widerstand","überbewertet","schwach","abwärtstrend","rot","angst","negativ","panik",
+    "betrug","scam","rug pull","ponzi","exploit","hack","verbot","durchgreifen","rekt","ngmi","paper hands"
+  ],
+  fr: [
+    "ours","baissier","vente","dump","krach","chute","effondrement","capitulation","liquidation",
+    "résistance","surévalué","faible","tendance baissière","rouge","peur","négatif","panique",
+    "fraude","arnaque","rug pull","ponzi","exploit","piratage","interdiction","répression","rekt","ngmi","mains de papier"
+  ],
+  es: [
+    "oso","bajista","vender","dump","desplome","crash","colapso","capitulación","liquidación",
+    "resistencia","sobrevalorado","débil","tendencia bajista","rojo","miedo","negativo","pánico",
+    "fraude","estafa","rug pull","ponzi","exploit","hackeo","prohibición","represión","rekt","ngmi","manos de papel"
+  ],
+  pt: [
+    "urso","baixista","vender","dump","queda","crash","colapso","capitulação","liquidação",
+    "resistência","sobrevalorizado","fraco","tendência de baixa","vermelho","medo","negativo","pânico",
+    "fraude","golpe","rug pull","ponzi","exploit","hack","proibição","repressão","rekt","ngmi","mãos de papel"
+  ],
+  it: [
+    "orso","ribassista","vendere","dump","crollo","caduta","collasso","capitolazione","liquidazione",
+    "resistenza","sopravvalutato","debole","trend ribassista","rosso","paura","negativo","panico",
+    "frode","truffa","rug pull","ponzi","exploit","hackeraggio","divieto","repressione","rekt","ngmi","mani di carta"
+  ],
+  nl: [
+    "beer","bearish","verkopen","dump","crash","inzinking","instorting","capitulatie","liquidatie",
+    "weerstand","overgewaardeerd","zwak","neerwaartse trend","rood","angst","negatief","paniek",
+    "fraude","oplichterij","rug pull","ponzi","exploit","hack","verbod","repressie","rekt","ngmi","papieren handen"
+  ],
+  tr: [
+    "ayı","ayı piyasası","sat","dump","çöküş","düşüş","çökme","kapitülasyon","likidasyon",
+    "direnç","aşırı değerli","zayıf","düşüş trendi","kırmızı","korku","negatif","panik",
+    "dolandırıcılık","sahtekarlık","rug pull","ponzi","exploit","hack","yasak","baskı","rekt","ngmi","kağıt eller"
+  ],
+  ru: [
+    "медведь","медвежий","продавать","дамп","крах","обвал","коллапс","капитуляция","ликвидация",
+    "сопротивление","переоценённый","слабый","нисходящий тренд","красный","страх","негатив","паника",
+    "мошенничество","скам","rug pull","понзи","эксплойт","взлом","запрет","репрессии","rekt","ngmi","бумажные руки"
+  ],
+  slang: [
+    "fud","ngmi","rekt","paper hands","🧻","📉","🟥","🔻","❌","😱","😭","💀","⚠️","🐻"
+  ]
+};
+
+/* 2) Negators (flip nearby sentiment) */
+const NEGATORS = {
+  en: ["not","no","never","without","isn't","aren't","wasn't","weren't","don't","doesn't","didn't","won't","can't","cannot"],
+  sv: ["inte","ej","aldrig","utan","inget","ingen","inga","utan att"],
+  no: ["ikke","aldri","uten","ingen","ingenting"],
+  da: ["ikke","aldrig","uden","ingen","intet"],
+  fi: ["ei","ilman","ikinä","koskaan","mikään ei"],
+  de: ["nicht","nie","ohne","kein","keine","keinen","keinem","keiner"],
+  fr: ["ne","pas","jamais","sans","aucun","aucune"],
+  es: ["no","nunca","jamás","sin","ningún","ninguna"],
+  pt: ["não","nunca","sem","nenhum","nenhuma"],
+  it: ["non","mai","senza","nessuno","nessuna"],
+  nl: ["niet","nooit","zonder","geen","geenszins"],
+  tr: ["değil","asla","hiç","olmadan"],
+  ru: ["не","нет","никогда","без"]
+};
+
+/* 3) Normalization helpers */
+function norm(s){
+  if(!s) return "";
+  return s.toLowerCase()
+          .normalize("NFD").replace(/[\u0300-\u036f]/g,"") // strip accents
+          .replace(/\s+/g," ").trim();
+}
+function tokenize(s){
+  // keep $ and # tokens; split on non-letter/number/$_ and keep cyrillic letters
+  return norm(s).split(/[^0-9a-z_$#\u0400-\u04FF]+/i).filter(Boolean);
+}
+
+/* 4) Build fast lookup sets */
+const POS_SET = new Set(), POS_PHRASES = new Set();
+const NEG_SET = new Set(), NEG_PHRASES = new Set();
+(function build(){
+  const add = (obj, SET, PHRASES)=>{
+    Object.values(obj).flat().forEach(t=>{
+      const x = norm(t);
+      if(x.includes(" ")) PHRASES.add(x); else SET.add(x);
+    });
+  };
+  add(LEX_POS, POS_SET, POS_PHRASES);
+  add(LEX_NEG, NEG_SET, NEG_PHRASES);
+})();
+
+/* 5) Negation lookup (flatten) */
+const NEGATOR_SET = new Set(Object.values(NEGATORS).flat().map(norm));
+
+/* 6) Scorer: emoji/slang + phrases + single words + multi-lang negation */
+function sentimentScore(text){
+  if(!text) return 0;
+
+  const original = text;
+  const tNorm = norm(original);
+  const toks = tokenize(original);
+
+  let score = 0;
+
+  // Emojis/phrases: scan by substring (phrases) and raw inc (emojis)
+  POS_PHRASES.forEach(p => { if(tNorm.includes(p)) score += 1; });
+  NEG_PHRASES.forEach(p => { if(tNorm.includes(p)) score -= 1; });
+
+  // Single-word hits with a small back-window for negators (3 tokens)
+  for(let i=0;i<toks.length;i++){
+    const w = toks[i];
+    let delta = 0;
+    if (POS_SET.has(w)) delta = 1;
+    else if (NEG_SET.has(w)) delta = -1;
+
+    if (delta !== 0){
+      // check preceding 3 tokens for a negator (any language)
+      const wStart = Math.max(0, i-3);
+      const prev = toks.slice(wStart, i);
+      if (prev.some(p => NEGATOR_SET.has(p))) delta *= -1;
+
+      // tiny emphasis if "very" (and equivalents)
+      if (prev.includes("very") || prev.includes("väldigt") || prev.includes("meget") ||
+          prev.includes("sehr") || prev.includes("très") || prev.includes("muy") ||
+          prev.includes("muito") || prev.includes("molto")) {
+        delta *= 1.2;
+      }
+      score += delta;
+    }
+  }
+
+  // treat tiny values as neutral to reduce noise
+  return Math.abs(score) < 0.5 ? 0 : score;
+}
 
 const MAP_CG_TO_BINANCE = { bitcoin: "BTCUSDT", ethereum: "ETHUSDT" };
 
@@ -156,16 +387,6 @@ const delay = (ms)=> new Promise(r=>setTimeout(r, ms));
 function fmtUSD(n){
   if(n==null || !isFinite(n)) return "—";
   return `$${Number(n).toLocaleString(undefined,{maximumFractionDigits:2})}`;
-}
-
-/* ==================== Sentiment ==================== */
-function sentimentScore(text){
-  if(!text) return 0;
-  const t = text.toLowerCase();
-  let s = 0;
-  for(const w of POSITIVE_WORDS){ if(t.includes(w)) s++; }
-  for(const w of NEGATIVE_WORDS){ if(t.includes(w)) s--; }
-  return s;
 }
 
 /* ==================== Fetch helpers (Worker → direct fallback) ==================== */
