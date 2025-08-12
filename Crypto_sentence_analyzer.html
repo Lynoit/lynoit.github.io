@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>BTC & ETH — Sentence-Level Sentiment (Last N Days)</title>
+<title>BTC & ETH — Sentence Sentiment + Scatter (Last N Days)</title>
 <style>
   :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--border:#272a3d}
   *{box-sizing:border-box}
@@ -21,7 +21,7 @@
   .card h2{margin:4px 0 10px;font-size:16px;display:flex;gap:10px;align-items:baseline}
   .priceTag{font-size:12px;color:var(--muted)}
   table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-  th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left}
+  th,td{border-bottom:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
   th{color:var(--muted);font-weight:600}
   td.num{text-align:right}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#1d2136;border:1px solid var(--border);color:var(--muted);font-size:12px;margin-right:6px}
@@ -36,8 +36,8 @@
 </head>
 <body>
 <header>
-  <h1>Bitcoin & Ethereum — Sentence-Level Sentiment (last N days)</h1>
-  <div class="muted small">Counts sentences classified as positive/negative (negation-aware) per day, for BTC & ETH. Prices via CoinGecko with Binance fallback.</div>
+  <h1>Bitcoin & Ethereum — Sentence-Level Sentiment + Scatter (last N days)</h1>
+  <div class="muted small">Counts sentences (negation-aware) per day for BTC & ETH; shows price and % vs previous day. Scatter plot: net sentences vs daily % change. Prices via CoinGecko with Binance fallback.</div>
 </header>
 
 <main>
@@ -82,6 +82,9 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div style="margin-top:10px">
+        <canvas id="btcScatter" height="260"></canvas>
+      </div>
     </section>
 
     <section class="card">
@@ -98,13 +101,19 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div style="margin-top:10px">
+        <canvas id="ethScatter" height="260"></canvas>
+      </div>
     </section>
   </div>
 
   <div class="foot">
-    Tip: if counts look low, untick “Titles only” and increase “Days”.
+    Tip: If counts look low, untick “Titles only” and increase “Days”. Ensure your Worker allows: <code>www.reddit.com</code>, <code>api.coingecko.com</code>, <code>api.binance.com</code>, and (for news) <code>coindesk.com</code>, <code>cointelegraph.com</code>, <code>bitcoinmagazine.com</code>, <code>news.google.com</code>.
   </div>
 </main>
+
+<!-- Chart.js for the scatter plots -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <script>
 /* ==================== Config ==================== */
@@ -147,13 +156,15 @@ async function fetchJSONSmart(targetUrl){
   const worker = getWorker();
   const tryDirect = async ()=>{
     const r = await fetch(targetUrl, { headers:{ "Accept":"application/json" }});
-    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    if(!r.ok) throw new Error(`Direct ${r.status} ${r.statusText} for ${targetUrl}`);
     return await r.json();
   };
   if(worker){
     try{
-      const r = await fetch(`${worker}/?url=${encodeURIComponent(targetUrl)}`, { headers:{ "Accept":"application/json" }});
-      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      // accept /?url=... or /proxy?url=... styles
+      const via = `${worker}${worker.endsWith('/proxy')?'':'/proxy'}?url=${encodeURIComponent(targetUrl)}`;
+      const r = await fetch(via, { headers:{ "Accept":"application/json" }});
+      if(!r.ok) throw new Error(`Worker ${r.status} ${r.statusText} for ${targetUrl}`);
       return await r.json();
     }catch(e){
       console.warn("Worker JSON failed, trying direct:", e);
@@ -167,13 +178,14 @@ async function fetchTextSmart(targetUrl){
   const worker = getWorker();
   const tryDirect = async ()=>{
     const r = await fetch(targetUrl);
-    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    if(!r.ok) throw new Error(`Direct ${r.status} ${r.statusText} for ${targetUrl}`);
     return await r.text();
   };
   if(worker){
     try{
-      const r = await fetch(`${worker}/?url=${encodeURIComponent(targetUrl)}`);
-      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      const via = `${worker}${worker.endsWith('/proxy')?'':'/proxy'}?url=${encodeURIComponent(targetUrl)}`;
+      const r = await fetch(via);
+      if(!r.ok) throw new Error(`Worker ${r.status} ${r.statusText} for ${targetUrl}`);
       return await r.text();
     }catch(e){
       console.warn("Worker TEXT failed, trying direct:", e);
@@ -297,18 +309,8 @@ function injectToday(prices, live){
   if(live!=null && isFinite(live) && prices[today]==null) prices[today] = Number(live);
   return prices;
 }
-function nearestPrevWithPrice(prices, sortedDescDates, idx){
-  for(let j=idx+1;j<sortedDescDates.length;j++){
-    const d = sortedDescDates[j]; if(prices[d]!=null) return d;
-  }
-  return null;
-}
 
-/* ==================== Sentence-level sentiment ==================== */
-/* A small, negation/booster-aware sentence scorer (language-light but robust).
-   It is NOT a keyword counter: we score each sentence, flipping on negation and
-   applying small boosts for intensifiers and exclamation marks. */
-
+/* ==================== Sentence-level sentiment (negation-aware) ==================== */
 const NEGATORS = new Set([
   "not","no","never","without","isnt","arent","wasnt","werent","dont","doesnt","didnt","wont","cant","cannot",
   "inte","ej","aldrig","utan",
@@ -322,13 +324,10 @@ const NEGATORS = new Set([
   "degil","asla","hic","olmadan",
   "ne","net","nikogda","bez"
 ]);
-
 const BOOSTERS = new Set([
   "very","so","really","extremely","highly","super","ultra","insanely","crazy","mega",
   "väldigt","mycket","svært","meget","sehr","très","muy","muito","molto","heel","çok","ochen","очень"
 ]);
-
-// minimal valence lexicon (balanced); this is sentence-level, not a bag-of-words count
 const VALENCE_POS = new Set([
   "bull","bullish","buy","accumulate","long","support","breakout","rally","bounce",
   "moon","pump","surge","spike","squeeze","green","uptrend","ath","rebound","recovery",
@@ -340,23 +339,16 @@ const VALENCE_NEG = new Set([
   "resistance","overvalued","weak","downtrend","red","fear","panic","fraud","scam",
   "rug","rug pull","ponzi","exploit","hack","ban","crackdown","rekt","ngmi","paper hands"
 ]);
-
 const EMOJI_POS = /🚀|📈|🟢|✅|💎🙌|💎|✨/g;
 const EMOJI_NEG = /📉|🟥|🔻|❌|😱|😭|💀|⚠️/g;
 
-function norm(s){ return (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
+function normText(s){ return (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
 function tokenize(s){
-  return norm(s).split(/[^0-9a-z$#\u0400-\u04FF]+/i).filter(Boolean);
+  return normText(s).split(/[^0-9a-z$#\u0400-\u04FF]+/i).filter(Boolean);
 }
 function splitSentences(text){
-  return (text||"")
-    .replace(/\r/g," ")
-    .split(/[.!?…\n]+/g)
-    .map(s=>s.trim())
-    .filter(s=>s.length>2);
+  return (text||"").replace(/\r/g," ").split(/[.!?…\n]+/g).map(s=>s.trim()).filter(s=>s.length>2);
 }
-
-// returns a signed score; > thresh => positive, < -thresh => negative
 function scoreSentence(sentence){
   if(!sentence) return 0;
   const s = sentence;
@@ -375,30 +367,23 @@ function scoreSentence(sentence){
     else if (VALENCE_NEG.has(w)) delta = -1;
 
     if (delta !== 0){
-      // tiny emphasis if booster in last 3 tokens
       const prev = toks.slice(Math.max(0,i-3), i);
-      if (prev.some(p=>BOOSTERS.has(p))) delta *= 1.2;
-
-      // flip if a negator in last 3 tokens
-      if (prev.some(p=>NEGATORS.has(p))) delta *= -1;
-
+      if (prev.some(p=>BOOSTERS.has(p))) delta *= 1.2;   // emphasis
+      if (prev.some(p=>NEGATORS.has(p))) delta *= -1;     // negation flip
       score += delta;
     }
   }
 
-  // exclamation emphasis
   const bangs = Math.min(3, (s.match(/!/g)||[]).length);
   if (bangs) score += 0.1*bangs * Math.sign(score||1);
 
-  // squash tiny values
-  if (Math.abs(score) < 0.35) return 0;
+  if (Math.abs(score) < 0.35) return 0; // neutral
   return score;
 }
 
-/* classify sentences for a given asset keyword */
 function sentenceSentimentCountsForAsset(posts, which){
   const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
-  const byDate = {}; // {date: {pos: n, neg: n}}
+  const byDate = {}; // {date: {pos:n, neg:n}}
   for(const p of posts){
     const text = `${p.title} ${p.selftext||""}`.trim();
     const sentences = splitSentences(text);
@@ -428,9 +413,7 @@ function fillTable(tbody, byDate, prices){
     let changeText = "—";
     if (prices && priceVal != null) {
       const prevDate = (function nearestPrev(dates, idx){
-        for(let j=idx+1;j<dates.length;j++){
-          const dd = dates[j]; if(prices[dd]!=null) return dd;
-        }
+        for(let j=idx+1;j<dates.length;j++){ const dd = dates[j]; if(prices[dd]!=null) return dd; }
         return null;
       })(dates, i);
       const prevVal = prevDate ? prices[prevDate] : null;
@@ -451,6 +434,108 @@ function fillTable(tbody, byDate, prices){
       `<td class="num">${changeText}</td>`;
     tbody.appendChild(tr);
   }
+}
+
+/* ==================== Scatter plot helpers ==================== */
+// Build per-day scatter points: x = pos - neg, y = % vs prev day.
+function buildScatterPoints(byDate, prices){
+  const dates = Object.keys(byDate).sort().reverse(); // newest first
+  const pts = [];
+
+  function prevDateWithPrice(idx){
+    for(let j=idx+1;j<dates.length;j++){
+      const d = dates[j];
+      if(prices && prices[d] != null) return d;
+    }
+    return null;
+  }
+
+  for(let i=0;i<dates.length;i++){
+    const d = dates[i];
+    const {pos=0, neg=0} = byDate[d] || {};
+    const x = (pos - neg);
+    let y = null;
+
+    if (prices && prices[d] != null){
+      const prevD = prevDateWithPrice(i);
+      const prevVal = prevD ? prices[prevD] : null;
+      if (prevVal != null && prevVal !== 0){
+        y = ((prices[d] - prevVal) / prevVal) * 100;
+      }
+    }
+    if (y == null || !isFinite(y)) continue;
+
+    pts.push({
+      x, y,
+      date: d,
+      pos, neg,
+      price: prices ? prices[d] : null,
+      color: y > 0 ? "#2ecc71" : y < 0 ? "#ff5c5c" : "#9aa3b2"
+    });
+  }
+  return pts;
+}
+
+let __btcChart, __ethChart;
+
+function drawScatter(canvasId, points, title){
+  const ctx = document.getElementById(canvasId)?.getContext('2d');
+  if(!ctx) return;
+
+  if(canvasId === "btcScatter" && __btcChart){ __btcChart.destroy(); }
+  if(canvasId === "ethScatter" && __ethChart){ __ethChart.destroy(); }
+
+  const data = {
+    datasets: [{
+      label: title,
+      data: points.map(p => ({ x:p.x, y:p.y })),
+      pointBackgroundColor: points.map(p => p.color),
+      pointBorderColor: points.map(p => p.color),
+      pointRadius: 4,
+      showLine: false
+    }]
+  };
+
+  const chart = new Chart(ctx, {
+    type: 'scatter',
+    data,
+    options: {
+      animation: false,
+      scales: {
+        x: {
+          title: { display:true, text: 'Positive − Negative sentences' },
+          grid: { color: 'rgba(255,255,255,0.08)' },
+          ticks: { color: '#9aa3b2' },
+          zeroLineColor: 'rgba(255,255,255,0.3)'
+        },
+        y: {
+          title: { display:true, text: '% vs previous day' },
+          grid: { color: 'rgba(255,255,255,0.08)' },
+          ticks: { color: '#9aa3b2', callback: (v)=> `${v}%` }
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const p = points[ctx.dataIndex];
+              const pct = (p.y>0?"+":"") + p.y.toFixed(2) + "%";
+              return [
+                `Date: ${p.date}`,
+                `Net sentences: ${p.x} ( +${p.pos} / -${p.neg} )`,
+                `Price: ${p.price!=null ? `$${Number(p.price).toLocaleString()}` : "—"}`,
+                `Δ vs prev: ${pct}`
+              ];
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if(canvasId === "btcScatter") __btcChart = chart;
+  if(canvasId === "ethScatter") __ethChart = chart;
 }
 
 /* ==================== Main ==================== */
@@ -478,7 +563,7 @@ async function run(){
 
     // 3) Prices
     const [btcDaily, ethDaily] = await Promise.all([fetchDaily("bitcoin", days), fetchDaily("ethereum", days)]);
-    const [btcLive,  ethLive ] = await Promise.all([fetchCurrent("bitcoin"),        fetchCurrent("ethereum")]);
+    const [btcLive,  ethLive ] = await Promise.all([fetchCurrent("bitcoin"),   fetchCurrent("ethereum")]);
 
     const btcPrices = injectToday(btcDaily, btcLive);
     const ethPrices = injectToday(ethDaily, ethLive);
@@ -490,12 +575,19 @@ async function run(){
     fillTable(document.querySelector('#btcTable tbody'), btcByDate, btcPrices);
     fillTable(document.querySelector('#ethTable tbody'), ethByDate, ethPrices);
 
-    // 5) Status
+    // 5) Build scatter data and render charts
+    const btcPoints = buildScatterPoints(btcByDate, btcPrices);
+    const ethPoints = buildScatterPoints(ethByDate, ethPrices);
+
+    drawScatter("btcScatter", btcPoints, "BTC: net sentences vs daily % change");
+    drawScatter("ethScatter", ethPoints, "ETH: net sentences vs daily % change");
+
+    // 6) Status
     const totalSentences =
       Object.values(btcByDate).reduce((a,x)=>a+x.pos+x.neg,0) +
       Object.values(ethByDate).reduce((a,x)=>a+x.pos+x.neg,0);
 
-    setStatus(`Done. Classified ${totalSentences} sentences across BTC & ETH.`, false);
+    setStatus(`Done. Classified ${totalSentences} sentences across BTC & ETH. Points: BTC ${btcPoints.length}, ETH ${ethPoints.length}.`, false);
   }catch(err){
     console.error(err);
     setStatus(`Error: ${err.message}`, false);
