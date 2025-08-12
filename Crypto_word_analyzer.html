@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Bitcoin — Daily Word Analysis vs Price Direction</title>
+<style>
+  :root{--bg:#0f1220;--card:#171a2b;--ink:#e7e9ff;--muted:#9aa3b2;--accent:#6ea8ff;--good:#2ecc71;--bad:#ff5c5c;--flat:#9aa3b2;--border:#272a3d}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Arial;background:var(--bg);color:var(--ink)}
+  header{padding:18px 16px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#14172a,#0f1220)}
+  h1{margin:0;font-size:20px}
+  .muted{color:var(--muted)}
+  main{max-width:1200px;margin:18px auto;padding:0 12px}
+  .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .controls>*{background:var(--card);border:1px solid var(--border);color:var(--ink);border-radius:10px;padding:10px 12px}
+  .controls input[type="text"]{min-width:340px}
+  button{cursor:pointer}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left;vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  td.num{text-align:right}
+  .status{min-height:24px}
+  .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;vertical-align:-3px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .dir-up{color:var(--good);font-weight:700}
+  .dir-down{color:var(--bad);font-weight:700}
+  .dir-flat{color:var(--flat);font-weight:700}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#1d2136;border:1px solid var(--border);color:var(--muted);font-size:12px;margin-right:6px}
+  .small{font-size:12px}
+  .nowrap{white-space:nowrap}
+  .pill{padding:2px 8px;border-radius:999px;border:1px solid var(--border);background:#121428;color:var(--muted);font-size:12px;margin-right:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Bitcoin — Daily Word Analysis vs Price Direction</h1>
+  <div class="muted small">Reddit (r/Bitcoin + optional r/CryptoCurrency). Daily BTC prices via CoinGecko with Binance fallback. Per-day top words for the last N days.</div>
+</header>
+
+<main>
+  <div class="controls">
+    <label>Worker URL:
+      <input id="workerUrl" type="text" placeholder="https://your-name.workers.dev"/>
+    </label>
+    <button id="saveWorker">Save</button>
+    <span class="muted small">Leave empty to fetch price APIs directly.</span>
+  </div>
+
+  <div class="controls">
+    <label>Days:
+      <input id="days" type="number" min="7" max="120" value="60" style="width:90px;margin-left:6px;background:transparent;border:none;outline:none;color:var(--ink);">
+    </label>
+    <label><input id="includeCryptoSub" type="checkbox" checked> Include r/CryptoCurrency</label>
+    <label><input id="titlesOnly" type="checkbox"> Titles only (faster)</label>
+    <button id="runBtn">Run analysis</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <div style="margin-bottom:10px">
+    <span class="tag">Direction: ↑ rising • ↓ falling • → flat</span>
+    <span class="tag">Aggregation: per UTC date</span>
+    <span class="tag">Top words exclude stopwords & “bitcoin/btc/xbt”</span>
+  </div>
+
+  <table id="resultTable">
+    <thead>
+      <tr>
+        <th class="nowrap">Date (UTC)</th>
+        <th>Direction</th>
+        <th class="nowrap">Price (USD)</th>
+        <th class="nowrap">Δ% vs prev</th>
+        <th>Top words (word(count))</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</main>
+
+<script>
+/* ==================== Config ==================== */
+const SUBS = ["Bitcoin"];
+const SUB_OPTIONAL = "CryptoCurrency";
+const REDDIT_PAGE_LIMIT = 100;
+const REDDIT_MAX_PAGES = 10;
+const BTC_KEYWORDS = /(bitcoin|btc|\$btc|\bxbt\b)/i;
+
+const MAP_CG_TO_BINANCE = { bitcoin: "BTCUSDT" };
+
+/* ==================== Helpers ==================== */
+function getWorker(){ return (localStorage.getItem("workerEndpoint") || "").trim(); }
+function setWorker(url){
+  if(url && !/^https?:\/\//i.test(url)) throw new Error("Worker URL must start with http(s)://");
+  localStorage.setItem("workerEndpoint", (url||"").replace(/\/+$/,""));
+}
+function setStatus(msg, spin=false){
+  const el = document.getElementById('status');
+  el.innerHTML = spin ? `<span class="spinner"></span> ${msg}` : msg;
+}
+const delay = (ms)=> new Promise(r=>setTimeout(r, ms));
+function toDateStrUTC(tsSec){ return new Date(tsSec*1000).toISOString().slice(0,10); }
+function fmtUSD(n){ return (n==null||!isFinite(n)) ? "—" : `$${Number(n).toLocaleString(undefined,{maximumFractionDigits:2})}`; }
+function fmtPct(n){ return (n==null||!isFinite(n)) ? "—" : `${n>0?"+":""}${n.toFixed(2)}%`; }
+
+/* ==================== Fetch (Worker → direct fallback) ==================== */
+async function fetchJSONSmart(targetUrl){
+  const worker = getWorker();
+  const tryDirect = async ()=>{
+    const r = await fetch(targetUrl, { headers:{ "Accept":"application/json" }});
+    if(!r.ok) throw new Error(`Direct HTTP ${r.status} for ${targetUrl}`);
+    return await r.json();
+  };
+  if(worker){
+    try{
+      const r = await fetch(`${worker}/?url=${encodeURIComponent(targetUrl)}`, { headers:{ "Accept":"application/json" }});
+      if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
+      return await r.json();
+    }catch(e){
+      console.warn("Worker JSON failed, trying direct:", e);
+      return await tryDirect();
+    }
+  }else{
+    return await tryDirect();
+  }
+}
+
+/* ==================== Reddit (/new.json) ==================== */
+async function fetchSubNew(sub, after=null){
+  const url = new URL(`https://www.reddit.com/r/${sub}/new.json`);
+  url.searchParams.set('limit', REDDIT_PAGE_LIMIT);
+  if(after) url.searchParams.set('after', after);
+  return await fetchJSONSmart(url.toString());
+}
+
+async function fetchPosts(days, titlesOnly, includeCrypto){
+  const cutoff = Date.now()/1000 - days*86400;
+  let all = [];
+  const subs = [...SUBS, ...(includeCrypto ? [SUB_OPTIONAL] : [])];
+
+  for(const sub of subs){
+    let after=null, pages=0;
+    while(pages < REDDIT_MAX_PAGES){
+      const data = await fetchSubNew(sub, after);
+      const children = data?.data?.children || [];
+      if(children.length===0) break;
+
+      const posts = children.map(c => c.data).map(p => ({
+        title: p.title || "",
+        selftext: titlesOnly ? "" : (p.selftext || ""),
+        created_utc: p.created_utc || 0
+      }));
+
+      const fresh = posts.filter(p => p.created_utc >= cutoff);
+      all.push(...fresh);
+
+      after = data?.data?.after || null;
+      pages++;
+      const lastTs = posts[posts.length-1]?.created_utc || 0;
+      if(!after || lastTs < cutoff) break;
+      await delay(220);
+    }
+  }
+
+  // Keep only posts that mention bitcoin/btc/xbt
+  return all.filter(p => BTC_KEYWORDS.test(`${p.title} ${p.selftext}`));
+}
+
+/* ==================== Prices (CoinGecko → Binance) ==================== */
+async function fetchCurrentBTC(){
+  // CoinGecko
+  try{
+    const data = await fetchJSONSmart("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+    return Number(data?.bitcoin?.usd ?? NaN);
+  }catch(e){
+    console.warn("CG current failed; fallback Binance", e);
+  }
+  // Binance
+  try{
+    const url = new URL("https://api.binance.com/api/v3/ticker/price");
+    url.searchParams.set("symbol","BTCUSDT");
+    const data = await fetchJSONSmart(url.toString());
+    return Number(data?.price ?? NaN);
+  }catch(e){
+    console.warn("Binance current failed", e);
+    return NaN;
+  }
+}
+
+async function fetchDailyBTC(days){
+  // CoinGecko market_chart daily
+  try{
+    const data = await fetchJSONSmart(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days+2}&interval=daily`);
+    const out = {};
+    for(const [ts, price] of (data?.prices || [])){
+      out[new Date(ts).toISOString().slice(0,10)] = Number(price);
+    }
+    return out;
+  }catch(e){
+    console.warn("CG market_chart failed; fallback Binance", e);
+  }
+  // Binance klines (1d)
+  try{
+    const url = new URL("https://api.binance.com/api/v3/klines");
+    url.searchParams.set("symbol","BTCUSDT");
+    url.searchParams.set("interval","1d");
+    url.searchParams.set("limit", String(days+2));
+    const data = await fetchJSONSmart(url.toString());
+    const out = {};
+    for(const k of data){
+      const openTime = k[0];    // ms
+      const closePrice = Number(k[4]);
+      out[new Date(openTime).toISOString().slice(0,10)] = closePrice;
+    }
+    return out;
+  }catch(e){
+    console.warn("Binance klines failed", e);
+    return {};
+  }
+}
+
+/* =============== Tokenization & Stopwords (multilingual) =============== */
+function stripAccents(s){ return s.normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
+function normalizeText(s){ return stripAccents((s||"").toLowerCase()); }
+function tokenize(text){
+  const t = normalizeText(text)
+            .replace(/https?:\/\/\S+/g," ") // drop URLs
+            .replace(/[\u2000-\u206F\u2E00-\u2E7F'’"“”()[\]{}.,!?;:*_~`<>|\\/@+=-]/g," ");
+  // keep cyrillic & latin letters, digits, $, #
+  return t.split(/[^0-9a-z$#\u0400-\u04FF]+/i).filter(Boolean);
+}
+
+// Basic multilingual stopwords (compact but effective)
+const STOP = new Set([
+  // english
+  "the","and","for","that","with","this","you","your","but","are","was","were","from","have","has","had","not","all","any","can","cant","cannot","will","would","should","could","just","like","get","got","into","its","it","they","them","their","there","these","those","than","then","over","more","most","less","least","about","why","what","when","how","who","where","which","while","also","much","many","very","really","im","ive","id","dont","doesnt","didnt","wont","cant","is","am","be","been","being","to","of","in","on","at","by","as","or","if","so","we","our","out","up","down","one","two","new",
+  // asset words (we exclude)
+  "bitcoin","btc","xbt","$btc",
+  // swedish
+  "och","att","det","som","en","ett","är","var","för","med","till","från","på","inte","eller","också","men","har","hade","den","detta","där","de","vi","ni","era","er","om","så","man","kan","ska","skall","kommer","få","får","fick","in","ut","upp","ned","mer","mest","minst",
+  // norwegian
+  "og","å","det","som","en","ei","ett","er","var","for","med","til","fra","på","ikke","eller","også","men","har","hadde","den","dette","der","de","vi","dere","om","så","man","kan","skal","kommer","få","inn","ut","opp","ned","mer","mest","minst",
+  // danish
+  "og","at","det","som","en","et","er","var","for","med","til","fra","på","ikke","eller","også","men","har","havde","den","dette","der","de","vi","i","om","så","man","kan","skal","kommer","få","ind","ud","op","ned","mere","mest","mindst",
+  // finnish
+  "ja","että","se","on","oli","olla","kun","kunnes","mutta","tai","myös","vain","vielä","kuten","kuin","me","he","te","minä","sinä","hän","ne","nämä","noin","tuo","tämä","joka","mitä","missä","miksi","koska","kanssa","ilman",
+  // german
+  "und","oder","der","die","das","ein","eine","ist","war","für","mit","zum","zur","aus","auf","nicht","auch","aber","hat","hatte","den","dies","dort","wir","sie","ihr","euer","wenn","so","man","kann","soll","wird","sein","im","ins","am","beim","vom","nach","vor","mehr","am",
+  // french
+  "et","ou","le","la","les","un","une","est","était","pour","avec","de","des","du","dans","sur","pas","aussi","mais","a","ont","avait","ce","cette","ces","là","nous","vous","ils","elles","si","alors","on","peut","va","aller","plus","moins","très","comme",
+  // spanish
+  "y","o","el","la","los","las","un","una","es","era","para","con","de","del","en","sobre","no","también","pero","ha","han","había","este","esta","estos","esas","allí","nosotros","vosotros","ellos","ellas","si","entonces","se","puede","va","más","menos","muy","como",
+  // portuguese
+  "e","ou","o","a","os","as","um","uma","é","era","para","com","de","do","da","dos","das","em","sobre","não","também","mas","tem","têm","tinha","este","esta","estes","essas","lá","nós","vocês","eles","elas","se","pode","vai","mais","menos","muito","como",
+  // italian
+  "e","o","il","lo","la","i","gli","le","un","una","è","era","per","con","di","del","della","dei","delle","in","su","non","anche","ma","ha","hanno","aveva","questo","questa","questi","quelle","lì","noi","voi","loro","se","può","va","più","meno","molto","come",
+  // dutch
+  "en","of","de","het","een","is","was","voor","met","naar","van","op","niet","ook","maar","heeft","had","dit","dat","daar","wij","jullie","zij","als","dan","men","kan","zal","meer","minder","veel","zoals",
+  // turkish
+  "ve","veya","bir","o","bu","şu","için","ile","de","da","ama","değil","çok","az","daha","gibi","olarak","olan","var","yok","şey","şu","bunu","bana","sana","biz","siz","onlar",
+  // russian
+  "и","или","это","как","для","с","на","не","тоже","но","есть","был","эта","этот","эти","там","мы","вы","они","если","то","может","будет","больше","меньше","очень","как"
+]);
+
+/* =============== Word Frequency per day =============== */
+function dayKey(tsSec){ return new Date(tsSec*1000).toISOString().slice(0,10); }
+
+function countWordsPerDay(posts){
+  // { date: Map(word->count) }
+  const perDay = {};
+  for(const p of posts){
+    const d = dayKey(p.created_utc);
+    const text = `${p.title} ${p.selftext||""}`;
+    const toks = tokenize(text)
+      .filter(w => w.length>=3)
+      .filter(w => !STOP.has(w));
+    if(!perDay[d]) perDay[d] = new Map();
+    const m = perDay[d];
+    for(const w of toks){
+      m.set(w, (m.get(w)||0)+1);
+    }
+  }
+  return perDay;
+}
+
+function topN(map, n=20){
+  return Array.from(map.entries())
+    .sort((a,b)=> b[1]-a[1])
+    .slice(0,n);
+}
+
+/* ==================== Build table ==================== */
+function fillTable(rows){
+  const tbody = document.querySelector('#resultTable tbody');
+  tbody.innerHTML = "";
+  // newest first
+  rows.sort((a,b)=> a.date < b.date ? 1 : -1);
+  for(const r of rows){
+    const tr = document.createElement('tr');
+    const dirClass = r.dir === "up" ? "dir-up" : r.dir === "down" ? "dir-down" : "dir-flat";
+    const dirChar  = r.dir === "up" ? "↑" : r.dir === "down" ? "↓" : "→";
+    const wordsStr = r.topWords.length ? r.topWords.map(([w,c])=>`${w}(${c})`).join(", ") : "—";
+    tr.innerHTML = `
+      <td class="nowrap">${r.date}</td>
+      <td class="${dirClass}">${dirChar}</td>
+      <td class="num">${fmtUSD(r.price)}</td>
+      <td class="num">${fmtPct(r.pct)}</td>
+      <td>${wordsStr}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+/* ==================== Main ==================== */
+async function run(){
+  const days = Math.max(7, Math.min(120, Number(document.getElementById('days').value || 60)));
+  const titlesOnly = document.getElementById('titlesOnly').checked;
+  const includeCrypto = document.getElementById('includeCryptoSub').checked;
+
+  setStatus(`Fetching last ${days} day(s) of posts & prices…`, true);
+  try{
+    // 1) Prices
+    let daily = await fetchDailyBTC(days);
+    const todayKey = new Date().toISOString().slice(0,10);
+    if(!daily[todayKey]){ // inject live as today's price if missing
+      const cur = await fetchCurrentBTC();
+      if(isFinite(cur)) daily[todayKey] = cur;
+    }
+
+    // 2) Posts
+    const posts = await fetchPosts(days, titlesOnly, includeCrypto);
+
+    // 3) Word frequencies per day
+    const perDayCounts = countWordsPerDay(posts);
+
+    // 4) Build rows with direction & top words
+    // Collect date keys appearing either in price or posts (intersection of last N)
+    const allDates = new Set([
+      ...Object.keys(daily),
+      ...Object.keys(perDayCounts)
+    ]);
+
+    // Limit to last N by date
+    const sortedDates = Array.from(allDates).sort(); // asc
+    const lastNDates = sortedDates.slice(-days);
+
+    const rows = [];
+    for(let i=0; i<lastNDates.length; i++){
+      const d = lastNDates[i];
+      const prev = lastNDates[i-1];
+
+      const price = daily[d];
+      let pct = null, dir = "flat";
+
+      // find nearest previous date that has a price
+      let prevPrice = null;
+      for(let j=i-1; j>=0; j--){
+        const pd = lastNDates[j];
+        if(daily[pd]!=null){
+          prevPrice = daily[pd];
+          break;
+        }
+      }
+      if(price!=null && prevPrice!=null && prevPrice!==0){
+        const change = ((price - prevPrice)/prevPrice)*100;
+        pct = change;
+        dir = change > 0 ? "up" : change < 0 ? "down" : "flat";
+      }
+
+      const counts = perDayCounts[d] || new Map();
+      // optionally: if day is very sparse, you still get empty words — that’s fine
+      const topWords = topN(counts, 20);
+
+      rows.push({ date:d, dir, price, pct, topWords });
+    }
+
+    fillTable(rows);
+
+    // status summary
+    const up = rows.filter(r=>r.dir==="up").length;
+    const down = rows.filter(r=>r.dir==="down").length;
+    const flat = rows.filter(r=>r.dir==="flat").length;
+    setStatus(`Done. Days: ${rows.length} (↑ ${up} / ↓ ${down} / → ${flat}). Posts analyzed: ${posts.length}.`, false);
+  }catch(err){
+    console.error(err);
+    setStatus(`Error: ${err.message}`, false);
+  }
+}
+
+document.getElementById('runBtn').addEventListener('click', run);
+
+// persist Worker URL
+const workerInput = document.getElementById('workerUrl');
+workerInput.value = getWorker();
+document.getElementById('saveWorker').addEventListener('click', ()=>{
+  try{ setWorker(workerInput.value||""); setStatus("Worker URL saved.", false); }
+  catch(e){ setStatus(e.message, false); }
+});
+
+// autorun if Worker set
+run();
+</script>
+</body>
+</html>
