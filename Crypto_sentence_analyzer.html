@@ -176,4 +176,344 @@ async function fetchTextSmart(targetUrl){
       if(!r.ok) throw new Error(`Worker HTTP ${r.status} for ${targetUrl}`);
       return await r.text();
     }catch(e){
-      console.warn("Worker TEXT failed, trying direct:", e)
+      console.warn("Worker TEXT failed, trying direct:", e);
+      return await tryDirect();
+    }
+  }else{
+    return await tryDirect();
+  }
+}
+
+/* ==================== Reddit ==================== */
+async function fetchSubNew(sub, after=null){
+  const url = new URL(`https://www.reddit.com/r/${sub}/new.json`);
+  url.searchParams.set('limit', REDDIT_PAGE_LIMIT);
+  if(after) url.searchParams.set('after', after);
+  return await fetchJSONSmart(url.toString());
+}
+
+async function fetchPosts(days, titlesOnly, includeCrypto){
+  const cutoff = Date.now()/1000 - days*86400;
+  let all = [];
+  const subs = [...SUBS_CORE, ...(includeCrypto ? [SUB_CRYPTOCURRENCY] : [])];
+
+  for(const sub of subs){
+    let after=null, pages=0;
+    while(pages < REDDIT_MAX_PAGES){
+      const data = await fetchSubNew(sub, after);
+      const children = data?.data?.children || [];
+      if(children.length===0) break;
+
+      const posts = children.map(c => c.data).map(p => ({
+        title: p.title || "",
+        selftext: titlesOnly ? "" : (p.selftext || ""),
+        created_utc: p.created_utc || 0
+      }));
+
+      const fresh = posts.filter(p => p.created_utc >= cutoff);
+      all.push(...fresh);
+
+      after = data?.data?.after || null;
+      pages++;
+      const lastTs = posts[posts.length-1]?.created_utc || 0;
+      if(!after || lastTs < cutoff) break;
+      await delay(220);
+    }
+  }
+  return all;
+}
+
+/* ==================== RSS (optional) ==================== */
+function parseRssItems(xmlText){
+  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+  let items = Array.from(doc.querySelectorAll("item"));
+  if(items.length === 0){ items = Array.from(doc.querySelectorAll("entry")); }
+  return items.map(el => {
+    const title = (el.querySelector("title")?.textContent || "").trim();
+    const desc = (el.querySelector("description, summary, content")?.textContent || "").trim();
+    const pub = (el.querySelector("pubDate, updated, published")?.textContent || "").trim();
+    const ts = pub ? Math.floor(Date.parse(pub)/1000) : Math.floor(Date.now()/1000);
+    return { title, selftext: desc, created_utc: isFinite(ts) ? ts : Math.floor(Date.now()/1000) };
+  });
+}
+async function fetchRSS(days){
+  const cutoff = Date.now()/1000 - days*86400;
+  const out = [];
+  for(const url of RSS_SOURCES){
+    try{
+      const text = await fetchTextSmart(url);
+      const items = parseRssItems(text);
+      for(const it of items){
+        if(it.created_utc >= cutoff) out.push(it);
+      }
+      await delay(160);
+    }catch(e){ console.warn("RSS fail", url, e); }
+  }
+  return out;
+}
+
+/* ==================== Prices (CG → Binance; inject today if missing) ==================== */
+async function fetchCurrent(symbol){ // "bitcoin" | "ethereum"
+  try{
+    const data = await fetchJSONSmart(`https://api.coingecko.com/api/v3/simple/price?ids=${symbol}&vs_currencies=usd`);
+    const v = data?.[symbol]?.usd;
+    if(v!=null) return Number(v);
+  }catch{}
+  try{
+    const bin = MAP_CG_TO_BINANCE[symbol];
+    const url = new URL("https://api.binance.com/api/v3/ticker/price");
+    url.searchParams.set("symbol", bin);
+    const data = await fetchJSONSmart(url.toString());
+    return Number(data?.price ?? NaN);
+  }catch{}
+  return NaN;
+}
+async function fetchDaily(symbol, days){
+  try{
+    const data = await fetchJSONSmart(`https://api.coingecko.com/api/v3/coins/${symbol}/market_chart?vs_currency=usd&days=${days+2}&interval=daily`);
+    const out = {};
+    for(const [ts, price] of (data?.prices || [])){
+      out[new Date(ts).toISOString().slice(0,10)] = Number(price);
+    }
+    return out;
+  }catch{}
+  try{
+    const bin = MAP_CG_TO_BINANCE[symbol];
+    const url = new URL("https://api.binance.com/api/v3/klines");
+    url.searchParams.set("symbol", bin);
+    url.searchParams.set("interval", "1d");
+    url.searchParams.set("limit", String(days+2));
+    const data = await fetchJSONSmart(url.toString());
+    const out = {};
+    for(const k of data){
+      out[new Date(k[0]).toISOString().slice(0,10)] = Number(k[4]);
+    }
+    return out;
+  }catch{}
+  return {};
+}
+function injectToday(prices, live){
+  const today = new Date().toISOString().slice(0,10);
+  if(live!=null && isFinite(live) && prices[today]==null) prices[today] = Number(live);
+  return prices;
+}
+function nearestPrevWithPrice(prices, sortedDescDates, idx){
+  for(let j=idx+1;j<sortedDescDates.length;j++){
+    const d = sortedDescDates[j]; if(prices[d]!=null) return d;
+  }
+  return null;
+}
+
+/* ==================== Sentence-level sentiment ==================== */
+/* A small, negation/booster-aware sentence scorer (language-light but robust).
+   It is NOT a keyword counter: we score each sentence, flipping on negation and
+   applying small boosts for intensifiers and exclamation marks. */
+
+const NEGATORS = new Set([
+  "not","no","never","without","isnt","arent","wasnt","werent","dont","doesnt","didnt","wont","cant","cannot",
+  "inte","ej","aldrig","utan",
+  "ikke","aldri","uden",
+  "nicht","nie","ohne","kein","keine",
+  "ne","pas","jamais","sans",
+  "no","nunca","sin","ningun","ninguna",
+  "nao","n\u00e3o","nunca","sem",
+  "non","mai","senza",
+  "niet","nooit","zonder","geen",
+  "degil","asla","hic","olmadan",
+  "ne","net","nikogda","bez"
+]);
+
+const BOOSTERS = new Set([
+  "very","so","really","extremely","highly","super","ultra","insanely","crazy","mega",
+  "väldigt","mycket","svært","meget","sehr","très","muy","muito","molto","heel","çok","ochen","очень"
+]);
+
+// minimal valence lexicon (balanced); this is sentence-level, not a bag-of-words count
+const VALENCE_POS = new Set([
+  "bull","bullish","buy","accumulate","long","support","breakout","rally","bounce",
+  "moon","pump","surge","spike","squeeze","green","uptrend","ath","rebound","recovery",
+  "strong","undervalued","cheap","oversold","momentum","rocket","hodl","wagmi","lfg",
+  "till månen","til månen","kuuhun","zum mond","vers la lune","a la luna","à la lune","alla luna","naar de maan"
+]);
+const VALENCE_NEG = new Set([
+  "bear","bearish","sell","dump","crash","plunge","collapse","capitulation","liquidation",
+  "resistance","overvalued","weak","downtrend","red","fear","panic","fraud","scam",
+  "rug","rug pull","ponzi","exploit","hack","ban","crackdown","rekt","ngmi","paper hands"
+]);
+
+const EMOJI_POS = /🚀|📈|🟢|✅|💎🙌|💎|✨/g;
+const EMOJI_NEG = /📉|🟥|🔻|❌|😱|😭|💀|⚠️/g;
+
+function norm(s){ return (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
+function tokenize(s){
+  return norm(s).split(/[^0-9a-z$#\u0400-\u04FF]+/i).filter(Boolean);
+}
+function splitSentences(text){
+  return (text||"")
+    .replace(/\r/g," ")
+    .split(/[.!?…\n]+/g)
+    .map(s=>s.trim())
+    .filter(s=>s.length>2);
+}
+
+// returns a signed score; > thresh => positive, < -thresh => negative
+function scoreSentence(sentence){
+  if(!sentence) return 0;
+  const s = sentence;
+  const emojisPos = (s.match(EMOJI_POS)||[]).length;
+  const emojisNeg = (s.match(EMOJI_NEG)||[]).length;
+
+  const toks = tokenize(s);
+  if(!toks.length) return emojisPos - emojisNeg;
+
+  let score = (emojisPos - emojisNeg); // emoji hint
+
+  for(let i=0;i<toks.length;i++){
+    const w = toks[i];
+    let delta = 0;
+    if (VALENCE_POS.has(w)) delta = 1;
+    else if (VALENCE_NEG.has(w)) delta = -1;
+
+    if (delta !== 0){
+      // tiny emphasis if booster in last 3 tokens
+      const prev = toks.slice(Math.max(0,i-3), i);
+      if (prev.some(p=>BOOSTERS.has(p))) delta *= 1.2;
+
+      // flip if a negator in last 3 tokens
+      if (prev.some(p=>NEGATORS.has(p))) delta *= -1;
+
+      score += delta;
+    }
+  }
+
+  // exclamation emphasis
+  const bangs = Math.min(3, (s.match(/!/g)||[]).length);
+  if (bangs) score += 0.1*bangs * Math.sign(score||1);
+
+  // squash tiny values
+  if (Math.abs(score) < 0.35) return 0;
+  return score;
+}
+
+/* classify sentences for a given asset keyword */
+function sentenceSentimentCountsForAsset(posts, which){
+  const kw = which==='btc' ? KEYWORDS.btc : KEYWORDS.eth;
+  const byDate = {}; // {date: {pos: n, neg: n}}
+  for(const p of posts){
+    const text = `${p.title} ${p.selftext||""}`.trim();
+    const sentences = splitSentences(text);
+    const date = utcDateStr(p.created_utc);
+    for(const sent of sentences){
+      if(!kw.test(sent)) continue; // sentence must mention the asset
+      const val = scoreSentence(sent);
+      if(val===0) continue;
+      if(!byDate[date]) byDate[date] = {pos:0, neg:0};
+      if(val>0) byDate[date].pos++; else byDate[date].neg++;
+    }
+  }
+  return byDate;
+}
+
+/* ==================== Tables ==================== */
+function fillTable(tbody, byDate, prices){
+  tbody.innerHTML = "";
+  const dates = Object.keys(byDate).sort().reverse(); // newest first
+  for(let i=0;i<dates.length;i++){
+    const d = dates[i];
+    const {pos, neg} = byDate[d];
+
+    const priceVal = prices ? prices[d] : null;
+    const priceText = fmtUSD(priceVal);
+
+    let changeText = "—";
+    if (prices && priceVal != null) {
+      const prevDate = (function nearestPrev(dates, idx){
+        for(let j=idx+1;j<dates.length;j++){
+          const dd = dates[j]; if(prices[dd]!=null) return dd;
+        }
+        return null;
+      })(dates, i);
+      const prevVal = prevDate ? prices[prevDate] : null;
+      if (prevVal != null && prevVal !== 0){
+        const change = ((priceVal - prevVal)/prevVal)*100;
+        const color = change>0 ? "var(--good)" : change<0 ? "var(--bad)" : "var(--muted)";
+        const sign = change>0 ? "+" : (change<0 ? "" : "");
+        changeText = `<span style="color:${color}">${sign}${change.toFixed(2)}%</span>`;
+      }
+    }
+
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${d}</td>`+
+      `<td class="num good">${pos||0}</td>`+
+      `<td class="num bad">${neg||0}</td>`+
+      `<td class="num">${priceText}</td>`+
+      `<td class="num">${changeText}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+/* ==================== Main ==================== */
+async function run(){
+  const days = Math.max(7, Math.min(120, Number(document.getElementById('days').value || 60)));
+  const titlesOnly = document.getElementById('titlesOnly').checked;
+  const includeCrypto = document.getElementById('includeCryptoSub').checked;
+  const includeNews = document.getElementById('includeNews').checked;
+
+  document.getElementById('srcExtra').textContent = includeCrypto ? ", r/CryptoCurrency" : "";
+  document.getElementById('newsTag').style.display = includeNews ? "inline-block" : "none";
+  setStatus(`Fetching posts & prices for last ${days} day(s)…`, true);
+
+  try{
+    // 1) Fetch posts
+    let posts = await fetchPosts(days, titlesOnly, includeCrypto);
+    if(includeNews){
+      const rss = await fetchRSS(days);
+      posts.push(...rss);
+    }
+
+    // 2) Sentence-level counts per asset/day
+    const btcByDate = sentenceSentimentCountsForAsset(posts, 'btc');
+    const ethByDate = sentenceSentimentCountsForAsset(posts, 'eth');
+
+    // 3) Prices
+    const [btcDaily, ethDaily] = await Promise.all([fetchDaily("bitcoin", days), fetchDaily("ethereum", days)]);
+    const [btcLive,  ethLive ] = await Promise.all([fetchCurrent("bitcoin"),        fetchCurrent("ethereum")]);
+
+    const btcPrices = injectToday(btcDaily, btcLive);
+    const ethPrices = injectToday(ethDaily, ethLive);
+
+    if (isFinite(btcLive)) document.getElementById('btcPrice').textContent = fmtUSD(btcLive);
+    if (isFinite(ethLive)) document.getElementById('ethPrice').textContent = fmtUSD(ethLive);
+
+    // 4) Fill tables
+    fillTable(document.querySelector('#btcTable tbody'), btcByDate, btcPrices);
+    fillTable(document.querySelector('#ethTable tbody'), ethByDate, ethPrices);
+
+    // 5) Status
+    const totalSentences =
+      Object.values(btcByDate).reduce((a,x)=>a+x.pos+x.neg,0) +
+      Object.values(ethByDate).reduce((a,x)=>a+x.pos+x.neg,0);
+
+    setStatus(`Done. Classified ${totalSentences} sentences across BTC & ETH.`, false);
+  }catch(err){
+    console.error(err);
+    setStatus(`Error: ${err.message}`, false);
+  }
+}
+
+document.getElementById('runBtn').addEventListener('click', run);
+
+// persist Worker URL
+const workerInput = document.getElementById('workerUrl');
+workerInput.value = getWorker();
+document.getElementById('saveWorker').addEventListener('click', ()=>{
+  try{ setWorker(workerInput.value||""); setStatus("Worker URL saved.", false); }
+  catch(e){ setStatus(e.message, false); }
+});
+
+// autorun
+run();
+</script>
+</body>
+</html>
