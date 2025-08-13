@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Road Features Map with KMZ Route</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body, html { margin: 0; padding: 0; height: 100%; display: flex; flex-direction: column; }
+    #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    #map { position: relative; width: 100%; height: 60%; }
+    #results, #seqResults { height: 20%; overflow: auto; margin-top: 5px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
+    .feature-label { background: white; border: 1px solid #333; border-radius: 4px; padding: 2px 4px; }
+    .leaflet-tooltip.feature-label:after { background: white; }
+    #searchOverlay {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 1.5em; z-index: 1000; pointer-events: none;
+    }
+    footer { text-align: center; padding: 10px; font-size: 0.8em; background: #fff; margin-top: auto; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <strong>Upload Route (KMZ):</strong>
+    <input type="file" id="kmzInput" accept=".kmz" />
+    <button id="loadRouteBtn">Load Route</button>
+    <button id="searchBtn">Sequential Search</button>
+    <button id="exportBtn" style="margin-left:10px;">Export to Excel</button>
+    <label style="margin-left:10px;">
+      Radius (m): <input type="number" id="range" value="5" min="1" step="1" style="width:80px;" />
+    </label>
+    <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
+  </div>
+
+  <div id="map">
+    <div id="searchOverlay" style="display:none;">Searching for road features…</div>
+  </div>
+
+  <div id="results">
+    <h4>Features by Type</h4>
+    <table id="typeTable">
+      <thead>
+        <tr><th>Feature</th><th>Lat</th><th>Lon</th></tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+
+  <div id="seqResults">
+    <h4>Features by Route Coordinate</h4>
+    <table id="seqTable">
+      <thead>
+        <tr><th>#</th><th>Lat</th><th>Lon</th><th>Features</th></tr>
+      </thead>
+      <tbody id="seqBody"></tbody>
+    </table>
+  </div>
+
+  <footer>&copy; Lynoit 2025</footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/togeojson/0.16.0/togeojson.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+
+  <script>
+    const RANGE = () => parseInt(document.getElementById('range').value, 10) || 5;
+    const showOverlay = () => (document.getElementById('searchOverlay').style.display = 'flex');
+    const hideOverlay = () => (document.getElementById('searchOverlay').style.display = 'none');
+
+    // Map
+    const map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OSM' }).addTo(map);
+    const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLayer: () => null }).addTo(map);
+
+    // Manual point (toggle on double-click)
+    let manualMarker = null;
+    map.on('dblclick', (e) => {
+      if (manualMarker) {
+        map.removeLayer(manualMarker);
+        manualMarker = null;
+      } else {
+        manualMarker = L.marker(e.latlng, { draggable: true }).addTo(map).bindTooltip('Manual point', {permanent:true, offset:[0,-24]});
+      }
+    });
+
+    // Feature definitions (supports multiple selectors per label)
+    const featureSettings = [
+      { label: 'Bridge', selectors: [ ['bridge','yes'], ['man_made','bridge'] ] },
+      { label: 'Tunnel', selectors: [ ['tunnel','yes'] ] },
+      { label: 'Toll Station', selectors: [ ['amenity','toll_booth'] ] },
+      { label: 'Roundabout', selectors: [ ['junction','roundabout'] ] },
+      { label: 'Stop Sign', selectors: [ ['highway','stop'] ] },
+      { label: 'Traffic Light', selectors: [ ['highway','traffic_signals'] ] },
+      // NOTE: "Intersection" isn't a standard tag; you might remove/replace this if noisy.
+      { label: 'Intersection', selectors: [ ['junction','yes'] ] },
+      { label: 'Speed Bump', selectors: [ ['traffic_calming','speed_bump'] ] },
+      // Speed limits (ways, mostly). Overpass will return "center" for ways.
+      ...['10','20','30','40','50','60','70','80','90','100','110','120','130','140','none']
+        .map(v => ({ label: (v==='none'?'Unlimited':`${v} kph`), selectors: [ ['maxspeed', v] ] }))
+    ];
+
+    // Per-label layer groups + simple per-label dedupe store
+    const featureLayers = {};
+    const seenByLabel = {}; // label -> array of [lat, lon]
+    featureSettings.forEach(({ label }) => {
+      featureLayers[label] = L.layerGroup().addTo(map);
+      seenByLabel[label] = [];
+    });
+
+    function nearExisting(label, lat, lon, meters = Math.max(3, RANGE()*0.75)) {
+      const p = turf.point([lon, lat]);
+      for (const [lt, ln] of seenByLabel[label]) {
+        const d = turf.distance(p, turf.point([ln, lt]), { units: 'meters' });
+        if (d <= meters) return true;
+      }
+      return false;
+    }
+
+    function recordSeen(label, lat, lon) {
+      seenByLabel[label].push([lat, lon]);
+    }
+
+    function addMarker(label, coord) {
+      L.circleMarker(coord, { radius: 6, color: 'blue', fillColor: 'blue', fillOpacity: 1, weight: 1, interactive: false })
+        .addTo(featureLayers[label])
+        .bindTooltip(label, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
+    }
+
+    function clearAll() {
+      Object.values(featureLayers).forEach(layer => layer.clearLayers());
+      Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
+      document.getElementById('resultsBody').innerHTML = '';
+      document.getElementById('seqBody').innerHTML = '';
+    }
+
+    // Load KMZ -> GeoJSON
+    document.getElementById('loadRouteBtn').addEventListener('click', async () => {
+      const file = document.getElementById('kmzInput').files[0];
+      if (!file) { alert('Select a KMZ file first'); return; }
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const kmlName = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
+        if (!kmlName) throw new Error('No KML found inside KMZ.');
+        const kmlText = await zip.file(kmlName).async('string');
+        const kmlDoc = new DOMParser().parseFromString(kmlText, 'application/xml');
+        const gj = toGeoJSON.kml(kmlDoc);
+        if (!gj.features.length) throw new Error('KML has no features.');
+        routeLayer.clearLayers().addData(gj);
+        map.fitBounds(routeLayer.getBounds(), { padding: [20,20] });
+      } catch (err) {
+        alert('Failed to load KMZ: ' + err.message);
+      }
+    });
+
+    // Overpass helper with mirrors + backoff
+    const OVERPASS_MIRRORS = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.openstreetmap.ru/api/interpreter'
+    ];
+    async function fetchOverpass(query, attempt = 0) {
+      const mirror = OVERPASS_MIRRORS[attempt % OVERPASS_MIRRORS.length];
+      const body = 'data=' + encodeURIComponent(query);
+      try {
+        const res = await fetch(mirror, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body
+        });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return await res.json();
+      } catch (e) {
+        if (attempt < 4) {
+          // simple backoff
+          await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+          return fetchOverpass(query, attempt + 1);
+        }
+        throw e;
+      }
+    }
+
+    // Get all route coordinates as LineStrings
+    function getRouteCoords(gj) {
+      const lines = [];
+      gj.features.forEach(f => {
+        if (!f.geometry) return;
+        if (f.geometry.type === 'LineString') {
+          lines.push(f.geometry.coordinates);
+        } else if (f.geometry.type === 'MultiLineString') {
+          f.geometry.coordinates.forEach(c => lines.push(c));
+        }
+      });
+      return lines;
+    }
+
+    // Build Overpass query for a label with multiple selectors
+    function buildQueryForSelectors(selectors, bboxStr) {
+      // Make a union of nodes and ways for each selector
+      const parts = [];
+      for (const [k, v] of selectors) {
+        parts.push(`node["${k}"="${v}"](${bboxStr});way["${k}"="${v}"](${bboxStr});`);
+      }
+      return `[out:json][timeout:25];(${parts.join('')});out center;`;
+    }
+
+    // Search features and populate tables
+    document.getElementById('searchBtn').addEventListener('click', async () => {
+      clearAll(); showOverlay();
+      try {
+        const gj = routeLayer.toGeoJSON();
+        if (!gj.features.length) { hideOverlay(); alert('Load a route first'); return; }
+
+        const bbox = turf.bbox(gj);
+        const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`; // S,W,N,E
+        const lines = getRouteCoords(gj);
+        if (!lines.length) throw new Error('No LineString geometry in route.');
+
+        const allFound = [];
+
+        // Query each label
+        for (const { label, selectors } of featureSettings) {
+          try {
+            const q = buildQueryForSelectors(selectors, bboxStr);
+            const data = await fetchOverpass(q);
+
+            (data.elements || []).forEach(el => {
+              const lat = el.lat != null ? el.lat : el.center?.lat;
+              const lon = el.lon != null ? el.lon : el.center?.lon;
+              if (lat == null || lon == null) return;
+
+              // Skip near-duplicate hits for this label
+              if (nearExisting(label, lat, lon)) return;
+
+              // Check within RANGE of any route segment
+              const pt = turf.point([lon, lat]);
+              const onAny = lines.some(coords => {
+                const d = turf.pointToLineDistance(pt, turf.lineString(coords), { units: 'meters' });
+                return d <= RANGE();
+              });
+              if (!onAny) return;
+
+              // Record + draw
+              recordSeen(label, lat, lon);
+              document.getElementById('resultsBody').insertAdjacentHTML(
+                'beforeend',
+                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
+              );
+              addMarker(label, [lat, lon]);
+              allFound.push({ el, label, lat, lon });
+            });
+          } catch (e) {
+            console.warn(`Query failed for ${label}:`, e);
+          }
+        }
+
+        // Sequential along route coords (and optional manual point)
+        const seqRows = [];
+        lines.forEach(coords => {
+          coords.forEach((c, i) => {
+            const [lng, lat] = c;
+            const labels = allFound
+              .filter(({ lat: la, lon: lo }) =>
+                turf.distance(turf.point([lo, la]), turf.point([lng, lat]), { units: 'meters' }) <= RANGE()
+              )
+              .map(x => x.label);
+            if (labels.length) {
+              seqRows.push({ idx: i + 1, lat, lng, labels: [...new Set(labels)].join(', ') });
+            }
+          });
+        });
+
+        // Manual point inclusion
+        if (manualMarker) {
+          const m = manualMarker.getLatLng();
+          const labels = allFound
+            .filter(({ lat: la, lon: lo }) =>
+              turf.distance(turf.point([lo, la]), turf.point([m.lng, m.lat]), { units: 'meters' }) <= RANGE()
+            )
+            .map(x => x.label);
+          if (labels.length) {
+            seqRows.push({ idx: 'M', lat: m.lat, lng: m.lng, labels: [...new Set(labels)].join(', ') });
+          }
+        }
+
+        // Render sequential rows
+        const seqBody = document.getElementById('seqBody');
+        seqRows.forEach(r => {
+          seqBody.insertAdjacentHTML(
+            'beforeend',
+            `<tr><td>${r.idx}</td><td>${r.lat.toFixed(6)}</td><td>${r.lng.toFixed(6)}</td><td>${r.labels}</td></tr>`
+          );
+        });
+
+      } catch (err) {
+        alert(err.message || err);
+      } finally {
+        hideOverlay();
+      }
+    });
+
+    // Export tables to Excel
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      const wb = XLSX.utils.book_new();
+      const ws1 = XLSX.utils.table_to_sheet(document.getElementById('typeTable'));
+      XLSX.utils.book_append_sheet(wb, ws1, 'By Type');
+      const ws2 = XLSX.utils.table_to_sheet(document.getElementById('seqTable'));
+      XLSX.utils.book_append_sheet(wb, ws2, 'By Route Seq');
+      XLSX.writeFile(wb, 'road_features.xlsx');
+    });
+  </script>
+</body>
+</html>
