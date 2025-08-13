@@ -6,13 +6,10 @@
   <title>Road Features Map (Excel Positions + Logbook)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
-    body, html { margin: 0; padding: 0; height: 100%; display: flex; flex-direction: column; }
+    body, html { margin: 0; padding: 0; height: 100%; }
+    body { display: flex; flex-direction: column; }
     #controls { padding: 10px; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-    #map { position: relative; width: 100%; height: 60%; }
-    #results, #seqResults { height: 20%; overflow: auto; margin-top: 5px; background: #fff; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
-
+    #map { position: relative; width: 100%; flex: 1; }
     /* Blue (geo-reversed) tooltips */
     .leaflet-tooltip.feature-label {
       background: blue;
@@ -22,10 +19,7 @@
       padding: 2px 6px;
       font-size: 12px;
     }
-    .leaflet-tooltip.feature-label.leaflet-tooltip-right:before {
-      border-right-color: blue;
-    }
-
+    .leaflet-tooltip.feature-label.leaflet-tooltip-right:before { border-right-color: blue; }
     /* Orange (logbook) tooltips */
     .leaflet-tooltip.logbook-label {
       background: orange;
@@ -35,11 +29,8 @@
       padding: 2px 6px;
       font-size: 12px;
     }
-    .leaflet-tooltip.logbook-label.leaflet-tooltip-top:before {
-      border-top-color: orange;
-    }
+    .leaflet-tooltip.logbook-label.leaflet-tooltip-top:before { border-top-color: orange; }
 
-    .feature-label, .logbook-label { /* keep pointer visible on white bg */ }
     #searchOverlay {
       position: absolute; top: 0; left: 0;
       width: 100%; height: 100%;
@@ -47,7 +38,7 @@
       display: flex; align-items: center; justify-content: center;
       color: white; font-size: 1.5em; z-index: 1000; pointer-events: none;
     }
-    footer { text-align: center; padding: 10px; font-size: 0.8em; background: #fff; margin-top: auto; }
+    footer { text-align: center; padding: 10px; font-size: 0.8em; background: #fff; }
 
     /* Legend */
     .map-legend {
@@ -71,8 +62,8 @@
     <strong>Upload Positions (Excel):</strong>
     <input type="file" id="xlsInput" accept=".xlsx,.xls" />
     <button id="loadExcelBtn">Load Positions</button>
-    <button id="searchBtn">Sequential Search</button>
-    <button id="exportBtn" style="margin-left:10px;">Export to Excel</button>
+    <button id="searchBtn">Find Road Features</button>
+    <button id="exportBtn" style="margin-left:10px;">Export (A-D)</button>
     <label style="margin-left:10px;">
       Radius (m): <input type="number" id="range" value="5" min="1" step="1" style="width:80px;" />
     </label>
@@ -81,26 +72,6 @@
 
   <div id="map">
     <div id="searchOverlay" style="display:none;">Searching for road features…</div>
-  </div>
-
-  <div id="results">
-    <h4>Features by Type</h4>
-    <table id="typeTable">
-      <thead>
-        <tr><th>Feature</th><th>Lat</th><th>Lon</th></tr>
-      </thead>
-      <tbody id="resultsBody"></tbody>
-    </table>
-  </div>
-
-  <div id="seqResults">
-    <h4>Features by Route Coordinate</h4>
-    <table id="seqTable">
-      <thead>
-        <tr><th>#</th><th>Lat</th><th>Lon</th><th>Features</th></tr>
-      </thead>
-      <tbody id="seqBody"></tbody>
-    </table>
   </div>
 
   <footer>&copy; Lynoit 2025</footer>
@@ -118,7 +89,7 @@
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OSM' }).addTo(map);
 
-    // Legend: explains colors
+    // Legend
     const legend = L.control({ position: 'bottomleft' });
     legend.onAdd = function () {
       const div = L.DomUtil.create('div', 'map-legend');
@@ -170,13 +141,9 @@
         .map(v => ({ label: (v==='none'?'Unlimited':`${v} kph`), selectors: [ ['maxspeed', v] ] }))
     ];
 
-    // (Legacy per-label layers kept for clearing logic)
-    const featureLayers = {};
+    // Dedupe memory by label
     const seenByLabel = {};
-    featureSettings.forEach(({ label }) => {
-      featureLayers[label] = L.layerGroup().addTo(map);
-      seenByLabel[label] = [];
-    });
+    featureSettings.forEach(({ label }) => { seenByLabel[label] = []; });
 
     function nearExisting(label, lat, lon, meters = Math.max(3, RANGE()*0.75)) {
       const p = turf.point([lon, lat]);
@@ -188,7 +155,7 @@
     }
     function recordSeen(label, lat, lon) { seenByLabel[label].push([lat, lon]); }
 
-    // NEW: single marker per coordinate; append labels with commas
+    // Single blue marker per coordinate; append labels with commas
     function addOrUpdateFeatureMarker(label, lat, lon) {
       const key = featureKey(lat, lon);
       let entry = featureNodeIndex.get(key);
@@ -209,22 +176,16 @@
     }
 
     function clearAll() {
-      Object.values(featureLayers).forEach(layer => layer.clearLayers());
       Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
-      document.getElementById('resultsBody').innerHTML = '';
-      document.getElementById('seqBody').innerHTML = '';
       logbookLayer.clearLayers();
       featuresCombinedLayer.clearLayers();
       featureNodeIndex.clear();
     }
     function clearSearchOnly() {
-      Object.values(featureLayers).forEach(layer => layer.clearLayers());
       Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
-      document.getElementById('resultsBody').innerHTML = '';
-      document.getElementById('seqBody').innerHTML = '';
       featuresCombinedLayer.clearLayers();
       featureNodeIndex.clear();
-      // DO NOT clear logbookLayer
+      // keep logbookLayer
     }
 
     function drawRouteFromCoords(coords) {
@@ -321,9 +282,7 @@
 
         // Fit bounds to include both route and logbook
         let bounds = routeLayer.getBounds();
-        if (logbookLayer.getLayers().length) {
-          bounds.extend(logbookLayer.getBounds());
-        }
+        if (logbookLayer.getLayers().length) bounds.extend(logbookLayer.getBounds());
         map.fitBounds(bounds, { padding: [20,20] });
 
         alert(`Loaded ${filtered.length} route positions and ${logCount} logbook point(s) from "${file.name}".`);
@@ -356,7 +315,8 @@
 
     function getRouteBbox() {
       if (!currentGeoJSON) return null;
-      return turf.bbox(currentGeoJSON); // [W,S,E,N] as [minX,minY,maxX,maxY]
+      // [minX,minY,maxX,maxY] => [W,S,E,N]
+      return turf.bbox(currentGeoJSON);
     }
 
     function buildQueryForSelectors(selectors, bboxStr) {
@@ -367,7 +327,7 @@
       return `[out:json][timeout:25];(${parts.join('')});out center;`;
     }
 
-    // Search features and populate tables
+    // Search features and plot (no tables)
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearSearchOnly(); showOverlay();
       try {
@@ -375,9 +335,7 @@
         const bbox = getRouteBbox();
         if (!bbox) throw new Error('No route geometry available.');
         const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`; // S,W,N,E
-
         const lines = routeLines;
-        const allFound = [];
 
         for (const { label, selectors } of featureSettings) {
           try {
@@ -399,61 +357,12 @@
               if (!onAny) return;
 
               recordSeen(label, lat, lon);
-
-              // Table (by type) remains one row per detected feature
-              document.getElementById('resultsBody').insertAdjacentHTML(
-                'beforeend',
-                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
-              );
-
-              // MAP: merge labels at identical coordinates
               addOrUpdateFeatureMarker(label, lat, lon);
-
-              allFound.push({ el, label, lat, lon });
             });
           } catch (e) {
             console.warn(`Query failed for ${label}:`, e);
           }
         }
-
-        // Sequential table across the Excel route coordinates (already merges labels per coordinate)
-        const seqRows = [];
-        lines.forEach(coords => {
-          coords.forEach((c, i) => {
-            const [lng, lat] = c;
-            const labels = allFound
-              .filter(({ lat: la, lon: lo }) =>
-                turf.distance(turf.point([lo, la]), turf.point([lng, lat]), { units: 'meters' }) <= RANGE()
-              )
-              .map(x => x.label);
-            if (labels.length) {
-              seqRows.push({ idx: i + 1, lat, lng, labels: [...new Set(labels)].join(', ') });
-            }
-          });
-        });
-
-        // Manual point inclusion
-        if (manualMarker) {
-          const m = manualMarker.getLatLng();
-          const labels = allFound
-            .filter(({ lat: la, lon: lo }) =>
-              turf.distance(turf.point([lo, la]), turf.point([m.lng, m.lat]), { units: 'meters' }) <= RANGE()
-            )
-            .map(x => x.label);
-          if (labels.length) {
-            seqRows.push({ idx: 'M', lat: m.lat, lng: m.lng, labels: [...new Set(labels)].join(', ') });
-          }
-        }
-
-        // Render sequential rows
-        const seqBody = document.getElementById('seqBody');
-        seqRows.forEach(r => {
-          seqBody.insertAdjacentHTML(
-            'beforeend',
-            `<tr><td>${r.idx}</td><td>${r.lat.toFixed(6)}</td><td>${r.lng.toFixed(6)}</td><td>${r.labels}</td></tr>`
-          );
-        });
-
       } catch (err) {
         alert(err.message || err);
       } finally {
@@ -461,55 +370,53 @@
       }
     });
 
-    // Export tables to Excel
-document.getElementById('exportBtn').addEventListener('click', () => {
-  if (!routeLines.length) { alert('Load positions (Excel) first'); return; }
+    // Export: one row per route coordinate, columns A-D as requested
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      if (!routeLines.length) { alert('Load positions (Excel) first'); return; }
 
-  // Gather current orange (logbook) and blue (features) markers on the map
-  const logPts = logbookLayer.getLayers().map(m => ({
-    lat: m.getLatLng().lat,
-    lng: m.getLatLng().lng,
-    label: (m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()).trim() : ''
-  }));
+      // Gather orange (logbook) and blue (features) markers from the map
+      const logPts = logbookLayer.getLayers().map(m => ({
+        lat: m.getLatLng().lat,
+        lng: m.getLatLng().lng,
+        label: (m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()).trim() : ''
+      }));
 
-  const featPts = featuresCombinedLayer.getLayers().map(m => ({
-    lat: m.getLatLng().lat,
-    lng: m.getLatLng().lng,
-    // Blue markers already have comma-separated text; split to distinct labels
-    labels: ((m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()) : '')
-              .split(',').map(s => s.trim()).filter(Boolean)
-  }));
+      const featPts = featuresCombinedLayer.getLayers().map(m => ({
+        lat: m.getLatLng().lat,
+        lng: m.getLatLng().lng,
+        labels: ((m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()) : '')
+                  .split(',').map(s => s.trim()).filter(Boolean)
+      }));
 
-  const rangeMeters = RANGE();
-  const rows = [['Latitude', 'Longitude', 'Manual annotations (orange)', 'Geo-reversed features (blue)']];
+      const rangeMeters = RANGE();
+      const rows = [['Latitude', 'Longitude', 'Manual annotations (orange)', 'Geo-reversed features (blue)']];
 
-  // For every route coordinate, collect nearby orange/blue labels within Radius
-  routeLines.forEach(coords => {
-    coords.forEach(([lng, lat]) => {
-      const pt = turf.point([lng, lat]);
+      routeLines.forEach(coords => {
+        coords.forEach(([lng, lat]) => {
+          const pt = turf.point([lng, lat]);
 
-      const orangeLabels = [];
-      for (const p of logPts) {
-        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
-        if (d <= rangeMeters && p.label) orangeLabels.push(p.label);
-      }
+          const orangeLabels = [];
+          for (const p of logPts) {
+            const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+            if (d <= rangeMeters && p.label) orangeLabels.push(p.label);
+          }
 
-      const blueLabels = [];
-      for (const p of featPts) {
-        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
-        if (d <= rangeMeters) blueLabels.push(...p.labels);
-      }
+          const blueLabels = [];
+          for (const p of featPts) {
+            const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+            if (d <= rangeMeters) blueLabels.push(...p.labels);
+          }
 
-      const colC = [...new Set(orangeLabels)].join(', ');
-      const colD = [...new Set(blueLabels)].join(', ');
-      rows.push([lat, lng, colC, colD]);
-    });
-  });
+          const colC = [...new Set(orangeLabels)].join(', ');
+          const colD = [...new Set(blueLabels)].join(', ');
+          rows.push([lat, lng, colC, colD]);
+        });
+      });
 
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  XLSX.utils.book_append_sheet(wb, ws, 'All Coordinates');
-  XLSX.writeFile(wb, 'coordinates_with_labels.xlsx');
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, 'All Coordinates');
+      XLSX.writeFile(wb, 'coordinates_with_labels.xlsx');
     });
   </script>
 </body>
