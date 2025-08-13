@@ -462,13 +462,54 @@
     });
 
     // Export tables to Excel
-    document.getElementById('exportBtn').addEventListener('click', () => {
-      const wb = XLSX.utils.book_new();
-      const ws1 = XLSX.utils.table_to_sheet(document.getElementById('typeTable'));
-      XLSX.utils.book_append_sheet(wb, ws1, 'By Type');
-      const ws2 = XLSX.utils.table_to_sheet(document.getElementById('seqTable'));
-      XLSX.utils.book_append_sheet(wb, ws2, 'By Route Seq');
-      XLSX.writeFile(wb, 'road_features.xlsx');
+document.getElementById('exportBtn').addEventListener('click', () => {
+  if (!routeLines.length) { alert('Load positions (Excel) first'); return; }
+
+  // Gather current orange (logbook) and blue (features) markers on the map
+  const logPts = logbookLayer.getLayers().map(m => ({
+    lat: m.getLatLng().lat,
+    lng: m.getLatLng().lng,
+    label: (m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()).trim() : ''
+  }));
+
+  const featPts = featuresCombinedLayer.getLayers().map(m => ({
+    lat: m.getLatLng().lat,
+    lng: m.getLatLng().lng,
+    // Blue markers already have comma-separated text; split to distinct labels
+    labels: ((m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()) : '')
+              .split(',').map(s => s.trim()).filter(Boolean)
+  }));
+
+  const rangeMeters = RANGE();
+  const rows = [['Latitude', 'Longitude', 'Manual annotations (orange)', 'Geo-reversed features (blue)']];
+
+  // For every route coordinate, collect nearby orange/blue labels within Radius
+  routeLines.forEach(coords => {
+    coords.forEach(([lng, lat]) => {
+      const pt = turf.point([lng, lat]);
+
+      const orangeLabels = [];
+      for (const p of logPts) {
+        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+        if (d <= rangeMeters && p.label) orangeLabels.push(p.label);
+      }
+
+      const blueLabels = [];
+      for (const p of featPts) {
+        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+        if (d <= rangeMeters) blueLabels.push(...p.labels);
+      }
+
+      const colC = [...new Set(orangeLabels)].join(', ');
+      const colD = [...new Set(blueLabels)].join(', ');
+      rows.push([lat, lng, colC, colD]);
+    });
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  XLSX.utils.book_append_sheet(wb, ws, 'All Coordinates');
+  XLSX.writeFile(wb, 'coordinates_with_labels.xlsx');
     });
   </script>
 </body>
