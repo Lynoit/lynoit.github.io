@@ -13,50 +13,33 @@
     table { width: 100%; border-collapse: collapse; }
     th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
 
-/* Geo-reversed feature labels (blue dots) */
-.leaflet-tooltip.feature-label {
-  background: blue;          /* same as dot fillColor */
-  color: #fff;
-  border: 1px solid #002b99; /* darker blue border looks nicer */
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 12px;
-}
-.leaflet-tooltip.feature-label.leaflet-tooltip-right:before {
-  border-right-color: blue;  /* match the background for the pointer */
-}
+    /* Blue (geo-reversed) tooltips */
+    .leaflet-tooltip.feature-label {
+      background: blue;
+      color: #fff;
+      border: 1px solid #002b99;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+    }
+    .leaflet-tooltip.feature-label.leaflet-tooltip-right:before {
+      border-right-color: blue;
+    }
 
-/* Logbook labels (orange dots) */
-.leaflet-tooltip.logbook-label {
-  background: orange;        /* same as dot fillColor */
-  color: #000;
-  border: 1px solid #b36b00; /* slightly darker orange/brown border */
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 12px;
-}
-.leaflet-tooltip.logbook-label.leaflet-tooltip-top:before {
-  border-top-color: orange;  /* match the background for the pointer */
-}
+    /* Orange (logbook) tooltips */
+    .leaflet-tooltip.logbook-label {
+      background: orange;
+      color: #000;
+      border: 1px solid #b36b00;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+    }
+    .leaflet-tooltip.logbook-label.leaflet-tooltip-top:before {
+      border-top-color: orange;
+    }
 
-    /* Legend styling */
-.map-legend {
-  background: rgba(255,255,255,0.9);
-  padding: 6px 8px;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  font: 12px/1.2 Arial, sans-serif;
-}
-.map-legend .legend-row {
-  display: flex; align-items: center; gap: 6px; margin: 2px 0;
-}
-.map-legend .legend-dot {
-  width: 12px; height: 12px; border-radius: 50%;
-  display: inline-block; border: 1px solid rgba(0,0,0,0.4);
-}
-.map-legend .legend-dot.orange { background: orange; }
-.map-legend .legend-dot.blue   { background: blue;   border-color: #002b99; }
-    
+    .feature-label, .logbook-label { /* keep pointer visible on white bg */ }
     #searchOverlay {
       position: absolute; top: 0; left: 0;
       width: 100%; height: 100%;
@@ -65,11 +48,27 @@
       color: white; font-size: 1.5em; z-index: 1000; pointer-events: none;
     }
     footer { text-align: center; padding: 10px; font-size: 0.8em; background: #fff; margin-top: auto; }
+
+    /* Legend */
+    .map-legend {
+      background: rgba(255,255,255,0.9);
+      padding: 6px 8px;
+      border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      font: 12px/1.2 Arial, sans-serif;
+    }
+    .map-legend .legend-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+    .map-legend .legend-dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      display: inline-block; border: 1px solid rgba(0,0,0,0.4);
+    }
+    .map-legend .legend-dot.orange { background: orange; }
+    .map-legend .legend-dot.blue   { background: blue; border-color: #002b99; }
   </style>
 </head>
 <body>
   <div id="controls">
-    <strong>Upload drive logbook:</strong>
+    <strong>Upload Positions (Excel):</strong>
     <input type="file" id="xlsInput" accept=".xlsx,.xls" />
     <button id="loadExcelBtn">Load Positions</button>
     <button id="searchBtn">Sequential Search</button>
@@ -119,31 +118,31 @@
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OSM' }).addTo(map);
 
-    // Legend: explains what orange/blue labels mean
-const legend = L.control({ position: 'bottomleft' });
-legend.onAdd = function (map) {
-  const div = L.DomUtil.create('div', 'map-legend');
-  div.innerHTML = `
-    <div class="legend-row">
-      <span class="legend-dot orange"></span> Manual annotation
-    </div>
-    <div class="legend-row">
-      <span class="legend-dot blue"></span> Geo-reversed road feature
-    </div>
-  `;
-  // Keep map interactions working when clicking on the legend
-  L.DomEvent.disableClickPropagation(div);
-  return div;
-};
-legend.addTo(map);
+    // Legend: explains colors
+    const legend = L.control({ position: 'bottomleft' });
+    legend.onAdd = function () {
+      const div = L.DomUtil.create('div', 'map-legend');
+      div.innerHTML = `
+        <div class="legend-row"><span class="legend-dot orange"></span> Manual annotations</div>
+        <div class="legend-row"><span class="legend-dot blue"></span> Geo-reversed road feature</div>
+      `;
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+    legend.addTo(map);
 
     // Route storage and layer
     let routeLines = [];            // array of arrays of [lng, lat]
     let routeLayer = null;          // Leaflet polyline
     let currentGeoJSON = null;      // FeatureCollection for bbox etc.
 
-    // Logbook layer
+    // Logbook layer (featureGroup so getBounds() works)
     const logbookLayer = L.featureGroup().addTo(map);
+
+    // Combined blue markers for features (single marker per coordinate)
+    const featuresCombinedLayer = L.layerGroup().addTo(map);
+    const featureNodeIndex = new Map(); // key => { marker, labels:Set<string> }
+    const featureKey = (lat, lon) => `${lat.toFixed(6)},${lon.toFixed(6)}`; // group by exact coord (~0.1m)
 
     // Manual point (toggle on double-click)
     let manualMarker = null;
@@ -152,7 +151,8 @@ legend.addTo(map);
         map.removeLayer(manualMarker);
         manualMarker = null;
       } else {
-        manualMarker = L.marker(e.latlng, { draggable: true }).addTo(map).bindTooltip('Manual point', {permanent:true, offset:[0,-24]});
+        manualMarker = L.marker(e.latlng, { draggable: true }).addTo(map)
+          .bindTooltip('Manual point', {permanent:true, offset:[0,-24]});
       }
     });
 
@@ -170,7 +170,7 @@ legend.addTo(map);
         .map(v => ({ label: (v==='none'?'Unlimited':`${v} kph`), selectors: [ ['maxspeed', v] ] }))
     ];
 
-    // Per-label layers + dedupe memory
+    // (Legacy per-label layers kept for clearing logic)
     const featureLayers = {};
     const seenByLabel = {};
     featureSettings.forEach(({ label }) => {
@@ -188,10 +188,24 @@ legend.addTo(map);
     }
     function recordSeen(label, lat, lon) { seenByLabel[label].push([lat, lon]); }
 
-    function addMarker(label, coord) {
-      L.circleMarker(coord, { radius: 6, color: 'blue', fillColor: 'blue', fillOpacity: 1, weight: 1, interactive: false })
-        .addTo(featureLayers[label])
-        .bindTooltip(label, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
+    // NEW: single marker per coordinate; append labels with commas
+    function addOrUpdateFeatureMarker(label, lat, lon) {
+      const key = featureKey(lat, lon);
+      let entry = featureNodeIndex.get(key);
+      if (!entry) {
+        const marker = L.circleMarker([lat, lon], {
+          radius: 6, color: 'blue', fillColor: 'blue', fillOpacity: 1, weight: 1, interactive: false
+        }).addTo(featuresCombinedLayer);
+        entry = { marker, labels: new Set() };
+        featureNodeIndex.set(key, entry);
+      }
+      entry.labels.add(label);
+      const text = Array.from(entry.labels).join(', ');
+      if (entry.marker.getTooltip()) {
+        entry.marker.setTooltipContent(text);
+      } else {
+        entry.marker.bindTooltip(text, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
+      }
     }
 
     function clearAll() {
@@ -200,10 +214,20 @@ legend.addTo(map);
       document.getElementById('resultsBody').innerHTML = '';
       document.getElementById('seqBody').innerHTML = '';
       logbookLayer.clearLayers();
+      featuresCombinedLayer.clearLayers();
+      featureNodeIndex.clear();
+    }
+    function clearSearchOnly() {
+      Object.values(featureLayers).forEach(layer => layer.clearLayers());
+      Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
+      document.getElementById('resultsBody').innerHTML = '';
+      document.getElementById('seqBody').innerHTML = '';
+      featuresCombinedLayer.clearLayers();
+      featureNodeIndex.clear();
+      // DO NOT clear logbookLayer
     }
 
     function drawRouteFromCoords(coords) {
-      // coords: [[lng,lat], ...]
       if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
       routeLayer = L.polyline(coords.map(([lng,lat]) => [lat,lng]), { color: 'blue', weight: 4 }).addTo(map);
       routeLines = [coords.slice()]; // one continuous line from Excel order
@@ -213,37 +237,31 @@ legend.addTo(map);
       };
     }
 
-    // --- New: parse "Logbook" sheet (labels from C, coords from M, starting row 5) ---
+    // Parse "Logbook" coords (label from C, coord from M, row >=5)
     function parseCoordCell(val) {
       if (val == null) return null;
-      if (typeof val === 'number') return null; // single number can't define a coord pair
+      if (typeof val === 'number') return null;
       const s = String(val);
       const nums = s.match(/-?\d+(?:\.\d+)?/g);
       if (!nums || nums.length < 2) return null;
       const n1 = Number(nums[0]), n2 = Number(nums[1]);
-      // Guess order by valid ranges
       const latlon = Math.abs(n1) <= 90 && Math.abs(n2) <= 180;
       const lonlat = Math.abs(n1) <= 180 && Math.abs(n2) <= 90;
-      if (latlon && !lonlat) return [n2, n1];         // [lng, lat]
-      if (!latlon && lonlat) return [n1, n2];         // [lng, lat]
-      // If ambiguous (both look valid), assume lat,lon
+      if (latlon && !lonlat) return [n2, n1];
+      if (!latlon && lonlat) return [n1, n2];
       if (latlon && lonlat) return [n2, n1];
       return null;
     }
 
-function addLogbookPoint(lat, lon, label) {
-  const marker = L.circleMarker([lat, lon], {
-    radius: 5, color: 'black', weight: 1, fillColor: 'orange', fillOpacity: 0.95
-  }).addTo(logbookLayer);
+    function addLogbookPoint(lat, lon, label) {
+      const marker = L.circleMarker([lat, lon], {
+        radius: 5, color: 'black', weight: 1, fillColor: 'orange', fillOpacity: 0.95
+      }).addTo(logbookLayer);
+      marker.bindTooltip(label || '(no label)', {
+        permanent: true, direction: 'top', offset: [0, -6], className: 'logbook-label'
+      });
+    }
 
-  marker.bindTooltip(label || '(no label)', {
-    permanent: true,              // <-- make it stick
-    direction: 'top',
-    offset: [0, -6],
-    className: 'logbook-label'    // optional CSS hook
-  });
-}
-    
     // Load Excel -> route + logbook points
     document.getElementById('loadExcelBtn').addEventListener('click', async () => {
       const file = document.getElementById('xlsInput').files[0];
@@ -253,7 +271,7 @@ function addLogbookPoint(lat, lon, label) {
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type:'array' });
 
-        // --- Positions sheet (route) ---
+        // Positions sheet (route)
         const wsPos = wb.Sheets['Positions'];
         if (!wsPos) throw new Error('Sheet "Positions" not found.');
         const refPos = wsPos['!ref'];
@@ -267,9 +285,7 @@ function addLogbookPoint(lat, lon, label) {
           if (!latCell && !lonCell) continue;
           const lat = Number(latCell?.v);
           const lon = Number(lonCell?.v);
-          if (Number.isFinite(lat) && Number.isFinite(lon)) {
-            coords.push([lon, lat]); // GeoJSON order [lng,lat]
-          }
+          if (Number.isFinite(lat) && Number.isFinite(lon)) coords.push([lon, lat]);
         }
         if (coords.length < 2) throw new Error('Need at least two valid rows of Lat/Lon in "Positions" (from row 4).');
 
@@ -280,7 +296,7 @@ function addLogbookPoint(lat, lon, label) {
         }
         drawRouteFromCoords(filtered);
 
-        // --- Logbook sheet (optional) ---
+        // Logbook sheet (optional)
         const wsLog = wb.Sheets['Logbook'];
         let logCount = 0;
         if (wsLog) {
@@ -306,7 +322,7 @@ function addLogbookPoint(lat, lon, label) {
         // Fit bounds to include both route and logbook
         let bounds = routeLayer.getBounds();
         if (logbookLayer.getLayers().length) {
-          bounds = bounds.extend(logbookLayer.getBounds());
+          bounds.extend(logbookLayer.getBounds());
         }
         map.fitBounds(bounds, { padding: [20,20] });
 
@@ -326,11 +342,7 @@ function addLogbookPoint(lat, lon, label) {
       const mirror = OVERPASS_MIRRORS[attempt % OVERPASS_MIRRORS.length];
       const body = 'data=' + encodeURIComponent(query);
       try {
-        const res = await fetch(mirror, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body
-        });
+        const res = await fetch(mirror, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return await res.json();
       } catch (e) {
@@ -344,7 +356,7 @@ function addLogbookPoint(lat, lon, label) {
 
     function getRouteBbox() {
       if (!currentGeoJSON) return null;
-      return turf.bbox(currentGeoJSON); // [minX,minY,maxX,maxY] => [W,S,E,N]
+      return turf.bbox(currentGeoJSON); // [W,S,E,N] as [minX,minY,maxX,maxY]
     }
 
     function buildQueryForSelectors(selectors, bboxStr) {
@@ -355,14 +367,6 @@ function addLogbookPoint(lat, lon, label) {
       return `[out:json][timeout:25];(${parts.join('')});out center;`;
     }
 
-    function clearSearchOnly() {
-  // Clear ONLY Overpass results + tables; keep Logbook dots
-  Object.values(featureLayers).forEach(layer => layer.clearLayers());
-  Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
-  document.getElementById('resultsBody').innerHTML = '';
-  document.getElementById('seqBody').innerHTML = '';
-}
-    
     // Search features and populate tables
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearSearchOnly(); showOverlay();
@@ -395,11 +399,16 @@ function addLogbookPoint(lat, lon, label) {
               if (!onAny) return;
 
               recordSeen(label, lat, lon);
+
+              // Table (by type) remains one row per detected feature
               document.getElementById('resultsBody').insertAdjacentHTML(
                 'beforeend',
                 `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
               );
-              addMarker(label, [lat, lon]);
+
+              // MAP: merge labels at identical coordinates
+              addOrUpdateFeatureMarker(label, lat, lon);
+
               allFound.push({ el, label, lat, lon });
             });
           } catch (e) {
@@ -407,7 +416,7 @@ function addLogbookPoint(lat, lon, label) {
           }
         }
 
-        // Sequential table across the Excel route coordinates
+        // Sequential table across the Excel route coordinates (already merges labels per coordinate)
         const seqRows = [];
         lines.forEach(coords => {
           coords.forEach((c, i) => {
