@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Road Features Map (Excel Positions)</title>
+  <title>Road Features Map (Excel Positions + Logbook)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body, html { margin: 0; padding: 0; height: 100%; display: flex; flex-direction: column; }
@@ -77,9 +77,12 @@
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OSM' }).addTo(map);
 
     // Route storage and layer
-    let routeLines = []; // array of arrays of [lng, lat]
-    let routeLayer = null; // Leaflet polyline
-    let currentGeoJSON = null; // FeatureCollection of route for bbox etc.
+    let routeLines = [];            // array of arrays of [lng, lat]
+    let routeLayer = null;          // Leaflet polyline
+    let currentGeoJSON = null;      // FeatureCollection for bbox etc.
+
+    // Logbook layer
+    const logbookLayer = L.layerGroup().addTo(map);
 
     // Manual point (toggle on double-click)
     let manualMarker = null;
@@ -135,13 +138,13 @@
       Object.keys(seenByLabel).forEach(k => (seenByLabel[k] = []));
       document.getElementById('resultsBody').innerHTML = '';
       document.getElementById('seqBody').innerHTML = '';
+      logbookLayer.clearLayers();
     }
 
     function drawRouteFromCoords(coords) {
       // coords: [[lng,lat], ...]
       if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
       routeLayer = L.polyline(coords.map(([lng,lat]) => [lat,lng]), { color: 'blue', weight: 4 }).addTo(map);
-      map.fitBounds(routeLayer.getBounds(), { padding: [20,20] });
       routeLines = [coords.slice()]; // one continuous line from Excel order
       currentGeoJSON = {
         type: 'FeatureCollection',
@@ -149,24 +152,51 @@
       };
     }
 
-    // Load Excel -> route
+    // --- New: parse "Logbook" sheet (labels from C, coords from M, starting row 5) ---
+    function parseCoordCell(val) {
+      if (val == null) return null;
+      if (typeof val === 'number') return null; // single number can't define a coord pair
+      const s = String(val);
+      const nums = s.match(/-?\d+(?:\.\d+)?/g);
+      if (!nums || nums.length < 2) return null;
+      const n1 = Number(nums[0]), n2 = Number(nums[1]);
+      // Guess order by valid ranges
+      const latlon = Math.abs(n1) <= 90 && Math.abs(n2) <= 180;
+      const lonlat = Math.abs(n1) <= 180 && Math.abs(n2) <= 90;
+      if (latlon && !lonlat) return [n2, n1];         // [lng, lat]
+      if (!latlon && lonlat) return [n1, n2];         // [lng, lat]
+      // If ambiguous (both look valid), assume lat,lon
+      if (latlon && lonlat) return [n2, n1];
+      return null;
+    }
+
+    function addLogbookPoint(lat, lon, label) {
+      const marker = L.circleMarker([lat, lon], {
+        radius: 5, color: 'black', weight: 1, fillColor: 'orange', fillOpacity: 0.95
+      }).addTo(logbookLayer);
+      marker.bindTooltip(label || '(no label)', { permanent: false, direction: 'top', offset: [0, -6] });
+    }
+
+    // Load Excel -> route + logbook points
     document.getElementById('loadExcelBtn').addEventListener('click', async () => {
       const file = document.getElementById('xlsInput').files[0];
       if (!file) { alert('Select an Excel file first'); return; }
       try {
+        clearAll();
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type:'array' });
-        const ws = wb.Sheets['Positions'];
-        if (!ws) throw new Error('Sheet "Positions" not found.');
 
-        const ref = ws['!ref'];
-        if (!ref) throw new Error('Sheet has no data.');
+        // --- Positions sheet (route) ---
+        const wsPos = wb.Sheets['Positions'];
+        if (!wsPos) throw new Error('Sheet "Positions" not found.');
+        const refPos = wsPos['!ref'];
+        if (!refPos) throw new Error('Sheet "Positions" has no data.');
+        const rangePos = XLSX.utils.decode_range(refPos);
 
-        const range = XLSX.utils.decode_range(ref);
         const coords = [];
-        for (let r = 3; r <= range.e.r; r++) { // row 4 => index 3
-          const latCell = ws['B' + (r + 1)];
-          const lonCell = ws['C' + (r + 1)];
+        for (let r = 3; r <= rangePos.e.r; r++) { // row 4 => index 3
+          const latCell = wsPos['B' + (r + 1)];
+          const lonCell = wsPos['C' + (r + 1)];
           if (!latCell && !lonCell) continue;
           const lat = Number(latCell?.v);
           const lon = Number(lonCell?.v);
@@ -174,18 +204,46 @@
             coords.push([lon, lat]); // GeoJSON order [lng,lat]
           }
         }
+        if (coords.length < 2) throw new Error('Need at least two valid rows of Lat/Lon in "Positions" (from row 4).');
 
-        if (coords.length < 2) throw new Error('Need at least two valid rows of Lat/Lon from row 4.');
-
-        // (Optional) remove exact duplicates next to each other
+        // remove exact consecutive duplicates
         const filtered = [];
         for (let i=0;i<coords.length;i++){
           if (i===0 || coords[i][0]!==coords[i-1][0] || coords[i][1]!==coords[i-1][1]) filtered.push(coords[i]);
         }
-
         drawRouteFromCoords(filtered);
-        clearAll();
-        alert(`Loaded ${filtered.length} positions from "${file.name}".`);
+
+        // --- Logbook sheet (optional) ---
+        const wsLog = wb.Sheets['Logbook'];
+        let logCount = 0;
+        if (wsLog) {
+          const refLog = wsLog['!ref'];
+          if (refLog) {
+            const rangeLog = XLSX.utils.decode_range(refLog);
+            for (let r = 4; r <= rangeLog.e.r; r++) { // row 5 => index 4
+              const labelCell = wsLog['C' + (r + 1)];
+              const coordCell = wsLog['M' + (r + 1)];
+              const label = (labelCell && String(labelCell.v).trim()) || '';
+              const parsed = parseCoordCell(coordCell ? coordCell.v : null);
+              if (parsed) {
+                const [lng, lat] = parsed;
+                if (Number.isFinite(lat) && Number.isFinite(lng)) {
+                  addLogbookPoint(lat, lng, label);
+                  logCount++;
+                }
+              }
+            }
+          }
+        }
+
+        // Fit bounds to include both route and logbook
+        let bounds = routeLayer.getBounds();
+        if (logbookLayer.getLayers().length) {
+          bounds = bounds.extend(logbookLayer.getBounds());
+        }
+        map.fitBounds(bounds, { padding: [20,20] });
+
+        alert(`Loaded ${filtered.length} route positions and ${logCount} logbook point(s) from "${file.name}".`);
       } catch (err) {
         alert('Failed to load Excel: ' + (err.message || err));
       }
