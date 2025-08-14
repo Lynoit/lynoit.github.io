@@ -370,66 +370,52 @@
     });
 
     // Export: one row per route coordinate, columns A-D as requested
-document.getElementById('exportBtn').addEventListener('click', () => {
-  if (!routeLines.length) { alert('Load positions (Excel) first'); return; }
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      if (!routeLines.length) { alert('Load positions (Excel) first'); return; }
 
-  // Gather orange (logbook) and blue (features) markers from the map
-  const logPts = logbookLayer.getLayers().map(m => ({
-    lat: m.getLatLng().lat,
-    lng: m.getLatLng().lng,
-    label: (m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()).trim() : ''
-  }));
+      // Gather orange (logbook) and blue (features) markers from the map
+      const logPts = logbookLayer.getLayers().map(m => ({
+        lat: m.getLatLng().lat,
+        lng: m.getLatLng().lng,
+        label: (m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()).trim() : ''
+      }));
 
-  const featPts = featuresCombinedLayer.getLayers().map(m => ({
-    lat: m.getLatLng().lat,
-    lng: m.getLatLng().lng,
-    labels: ((m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()) : '')
-              .split(',').map(s => s.trim()).filter(Boolean)
-  }));
+      const featPts = featuresCombinedLayer.getLayers().map(m => ({
+        lat: m.getLatLng().lat,
+        lng: m.getLatLng().lng,
+        labels: ((m.getTooltip() && m.getTooltip().getContent()) ? String(m.getTooltip().getContent()) : '')
+                  .split(',').map(s => s.trim()).filter(Boolean)
+      }));
 
-  const rangeMeters = RANGE();
-  const rows = [['Latitude', 'Longitude',
-                 'Manual annotations (orange; nearest if none within radius)',
-                 'Geo-reversed features (blue)']];
+      const rangeMeters = RANGE();
+      const rows = [['Latitude', 'Longitude', 'Manual annotations', 'Reverse-geocoded features']];
 
-  routeLines.forEach(coords => {
-    coords.forEach(([lng, lat]) => {
-      const pt = turf.point([lng, lat]);
+      routeLines.forEach(coords => {
+        coords.forEach(([lng, lat]) => {
+          const pt = turf.point([lng, lat]);
 
-      // ORANGE: prefer within-radius; if none, fallback to nearest (regardless of distance)
-      const orangeNearby = [];
-      let nearestOrange = null;
-      let nearestDist = Infinity;
+          const orangeLabels = [];
+          for (const p of logPts) {
+            const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+            if (d <= rangeMeters && p.label) orangeLabels.push(p.label);
+          }
 
-      for (const p of logPts) {
-        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
-        if (d <= rangeMeters && p.label) orangeNearby.push(p.label);
-        if (d < nearestDist) { nearestDist = d; nearestOrange = p; }
-      }
+          const blueLabels = [];
+          for (const p of featPts) {
+            const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
+            if (d <= rangeMeters) blueLabels.push(...p.labels);
+          }
 
-      let colC = '';
-      if (orangeNearby.length) {
-        colC = [...new Set(orangeNearby)].join(', ');
-      } else if (nearestOrange && nearestOrange.label) {
-        colC = nearestOrange.label; // fallback to the single nearest orange label
-      }
+          const colC = [...new Set(orangeLabels)].join(', ');
+          const colD = [...new Set(blueLabels)].join(', ');
+          rows.push([lat, lng, colC, colD]);
+        });
+      });
 
-      // BLUE: still radius-based
-      const blueLabels = [];
-      for (const p of featPts) {
-        const d = turf.distance(pt, turf.point([p.lng, p.lat]), { units: 'meters' });
-        if (d <= rangeMeters) blueLabels.push(...p.labels);
-      }
-      const colD = [...new Set(blueLabels)].join(', ');
-
-      rows.push([lat, lng, colC, colD]);
-    });
-  });
-
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  XLSX.utils.book_append_sheet(wb, ws, 'All Coordinates');
-  XLSX.writeFile(wb, 'coordinates_with_labels.xlsx');
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, 'All Coordinates');
+      XLSX.writeFile(wb, 'coordinates_with_labels.xlsx');
     });
   </script>
 </body>
