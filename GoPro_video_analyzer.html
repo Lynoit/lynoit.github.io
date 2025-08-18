@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GoPro MP4 → Map + Speed + Accelerometer (robust)</title>
+  <title>GoPro MP4 → Map + Speed + Accelerometer (no-length-crash)</title>
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -80,6 +80,11 @@
   import goproTelemetry from "https://esm.sh/gopro-telemetry@latest";
   import Chart from "https://esm.sh/chart.js@4.4.4/auto";
 
+  // ---------- helpers that make .length safe ----------
+  const isArr = (x) => Array.isArray(x);
+  const len = (x) => (Array.isArray(x) ? x.length : 0);
+  const numberOrNull = (x) => Number.isFinite(Number(x)) ? Number(x) : null;
+
   // Leaflet
   const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -131,56 +136,56 @@
       const gpmf = await gpmfExtract(file, { browserMode: true });
 
       setStatus('Decoding telemetry (GPS + ACC)…');
-      const telemetry = await goproTelemetry(gpmf, {
+      const telemetry = (await goproTelemetry(gpmf, {
         stream: ['GPS', 'ACCL'],
         repeatHeaders: true,
         tolerant: true,
         decimalPlaces: 7
-      }) || {}; // <-- ensure object
+      })) || {};
 
-      // 1) Map path from GPS
-      const gps = collectGps(telemetry); // always returns arrays
-      if (gps.latlngs.length >= 2) drawTrack(gps.latlngs);
+      // 1) GPS path
+      const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
+      if (len(gps.latlngs) >= 2) drawTrack(gps.latlngs);
 
       // 2) Speed series
-      const speed = buildSpeedSeries(gps); // always returns {t:[], v:[]}
-      // 3) Accelerometer series
-      const acc = collectAcc(telemetry);   // always returns {t:[], ax:[], ay:[], az:[]}
+      const speed = buildSpeedSeries(gps) || { t: [], v: [] };
+      // 3) ACC series
+      const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
 
-      if (gps.latlngs.length === 0) {
+      if (len(gps.latlngs) === 0) {
         const streamList = await goproTelemetry(gpmf, { streamList: true });
         debugPre.textContent =
           'Stream list:\n' + JSON.stringify(streamList, null, 2) +
-          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify(gps.preview, null, 2);
+          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((gps.preview||[]).slice(0,10), null, 2);
         debugBox.style.display = 'block';
         debugBox.open = true;
       }
 
-      // Draw charts (skip gracefully if empty)
-      if (speed.t.length && speed.v.length) {
+      // Charts (guarded)
+      if (len(speed.t) && len(speed.v)) {
         drawSpeedChart(speed);
       } else {
         speedPH.style.display = 'block';
       }
 
-      if (acc.t.length) {
+      if (len(acc.t)) {
         drawAccChart(acc);
       } else {
         accPH.style.display = 'block';
       }
 
-      const distKm = (gps.latlngs.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
+      const distKm = (len(gps.latlngs) ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
       const streamsUsed = [];
-      if (gps.used.length) streamsUsed.push('GPS');
+      if (len(gps.used)) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
-      setStatus(`Points: ${gps.latlngs.length} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+      setStatus(`Points: ${len(gps.latlngs)} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
     }
   }
 
-  // --- GPS extraction (always returns arrays) ---
+  // --- GPS extraction (returns arrays) ---
   function collectGps(telemetry) {
     const latlngs = [];
     const times = [];
@@ -198,18 +203,16 @@
         used.push(key);
 
         const stream = streams[key];
-        const samples = Array.isArray(stream?.samples) ? stream.samples : [];
+        const samples = isArr(stream?.samples) ? stream.samples : [];
 
-        for (let i = 0; i < samples.length; i++) {
+        for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
-          if (preview.length < 10) preview.push(s);
+          if (len(preview) < 10) preview.push(s);
           const v = s?.value;
 
-          // Time (secs) with robust fallback
           let t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
-          if (t == null) t = i; // fallback to sample index
+          if (t == null) t = i;
 
-          // Lat/Lon and speed if available
           let lat = null, lon = null, speedMs = null;
           if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const k of Object.keys(v)) {
@@ -218,10 +221,7 @@
               if (lon === null && /(^|[^a-z])lon(gitude)?/.test(nk)) lon = numberOrNull(v[k]);
               if (speedMs === null && /speed/.test(nk)) {
                 const val = numberOrNull(v[k]);
-                if (val != null) {
-                  if (/km\/?h|kph/.test(nk)) speedMs = val / 3.6;
-                  else speedMs = val; // assume m/s
-                }
+                if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val;
               }
             }
           } else if (Array.isArray(v) && v.length >= 2) {
@@ -241,22 +241,22 @@
     return { used: [...new Set(used)], latlngs, times, speedsRaw, preview };
   }
 
-  // --- Speed series (km/h) — always returns arrays ---
+  // --- Speed series (km/h) ---
   function buildSpeedSeries(gps) {
-    const T = Array.isArray(gps?.times) ? gps.times : [];
-    const P = Array.isArray(gps?.latlngs) ? gps.latlngs : [];
-    const S = Array.isArray(gps?.speedsRaw) ? gps.speedsRaw : [];
+    const T = isArr(gps?.times) ? gps.times : [];
+    const P = isArr(gps?.latlngs) ? gps.latlngs : [];
+    const S = isArr(gps?.speedsRaw) ? gps.speedsRaw : [];
 
     const t = [];
     const vKph = [];
 
-    for (let i = 0; i < P.length; i++) {
+    for (let i = 0; i < len(P); i++) {
       const tNow = numberOrNull(T[i]);
       if (S[i] != null) {
         t.push(tNow ?? i);
         vKph.push(S[i] * 3.6);
       } else if (i > 0) {
-        const dt = ( (tNow ?? i) - (numberOrNull(T[i-1]) ?? (i-1)) );
+        const dt = ((tNow ?? i) - (numberOrNull(T[i-1]) ?? (i-1)));
         const dMeters = haversineMeters(P[i-1], P[i]);
         const speedMs = (dt > 0.001) ? (dMeters / dt) : 0;
         t.push(tNow ?? i);
@@ -267,18 +267,18 @@
       }
     }
 
-    // Clean NaN/undefined
+    // Clean
     const tC = [], vC = [];
-    for (let i = 0; i < t.length; i++) {
+    for (let i = 0; i < len(t); i++) {
       if (Number.isFinite(t[i]) && Number.isFinite(vKph[i])) {
         tC.push(t[i]); vC.push(vKph[i]);
       }
     }
 
-    return decimateSeries(tC, vC, 6000); // -> {t:[], v:[]}
+    return decimateSeries(tC, vC, 6000);
   }
 
-  // --- Accelerometer extraction (m/s^2) — always returns arrays ---
+  // --- Accelerometer (m/s²) ---
   function collectAcc(telemetry) {
     const t = [], ax = [], ay = [], az = [];
     let used = false;
@@ -295,12 +295,12 @@
 
         const stream = streams[key];
         const units = stream?.units?.value;
-        if (Array.isArray(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) {
+        if (isArr(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) {
           unitType = 'g';
         }
 
-        const samples = Array.isArray(stream?.samples) ? stream.samples : [];
-        for (let i = 0; i < samples.length; i++) {
+        const samples = isArr(stream?.samples) ? stream.samples : [];
+        for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
           const v = s?.value;
           const time = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp);
@@ -330,13 +330,13 @@
 
     // Clean NaNs
     const tC=[], axC=[], ayC=[], azC=[];
-    for (let i=0; i<t.length; i++) {
+    for (let i=0; i<len(t); i++) {
       if ([t[i], ax[i], ay[i], az[i]].every(Number.isFinite)) {
         tC.push(t[i]); axC.push(ax[i]); ayC.push(ay[i]); azC.push(az[i]);
       }
     }
 
-    const dec = decimateMultiSeries(tC, [axC, ayC, azC], 6000); // -> {t:[], series:[[],[],[]]}
+    const dec = decimateMultiSeries(tC, [axC, ayC, azC], 6000);
     return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
   }
 
@@ -347,7 +347,7 @@
 
     const line = L.polyline(latlngs, { weight: 4, opacity: 0.9 }).addTo(trackLayer);
     const start = latlngs[0];
-    const end = latlngs[latlngs.length - 1];
+    const end = latlngs[len(latlngs) - 1];
     L.circleMarker(start, { radius: 6, color: '#1ec31e', weight: 2, fillOpacity: 0.8 }).addTo(trackLayer).bindPopup('Start');
     L.circleMarker(end, { radius: 6, color: '#ff4d4f', weight: 2, fillOpacity: 0.8 }).addTo(trackLayer).bindPopup('End');
     map.fitBounds(line.getBounds(), { padding: [20, 20] });
@@ -356,7 +356,7 @@
   function drawSpeedChart(speed) {
     const ctx = document.getElementById('speedChart');
     if (speedChart) { speedChart.destroy(); speedChart = null; }
-    const N = Math.min(speed.t.length, speed.v.length);
+    const N = Math.min(len(speed.t), len(speed.v));
     const data = Array.from({length: N}, (_,i)=>({ x: speed.t[i], y: speed.v[i] }));
     speedChart = new Chart(ctx, {
       type: 'line',
@@ -375,11 +375,7 @@
   function drawAccChart(acc) {
     const ctx = document.getElementById('accChart');
     if (accChart) { accChart.destroy(); accChart = null; }
-    const mk = (label, arr) => ({
-      label,
-      data: acc.t.map((x,i)=>({x, y: arr[i]})),
-      pointRadius: 0, borderWidth: 2, tension: 0.1
-    });
+    const mk = (label, arr) => ({ label, data: acc.t.map((x,i)=>({x, y: arr[i]})), pointRadius: 0, borderWidth: 2, tension: 0.1 });
     accChart = new Chart(ctx, {
       type: 'line',
       data: { datasets: [ mk('Ax', acc.ax), mk('Ay', acc.ay), mk('Az', acc.az) ] },
@@ -401,7 +397,7 @@
 
   // --- Helpers ---
   function haversineMeters(a, b) {
-    if (!a || !b) return 0;
+    if (!isArr(a) || !isArr(b) || len(a) < 2 || len(b) < 2) return 0;
     const R = 6371000;
     const φ1 = a[0]*Math.PI/180, φ2 = b[0]*Math.PI/180;
     const dφ = (b[0]-a[0])*Math.PI/180, dλ = (b[1]-a[1])*Math.PI/180;
@@ -410,17 +406,16 @@
   }
   function totalDistanceKm(latlngs) {
     let d = 0;
-    for (let i=1;i<latlngs.length;i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
+    for (let i=1;i<len(latlngs);i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
     return d/1000;
   }
 
   function decimateSeries(tIn, yIn, maxPts) {
-    const t = Array.isArray(tIn) ? tIn : [];
-    const y = Array.isArray(yIn) ? yIn : [];
-    const n = Math.min(t.length, y.length);
+    const t = isArr(tIn) ? tIn : [];
+    const y = isArr(yIn) ? yIn : [];
+    const n = Math.min(len(t), len(y));
     if (n <= 0) return { t: [], v: [] };
-    if (!Number.isFinite(maxPts) || maxPts <= 0) return { t: t.slice(0,n), v: y.slice(0,n) };
-    if (n <= maxPts) return { t: t.slice(0, n), v: y.slice(0, n) };
+    if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) return { t: t.slice(0,n), v: y.slice(0,n) };
     const step = Math.max(1, Math.ceil(n / maxPts));
     const td=[], yd=[];
     for (let i=0; i<n; i+=step) { td.push(t[i]); yd.push(y[i]); }
@@ -428,9 +423,10 @@
   }
 
   function decimateMultiSeries(tIn, seriesIn, maxPts) {
-    const t = Array.isArray(tIn) ? tIn : [];
-    const series = Array.isArray(seriesIn) ? seriesIn.map(a => Array.isArray(a) ? a : []) : [];
-    const n = Math.min(t.length, ...series.map(a => a.length || 0));
+    const t = isArr(tIn) ? tIn : [];
+    const series = isArr(seriesIn) ? seriesIn.map(a => isArr(a) ? a : []) : [];
+    const lengths = [len(t), ...series.map(a => len(a))].filter(n => Number.isFinite(n));
+    const n = lengths.length ? Math.min(...lengths) : 0;
     if (n <= 0) return { t: [], series: series.map(()=>[]) };
     if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) {
       return { t: t.slice(0,n), series: series.map(a=>a.slice(0,n)) };
@@ -444,9 +440,10 @@
     return { t: td, series: out };
   }
 
-  function numberOrNull(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : null;
+  function isFiniteLatLon(lat, lon) {
+    return Number.isFinite(lat) && Number.isFinite(lon) &&
+           Math.abs(lat) <= 90 && Math.abs(lon) <= 180 &&
+           !(lat === 0 && lon === 0);
   }
 
   // Demo
@@ -468,7 +465,7 @@
     accPH.style.display = 'none';
     drawSpeedChart(decimateSeries(t, speed, 6000));
     drawAccChart({ used:true, t, ax, ay, az });
-    setStatus(`Demo: ${demoLatLngs.length} map points · charts rendered`);
+    setStatus(`Demo: ${len(demoLatLngs)} map points · charts rendered`);
   });
 </script>
 </body>
