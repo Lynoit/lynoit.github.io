@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>GoPro Telemetry – MP4 Debugger & Viewer</title>
+  <title>GoPro MP4 → GPS Route + Speed + Accelerometer (SAFE MODE)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
 
   <!-- Leaflet -->
@@ -34,7 +34,7 @@
 <body>
   <header>
     <div class="row">
-      <h1 style="flex:1">GoPro MP4 → Telemetry debugger (GPS, Speed, Accelerometer)</h1>
+      <h1 style="flex:1">GoPro MP4 → Telemetry Viewer (SAFE MODE)</h1>
       <label class="btn">📁 Choose GoPro .MP4 (original)
         <input id="fileInput" type="file" accept="video/mp4,video/*">
       </label>
@@ -67,23 +67,77 @@
       </div>
 
       <div class="card">
-        <div class="kv" style="margin-bottom:6px">Extraction log (for troubleshooting)</div>
+        <div class="row" style="justify-content:space-between; align-items:center; gap:8px;">
+          <div class="kv">Extraction log</div>
+          <button id="clearLog" class="btn" style="border-style:solid">Clear</button>
+        </div>
         <pre class="log" id="log"></pre>
       </div>
     </div>
   </div>
 
-  <script type="module">
-    import gpmfExtract from "https://cdn.jsdelivr.net/npm/gpmf-extract@0.2.3/+esm";
-    import goproTelemetry from "https://cdn.jsdelivr.net/npm/gopro-telemetry@1.5.3/+esm";
+  <!-- Attach a tiny non-module listener so the status changes even if modules fail -->
+  <script>
+    (function(){
+      const statusEl = document.getElementById('status');
+      const fileInput = document.getElementById('fileInput');
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files[0]) {
+          statusEl.textContent = `Selected: ${fileInput.files[0].name} — loading JS…`;
+        }
+      });
+    })();
+  </script>
 
-    // --- Leaflet map ---
+  <script type="module">
+    // ---- Dynamic ESM loader with fallbacks (CDN-resilient) ----
+    const statusEl  = document.getElementById('status');
+    const progressEl= document.getElementById('progress');
+    const metaEl    = document.getElementById('meta');
+    const speedInfo = document.getElementById('speedInfo');
+    const accInfo   = document.getElementById('accInfo');
+    const logEl     = document.getElementById('log');
+    const fileInput = document.getElementById('fileInput');
+    const clearBtn  = document.getElementById('clearLog');
+
+    function log(msg, obj){
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      console.log(line, obj ?? '');
+      try { logEl.textContent += line + (obj ? ' ' + JSON.stringify(obj, null, 2) : '') + '\n'; }
+      catch { logEl.textContent += line + '\n'; }
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    async function loadLib(urls){
+      for (const url of urls){
+        try { log(`Trying import: ${url}`); const mod = await import(url); log(`Loaded: ${url}`); return mod?.default ?? mod; }
+        catch (e){ log(`Import failed: ${url}`, {error: String(e)}); }
+      }
+      throw new Error('All CDN imports failed');
+    }
+
+    statusEl.textContent = 'Booting…';
+
+    // Load libs with robust fallbacks
+    const gpmfExtract = await loadLib([
+      'https://cdn.jsdelivr.net/npm/gpmf-extract@0.2.3/+esm',
+      'https://esm.sh/gpmf-extract@0.2.3',
+      'https://unpkg.com/gpmf-extract@0.2.3?module'
+    ]);
+    const goproTelemetry = await loadLib([
+      'https://cdn.jsdelivr.net/npm/gopro-telemetry@1.5.3/+esm',
+      'https://esm.sh/gopro-telemetry@1.5.3',
+      'https://unpkg.com/gopro-telemetry@1.5.3?module'
+    ]);
+
+    statusEl.textContent = 'Ready — choose a GoPro MP4';
+
+    // ---- Leaflet map ----
     const map = L.map('map', { zoomControl: true, scrollWheelZoom: true }).setView([0,0], 2);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
     let routeLayer = null, startMarker = null, endMarker = null;
 
-    // --- Charts ---
+    // ---- Charts ----
     const speedCtx = document.getElementById('speedChart').getContext('2d');
     const accCtx   = document.getElementById('accChart').getContext('2d');
     const speedChart = new Chart(speedCtx, {
@@ -113,49 +167,6 @@
       }
     });
 
-    // --- UI refs ---
-    const fileInput = document.getElementById('fileInput');
-    const statusEl  = document.getElementById('status');
-    const progressEl= document.getElementById('progress');
-    const metaEl    = document.getElementById('meta');
-    const speedInfo = document.getElementById('speedInfo');
-    const accInfo   = document.getElementById('accInfo');
-    const logEl     = document.getElementById('log');
-
-    // Logging helpers
-    function log(msg, obj){
-      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
-      console.log(line, obj ?? '');
-      logEl.textContent += line + (obj ? ' ' + safeJSON(obj) : '') + '\n';
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-    const safeJSON = (o)=>{ try{ return JSON.stringify(o, null, 2); }catch{ return ''; } };
-
-    // Small helpers
-    const fmtDate = (d)=>{ try{const dt=(d instanceof Date)?d:new Date(d); return dt.toISOString().replace('T',' ').replace('Z','');}catch{return '';} };
-    const toSeconds = (cts,t0,ts)=>{ const s=(cts-(t0||0))/(ts||1000); return Number.isFinite(s)?s:0; };
-
-    function haversine(lat1, lon1, lat2, lon2){
-      const R=6371000, toRad=(d)=>d*Math.PI/180;
-      const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
-      const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      return 2*R*Math.asin(Math.sqrt(a));
-    }
-    function deriveSpeedFromGPS(gpsStream){
-      const s=gpsStream?.samples||[]; if (s.length<2) return {series:[]};
-      const ts=gpsStream.timescale||1000; const t0=s[0].cts||0; const series=[];
-      for (let i=1;i<s.length;i++){
-        const v1=s[i-1].value, v2=s[i].value; if(!v1||!v2) continue;
-        const [lat1,lon1]=[v1[0],v1[1]], [lat2,lon2]=[v2[0],v2[1]];
-        const dt=((s[i].cts||0)-(s[i-1].cts||0))/ts;
-        if (!Number.isFinite(lat1)||!Number.isFinite(lon1)||!Number.isFinite(lat2)||!Number.isFinite(lon2)||dt<=0) continue;
-        const d=haversine(lat1,lon1,lat2,lon2); const mps=d/dt;
-        series.push({ x: ((s[i].cts||0)-t0)/ts, y: mps*3.6 });
-      }
-      return { series };
-    }
-
-    // Map reset
     function resetUI(){
       if (routeLayer) { map.removeLayer(routeLayer); routeLayer=null; }
       if (startMarker){ map.removeLayer(startMarker); startMarker=null; }
@@ -166,40 +177,33 @@
       logEl.textContent = '';
     }
 
+    clearBtn.addEventListener('click', ()=>{ logEl.textContent=''; });
+
     fileInput.addEventListener('change', async (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
-
       resetUI();
-      statusEl.textContent = `Reading "${file.name}" (${(file.size/1e6).toFixed(1)} MB)…`;
+      statusEl.textContent = `Extracting "${file.name}"…`;
       progressEl.style.display = 'inline-block';
       progressEl.value = 0;
 
       try {
-        log('Step 1: starting gpmfExtract');
-        // 1) Extract GPMF (telemetry) track from MP4
+        log('Step 1: gpmfExtract start');
+        // IMPORTANT: disable web worker — some setups block cross-origin workers
         const extracted = await gpmfExtract(file, {
           browserMode: true,
-          progress: (p) => {
-            // p is 0..100
-            if (typeof p === 'number') {
-              progressEl.value = p/100;
-              if (p % 10 === 0) log(`gpmfExtract progress: ${p}%`);
-            }
-          }
+          useWorker: false,
+          progress: (p) => { if (typeof p === 'number') { progressEl.value = p/100; if (p % 10 === 0) log(`Progress: ${p}%`); } }
         });
 
-        log('Step 1.1: extraction metadata', { duration: extracted?.duration, tracks: Object.keys(extracted || {}) });
         if (!extracted || (!extracted.rawData && !extracted.data)) {
           statusEl.innerHTML = `<span class="bad">No GPMF track found in this file.</span>`;
-          log('No GPMF present. Possible causes: re-encoded/exported file, GPS off, indoor no lock, or not an original in-camera MP4.');
+          log('No GPMF present. Causes: re-encoded/exported file, GPS off, indoor no lock, or not original MP4.');
           return;
         }
 
         statusEl.textContent = 'Parsing telemetry…';
-        log('Step 2: starting goproTelemetry');
-
-        // 2) Parse streams with gopro-telemetry
+        log('Step 2: goproTelemetry start');
         const telemetry = await goproTelemetry(extracted, {
           stream: ['GPS5','GPSF','GPSU','ACCL'],
           raw: false,
@@ -210,18 +214,9 @@
 
         const deviceKey = Object.keys(telemetry)[0];
         const dev = telemetry[deviceKey] || {};
-        const streamKeys = dev?.streams ? Object.keys(dev.streams) : [];
-        log('Step 2.1: telemetry parsed; streams present', streamKeys);
+        log('Streams present', Object.keys(dev.streams || {}));
 
-        // If *no* requested streams are present, tell the user why
-        const hasGPS = !!dev?.streams?.GPS5?.samples?.length;
-        const hasACC = !!dev?.streams?.ACCL?.samples?.length;
-        if (!hasGPS && !hasACC) {
-          statusEl.innerHTML = `<span class="warn">Telemetry parsed, but no GPS/ACC samples found.</span>`;
-          log('Parsed OK, but streams missing. This can happen if GPS was OFF, or this clip didn’t get satellite lock.');
-        }
-
-        handleTelemetry(dev, file);
+        renderAll(dev, file);
         statusEl.innerHTML = `<span class="ok">Done.</span>`;
       } catch (err) {
         console.error(err);
@@ -232,8 +227,7 @@
       }
     });
 
-    function handleTelemetry(dev, file){
-      // Summary line
+    function renderAll(dev, file){
       const gps = dev?.streams?.GPS5, acc = dev?.streams?.ACCL;
       const parts = [];
       parts.push(`Size: ${(file.size/1e6).toFixed(1)} MB`);
@@ -245,12 +239,11 @@
       }
       metaEl.textContent = parts.join(' • ');
 
-      // GPS points + speed series
+      // GPS + speed
       let gpsPoints = [];
       let speedSeries = [];
       if (gps?.samples?.length){
-        const t0 = gps.samples[0].cts ?? 0;
-        const ts = gps.timescale || 1000;
+        const t0 = gps.samples[0].cts ?? 0; const ts = gps.timescale || 1000;
         gps.samples.forEach(s => {
           const v = s.value; // [lat, lon, alt, speed(m/s), ...]
           const lat = v?.[0], lon = v?.[1];
@@ -267,16 +260,16 @@
 
       // Accelerometer
       const ax=[], ay=[], az=[];
+      const acc = dev?.streams?.ACCL;
       if (acc?.samples?.length){
-        const t0a = acc.samples[0].cts ?? 0;
-        const ts  = acc.timescale || 1000;
+        const t0a = acc.samples[0].cts ?? 0; const ts  = acc.timescale || 1000;
         acc.samples.forEach(s=>{
           const v=s.value; const tSec=toSeconds(s.cts, t0a, ts);
           if (v && v.length>=3){ ax.push({x:tSec,y:v[0]}); ay.push({x:tSec,y:v[1]}); az.push({x:tSec,y:v[2]}); }
         });
       }
 
-      // Map route
+      // Map
       if (gpsPoints.length){
         if (routeLayer) map.removeLayer(routeLayer);
         routeLayer = L.polyline(gpsPoints, { color:'#3aa7ff', weight:3 }).addTo(map);
@@ -302,6 +295,29 @@
       accChart.data.datasets[2].data = az;
       accChart.update();
       accInfo.textContent = (ax.length+ay.length+az.length) ? `samples: ${Math.max(ax.length,ay.length,az.length)}` : 'No accelerometer data found.';
+    }
+
+    // ---- Utilities ----
+    const fmtDate = (d)=>{ try{const dt=(d instanceof Date)?d:new Date(d); return dt.toISOString().replace('T',' ').replace('Z','');}catch{return '';} };
+    const toSeconds = (cts,t0,ts)=>{ const s=(cts-(t0||0))/(ts||1000); return Number.isFinite(s)?s:0; };
+    function haversine(lat1, lon1, lat2, lon2){
+      const R=6371000, toRad=(d)=>d*Math.PI/180;
+      const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+      const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
+    function deriveSpeedFromGPS(gpsStream){
+      const s=gpsStream?.samples||[]; if (s.length<2) return {series:[]};
+      const ts=gpsStream.timescale||1000; const t0=s[0].cts||0; const series=[];
+      for (let i=1;i<s.length;i++){
+        const v1=s[i-1].value, v2=s[i].value; if(!v1||!v2) continue;
+        const [lat1,lon1]=[v1[0],v1[1]], [lat2,lon2]=[v2[0],v2[1]];
+        const dt=((s[i].cts||0)-(s[i-1].cts||0))/ts;
+        if (!Number.isFinite(lat1)||!Number.isFinite(lon1)||!Number.isFinite(lat2)||!Number.isFinite(lon2)||dt<=0) continue;
+        const d=haversine(lat1,lon1,lat2,lon2); const mps=d/dt;
+        series.push({ x: ((s[i].cts||0)-t0)/ts, y: mps*3.6 });
+      }
+      return { series };
     }
   </script>
 </body>
