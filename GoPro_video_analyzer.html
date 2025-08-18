@@ -77,7 +77,7 @@
   </footer>
 
 <script type="module">
-  // Pin versions and avoid "latest" to prevent breaking changes.
+  // ——— pinned, real versions ———
   const gpmfExtract = (await import("https://esm.sh/gpmf-extract@0.3.2?bundle")).default;
   const goproTelemetry = (await import("https://esm.sh/gopro-telemetry@1.2.9?bundle")).default;
   const Chart = (await import("https://esm.sh/chart.js@4.4.4/auto?bundle")).default;
@@ -160,18 +160,15 @@
 
       setStatus('Decoding telemetry (GPS + ACC)…');
 
-      // First attempt: only the streams we want, no decimalPlaces (problematic upstream).
       let telemetry = null;
       try {
         telemetry = await goproTelemetry(gpmf, {
           stream: ['GPS', 'ACCL'],
           repeatHeaders: true,
           tolerant: true
-          // decimalPlaces: 7   // <-- intentionally removed to avoid rt.exports length issue
         });
       } catch (e) {
         console.warn('Primary decode failed, retrying with minimal options:', e);
-        // Fallback: let the lib decide; fewer transforms = fewer edge-case crashes
         telemetry = await goproTelemetry(gpmf, { tolerant: true });
       }
       if (!telemetry || typeof telemetry !== 'object') throw new Error('Telemetry decode produced no object');
@@ -186,17 +183,24 @@
       // ACC
       const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
 
-      // Debug info when GPS empty
-      if (len(gps.latlngs) === 0) {
+      // Debug info if missing/short
+      const wantDebug = (len(gps.latlngs) < 2) || (len(speed.t) === 0) || (len(acc.t) === 0);
+      if (wantDebug) {
         let streamList = null;
         try { streamList = await goproTelemetry(gpmf, { streamList: true }); } catch {}
         const dbgA = [
-          'No GPS points decoded.',
-          'Stream list:',
+          `GPS points: ${len(gps.latlngs)}`,
+          `Speed samples: ${len(speed.t)}`,
+          `ACC samples: ${len(acc.t)}`,
+          '',
+          'Streams present (from streamList):',
           JSON.stringify(streamList ?? '(failed to read)', null, 2),
           '',
-          'GPS preview (first 10 samples):',
-          JSON.stringify(safeSlice(gps.preview, 10), null, 2)
+          'GPS preview (first 10 decoded samples):',
+          JSON.stringify(safeSlice(gps.preview, 10), null, 2),
+          '',
+          'ACC preview (first 10 decoded samples):',
+          JSON.stringify(safeSlice(acc.preview ?? [], 10), null, 2)
         ];
         debugPre.textContent = dbgA.join('\n');
         debugBox.style.display = 'block';
@@ -220,6 +224,32 @@
     }
   }
 
+  // ---------- Stream traversal helpers ----------
+  function asSamples(stream) {
+    // Accept: array of samples OR object with .samples array OR object that itself is a sample
+    if (isArr(stream)) return stream;
+    if (isArr(stream?.samples)) return stream.samples;
+    if (stream && typeof stream === 'object') return [stream]; // single sample object fallback
+    return [];
+  }
+  function streamEntries(streams) {
+    // Accept: object map {name: stream} OR array [{name, samples}] OR array of streams (no names)
+    const out = [];
+    if (!streams) return out;
+    if (isArr(streams)) {
+      for (const s of streams) {
+        if (s && typeof s === 'object' && ('name' in s || 'label' in s)) {
+          out.push({ name: String(s.name ?? s.label ?? 'UNKNOWN'), stream: s });
+        } else {
+          out.push({ name: 'UNKNOWN', stream: s });
+        }
+      }
+    } else if (typeof streams === 'object') {
+      for (const k of Object.keys(streams)) out.push({ name: k, stream: streams[k] });
+    }
+    return out;
+  }
+
   // ---------- Telemetry extractors ----------
   function collectGps(telemetry) {
     const latlngs = [];
@@ -233,35 +263,39 @@
       const streams = dev && dev.streams;
       if (!streams) continue;
 
-      for (const key of Object.keys(streams)) {
-        if (!/^GPS/i.test(key)) continue;
-        used.push(key);
+      for (const { name, stream } of streamEntries(streams)) {
+        if (!/^gps/i.test(name)) continue;
+        used.push(name);
 
-        const stream = streams[key];
-        const samples = isArr(stream?.samples) ? stream.samples : [];
-
+        const samples = asSamples(stream);
         for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
           if (s && len(preview) < 10) preview.push(s);
-          const v = s?.value;
 
+          const v = s?.value ?? s?.vals ?? s?.val ?? s; // tolerate raw object/array
           let t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
           if (t == null) t = i;
 
           let lat = null, lon = null, speedMs = null;
+
           if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const k of Object.keys(v)) {
               const nk = k.toLowerCase();
               if (lat === null && /(^|[^a-z])lat(itude)?/.test(nk)) lat = numberOrNull(v[k]);
               if (lon === null && /(^|[^a-z])lon(gitude)?/.test(nk)) lon = numberOrNull(v[k]);
-              if (speedMs === null && /speed/.test(nk)) {
+              if (speedMs === null && /(^|[^a-z])(?:2d|3d)?\s*speed/.test(nk)) {
                 const val = numberOrNull(v[k]);
                 if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val; // normalize to m/s
               }
             }
-          } else if (isArr(v) && len(v) >= 2) {
+          } else if (isArr(v)) {
+            // Typical GPS array: [lat, lon, alt, 2D speed, 3D speed, ...]
             lat = numberOrNull(v[0]);
             lon = numberOrNull(v[1]);
+            // Prefer 2D speed if present, else 3D
+            const s2d = numberOrNull(v[3]);
+            const s3d = numberOrNull(v[4]);
+            speedMs = s2d ?? s3d ?? null;
           }
 
           if (isFiniteLatLon(lat, lon)) {
@@ -288,7 +322,7 @@
 
     for (let i = 0; i < len(P); i++) {
       const tNow = numberOrNull(T[i]);
-      if (S[i] != null) {
+      if (S[i] != null && Number.isFinite(S[i])) {
         t.push(tNow ?? i);
         vKph.push(S[i] * 3.6); // m/s → km/h
       } else if (i > 0) {
@@ -318,26 +352,30 @@
     const t = [], ax = [], ay = [], az = [];
     let used = false;
     let unitType = 'm/s^2';
+    const preview = [];
 
     for (const devId in (telemetry || {})) {
       const dev = telemetry[devId];
       const streams = dev && dev.streams;
       if (!streams) continue;
 
-      for (const key of Object.keys(streams)) {
-        if (!/^ACCL/i.test(key)) continue;
+      for (const { name, stream } of streamEntries(streams)) {
+        if (!/^accl/i.test(name)) continue;
         used = true;
 
-        const stream = streams[key];
-        const units = stream?.units?.value;
+        // units hint (if present)
+        const units = stream?.units?.value ?? stream?.units;
         if (isArr(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) {
+          unitType = 'g';
+        } else if (typeof units === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(units)) {
           unitType = 'g';
         }
 
-        const samples = isArr(stream?.samples) ? stream.samples : [];
+        const samples = asSamples(stream);
         for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
-          const v = s?.value;
+          if (s && len(preview) < 10) preview.push(s);
+          const v = s?.value ?? s?.vals ?? s?.val ?? s;
           const time = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp);
 
           let x=null,y=null,z=null;
@@ -348,7 +386,8 @@
               if (y===null && /\by\b/.test(nk)) y = numberOrNull(v[k]);
               if (z===null && /\bz\b/.test(nk)) z = numberOrNull(v[k]);
             }
-          } else if (isArr(v) && len(v) >= 3) {
+          } else if (isArr(v)) {
+            // Typical ACCL array: [Ax, Ay, Az]
             x = numberOrNull(v[0]); y = numberOrNull(v[1]); z = numberOrNull(v[2]);
           }
 
@@ -373,7 +412,7 @@
 
     const tSec = normalizeTimesToSeconds(tC);
     const dec  = decimateMultiSeries(tSec, [axC, ayC, azC], 6000);
-    return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
+    return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [], preview };
   }
 
   // ---------- Drawing ----------
