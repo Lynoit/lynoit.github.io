@@ -128,9 +128,9 @@
   ['dragenter','dragover'].forEach(evt =>
     dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
   );
-  ['dragleave','drop'].forEach(evt =>
+  ['dragleave','drop'].forEach evt =>
     dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
-  );
+  ;
   dropzone.addEventListener('drop', async (e) => {
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) await handleFile(f);
@@ -161,7 +161,7 @@
 
       // 1) GPS path
       const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
-      if (Array.isArray(gps.latlngs) && gps.latlngs.length >= 2) {
+      if (isArr(gps.latlngs) && len(gps.latlngs) >= 2) {
         drawTrack(gps.latlngs);
       }
 
@@ -172,34 +172,40 @@
       const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
 
       // If GPS didn’t decode, show a helpful debug dump
-      if (!Array.isArray(gps.latlngs) || gps.latlngs.length === 0) {
-        const streamList = await goproTelemetry(gpmf, { streamList: true });
-        debugPre.textContent =
-          'No GPS points decoded.\n\nStream list:\n' + JSON.stringify(streamList, null, 2) +
-          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((Array.isArray(gps.preview) ? gps.preview.slice(0,10) : []), null, 2);
-        debugBox.style.display = 'block';
-        debugBox.open = true;
+      if (!isArr(gps.latlngs) || len(gps.latlngs) === 0) {
+        try {
+          const streamList = await goproTelemetry(gpmf, { streamList: true });
+          debugPre.textContent =
+            'No GPS points decoded.\n\nStream list:\n' + JSON.stringify(streamList, null, 2) +
+            '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((isArr(gps.preview) ? gps.preview.slice(0,10) : []), null, 2);
+          debugBox.style.display = 'block';
+          debugBox.open = true;
+        } catch (e) {
+          debugPre.textContent = 'No GPS points decoded.\nAlso failed to read stream list: ' + (e?.message || e);
+          debugBox.style.display = 'block';
+          debugBox.open = true;
+        }
       }
 
       // Charts (with guards)
-      if (Array.isArray(speed.t) && Array.isArray(speed.v) && speed.t.length && speed.v.length) {
+      if (isArr(speed.t) && isArr(speed.v) && len(speed.t) && len(speed.v)) {
         drawSpeedChart(speed);
       } else {
         speedPH.style.display = 'block';
       }
 
-      if (Array.isArray(acc.t) && acc.t.length) {
+      if (isArr(acc.t) && len(acc.t)) {
         drawAccChart(acc);
       } else {
         accPH.style.display = 'block';
       }
 
       // Footer status
-      const distKm = (Array.isArray(gps.latlngs) && gps.latlngs.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
+      const distKm = (isArr(gps.latlngs) && len(gps.latlngs) ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
       const streamsUsed = [];
-      if (Array.isArray(gps.used) && gps.used.length) streamsUsed.push('GPS');
+      if (isArr(gps.used) && len(gps.used)) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
-      setStatus(`Points: ${Array.isArray(gps.latlngs) ? gps.latlngs.length : 0} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+      setStatus(`Points: ${isArr(gps.latlngs) ? len(gps.latlngs) : 0} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
@@ -299,7 +305,7 @@
       }
     }
 
-    return decimateSeries(tC, vC, 6000);
+    return { t: tC, v: vC }; // decimation optional; remove to reduce moving parts while debugging
   }
 
   // --- Accelerometer (m/s²) ---
@@ -360,10 +366,9 @@
       }
     }
 
-    // Normalize time base to seconds before decimation
+    // Normalize time base to seconds (no decimation while debugging)
     const tSec = normalizeTimesToSeconds(tC);
-    const dec = decimateMultiSeries(tSec, [axC, ayC, azC], 6000);
-    return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
+    return { used, t: tSec, ax: axC, ay: ayC, az: azC };
   }
 
   // --- Drawing ---
@@ -434,39 +439,6 @@
     let d = 0;
     for (let i=1;i<len(latlngs);i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
     return d/1000;
-  }
-  function decimateSeries(tIn, yIn, maxPts) {
-    const t = isArr(tIn) ? tIn : [];
-    const y = isArr(yIn) ? yIn : [];
-    const n = Math.min(len(t), len(y));
-    if (n <= 0) return { t: [], v: [] };
-    if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) return { t: t.slice(0,n), v: y.slice(0,n) };
-    const step = Math.max(1, Math.ceil(n / maxPts));
-    const td=[], yd=[];
-    for (let i=0; i<n; i+=step) { td.push(t[i]); yd.push(y[i]); }
-    return { t: td, v: yd };
-  }
-  function decimateMultiSeries(tIn, seriesIn, maxPts) {
-    const t = isArr(tIn) ? tIn : [];
-    const series = isArr(seriesIn) ? seriesIn.map(a => isArr(a) ? a : []) : [];
-    const lengths = [len(t), ...series.map(a => len(a))].filter(n => Number.isFinite(n));
-    const n = lengths.length ? Math.min(...lengths) : 0;
-    if (n <= 0) return { t: [], series: series.map(()=>[]) };
-    if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) {
-      return { t: t.slice(0,n), series: series.map(a=>a.slice(0,n)) };
-    }
-    const step = Math.max(1, Math.ceil(n / maxPts));
-    const td=[]; const out = series.map(()=>[]);
-    for (let i=0;i<n;i+=step) {
-      td.push(t[i]);
-      for (let k=0;k<series.length;k++) out[k].push(series[k][i]);
-    }
-    return { t: td, series: out };
-  }
-  function isFiniteLatLon(lat, lon) {
-    return Number.isFinite(lat) && Number.isFinite(lon) &&
-           Math.abs(lat) <= 90 && Math.abs(lon) <= 180 &&
-           !(lat === 0 && lon === 0);
   }
 </script>
 </body>
