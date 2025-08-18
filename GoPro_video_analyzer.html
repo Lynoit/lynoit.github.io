@@ -77,9 +77,10 @@
   </footer>
 
 <script type="module">
-  import gpmfExtract from "https://esm.sh/gpmf-extract@latest";
-  import goproTelemetry from "https://esm.sh/gopro-telemetry@latest";
-  import Chart from "https://esm.sh/chart.js@4.4.4/auto";
+  // Pin versions and avoid "latest" to prevent breaking changes.
+  import gpmfExtract from "https://esm.sh/gpmf-extract@3.0.4?bundle";
+  import goproTelemetry from "https://esm.sh/gopro-telemetry@2.2.2?bundle";
+  import Chart from "https://esm.sh/chart.js@4.4.4/auto?bundle";
 
   // ---------- helpers ----------
   const isArr = (x) => Array.isArray(x);
@@ -158,12 +159,22 @@
       if (!gpmf) throw new Error('gpmfExtract returned nothing (file may have no telemetry)');
 
       setStatus('Decoding telemetry (GPS + ACC)…');
-      const telemetry = (await goproTelemetry(gpmf, {
-        stream: ['GPS', 'ACCL'],
-        repeatHeaders: true,
-        tolerant: true,
-        decimalPlaces: 7
-      })) || {};
+
+      // First attempt: only the streams we want, no decimalPlaces (problematic upstream).
+      let telemetry = null;
+      try {
+        telemetry = await goproTelemetry(gpmf, {
+          stream: ['GPS', 'ACCL'],
+          repeatHeaders: true,
+          tolerant: true
+          // decimalPlaces: 7   // <-- intentionally removed to avoid rt.exports length issue
+        });
+      } catch (e) {
+        console.warn('Primary decode failed, retrying with minimal options:', e);
+        // Fallback: let the lib decide; fewer transforms = fewer edge-case crashes
+        telemetry = await goproTelemetry(gpmf, { tolerant: true });
+      }
+      if (!telemetry || typeof telemetry !== 'object') throw new Error('Telemetry decode produced no object');
 
       // GPS
       const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
@@ -231,7 +242,7 @@
 
         for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
-          if (len(preview) < 10) preview.push(s);
+          if (s && len(preview) < 10) preview.push(s);
           const v = s?.value;
 
           let t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
