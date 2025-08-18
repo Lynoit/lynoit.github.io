@@ -30,13 +30,10 @@
     <strong>Upload Route (KMZ):</strong>
     <input type="file" id="kmzInput" accept=".kmz" />
     <button id="loadRouteBtn">Load Route</button>
-    <button id="searchBtn">Sequential Search</button>
+    <button id="searchBtn">Search Features</button>
     <button id="exportBtn" style="margin-left:10px;">Export to Excel</button>
     <label style="margin-left:10px;">
-      Radius (m): <input type="number" id="range" value="40" min="1" step="1" style="width:80px;" />
-    </label>
-    <label style="margin-left:10px;">
-      Sample (m): <input type="number" id="sample" value="500" min="50" step="50" style="width:80px;" title="Distance between sampled points along the route"/>
+      Radius (m): <input type="number" id="range" value="60" min="5" step="5" style="width:80px;" title="Half-width of search tube around route"/>
     </label>
     <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
   </div>
@@ -75,9 +72,9 @@
 
   <script>
     // === UI helpers ===
-    const RANGE_METERS = () => parseInt(document.getElementById('range').value, 10) || 5;
+    const RANGE_METERS = () => parseInt(document.getElementById('range').value, 10) || 50;
     const RANGE_KM = () => RANGE_METERS() / 1000;
-    const SAMPLE_METERS = () => parseInt(document.getElementById('sample').value, 10) || 500;
+
     function setOverlay(text) {
       const el = document.getElementById('searchOverlay');
       el.textContent = text; el.style.display = 'flex';
@@ -88,6 +85,7 @@
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLayer: () => null }).addTo(map);
+    const bufferLayer = L.geoJSON(null, { style: { color: 'red', weight: 2, fillOpacity: 0.05 } }).addTo(map);
 
     // Manual point toggle (double-click)
     let manualMarker = null;
@@ -141,40 +139,49 @@
       Object.values(featureLayers).forEach(layer => layer.clearLayers());
       document.getElementById('resultsBody').innerHTML = '';
       document.getElementById('seqBody').innerHTML = '';
+      bufferLayer.clearLayers();
     }
 
-    // === Utilities: get lines, sample along route ===
-    function getRouteLineStrings(gj) {
+    // === Utilities: extract lines, merge, buffer, simplify, polygon -> Overpass poly string(s) ===
+    function extractRouteLines(gj) {
       const lines = [];
       (gj.features || []).forEach(f => {
         const g = f.geometry;
         if (!g) return;
-        if (g.type === 'LineString') {
-          lines.push(g.coordinates);
-        } else if (g.type === 'MultiLineString') {
-          g.coordinates.forEach(c => lines.push(c));
-        }
+        if (g.type === 'LineString') lines.push(g.coordinates);
+        else if (g.type === 'MultiLineString') g.coordinates.forEach(c => lines.push(c));
       });
       return lines;
     }
 
     function mergeToLineString(lines) {
-      // simple concat in sequence; assumes route features are already ordered
       const coords = [];
       lines.forEach(ls => coords.push(...ls));
       return turf.lineString(coords);
     }
 
-    function sampleRoutePoints(lineString, stepMeters) {
-      const pts = [];
-      const lengthKm = turf.length(lineString, { units: 'kilometers' });
-      const stepKm = Math.max(0.05, stepMeters / 1000); // clamp to >=50m
-      for (let d = 0; d <= lengthKm; d += stepKm) {
-        const p = turf.along(lineString, d, { units: 'kilometers' });
-        const [lon, lat] = p.geometry.coordinates;
-        pts.push([lat, lon]);
-      }
-      return pts;
+    function buildBufferedPolygons(lineString, radiusKm) {
+      // Buffer the single line, then simplify to keep query short
+      const buff = turf.buffer(lineString, radiusKm, { units: 'kilometers', steps: 16 }); // steps=16 smooths a bit
+      const simple = turf.simplify(buff, { tolerance: radiusKm / 5, highQuality: false }); // reduce vertices
+      // Return polygons (could be MultiPolygon)
+      const polys = [];
+      const g = simple.geometry;
+      if (!g) return polys;
+      if (g.type === 'Polygon') polys.push(g.coordinates);
+      else if (g.type === 'MultiPolygon') g.coordinates.forEach(p => polys.push(p));
+      return polys;
+    }
+
+    function polygonToOverpassPolyStrings(poly) {
+      // poly = [ ring0, ring1, ... ], each ring is [[lon,lat], ...]
+      // Overpass expects "poly:\"lat lon lat lon ...\"" in LAT LON order
+      const rings = poly.map(ring => {
+        const pairs = ring.map(([lon, lat]) => `${lat} ${lon}`); // LAT LON
+        return pairs.join(' ');
+      });
+      // Overpass only uses outer ring in poly filter; we’ll use the first (outer)
+      return rings.length ? [rings[0]] : [];
     }
 
     // === Overpass mirrors (CORS-friendly) ===
@@ -183,28 +190,23 @@
       'https://overpass.kumi.systems/api/interpreter'
     ];
 
-    // Build query for a small set of features around a chunk of sampled points
-    function buildAroundQuery(pairs, points, radiusMeters) {
-      const R = Math.max(1, Math.round(radiusMeters)); // integer meters
-      const blocks = [];
-      for (const [k, v] of pairs) {
-        // for each sampled point, query node+way around(lat,lon)
-        const perPoint = points.map(([lat, lon]) =>
-          `(node["${k}"="${v}"](around:${R},${lat},${lon});way["${k}"="${v}"](around:${R},${lat},${lon});)`
-        ).join("");
-        blocks.push(perPoint);
-      }
-      return `[out:json][timeout:60];(${blocks.join("")});out center;`;
+    // Build query for a small set of features inside ONE polygon tube
+    function buildPolyQuery(pairs, polyStr) {
+      // node/way with k=v inside polygon; output with center for ways
+      const blocks = pairs.map(([k, v]) =>
+        `(node["${k}"="${v}"](poly:"${polyStr}");way["${k}"="${v}"](poly:"${polyStr}");)`
+      ).join('');
+      return `[out:json][timeout:60];(${blocks});out center;`;
     }
 
-    // Split into chunks
+    // Chunk an array
     function chunk(arr, size) {
       const out = [];
       for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
       return out;
     }
 
-    // GET first (to dodge some preflights), POST fallback
+    // GET first (short URLs), POST fallback
     async function fetchOverpass(query) {
       let lastErr;
       for (const base of OVERPASS_ENDPOINTS) {
@@ -249,7 +251,7 @@
         .catch(err => alert('Failed to load KMZ: ' + err));
     });
 
-    // === Search features (route-sampled, chunked) ===
+    // === Search features (buffered polygon tube, chunked) ===
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearAll();
       window._dedup = new Set();  // reset per search
@@ -257,19 +259,31 @@
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) { alert('Load a route first'); return; }
 
-      const lines = getRouteLineStrings(gj);
+      const lines = extractRouteLines(gj);
       if (!lines.length) { alert('No line geometry found in the KMZ route.'); return; }
       const fullLine = mergeToLineString(lines);
 
-      // sample points along route
-      const samples = sampleRoutePoints(fullLine, SAMPLE_METERS());
-      if (samples.length === 0) { alert('Sampling failed.'); return; }
+      // Build buffered polygon(s) around the route
+      setOverlay('Creating search tube…');
+      const polys = buildBufferedPolygons(fullLine, RANGE_KM()); // array of polygons (each polygon = array of rings)
 
-      // chunk features & sampled points to keep queries small
+      if (!polys.length) {
+        hideOverlay();
+        alert('Could not create a buffer around the route.');
+        return;
+      }
+
+      // Draw buffer (outer rings only) for user feedback
+      bufferLayer.addData(turf.multiPolygon(polys));
+
+      // Convert each polygon to Overpass poly strings
+      const polyStrings = polys.flatMap(p => polygonToOverpassPolyStrings(p)); // array of "lat lon …" strings
+
+      // Chunk features & polygons to keep queries small
       const FEATURE_CHUNK = 6;        // features per request
-      const POINT_CHUNK = 40;         // sampled points per request
+      const POLY_CHUNK = 1;           // one polygon per request (keeps it small)
       const featureChunks = chunk(featureSettings.map(a => [a[0], a[1], a[2]]), FEATURE_CHUNK);
-      const pointChunks = chunk(samples, POINT_CHUNK);
+      const polyChunks = chunk(polyStrings, POLY_CHUNK);
 
       // tag k=v -> label
       const labelFor = new Map(featureSettings.map(([k, v, l]) => [`${k}=${v}`, l]));
@@ -278,11 +292,11 @@
 
       try {
         for (let fi = 0; fi < featureChunks.length; fi++) {
-          for (let pi = 0; pi < pointChunks.length; pi++) {
-            setOverlay(`Querying Overpass… features ${fi+1}/${featureChunks.length}, points ${pi+1}/${pointChunks.length}`);
-            const pairs = featureChunks[fi].map(([k,v]) => [k,v]);
-            const pts = pointChunks[pi];
-            const q = buildAroundQuery(pairs, pts, RANGE_METERS());
+          for (let pi = 0; pi < polyChunks.length; pi++) {
+            setOverlay(`Querying Overpass… features ${fi+1}/${featureChunks.length}, area ${pi+1}/${polyChunks.length}`);
+            const pairs = featureChunks[fi].map(([k, v]) => [k, v]);
+            const polyStr = polyChunks[pi][0]; // one per chunk
+            const q = buildPolyQuery(pairs, polyStr);
             const json = await fetchOverpass(q);
             const els = (json && Array.isArray(json.elements)) ? json.elements : [];
 
@@ -299,7 +313,7 @@
               }
               if (!matches.length) return;
 
-              // dedupe by label set @ coord
+              // de-dup by label set @ coord
               const key = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
               if (window._dedup.has(key)) return;
               window._dedup.add(key);
@@ -346,7 +360,7 @@
       hideOverlay();
 
       if (!addedCount) {
-        alert('No features found within the specified radius of the route.\nTry increasing Radius to 50–80 m, or reduce Sample to 300–400 m.');
+        alert('No features found in the search tube.\nTry a larger Radius (e.g., 80–120 m).');
       }
     });
 
