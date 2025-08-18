@@ -3,16 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GoPro GPS → Leaflet Map</title>
+  <title>GoPro GPS → Leaflet Map (CDN Fallbacks)</title>
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- Telemetry libs (UMD builds expose window.gpmfExtract & window.goproTelemetry) -->
-  <script src="https://unpkg.com/mp4box@0.5.4/dist/mp4box.all.min.js"></script>
-  <script src="https://unpkg.com/gpmf-extract@0.3.2/dist/gpmf-extract.umd.js"></script>
-  <script src="https://unpkg.com/gopro-telemetry@4.2.2/dist/gopro-telemetry.umd.js"></script>
 
   <style>
     :root { color-scheme: light dark; }
@@ -38,6 +33,7 @@
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     footer { border-top: 1px solid #2a2a2a; border-bottom: 0; font-size: 0.9rem; display: flex; justify-content: space-between; align-items: center; }
     a { color: #9ec5ff; }
+    code { background:#222; padding: 2px 6px; border-radius:4px; }
   </style>
 </head>
 <body>
@@ -48,8 +44,8 @@
         <strong>Drop MP4 here</strong> or
         <input id="file" type="file" accept=".mp4,video/mp4" />
       </label>
-      <button id="demoBtn" title="Loads a tiny built-in demo track to test the UI" type="button">Quick demo</button>
-      <span id="status">No file loaded.</span>
+      <button id="demoBtn" type="button">Quick demo</button>
+      <span id="status">Loading libraries…</span>
     </div>
   </header>
 
@@ -61,57 +57,134 @@
   </footer>
 
 <script>
-/* ========= Leaflet map setup ========= */
+/* ---------------- Leaflet map ---------------- */
 let map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-let trackLayer; // polyline + markers group
+let trackLayer;
 const statusEl = document.getElementById('status');
 const fileEl = document.getElementById('file');
 const dropzone = document.getElementById('dropzone');
 const demoBtn = document.getElementById('demoBtn');
-
 function setStatus(msg) { statusEl.textContent = msg; }
 
-/* ========= UI: file input & drag-drop ========= */
-fileEl.addEventListener('change', async (e) => {
-  const f = e.target.files && e.target.files[0];
-  if (f) await handleFile(f);
-});
-['dragenter','dragover'].forEach(evt =>
-  dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
-);
-['dragleave','drop'].forEach(evt =>
-  dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
-);
-dropzone.addEventListener('drop', async (e) => {
-  const f = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (f) await handleFile(f);
-});
+/* --------- Robust script loader with fallbacks --------- */
+async function loadScriptWithFallback(name, urls, globalCheckFn) {
+  for (const url of urls) {
+    try {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.async = true;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load ' + url));
+        document.head.appendChild(s);
+      });
+      if (globalCheckFn()) {
+        console.log(`[OK] ${name} from ${urls.indexOf(url)===0 ? 'primary' : 'fallback'}: ${url}`);
+        return true;
+      } else {
+        console.warn(`[WARN] ${name} loaded but global not found after: ${url}`);
+      }
+    } catch (e) {
+      console.warn(`[FAIL] ${name}: ${e.message}`);
+    }
+  }
+  return false;
+}
 
-/* ========= Core: parse GoPro telemetry & plot ========= */
+(async function bootstrap() {
+  setStatus('Loading libraries…');
+
+  const okMp4 = await loadScriptWithFallback(
+    'mp4box',
+    [
+      'https://unpkg.com/mp4box@0.5.4/dist/mp4box.all.min.js',
+      'https://cdn.jsdelivr.net/npm/mp4box@0.5.4/dist/mp4box.all.min.js'
+    ],
+    () => !!window.MP4Box
+  );
+
+  const okGpmf = await loadScriptWithFallback(
+    'gpmf-extract (UMD)',
+    [
+      'https://unpkg.com/gpmf-extract@0.3.2/dist/gpmf-extract.umd.js',
+      'https://cdn.jsdelivr.net/npm/gpmf-extract@0.3.2/dist/gpmf-extract.umd.js'
+    ],
+    () => typeof window.gpmfExtract === 'function'
+  );
+
+  const okTelem = await loadScriptWithFallback(
+    'gopro-telemetry (UMD)',
+    [
+      'https://unpkg.com/gopro-telemetry@4.2.2/dist/gopro-telemetry.umd.js',
+      'https://cdn.jsdelivr.net/npm/gopro-telemetry@4.2.2/dist/gopro-telemetry.umd.js'
+    ],
+    () => typeof window.goproTelemetry === 'function'
+  );
+
+  if (okMp4 && okGpmf && okTelem) {
+    setStatus('Libraries ready. Load an .MP4 to extract GPS.');
+    enableUI();
+  } else {
+    const miss = [
+      !okMp4 ? 'mp4box@0.5.4' : null,
+      !okGpmf ? 'gpmf-extract@0.3.2 (UMD)' : null,
+      !okTelem ? 'gopro-telemetry@4.2.2 (UMD)' : null
+    ].filter(Boolean).join(', ');
+    setStatus('Libraries not loaded: ' + miss + '. See console for failed URLs. You can also host UMD files locally.');
+    console.error('Missing libs:', { okMp4, okGpmf, okTelem });
+  }
+})();
+
+/* ----------------- UI wiring ----------------- */
+function enableUI() {
+  fileEl.addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) await handleFile(f);
+  });
+  ['dragenter','dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
+  );
+  ['dragleave','drop'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
+  );
+  dropzone.addEventListener('drop', async (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) await handleFile(f);
+  });
+
+  demoBtn.addEventListener('click', () => {
+    const demo = [
+      [37.807, -122.475], [37.8076, -122.472], [37.8088, -122.469],
+      [37.81, -122.466], [37.811, -122.463], [37.812, -122.460],
+    ];
+    drawTrack(demo);
+    setStatus(`Demo: plotted ${demo.length} points · ${(totalDistanceKm(demo)).toFixed(2)} km`);
+  });
+}
+
+/* ------------- Core: parse telemetry ------------- */
 async function handleFile(file) {
   try {
     if (typeof window.gpmfExtract !== 'function' || typeof window.goproTelemetry !== 'function') {
-      setStatus('Libraries not loaded. Check the <script> URLs for gpmf-extract & gopro-telemetry (UMD builds).');
+      setStatus('Libraries not loaded. Check console for which URLs failed.');
       return;
     }
     setStatus(`Reading "${file.name}"… (${(file.size/1048576).toFixed(1)} MB)`);
     const buffer = await file.arrayBuffer();
 
     setStatus('Extracting GPMF telemetry…');
-    // Extract the GPMF payload from MP4 (browser-friendly)
-    const gpmf = await window.gpmfExtract(buffer); // mp4box is used under the hood
+    const gpmf = await window.gpmfExtract(buffer); // uses mp4box
 
     setStatus('Decoding telemetry…');
-    // Keep the default parsing; we mainly want GPS streams
-    const telemetry = await window.goproTelemetry(gpmf, { /* e.g., streams: ['GPS5'] */ });
+    const telemetry = await window.goproTelemetry(gpmf, { /* streams:['GPS5'] */ });
 
     const points = extractGpsPoints(telemetry);
     if (!points.length) {
-      setStatus('No GPS points found. Ensure GPS was enabled and locked before recording.');
+      setStatus('No GPS points found. Ensure GPS was on and locked before recording.');
       return;
     }
 
@@ -144,9 +217,7 @@ function extractGpsPoints(telemetry) {
         }
       }
     }
-    for (const k in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, k)) dig(obj[k]);
-    }
+    for (const k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) dig(obj[k]);
   }
   dig(telemetry);
 
@@ -164,12 +235,9 @@ function extractGpsPoints(telemetry) {
   return deduped;
 }
 
-/* Draw the polyline and start/end markers */
+/* Draw polyline and markers */
 function drawTrack(latlngs) {
-  if (trackLayer) {
-    trackLayer.remove();
-    trackLayer = null;
-  }
+  if (trackLayer) { trackLayer.remove(); trackLayer = null; }
   trackLayer = L.layerGroup().addTo(map);
 
   const line = L.polyline(latlngs, { weight: 4, opacity: 0.9 }).addTo(trackLayer);
@@ -195,16 +263,17 @@ function totalDistanceKm(latlngs) {
   }
   return d;
 }
-
-/* Tiny built-in demo polyline */
-demoBtn.addEventListener('click', () => {
-  const demo = [
-    [37.807, -122.475], [37.8076, -122.472], [37.8088, -122.469],
-    [37.81, -122.466], [37.811, -122.463], [37.812, -122.460],
-  ];
-  drawTrack(demo);
-  setStatus(`Demo: plotted ${demo.length} points · ${(totalDistanceKm(demo)).toFixed(2)} km`);
-});
 </script>
+
+<!--
+If CDNs keep failing, download UMD files into ./lib and swap to:
+  <script src="lib/mp4box.all.min.js"></script>
+  <script src="lib/gpmf-extract.umd.js"></script>
+  <script src="lib/gopro-telemetry.umd.js"></script>
+Make sure the globals exist in the console:
+  typeof MP4Box            // 'function' or 'object'
+  typeof gpmfExtract       // 'function'
+  typeof goproTelemetry    // 'function'
+-->
 </body>
 </html>
