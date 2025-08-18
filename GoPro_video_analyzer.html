@@ -23,11 +23,17 @@
     footer { border-top: 1px solid #2a2a2a; border-bottom: 0; display:flex; justify-content:space-between; align-items:center; }
     header h1 { font-size: 1.1rem; margin: 0 0 6px; }
     #controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    #status { font-size: 0.95rem; opacity: 0.85 }
+    #status { font-size: 0.95rem; opacity: 0.95 }
     #map { height: 100%; }
-    .dropzone { border: 2px dashed #3a3a3a; border-radius: 10px; padding: 12px 14px; display: inline-flex; gap: 10px; align-items: center; background: #151515; }
+
+    .dropzone { border: 2px dashed #3a3a3a; border-radius: 10px; padding: 10px 12px; display: inline-flex; gap: 10px; align-items: center; background: #151515; }
     .dropzone.dragover { border-color: #6fa8ff; background: #0f1725; }
     input[type=file] { accent-color: #6fa8ff; }
+
+    /* Progress */
+    #progressWrap { display:flex; align-items:center; gap:10px; min-width: 300px; }
+    progress { width: 260px; height: 10px; }
+    #stepText { font-size: 0.9rem; opacity: 0.85; min-width: 180px; }
 
     #plots { padding: 8px 12px 14px; background:#0f0f0f; border-top:1px solid #2a2a2a; display:grid; gap:10px; }
     .chart-wrap { background:#151515; border:1px solid #262626; border-radius:10px; padding:8px; }
@@ -47,7 +53,13 @@
         <strong>Drop MP4 here</strong> or
         <input id="file" type="file" accept=".mp4,video/mp4" />
       </label>
-      <span id="status">Loading modules…</span>
+
+      <div id="progressWrap">
+        <progress id="prog" max="100" value="0"></progress>
+        <span id="stepText">Idle</span>
+      </div>
+
+      <span id="status">Modules loading…</span>
     </div>
   </header>
 
@@ -67,7 +79,7 @@
   </section>
 
   <details id="debugBox" style="display:none;">
-    <summary>Debug (auto-opens when few points are found)</summary>
+    <summary>Debug</summary>
     <pre id="debugPre"></pre>
   </details>
 
@@ -77,7 +89,7 @@
   </footer>
 
 <script type="module">
-  // ——— pinned, real versions ———
+  // ——— pinned versions ———
   const gpmfExtract = (await import("https://esm.sh/gpmf-extract@0.3.2?bundle")).default;
   const goproTelemetry = (await import("https://esm.sh/gopro-telemetry@1.2.9?bundle")).default;
   const Chart = (await import("https://esm.sh/chart.js@4.4.4/auto?bundle")).default;
@@ -89,6 +101,15 @@
   const safeSlice = (arr, n) => (isArr(arr) ? arr.slice(0, n) : []);
   const safeJoin  = (arr, sep) => (isArr(arr) && len(arr) ? arr.join(sep) : '');
 
+  const statusEl = document.getElementById('status');
+  const stepText = document.getElementById('stepText');
+  const progEl   = document.getElementById('prog');
+  const setStatus = (m) => { try { statusEl.textContent = String(m ?? ''); } catch {} };
+  const step = (pct, text) => {
+    try { progEl.value = Math.max(0, Math.min(100, pct|0)); } catch {}
+    try { stepText.textContent = text || ''; } catch {}
+  };
+
   function normalizeTimesToSeconds(arr) {
     const t = (isArr(arr) ? arr.slice() : []).map(x => Number.isFinite(+x) ? +x : null);
     const diffs = [];
@@ -99,9 +120,7 @@
     if (!len(diffs)) return t;
     diffs.sort((a,b)=>a-b);
     const med = diffs[Math.floor(diffs.length/2)];
-    if (med > 5) {
-      for (let i = 0; i < t.length; i++) if (Number.isFinite(t[i])) t[i] = t[i] / 1000;
-    }
+    if (med > 5) for (let i = 0; i < t.length; i++) if (Number.isFinite(t[i])) t[i] = t[i] / 1000;
     return t;
   }
 
@@ -114,16 +133,14 @@
   let trackLayer;
   let speedChart, accChart;
 
-  const statusEl = document.getElementById('status');
   const fileEl   = document.getElementById('file');
   const dropzone = document.getElementById('dropzone');
   const debugBox = document.getElementById('debugBox');
   const debugPre = document.getElementById('debugPre');
   const speedPH  = document.getElementById('speedPlaceholder');
   const accPH    = document.getElementById('accPlaceholder');
-  const setStatus = (m) => { try { statusEl.textContent = String(m ?? ''); } catch {} };
 
-  setStatus('Modules ready. Load an .MP4 to extract GPS, speed and accelerometer.');
+  setStatus('Ready. Load an .MP4 to extract GPS, speed and accelerometer.');
 
   // ---------- UI ----------
   fileEl.addEventListener('change', async (e) => {
@@ -144,22 +161,24 @@
   // ---------- Main ----------
   async function handleFile(file) {
     try {
+      step(0, 'Reading file…');
+      setStatus('Preparing…');
       debugBox.style.display = 'none';
       debugPre.textContent = '';
       destroyCharts();
       speedPH.style.display = 'none';
       accPH.style.display = 'none';
+      fileEl.disabled = true;
 
       const fname = (file && typeof file.name === 'string') ? file.name : 'file';
       const fmb   = (file && Number.isFinite(file.size)) ? (file.size/1048576).toFixed(1) : '?';
-      setStatus(`Reading "${fname}"… (${fmb} MB)`);
+      setStatus(`Reading "${fname}" (${fmb} MB)`);
 
-      setStatus('Extracting GPMF telemetry…');
+      step(10, 'Extracting telemetry…');
       const gpmf = await gpmfExtract(file, { browserMode: true });
       if (!gpmf) throw new Error('gpmfExtract returned nothing (file may have no telemetry)');
 
-      setStatus('Decoding telemetry (GPS + ACC)…');
-
+      step(30, 'Decoding streams…');
       let telemetry = null;
       try {
         telemetry = await goproTelemetry(gpmf, {
@@ -168,72 +187,63 @@
           tolerant: true
         });
       } catch (e) {
-        console.warn('Primary decode failed, retrying with minimal options:', e);
+        console.warn('Primary decode failed, retrying:', e);
         telemetry = await goproTelemetry(gpmf, { tolerant: true });
       }
       if (!telemetry || typeof telemetry !== 'object') throw new Error('Telemetry decode produced no object');
 
-      // GPS
-      const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
+      // ====== EXTRACTION PHASE (arrays only, no rendering) ======
+      step(45, 'Parsing GPS…');
+      const gps = collectGps(telemetry); // arrays only
+      step(60, 'Parsing accelerometer…');
+      const acc = collectAcc(telemetry); // arrays only
+      step(75, 'Building speed series…');
+      const speed = buildSpeedSeries(gps); // arrays only
+
+      // ====== RENDERING PHASE (after arrays are complete) ======
+      step(85, 'Rendering map & charts…');
+
       if (len(gps.latlngs) >= 2) drawTrack(gps.latlngs);
-
-      // Speed
-      const speed = buildSpeedSeries(gps) || { t: [], v: [] };
-
-      // ACC
-      const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
-
-      // Debug info if missing/short
-      const wantDebug = (len(gps.latlngs) < 2) || (len(speed.t) === 0) || (len(acc.t) === 0);
-      if (wantDebug) {
+      else {
+        // show some debug if GPS is missing/short
         let streamList = null;
         try { streamList = await goproTelemetry(gpmf, { streamList: true }); } catch {}
-        const dbgA = [
-          `GPS points: ${len(gps.latlngs)}`,
-          `Speed samples: ${len(speed.t)}`,
-          `ACC samples: ${len(acc.t)}`,
-          '',
-          'Streams present (from streamList):',
-          JSON.stringify(streamList ?? '(failed to read)', null, 2),
-          '',
-          'GPS preview (first 10 decoded samples):',
-          JSON.stringify(safeSlice(gps.preview, 10), null, 2),
-          '',
-          'ACC preview (first 10 decoded samples):',
-          JSON.stringify(safeSlice(acc.preview ?? [], 10), null, 2)
-        ];
-        debugPre.textContent = dbgA.join('\n');
+        debugPre.textContent =
+          `GPS points: ${len(gps.latlngs)}\n` +
+          'Streams present:\n' + JSON.stringify(streamList, null, 2) + '\n' +
+          'GPS preview:\n' + JSON.stringify(safeSlice(gps.preview, 10), null, 2);
         debugBox.style.display = 'block';
         debugBox.open = true;
       }
 
-      // Charts (guarded)
-      if (len(speed.t) && len(speed.v)) drawSpeedChart(speed); else speedPH.style.display = 'block';
-      if (len(acc.t)) drawAccChart(acc); else accPH.style.display = 'block';
+      if (len(speed.t) && len(speed.v)) drawSpeedChart(speed); else accPH.style.display = 'none', speedPH.style.display = 'block';
+      if (len(acc.t)) drawAccChart(acc); else speedPH.style.display = 'none', accPH.style.display = 'block';
 
-      // Footer status
       const distKm = (len(gps.latlngs) ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
       const streamsUsed = [];
       if (len(gps.used)) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
       const streamsUsedStr = safeJoin(streamsUsed, ', ');
       setStatus(`Points: ${len(gps.latlngs)} · Dist: ${distKm} km · Streams: ${streamsUsedStr || '—'}`);
+
+      step(100, 'Done');
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
+      step(0, 'Error');
+    } finally {
+      fileEl.disabled = false;
     }
   }
 
   // ---------- Stream traversal helpers ----------
   function asSamples(stream) {
-    // Accept: array of samples OR object with .samples array OR object that itself is a sample
     if (isArr(stream)) return stream;
     if (isArr(stream?.samples)) return stream.samples;
-    if (stream && typeof stream === 'object') return [stream]; // single sample object fallback
+    if (stream && typeof stream === 'object') return [stream];
     return [];
   }
   function streamEntries(streams) {
-    // Accept: object map {name: stream} OR array [{name, samples}] OR array of streams (no names)
     const out = [];
     if (!streams) return out;
     if (isArr(streams)) {
@@ -250,34 +260,24 @@
     return out;
   }
 
-  // ---------- Telemetry extractors ----------
+  // ---------- Telemetry extractors (arrays only) ----------
   function collectGps(telemetry) {
-    const latlngs = [];
-    const times = [];
-    const speedsRaw = [];
-    const preview = [];
-    const used = [];
-
+    const latlngs = [], times = [], speedsRaw = [], preview = [], used = [];
     for (const devId in (telemetry || {})) {
       const dev = telemetry[devId];
       const streams = dev && dev.streams;
       if (!streams) continue;
-
       for (const { name, stream } of streamEntries(streams)) {
         if (!/^gps/i.test(name)) continue;
         used.push(name);
-
         const samples = asSamples(stream);
         for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
           if (s && len(preview) < 10) preview.push(s);
-
-          const v = s?.value ?? s?.vals ?? s?.val ?? s; // tolerate raw object/array
+          const v = s?.value ?? s?.vals ?? s?.val ?? s;
           let t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
           if (t == null) t = i;
-
           let lat = null, lon = null, speedMs = null;
-
           if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const k of Object.keys(v)) {
               const nk = k.toLowerCase();
@@ -285,19 +285,16 @@
               if (lon === null && /(^|[^a-z])lon(gitude)?/.test(nk)) lon = numberOrNull(v[k]);
               if (speedMs === null && /(^|[^a-z])(?:2d|3d)?\s*speed/.test(nk)) {
                 const val = numberOrNull(v[k]);
-                if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val; // normalize to m/s
+                if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val;
               }
             }
           } else if (isArr(v)) {
-            // Typical GPS array: [lat, lon, alt, 2D speed, 3D speed, ...]
             lat = numberOrNull(v[0]);
             lon = numberOrNull(v[1]);
-            // Prefer 2D speed if present, else 3D
             const s2d = numberOrNull(v[3]);
             const s3d = numberOrNull(v[4]);
             speedMs = s2d ?? s3d ?? null;
           }
-
           if (isFiniteLatLon(lat, lon)) {
             latlngs.push([lat, lon]);
             times.push(t);
@@ -306,7 +303,6 @@
         }
       }
     }
-
     return { used: [...new Set(used)], latlngs, times, speedsRaw, preview };
   }
 
@@ -314,17 +310,13 @@
     const Traw = isArr(gps?.times) ? gps.times : [];
     const P    = isArr(gps?.latlngs) ? gps.latlngs : [];
     const S    = isArr(gps?.speedsRaw) ? gps.speedsRaw : [];
-
     const T = normalizeTimesToSeconds(Traw);
-
-    const t = [];
-    const vKph = [];
-
+    const t = [], vKph = [];
     for (let i = 0; i < len(P); i++) {
       const tNow = numberOrNull(T[i]);
       if (S[i] != null && Number.isFinite(S[i])) {
         t.push(tNow ?? i);
-        vKph.push(S[i] * 3.6); // m/s → km/h
+        vKph.push(S[i] * 3.6);
       } else if (i > 0) {
         const tPrev = numberOrNull(T[i-1]) ?? (i-1);
         const dt = (tNow ?? i) - tPrev;
@@ -337,47 +329,31 @@
         vKph.push(0);
       }
     }
-
-    // Clean & decimate
     const tC = [], vC = [];
-    for (let i = 0; i < len(t); i++) {
-      if (Number.isFinite(t[i]) && Number.isFinite(vKph[i])) {
-        tC.push(t[i]); vC.push(vKph[i]);
-      }
-    }
+    for (let i = 0; i < len(t); i++) if (Number.isFinite(t[i]) && Number.isFinite(vKph[i])) { tC.push(t[i]); vC.push(vKph[i]); }
     return decimateSeries(tC, vC, 6000);
   }
 
   function collectAcc(telemetry) {
     const t = [], ax = [], ay = [], az = [];
-    let used = false;
-    let unitType = 'm/s^2';
+    let used = false, unitType = 'm/s^2';
     const preview = [];
-
     for (const devId in (telemetry || {})) {
       const dev = telemetry[devId];
       const streams = dev && dev.streams;
       if (!streams) continue;
-
       for (const { name, stream } of streamEntries(streams)) {
         if (!/^accl/i.test(name)) continue;
         used = true;
-
-        // units hint (if present)
         const units = stream?.units?.value ?? stream?.units;
-        if (isArr(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) {
-          unitType = 'g';
-        } else if (typeof units === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(units)) {
-          unitType = 'g';
-        }
-
+        if (isArr(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) unitType = 'g';
+        else if (typeof units === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(units)) unitType = 'g';
         const samples = asSamples(stream);
         for (let i = 0; i < len(samples); i++) {
           const s = samples[i];
           if (s && len(preview) < 10) preview.push(s);
           const v = s?.value ?? s?.vals ?? s?.val ?? s;
           const time = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp);
-
           let x=null,y=null,z=null;
           if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const k of Object.keys(v)) {
@@ -387,29 +363,17 @@
               if (z===null && /\bz\b/.test(nk)) z = numberOrNull(v[k]);
             }
           } else if (isArr(v)) {
-            // Typical ACCL array: [Ax, Ay, Az]
             x = numberOrNull(v[0]); y = numberOrNull(v[1]); z = numberOrNull(v[2]);
           }
-
           if (x!=null && y!=null && z!=null) {
             const conv = (unitType === 'g') ? 9.80665 : 1;
-            t.push(time ?? i);
-            ax.push(x * conv);
-            ay.push(y * conv);
-            az.push(z * conv);
+            t.push(time ?? i); ax.push(x * conv); ay.push(y * conv); az.push(z * conv);
           }
         }
       }
     }
-
-    // Clean
     const tC=[], axC=[], ayC=[], azC=[];
-    for (let i=0; i<len(t); i++) {
-      if ([t[i], ax[i], ay[i], az[i]].every(Number.isFinite)) {
-        tC.push(t[i]); axC.push(ax[i]); ayC.push(ay[i]); azC.push(az[i]);
-      }
-    }
-
+    for (let i=0; i<len(t); i++) if ([t[i], ax[i], ay[i], az[i]].every(Number.isFinite)) { tC.push(t[i]); axC.push(ax[i]); ayC.push(ay[i]); azC.push(az[i]); }
     const tSec = normalizeTimesToSeconds(tC);
     const dec  = decimateMultiSeries(tSec, [axC, ayC, azC], 6000);
     return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [], preview };
@@ -419,7 +383,6 @@
   function drawTrack(latlngs) {
     if (trackLayer) { trackLayer.remove(); trackLayer = null; }
     trackLayer = L.layerGroup().addTo(map);
-
     const line = L.polyline(latlngs, { weight: 4, opacity: 0.9 }).addTo(trackLayer);
     const start = latlngs[0];
     const end   = latlngs[len(latlngs) - 1];
@@ -480,42 +443,31 @@
     return 2*R*Math.asin(Math.sqrt(s));
   }
   function totalDistanceKm(latlngs) {
-    let d = 0;
-    for (let i=1;i<len(latlngs);i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
-    return d/1000;
+    let d = 0; for (let i=1;i<len(latlngs);i++) d += haversineMeters(latlngs[i-1], latlngs[i]); return d/1000;
   }
   function decimateSeries(tIn, yIn, maxPts) {
-    const t = isArr(tIn) ? tIn : [];
-    const y = isArr(yIn) ? yIn : [];
+    const t = isArr(tIn) ? tIn : []; const y = isArr(yIn) ? yIn : [];
     const n = Math.min(len(t), len(y));
     if (n <= 0) return { t: [], v: [] };
     if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) return { t: t.slice(0,n), v: y.slice(0,n) };
-    const step = Math.max(1, Math.ceil(n / maxPts));
-    const td=[], yd=[];
+    const step = Math.max(1, Math.ceil(n / maxPts)); const td=[], yd=[];
     for (let i=0; i<n; i+=step) { td.push(t[i]); yd.push(y[i]); }
     return { t: td, v: yd };
   }
   function decimateMultiSeries(tIn, seriesIn, maxPts) {
     const t = isArr(tIn) ? tIn : [];
     const series = isArr(seriesIn) ? seriesIn.map(a => isArr(a) ? a : []) : [];
-    const lengths = [len(t), ...series.map(a => len(a))].filter(n => Number.isFinite(n));
+    const lengths = [len(t), ...series.map(a => len(a))].filter(Number.isFinite);
     const n = lengths.length ? Math.min(...lengths) : 0;
     if (n <= 0) return { t: [], series: series.map(()=>[]) };
-    if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) {
-      return { t: t.slice(0,n), series: series.map(a=>a.slice(0,n)) };
-    }
+    if (!Number.isFinite(maxPts) || maxPts <= 0 || n <= maxPts) return { t: t.slice(0,n), series: series.map(a=>a.slice(0,n)) };
     const step = Math.max(1, Math.ceil(n / maxPts));
     const td=[]; const out = series.map(()=>[]);
-    for (let i=0;i<n;i+=step) {
-      td.push(t[i]);
-      for (let k=0;k<series.length;k++) out[k].push(series[k][i]);
-    }
+    for (let i=0;i<n;i+=step) { td.push(t[i]); for (let k=0;k<series.length;k++) out[k].push(series[k][i]); }
     return { t: td, series: out };
   }
   function isFiniteLatLon(lat, lon) {
-    return Number.isFinite(lat) && Number.isFinite(lon) &&
-           Math.abs(lat) <= 90 && Math.abs(lon) <= 180 &&
-           !(lat === 0 && lon === 0);
+    return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
   }
 </script>
 </body>
