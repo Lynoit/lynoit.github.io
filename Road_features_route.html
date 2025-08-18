@@ -70,16 +70,29 @@
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 
   <script>
+    // === Controls & overlay ===
     const RANGE = () => parseInt(document.getElementById('range').value, 10) || 5;
     function showOverlay() { document.getElementById('searchOverlay').style.display = 'flex'; }
     function hideOverlay() { document.getElementById('searchOverlay').style.display = 'none'; }
 
-    // Initialize map
+    // === Map ===
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLayer: () => null }).addTo(map);
 
-    // Feature definitions
+    // Manual point toggle (double-click)
+    let manualMarker = null;
+    map.on('dblclick', (e) => {
+      if (!manualMarker) {
+        manualMarker = L.marker(e.latlng, { draggable:true }).addTo(map)
+          .bindTooltip('Manual', {permanent:true, direction:'right', offset:[10,0], className:'feature-label'});
+      } else {
+        map.removeLayer(manualMarker);
+        manualMarker = null;
+      }
+    });
+
+    // === Feature definitions ===
     const featureSettings = [
       ['man_made', 'bridge', 'Bridge'],
       ['tunnel', 'yes', 'Tunnel'],
@@ -87,7 +100,7 @@
       ['junction', 'roundabout', 'Roundabout'],
       ['highway', 'stop', 'Stop Sign'],
       ['highway', 'traffic_signals', 'Traffic Light'],
-      ['junction', 'yes', 'Intersection'],
+      ['junction', 'yes', 'Intersection'],          // note: rare in OSM
       ['traffic_calming', 'speed_bump', 'Speed Bump'],
       ['maxspeed', '10', '10 kph'],
       ['maxspeed', '20', '20 kph'],
@@ -105,6 +118,7 @@
       ['maxspeed', '140', '140 kph'],
       ['maxspeed', 'none', 'Unlimited']
     ];
+
     const featureLayers = {};
     featureSettings.forEach(([, , label]) => { featureLayers[label] = L.layerGroup().addTo(map); });
 
@@ -120,84 +134,149 @@
       document.getElementById('seqBody').innerHTML = '';
     }
 
-    // Load KMZ and convert to GeoJSON
+    // === Batched Overpass query ===
+    function buildBatchedOverpassQuery(bboxStr) {
+      const parts = featureSettings.map(([key, val]) =>
+        `(node["${key}"="${val}"](${bboxStr});way["${key}"="${val}"](${bboxStr});)`
+      );
+      return `[out:json][timeout:60];(${parts.join("")});out center;`;
+    }
+
+    // === Load KMZ and convert to GeoJSON ===
     document.getElementById('loadRouteBtn').addEventListener('click', () => {
       const file = document.getElementById('kmzInput').files[0];
       if (!file) { alert('Select a KMZ file first'); return; }
       JSZip.loadAsync(file)
         .then(zip => {
           const kmlFile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
+          if (!kmlFile) throw new Error('No .kml found inside the KMZ.');
           return zip.file(kmlFile).async('string');
         })
         .then(kmlText => {
           const kmlDoc = new DOMParser().parseFromString(kmlText, 'application/xml');
           const gj = toGeoJSON.kml(kmlDoc);
+          if (!gj.features?.length) throw new Error('No features found in KML.');
           routeLayer.clearLayers().addData(gj);
           map.fitBounds(routeLayer.getBounds());
         })
         .catch(err => alert('Failed to load KMZ: ' + err));
     });
 
-    // Search features and populate tables
+    // === Search features and populate tables (batched) ===
     document.getElementById('searchBtn').addEventListener('click', async () => {
-      clearAll(); showOverlay();
+      clearAll();
+      window._dedup = new Set();  // reset per search
+      showOverlay();
+
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) { hideOverlay(); alert('Load a route first'); return; }
+
+      // Warn if bbox is huge (very slow query)
+      const bbox = turf.bbox(gj);
+      const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
+      try {
+        const diagKm = turf.distance(
+          turf.point([bbox[0], bbox[1]]),
+          turf.point([bbox[2], bbox[3]]),
+          { units: 'kilometers' }
+        );
+        if (diagKm > 400) {
+          const proceed = confirm(`Warning: The route bounding box is large (~${diagKm.toFixed(0)} km diagonal).\nThis query may be slow and could be rate-limited. Continue?`);
+          if (!proceed) { hideOverlay(); return; }
+        }
+      } catch (_) {}
+
       const allFound = [];
 
-      for (const [key, val, label] of featureSettings) {
-        try {
-          const bbox = turf.bbox(gj);
-          const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`;
-          const query = `[out:json][timeout:25];(node[\"${key}\"=\"${val}\"](${bboxStr});way[\"${key}\"=\"${val}\"](${bboxStr}););out center;`;
-          const res = await fetch('https://overpass-api.de/api/interpreter', {
-            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: query
-          });
-          if (!res.ok) throw new Error(`Overpass ${res.status}`);
-          const data = await res.json();
+      try {
+        const query = buildBatchedOverpassQuery(bboxStr);
+        const res = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body: 'data=' + encodeURIComponent(query)
+        });
+        if (!res.ok) throw new Error(`Overpass ${res.status}`);
+        const data = await res.json();
 
-          data.elements.forEach(el => {
-            const lat = el.lat != null ? el.lat : el.center.lat;
-            const lon = el.lon != null ? el.lon : el.center.lon;
-            const pt = turf.point([lon, lat]);
-            const onRoute = gj.features.some(f => {
-              const coords = f.geometry.type === 'LineString'
-                ? f.geometry.coordinates
-                : [].concat(...f.geometry.coordinates);
-              return turf.pointToLineDistance(pt, turf.lineString(coords), {units:'meters'}) <= RANGE();
-            });
-            if (onRoute) {
-              document.getElementById('resultsBody').insertAdjacentHTML('beforeend',
-                `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`);
-              addMarker(label, [lat, lon]);
-              allFound.push({el, label});
-            }
+        // map of tag k=v -> label
+        const labelFor = new Map(featureSettings.map(([k, v, l]) => [`${k}=${v}`, l]));
+
+        data.elements.forEach(el => {
+          const lat = el.lat != null ? el.lat : el.center?.lat;
+          const lon = el.lon != null ? el.lon : el.center?.lon;
+          if (lat == null || lon == null) return;
+
+          const tags = el.tags || {};
+          const matches = [];
+          for (const [k, v] of Object.entries(tags)) {
+            const lbl = labelFor.get(`${k}=${v}`);
+            if (lbl) matches.push(lbl);
+          }
+          if (!matches.length) return;
+
+          // Check proximity to route
+          const pt = turf.point([lon, lat]);
+          const onRoute = gj.features.some(f => {
+            const coords = f.geometry.type === 'LineString'
+              ? f.geometry.coordinates
+              : [].concat(...f.geometry.coordinates);
+            return turf.pointToLineDistance(pt, turf.lineString(coords), { units: 'meters' }) <= RANGE();
           });
-        } catch(e) { console.warn(label, e); }
+          if (!onRoute) return;
+
+          // De-duplicate (same labels at same coord)
+          const dedupKey = `${matches.sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
+          if (window._dedup.has(dedupKey)) return;
+          window._dedup.add(dedupKey);
+
+          // Add a marker (use first label for tooltip)
+          addMarker(matches[0], [lat, lon]);
+
+          // Add table rows (By Type)
+          matches.forEach(label => {
+            document.getElementById('resultsBody').insertAdjacentHTML(
+              'beforeend',
+              `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
+            );
+          });
+
+          allFound.push({ el, labels: matches });
+        });
+      } catch (e) {
+        console.warn('Overpass batched query failed:', e);
       }
 
-      // Sequential along route
+      // === Sequential along route (per coordinate aggregate) ===
       const coords = [];
       gj.features.forEach(f => {
-        if (f.geometry.type === 'LineString') coords.push(...f.geometry.coordinates);
-        else if (f.geometry.type === 'MultiLineString') f.geometry.coordinates.forEach(c => coords.push(...c));
-      });
-      coords.forEach((c, i) => {
-        const [lng, lat] = c;
-        const labels = allFound.filter(({el}) => {
-          const lat2 = el.lat != null ? el.lat : el.center.lat;
-          const lon2 = el.lon != null ? el.lon : el.center.lon;
-          return turf.distance(turf.point([lon2, lat2]), turf.point([lng, lat]), {units:'meters'}) <= RANGE();
-        }).map(x => x.label);
-        if (labels.length) {
-          document.getElementById('seqBody').insertAdjacentHTML('beforeend',
-            `<tr><td>${i+1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${[...new Set(labels)].join(', ')}</td></tr>`);
+        if (f.geometry.type === 'LineString') {
+          coords.push(...f.geometry.coordinates);
+        } else if (f.geometry.type === 'MultiLineString') {
+          f.geometry.coordinates.forEach(c => coords.push(...c));
         }
       });
+
+      coords.forEach((c, i) => {
+        const [lng, lat] = c;
+        const labels = allFound.flatMap(({ el, labels }) => {
+          const lat2 = el.lat != null ? el.lat : el.center?.lat;
+          const lon2 = el.lon != null ? el.lon : el.center?.lon;
+          if (lat2 == null || lon2 == null) return [];
+          const d = turf.distance(turf.point([lon2, lat2]), turf.point([lng, lat]), { units: 'meters' });
+          return d <= RANGE() ? labels : [];
+        });
+        if (labels.length) {
+          document.getElementById('seqBody').insertAdjacentHTML(
+            'beforeend',
+            `<tr><td>${i + 1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${[...new Set(labels)].join(', ')}</td></tr>`
+          );
+        }
+      });
+
       hideOverlay();
     });
 
-    // Export tables to Excel
+    // === Export tables to Excel ===
     document.getElementById('exportBtn').addEventListener('click', () => {
       const wb = XLSX.utils.book_new();
       const ws1 = XLSX.utils.table_to_sheet(document.getElementById('typeTable'));
