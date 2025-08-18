@@ -81,29 +81,30 @@
   import goproTelemetry from "https://esm.sh/gopro-telemetry@latest";
   import Chart from "https://esm.sh/chart.js@4.4.4/auto";
 
-  // ---------- small helpers ----------
+  // ---------- helpers ----------
   const isArr = (x) => Array.isArray(x);
   const len  = (x) => (Array.isArray(x) ? x.length : 0);
   const numberOrNull = (x) => Number.isFinite(Number(x)) ? Number(x) : null;
+  const safeSlice = (arr, n) => (isArr(arr) ? arr.slice(0, n) : []);
+  const safeJoin  = (arr, sep) => (isArr(arr) && len(arr) ? arr.join(sep) : '');
 
-  // Normalize timestamp arrays to seconds (detect ms and divide by 1000)
   function normalizeTimesToSeconds(arr) {
-    const t = (Array.isArray(arr) ? arr.slice() : []).map(x => Number.isFinite(+x) ? +x : null);
+    const t = (isArr(arr) ? arr.slice() : []).map(x => Number.isFinite(+x) ? +x : null);
     const diffs = [];
     for (let i = 1; i < t.length; i++) {
       const a = t[i-1], b = t[i];
       if (Number.isFinite(a) && Number.isFinite(b)) diffs.push(b - a);
     }
-    if (!diffs.length) return t;
+    if (!len(diffs)) return t;
     diffs.sort((a,b)=>a-b);
     const med = diffs[Math.floor(diffs.length/2)];
-    if (med > 5) { // very likely milliseconds
+    if (med > 5) {
       for (let i = 0; i < t.length; i++) if (Number.isFinite(t[i])) t[i] = t[i] / 1000;
     }
     return t;
   }
 
-  // ---------- Leaflet map ----------
+  // ---------- Leaflet ----------
   const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
@@ -119,11 +120,11 @@
   const debugPre = document.getElementById('debugPre');
   const speedPH  = document.getElementById('speedPlaceholder');
   const accPH    = document.getElementById('accPlaceholder');
-  const setStatus = (m) => statusEl.textContent = m;
+  const setStatus = (m) => { try { statusEl.textContent = String(m ?? ''); } catch {} };
 
   setStatus('Modules ready. Load an .MP4 to extract GPS, speed and accelerometer.');
 
-  // ---------- UI events ----------
+  // ---------- UI ----------
   fileEl.addEventListener('change', async (e) => {
     const f = e.target.files && e.target.files[0];
     if (f) await handleFile(f);
@@ -148,7 +149,9 @@
       speedPH.style.display = 'none';
       accPH.style.display = 'none';
 
-      setStatus(`Reading "${file?.name ?? 'file'}"… (${file && Number.isFinite(file.size) ? (file.size/1048576).toFixed(1) : '?' } MB)`);
+      const fname = (file && typeof file.name === 'string') ? file.name : 'file';
+      const fmb   = (file && Number.isFinite(file.size)) ? (file.size/1048576).toFixed(1) : '?';
+      setStatus(`Reading "${fname}"… (${fmb} MB)`);
 
       setStatus('Extracting GPMF telemetry…');
       const gpmf = await gpmfExtract(file, { browserMode: true });
@@ -162,33 +165,34 @@
         decimalPlaces: 7
       })) || {};
 
-      // 1) GPS path
+      // GPS
       const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
       if (len(gps.latlngs) >= 2) drawTrack(gps.latlngs);
 
-      // 2) Speed series
+      // Speed
       const speed = buildSpeedSeries(gps) || { t: [], v: [] };
 
-      // 3) ACC series
+      // ACC
       const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
 
-      // If GPS didn’t decode, show stream list for diagnosis
+      // Debug info when GPS empty
       if (len(gps.latlngs) === 0) {
-        try {
-          const streamList = await goproTelemetry(gpmf, { streamList: true });
-          debugPre.textContent =
-            'No GPS points decoded.\n\nStream list:\n' + JSON.stringify(streamList, null, 2) +
-            '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((gps.preview||[]).slice(0,10), null, 2);
-          debugBox.style.display = 'block';
-          debugBox.open = true;
-        } catch (e) {
-          debugPre.textContent = 'No GPS points decoded.\nAlso failed to read stream list: ' + (e?.message || e);
-          debugBox.style.display = 'block';
-          debugBox.open = true;
-        }
+        let streamList = null;
+        try { streamList = await goproTelemetry(gpmf, { streamList: true }); } catch {}
+        const dbgA = [
+          'No GPS points decoded.',
+          'Stream list:',
+          JSON.stringify(streamList ?? '(failed to read)', null, 2),
+          '',
+          'GPS preview (first 10 samples):',
+          JSON.stringify(safeSlice(gps.preview, 10), null, 2)
+        ];
+        debugPre.textContent = dbgA.join('\n');
+        debugBox.style.display = 'block';
+        debugBox.open = true;
       }
 
-      // Charts (with guards)
+      // Charts (guarded)
       if (len(speed.t) && len(speed.v)) drawSpeedChart(speed); else speedPH.style.display = 'block';
       if (len(acc.t)) drawAccChart(acc); else accPH.style.display = 'block';
 
@@ -197,7 +201,8 @@
       const streamsUsed = [];
       if (len(gps.used)) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
-      setStatus(`Points: ${len(gps.latlngs)} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+      const streamsUsedStr = safeJoin(streamsUsed, ', ');
+      setStatus(`Points: ${len(gps.latlngs)} · Dist: ${distKm} km · Streams: ${streamsUsedStr || '—'}`);
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
@@ -240,10 +245,10 @@
               if (lon === null && /(^|[^a-z])lon(gitude)?/.test(nk)) lon = numberOrNull(v[k]);
               if (speedMs === null && /speed/.test(nk)) {
                 const val = numberOrNull(v[k]);
-                if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val; // if already kph, convert back to m/s
+                if (val != null) speedMs = /km\/?h|kph/.test(nk) ? (val / 3.6) : val; // normalize to m/s
               }
             }
-          } else if (Array.isArray(v) && v.length >= 2) {
+          } else if (isArr(v) && len(v) >= 2) {
             lat = numberOrNull(v[0]);
             lon = numberOrNull(v[1]);
           }
@@ -251,7 +256,7 @@
           if (isFiniteLatLon(lat, lon)) {
             latlngs.push([lat, lon]);
             times.push(t);
-            speedsRaw.push(speedMs); // may be null → we’ll compute from distance if needed
+            speedsRaw.push(speedMs);
           }
         }
       }
@@ -262,8 +267,8 @@
 
   function buildSpeedSeries(gps) {
     const Traw = isArr(gps?.times) ? gps.times : [];
-    const P = isArr(gps?.latlngs) ? gps.latlngs : [];
-    const S = isArr(gps?.speedsRaw) ? gps.speedsRaw : [];
+    const P    = isArr(gps?.latlngs) ? gps.latlngs : [];
+    const S    = isArr(gps?.speedsRaw) ? gps.speedsRaw : [];
 
     const T = normalizeTimesToSeconds(Traw);
 
@@ -274,7 +279,7 @@
       const tNow = numberOrNull(T[i]);
       if (S[i] != null) {
         t.push(tNow ?? i);
-        vKph.push(S[i] * 3.6); // S is m/s → km/h
+        vKph.push(S[i] * 3.6); // m/s → km/h
       } else if (i > 0) {
         const tPrev = numberOrNull(T[i-1]) ?? (i-1);
         const dt = (tNow ?? i) - tPrev;
@@ -288,7 +293,7 @@
       }
     }
 
-    // Clean & decimate to ~6000 points
+    // Clean & decimate
     const tC = [], vC = [];
     for (let i = 0; i < len(t); i++) {
       if (Number.isFinite(t[i]) && Number.isFinite(vKph[i])) {
@@ -332,7 +337,7 @@
               if (y===null && /\by\b/.test(nk)) y = numberOrNull(v[k]);
               if (z===null && /\bz\b/.test(nk)) z = numberOrNull(v[k]);
             }
-          } else if (Array.isArray(v) && v.length >= 3) {
+          } else if (isArr(v) && len(v) >= 3) {
             x = numberOrNull(v[0]); y = numberOrNull(v[1]); z = numberOrNull(v[2]);
           }
 
@@ -347,7 +352,7 @@
       }
     }
 
-    // Clean NaNs
+    // Clean
     const tC=[], axC=[], ayC=[], azC=[];
     for (let i=0; i<len(t); i++) {
       if ([t[i], ax[i], ay[i], az[i]].every(Number.isFinite)) {
@@ -355,7 +360,6 @@
       }
     }
 
-    // Normalize time base to seconds and decimate
     const tSec = normalizeTimesToSeconds(tC);
     const dec  = decimateMultiSeries(tSec, [axC, ayC, azC], 6000);
     return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
