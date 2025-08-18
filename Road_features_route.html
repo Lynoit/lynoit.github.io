@@ -83,4 +83,263 @@
     // === Map ===
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLa
+    const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLayer: () => null }).addTo(map);
+
+    // Manual point toggle (double-click)
+    let manualMarker = null;
+    map.on('dblclick', (e) => {
+      if (!manualMarker) {
+        manualMarker = L.marker(e.latlng, { draggable:true }).addTo(map)
+          .bindTooltip('Manual', {permanent:true, direction:'right', offset:[10,0], className:'feature-label'});
+      } else {
+        map.removeLayer(manualMarker);
+        manualMarker = null;
+      }
+    });
+
+    // === Feature definitions ===
+    const featureSettings = [
+      ['man_made', 'bridge', 'Bridge'],
+      ['tunnel', 'yes', 'Tunnel'],
+      ['amenity', 'toll_booth', 'Toll Station'],
+      ['junction', 'roundabout', 'Roundabout'],
+      ['highway', 'stop', 'Stop Sign'],
+      ['highway', 'traffic_signals', 'Traffic Light'],
+      ['junction', 'yes', 'Intersection'],          // note: rare in OSM
+      ['traffic_calming', 'speed_bump', 'Speed Bump'],
+      ['maxspeed', '10', '10 kph'],
+      ['maxspeed', '20', '20 kph'],
+      ['maxspeed', '30', '30 kph'],
+      ['maxspeed', '40', '40 kph'],
+      ['maxspeed', '50', '50 kph'],
+      ['maxspeed', '60', '60 kph'],
+      ['maxspeed', '70', '70 kph'],
+      ['maxspeed', '80', '80 kph'],
+      ['maxspeed', '90', '90 kph'],
+      ['maxspeed', '100', '100 kph'],
+      ['maxspeed', '110', '110 kph'],
+      ['maxspeed', '120', '120 kph'],
+      ['maxspeed', '130', '130 kph'],
+      ['maxspeed', '140', '140 kph'],
+      ['maxspeed', 'none', 'Unlimited']
+    ];
+
+    const featureLayers = {};
+    featureSettings.forEach(([, , label]) => { featureLayers[label] = L.layerGroup().addTo(map); });
+
+    function addMarker(label, coordLatLng) {
+      L.circleMarker(coordLatLng, { radius: 6, color: 'blue', fillColor: 'blue', fillOpacity: 1, weight: 1, interactive: false })
+        .addTo(featureLayers[label])
+        .bindTooltip(label, { permanent: true, direction: 'right', offset: [10, 0], className: 'feature-label' });
+    }
+
+    function clearAll() {
+      Object.values(featureLayers).forEach(layer => layer.clearLayers());
+      document.getElementById('resultsBody').innerHTML = '';
+      document.getElementById('seqBody').innerHTML = '';
+    }
+
+    // === Build a list of line segments from the route (ignore non-line features) ===
+    function getRouteLineSegments(gj) {
+      const lines = [];
+      (gj.features || []).forEach(f => {
+        const g = f.geometry;
+        if (!g) return;
+        if (g.type === 'LineString') {
+          lines.push(g.coordinates);
+        } else if (g.type === 'MultiLineString') {
+          g.coordinates.forEach(c => lines.push(c));
+        }
+      });
+      return lines;
+    }
+
+    // === Batched Overpass query builder ===
+    function buildBatchedOverpassQuery(bboxStr) {
+      const parts = featureSettings.map(([key, val]) =>
+        `(node["${key}"="${val}"](${bboxStr});way["${key}"="${val}"](${bboxStr});)`
+      );
+      return `[out:json][timeout:60];(${parts.join("")});out center;`;
+    }
+
+    // === Resilient Overpass fetch with mirror fallback ===
+    const OVERPASS_ENDPOINTS = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.openstreetmap.ru/api/interpreter'
+    ];
+
+    async function fetchOverpassJSON(query) {
+      let lastErr;
+      for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
+        const url = OVERPASS_ENDPOINTS[i];
+        try {
+          setOverlay(`Querying Overpass (${i+1}/${OVERPASS_ENDPOINTS.length})…`);
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: 'data=' + encodeURIComponent(query)
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status} at ${url}`);
+          const json = await res.json();
+          return json;
+        } catch (e) {
+          console.warn('Overpass mirror failed:', url, e);
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error('All Overpass mirrors failed');
+    }
+
+    // === Load KMZ and convert to GeoJSON ===
+    document.getElementById('loadRouteBtn').addEventListener('click', () => {
+      const file = document.getElementById('kmzInput').files[0];
+      if (!file) { alert('Select a KMZ file first'); return; }
+      JSZip.loadAsync(file)
+        .then(zip => {
+          const kmlFile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
+          if (!kmlFile) throw new Error('No .kml found inside the KMZ.');
+          return zip.file(kmlFile).async('string');
+        })
+        .then(kmlText => {
+          const kmlDoc = new DOMParser().parseFromString(kmlText, 'application/xml');
+          const gj = toGeoJSON.kml(kmlDoc);
+          if (!gj.features?.length) throw new Error('No features found in KML.');
+          routeLayer.clearLayers().addData(gj);
+          map.fitBounds(routeLayer.getBounds());
+        })
+        .catch(err => alert('Failed to load KMZ: ' + err));
+    });
+
+    // === Search features and populate tables (batched) ===
+    document.getElementById('searchBtn').addEventListener('click', async () => {
+      clearAll();
+      window._dedup = new Set();  // reset per search
+
+      const gj = routeLayer.toGeoJSON();
+      if (!gj.features.length) { alert('Load a route first'); return; }
+
+      // collect route lines
+      const routeLines = getRouteLineSegments(gj);
+      if (!routeLines.length) { alert('No line geometry found in the KMZ route.'); return; }
+
+      // Warn if bbox is huge (very slow query)
+      const bbox = turf.bbox(gj); // [minLon, minLat, maxLon, maxLat]
+      const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`; // south,west,north,east
+      try {
+        const diagKm = turf.distance(
+          turf.point([bbox[0], bbox[1]]),
+          turf.point([bbox[2], bbox[3]]),
+          { units: 'kilometers' }
+        );
+        if (diagKm > 400) {
+          const proceed = confirm(`Warning: The route bounding box is large (~${diagKm.toFixed(0)} km diagonal).\nThis query may be slow and could be rate-limited. Continue?`);
+          if (!proceed) { return; }
+        }
+      } catch (_) {}
+
+      setOverlay('Building query…');
+      const query = buildBatchedOverpassQuery(bboxStr);
+
+      let data;
+      try {
+        data = await fetchOverpassJSON(query);
+      } catch (e) {
+        hideOverlay();
+        alert('Overpass query failed: ' + e);
+        return;
+      }
+
+      setOverlay('Filtering results near the route…');
+
+      // map of tag k=v -> label
+      const labelFor = new Map(featureSettings.map(([k, v, l]) => [`${k}=${v}`, l]));
+      const allFound = [];
+      let addedCount = 0;
+
+      (data.elements || []).forEach(el => {
+        const lat = el.lat != null ? el.lat : el.center?.lat;
+        const lon = el.lon != null ? el.lon : el.center?.lon;
+        if (lat == null || lon == null) return;
+
+        const tags = el.tags || {};
+        const matches = [];
+        for (const [k, v] of Object.entries(tags)) {
+          const lbl = labelFor.get(`${k}=${v}`);
+          if (lbl) matches.push(lbl);
+        }
+        if (!matches.length) return;
+
+        const pt = turf.point([lon, lat]);
+        const nearAnyLine = routeLines.some(coords => {
+          try {
+            // Turf expects lon/lat coords; distance in km
+            const d = turf.pointToLineDistance(pt, turf.lineString(coords), { units: 'kilometers' });
+            return d <= RANGE_KM();
+          } catch (e) {
+            // if any bad geometry slips in, skip that segment
+            return false;
+          }
+        });
+        if (!nearAnyLine) return;
+
+        // De-duplicate (same labels at same coord)
+        const dedupKey = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
+        if (window._dedup.has(dedupKey)) return;
+        window._dedup.add(dedupKey);
+
+        // Add a marker (use first label for tooltip)
+        addMarker(matches[0], [lat, lon]);
+
+        // Add table rows (By Type)
+        matches.forEach(label => {
+          document.getElementById('resultsBody').insertAdjacentHTML(
+            'beforeend',
+            `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
+          );
+          addedCount++;
+        });
+
+        allFound.push({ el, labels: matches });
+      });
+
+      // === Sequential along route (per coordinate aggregate) ===
+      setOverlay('Aggregating by route coordinate…');
+      const allCoords = routeLines.flat(); // array of [lon,lat]
+
+      allCoords.forEach((c, i) => {
+        const [lng, lat] = c;
+        const labels = allFound.flatMap(({ el, labels }) => {
+          const lat2 = el.lat != null ? el.lat : el.center?.lat;
+          const lon2 = el.lon != null ? el.lon : el.center?.lon;
+          if (lat2 == null || lon2 == null) return [];
+          const dKm = turf.distance(turf.point([lon2, lat2]), turf.point([lng, lat]), { units: 'kilometers' });
+          return dKm <= RANGE_KM() ? labels : [];
+        });
+        if (labels.length) {
+          document.getElementById('seqBody').insertAdjacentHTML(
+            'beforeend',
+            `<tr><td>${i + 1}</td><td>${lat.toFixed(6)}</td><td>${lng.toFixed(6)}</td><td>${[...new Set(labels)].join(', ')}</td></tr>`
+          );
+        }
+      });
+
+      hideOverlay();
+
+      if (!addedCount) {
+        alert('No features found within the specified radius of the route.\nTry increasing the Radius (m) to 30–50 m.');
+      }
+    });
+
+    // === Export tables to Excel ===
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      const wb = XLSX.utils.book_new();
+      const ws1 = XLSX.utils.table_to_sheet(document.getElementById('typeTable'));
+      XLSX.utils.book_append_sheet(wb, ws1, 'By Type');
+      const ws2 = XLSX.utils.table_to_sheet(document.getElementById('seqTable'));
+      XLSX.utils.book_append_sheet(wb, ws2, 'By Route Seq');
+      XLSX.writeFile(wb, 'road_features.xlsx');
+    });
+  </script>
+</body>
+</html>
