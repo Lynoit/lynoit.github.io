@@ -59,3 +59,145 @@
     </div>
     <div class="chart-wrap">
       <h3>Accelerometer (m/s²)</h3>
+      <div id="accPlaceholder" class="placeholder" style="display:none;">No accelerometer data found.</div>
+      <canvas id="accChart"></canvas>
+    </div>
+  </section>
+
+  <details id="debugBox" style="display:none;">
+    <summary>Debug (auto-opens when few points are found)</summary>
+    <pre id="debugPre"></pre>
+  </details>
+
+  <footer>
+    <div>© OpenStreetMap contributors</div>
+    <div>Tip: On HERO10 Black, enable <em>GPS</em> and start recording after GPS lock.</div>
+  </footer>
+
+<script type="module">
+  import gpmfExtract from "https://esm.sh/gpmf-extract@latest";
+  import goproTelemetry from "https://esm.sh/gopro-telemetry@latest";
+  import Chart from "https://esm.sh/chart.js@4.4.4/auto";
+
+  const isArr = (x) => Array.isArray(x);
+  const len = (x) => (Array.isArray(x) ? x.length : 0);
+  const numberOrNull = (x) => Number.isFinite(Number(x)) ? Number(x) : null;
+
+  function normalizeTimesToSeconds(arr) {
+    const t = (Array.isArray(arr) ? arr.slice() : []).map(x => Number.isFinite(+x) ? +x : null);
+    const diffs = [];
+    for (let i = 1; i < t.length; i++) {
+      const a = t[i-1], b = t[i];
+      if (Number.isFinite(a) && Number.isFinite(b)) diffs.push(b - a);
+    }
+    if (!diffs.length) return t;
+    diffs.sort((a,b)=>a-b);
+    const med = diffs[Math.floor(diffs.length/2)];
+    if (med > 5) {
+      for (let i = 0; i < t.length; i++) if (Number.isFinite(t[i])) t[i] = t[i] / 1000;
+    }
+    return t;
+  }
+
+  const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  let trackLayer;
+  let speedChart, accChart;
+
+  const statusEl = document.getElementById('status');
+  const fileEl = document.getElementById('file');
+  const dropzone = document.getElementById('dropzone');
+  const debugBox = document.getElementById('debugBox');
+  const debugPre = document.getElementById('debugPre');
+  const speedPH = document.getElementById('speedPlaceholder');
+  const accPH = document.getElementById('accPlaceholder');
+  const setStatus = (m) => statusEl.textContent = m;
+
+  setStatus('Modules ready. Load an .MP4 to extract GPS, speed and accelerometer.');
+
+  fileEl.addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) await handleFile(f);
+  });
+  ['dragenter','dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
+  );
+  ['dragleave','drop'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
+  );
+  dropzone.addEventListener('drop', async (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) await handleFile(f);
+  });
+
+  async function handleFile(file) {
+    try {
+      debugBox.style.display = 'none';
+      debugPre.textContent = '';
+      destroyCharts();
+      speedPH.style.display = 'none';
+      accPH.style.display = 'none';
+
+      setStatus(`Reading "${file?.name ?? 'file'}"… (${file && Number.isFinite(file.size) ? (file.size/1048576).toFixed(1) : '?' } MB)`);
+
+      setStatus('Extracting GPMF telemetry…');
+      const gpmf = await gpmfExtract(file, { browserMode: true });
+      if (!gpmf) throw new Error('gpmfExtract returned nothing (file may have no telemetry)');
+
+      setStatus('Decoding telemetry (GPS + ACC)…');
+      const telemetry = (await goproTelemetry(gpmf, {
+        stream: ['GPS', 'ACCL'],
+        repeatHeaders: true,
+        tolerant: true,
+        decimalPlaces: 7
+      })) || {};
+
+      const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
+      if (Array.isArray(gps.latlngs) && gps.latlngs.length >= 2) {
+        drawTrack(gps.latlngs);
+      }
+
+      const speed = buildSpeedSeries(gps) || { t: [], v: [] };
+      const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
+
+      if (!Array.isArray(gps.latlngs) || gps.latlngs.length === 0) {
+        const streamList = await goproTelemetry(gpmf, { streamList: true });
+        debugPre.textContent =
+          'No GPS points decoded.\n\nStream list:\n' + JSON.stringify(streamList, null, 2) +
+          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((Array.isArray(gps.preview) ? gps.preview.slice(0,10) : []), null, 2);
+        debugBox.style.display = 'block';
+        debugBox.open = true;
+      }
+
+      if (Array.isArray(speed.t) && Array.isArray(speed.v) && speed.t.length && speed.v.length) {
+        drawSpeedChart(speed);
+      } else {
+        speedPH.style.display = 'block';
+      }
+
+      if (Array.isArray(acc.t) && acc.t.length) {
+        drawAccChart(acc);
+      } else {
+        accPH.style.display = 'block';
+      }
+
+      const distKm = (Array.isArray(gps.latlngs) && gps.latlngs.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
+      const streamsUsed = [];
+      if (Array.isArray(gps.used) && gps.used.length) streamsUsed.push('GPS');
+      if (acc.used) streamsUsed.push('ACCL');
+      setStatus(`Points: ${Array.isArray(gps.latlngs) ? gps.latlngs.length : 0} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  /* collectGps, buildSpeedSeries, collectAcc, drawTrack, drawSpeedChart, drawAccChart,
+     destroyCharts, haversineMeters, totalDistanceKm, decimateSeries, decimateMultiSeries,
+     isFiniteLatLon go here — unchanged from previous version */
+</script>
+</body>
+</html>
