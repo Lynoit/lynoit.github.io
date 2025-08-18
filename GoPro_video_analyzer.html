@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>GoPro Telemetry Viewer (GPS + Speed + Accelerometer)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <!-- GoPro telemetry (browser build) -->
+  <script src="https://unpkg.com/gopro-telemetry@1.5.3/dist/gopro-telemetry.min.js"></script>
+
+  <style>
+    :root {
+      --bg:#111; --fg:#eee; --muted:#999; --accent:#3aa7ff; --card:#1a1a1a; --border:#2a2a2a;
+    }
+    html, body { height:100%; margin:0; background:var(--bg); color:var(--fg); font-family:system-ui, Arial, sans-serif; }
+    header { padding:14px 16px; border-bottom:1px solid var(--border); background:var(--card); position:sticky; top:0; z-index:10 }
+    h1 { font-size:18px; margin:0 0 8px; font-weight:600 }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px; }
+    #map { height:50vh; width:100%; border-radius:12px; border:1px solid var(--border); }
+    .wrap { max-width:1200px; margin:0 auto; padding:12px; display:grid; gap:14px }
+    label.btn { display:inline-block; padding:8px 12px; border:1px dashed var(--border); border-radius:10px; cursor:pointer; }
+    input[type=file] { display:none; }
+    .kv { font-size:13px; color:var(--muted) }
+    .grid { display:grid; gap:14px }
+    canvas { background:#0d0d0d; border-radius:12px; border:1px solid var(--border); }
+    progress { width:260px; height:10px; }
+    .bad { color:#ff6b6b }
+    .ok  { color:#7dff9b }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="row">
+      <h1 style="flex:1">GoPro MP4 → GPS route + Speed + Accelerometer</h1>
+      <label class="btn">
+        📁 Choose GoPro .MP4
+        <input id="fileInput" type="file" accept="video/mp4,video/*">
+      </label>
+      <div class="kv" id="status">No file loaded.</div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <progress id="progress" value="0" max="1" style="display:none"></progress>
+      <div class="kv" id="meta"></div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div id="map" class="card"></div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="row" style="justify-content:space-between; align-items:baseline;">
+          <div class="kv">Speed (km/h)</div>
+          <div class="kv" id="speedInfo"></div>
+        </div>
+        <canvas id="speedChart" height="150"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between; align-items:baseline;">
+          <div class="kv">Accelerometer (m/s²)</div>
+          <div class="kv" id="accInfo"></div>
+        </div>
+        <canvas id="accChart" height="180"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- Leaflet map setup ---
+    const map = L.map('map', { zoomControl: true, scrollWheelZoom: true }).setView([0,0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    let routeLayer = null, startMarker = null, endMarker = null;
+
+    // --- Charts setup ---
+    const speedCtx = document.getElementById('speedChart').getContext('2d');
+    const accCtx   = document.getElementById('accChart').getContext('2d');
+
+    const speedChart = new Chart(speedCtx, {
+      type: 'line',
+      data: { datasets: [{ label:'Speed', data: [], borderWidth:2, pointRadius:0, tension:0.2 }] },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { title: { text:'Time (s)', display:true }, grid:{ color:'#222' }, ticks:{ color:'#bbb' } },
+          y: { title: { text:'km/h', display:true }, grid:{ color:'#222' }, ticks:{ color:'#bbb' } }
+        },
+        plugins: { legend: { labels:{ color:'#ddd' } } }
+      }
+    });
+
+    const accChart = new Chart(accCtx, {
+      type: 'line',
+      data: {
+        datasets: [
+          { label:'Ax', data: [], borderWidth:1.8, pointRadius:0, tension:0.15 },
+          { label:'Ay', data: [], borderWidth:1.8, pointRadius:0, tension:0.15 },
+          { label:'Az', data: [], borderWidth:1.8, pointRadius:0, tension:0.15 }
+        ]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { title: { text:'Time (s)', display:true }, grid:{ color:'#222' }, ticks:{ color:'#bbb' } },
+          y: { title: { text:'m/s²', display:true }, grid:{ color:'#222' }, ticks:{ color:'#bbb' } }
+        },
+        plugins: { legend: { labels:{ color:'#ddd' } } }
+      }
+    });
+
+    // --- UI helpers ---
+    const fileInput = document.getElementById('fileInput');
+    const statusEl  = document.getElementById('status');
+    const progressEl= document.getElementById('progress');
+    const metaEl    = document.getElementById('meta');
+    const speedInfo = document.getElementById('speedInfo');
+    const accInfo   = document.getElementById('accInfo');
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      resetUI();
+      statusEl.textContent = `Parsing "${file.name}"…`;
+      progressEl.style.display = 'inline-block';
+      progressEl.value = 0;
+
+      try {
+        // gopro-telemetry browser usage:
+        //  - mp4: File object
+        //  - stream filters so we only work with what we need
+        //  - "browser" build handles demuxing with mp4box internally
+        await new Promise((resolve, reject) => {
+          window.goproTelemetry(
+            {
+              mp4: file,
+              streams: ['GPS5','GPSF','GPSU','ACCL'], // GPS5=fixes, GPSF=fix type, GPSU=time, ACCL=accelerometer
+              // performance tweaks:
+              groupTimes: 0,      // 0 = no grouping (highest resolution)
+              raw: false,         // we want scaled values
+              repeat: false,      // no repetition
+              timeOut: 120000     // 120s timeout for huge files
+            },
+            (telemetry) => { resolve(handleTelemetry(telemetry, file)); },
+            (progress)  => {
+              // progress is 0..1 when available
+              if (typeof progress === 'number') progressEl.value = progress;
+            }
+          );
+        });
+
+        statusEl.innerHTML = `<span class="ok">Done.</span>`;
+      } catch (err) {
+        console.error(err);
+        statusEl.innerHTML = `<span class="bad">Failed: ${String(err.message || err)}</span>`;
+      } finally {
+        progressEl.style.display = 'none';
+      }
+    });
+
+    function resetUI() {
+      // Map
+      if (routeLayer) { map.removeLayer(routeLayer); routeLayer=null; }
+      if (startMarker){ map.removeLayer(startMarker); startMarker=null; }
+      if (endMarker)  { map.removeLayer(endMarker); endMarker=null; }
+      // Charts
+      speedChart.data.datasets[0].data = [];
+      speedChart.update();
+      accChart.data.datasets[0].data = [];
+      accChart.data.datasets[1].data = [];
+      accChart.data.datasets[2].data = [];
+      accChart.update();
+      // Info
+      metaEl.textContent = '';
+      speedInfo.textContent = '';
+      accInfo.textContent = '';
+    }
+
+    function handleTelemetry(telemetry, file) {
+      // The structure usually has one top-level device key (e.g., "1")
+      // within it, each stream (GPS5, ACCL, etc.) sits at telemetry[dev].streams[FOURCC]
+      const deviceKey = Object.keys(telemetry)[0];
+      const dev = telemetry[deviceKey];
+
+      metaEl.textContent = summarize(dev, file);
+
+      // --- GPS path & speed ---
+      const gps = dev?.streams?.GPS5;
+      let gpsPoints = [];
+      let speedSeries = []; // {x: tSec, y: km/h}
+      if (gps && Array.isArray(gps.samples) && gps.samples.length) {
+        const t0 = gps.samples[0].cts ?? 0;
+        gps.samples.forEach(s => {
+          // GPS5 sample value: [lat, lon, alt, speed, ?] (already scaled)
+          const v = s.value;
+          const lat = v?.[0], lon = v?.[1];
+          const spd_mps = v?.[3]; // meters per second (GoPro)
+          const tSec = toSeconds(s.cts, t0, gps.timescale || 1000); // cts / timescale
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            gpsPoints.push([lat, lon]);
+          }
+          if (Number.isFinite(spd_mps)) {
+            speedSeries.push({ x: tSec, y: spd_mps * 3.6 }); // km/h
+          }
+        });
+      }
+
+      // If no speed track, try deriving from GPS positions (fallback)
+      if ((!speedSeries.length || speedSeries.every(p => !Number.isFinite(p.y))) && gpsPoints.length > 2) {
+        const derived = deriveSpeedFromGPS(dev.streams.GPS5);
+        speedSeries = derived.series;
+      }
+
+      // --- Accelerometer X/Y/Z ---
+      const acc = dev?.streams?.ACCL;
+      const accX = [], accY = [], accZ = [];
+      if (acc && Array.isArray(acc.samples) && acc.samples.length) {
+        const t0a = acc.samples[0].cts ?? 0;
+        const ts  = acc.timescale || 1000;
+        acc.samples.forEach(s => {
+          // ACCL value: [ax, ay, az] in m/s^2 (scaled by library)
+          const v = s.value;
+          const tSec = toSeconds(s.cts, t0a, ts);
+          if (v && v.length >= 3) {
+            accX.push({ x:tSec, y: v[0] });
+            accY.push({ x:tSec, y: v[1] });
+            accZ.push({ x:tSec, y: v[2] });
+          }
+        });
+      }
+
+      // --- Draw Map Route ---
+      if (gpsPoints.length) {
+        if (routeLayer) map.removeLayer(routeLayer);
+        routeLayer = L.polyline(gpsPoints, { color:'#3aa7ff', weight:3 }).addTo(map);
+        map.fitBounds(routeLayer.getBounds(), { padding:[20,20] });
+
+        // Start/End markers
+        if (startMarker) map.removeLayer(startMarker);
+        if (endMarker) map.removeLayer(endMarker);
+        startMarker = L.circleMarker(gpsPoints[0], { radius:5, color:'#7dff9b' }).addTo(map).bindTooltip('Start');
+        endMarker   = L.circleMarker(gpsPoints[gpsPoints.length-1], { radius:5, color:'#ff6b6b' }).addTo(map).bindTooltip('End');
+      } else {
+        // No GPS found
+        map.setView([0,0], 2);
+      }
+
+      // --- Update Speed Chart ---
+      speedChart.data.datasets[0].data = speedSeries;
+      speedChart.update();
+      if (speedSeries.length) {
+        const maxKph = Math.max(...speedSeries.map(p => p.y||0));
+        const avgKph = speedSeries.reduce((a,b)=>a+(b.y||0),0) / speedSeries.length;
+        speedInfo.textContent = `points: ${speedSeries.length} • max: ${maxKph.toFixed(1)} km/h • avg: ${avgKph.toFixed(1)} km/h`;
+      } else {
+        speedInfo.textContent = 'No speed track available.';
+      }
+
+      // --- Update ACC Chart ---
+      accChart.data.datasets[0].data = accX;
+      accChart.data.datasets[1].data = accY;
+      accChart.data.datasets[2].data = accZ;
+      accChart.update();
+      if (accX.length + accY.length + accZ.length > 0) {
+        accInfo.textContent = `samples: ${Math.max(accX.length, accY.length, accZ.length)}`;
+      } else {
+        accInfo.textContent = 'No accelerometer data found.';
+      }
+    }
+
+    function summarize(dev, file) {
+      const parts = [];
+      parts.push(`Size: ${(file.size/1e6).toFixed(1)} MB`);
+      const gps = dev?.streams?.GPS5, acc = dev?.streams?.ACCL;
+      parts.push(gps ? 'GPS ✓' : 'GPS ✗');
+      parts.push(acc ? 'ACC ✓' : 'ACC ✗');
+      if (gps?.samples?.length) {
+        const first = gps.samples[0]?.date || null;
+        const last  = gps.samples[gps.samples.length-1]?.date || null;
+        if (first && last) {
+          parts.push(`Time: ${fmtDate(first)} → ${fmtDate(last)}`);
+        }
+      }
+      return parts.join(' • ');
+    }
+
+    function fmtDate(d) {
+      try {
+        const dt = (d instanceof Date) ? d : new Date(d);
+        return dt.toISOString().replace('T',' ').replace('Z','');
+      } catch { return ''; }
+    }
+
+    function toSeconds(cts, t0, timescale) {
+      // composition time stamp to seconds relative to first sample
+      const base = (cts - (t0||0)) / (timescale || 1000);
+      return Number.isFinite(base) ? base : 0;
+    }
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      const R = 6371000; // meters
+      const toRad = d => d*Math.PI/180;
+      const dLat = toRad(lat2-lat1);
+      const dLon = toRad(lon2-lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
+
+    function deriveSpeedFromGPS(gpsStream) {
+      // Fallback: compute speed from successive GPS points and timestamps
+      const s = gpsStream?.samples || [];
+      if (s.length < 2) return { series: [] };
+      const ts = gpsStream.timescale || 1000;
+      const t0 = s[0].cts || 0;
+      const series = [];
+      for (let i=1;i<s.length;i++) {
+        const v1 = s[i-1].value, v2 = s[i].value;
+        if (!v1 || !v2) continue;
+        const lat1=v1[0], lon1=v1[1], lat2=v2[0], lon2=v2[1];
+        const dt = ((s[i].cts||0)-(s[i-1].cts||0)) / ts;
+        if (!Number.isFinite(lat1) || !Number.isFinite(lon1) || !Number.isFinite(lat2) || !Number.isFinite(lon2) || dt<=0) continue;
+        const d = haversine(lat1, lon1, lat2, lon2); // meters
+        const mps = d/dt;
+        series.push({ x: ((s[i].cts||0)-t0)/ts, y: mps*3.6 });
+      }
+      return { series };
+    }
+  </script>
+</body>
+</html>
