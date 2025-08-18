@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GoPro MP4 → GPS + Speed + Accelerometer</title>
+  <title>GoPro MP4 → Map + Speed + Accelerometer (robust)</title>
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -30,6 +30,7 @@
     #plots { padding: 8px 12px 14px; background:#0f0f0f; border-top:1px solid #2a2a2a; display:grid; gap:10px; }
     .chart-wrap { background:#151515; border:1px solid #262626; border-radius:10px; padding:8px; }
     .chart-wrap h3 { margin:4px 0 10px; font-size:0.95rem; font-weight:600; color:#ddd; }
+    .placeholder { padding: 12px; color:#bbb; font-size: 0.9rem; }
     canvas { width:100%; height:220px; }
 
     details { background:#151515; border:1px solid #2a2a2a; border-radius:8px; padding:8px 10px; max-width: 1400px; margin: 8px 12px; }
@@ -54,10 +55,12 @@
   <section id="plots">
     <div class="chart-wrap">
       <h3>Speed (km/h)</h3>
+      <div id="speedPlaceholder" class="placeholder" style="display:none;">No speed data found.</div>
       <canvas id="speedChart"></canvas>
     </div>
     <div class="chart-wrap">
       <h3>Accelerometer (m/s²)</h3>
+      <div id="accPlaceholder" class="placeholder" style="display:none;">No accelerometer data found.</div>
       <canvas id="accChart"></canvas>
     </div>
   </section>
@@ -73,12 +76,11 @@
   </footer>
 
 <script type="module">
-  // ESM imports (no bundler)
   import gpmfExtract from "https://esm.sh/gpmf-extract@latest";
   import goproTelemetry from "https://esm.sh/gopro-telemetry@latest";
   import Chart from "https://esm.sh/chart.js@4.4.4/auto";
 
-  // Leaflet map
+  // Leaflet
   const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
@@ -93,11 +95,13 @@
   const demoBtn = document.getElementById('demoBtn');
   const debugBox = document.getElementById('debugBox');
   const debugPre = document.getElementById('debugPre');
+  const speedPH = document.getElementById('speedPlaceholder');
+  const accPH = document.getElementById('accPlaceholder');
   const setStatus = (m) => statusEl.textContent = m;
 
   setStatus('Modules ready. Load an .MP4 to extract GPS, speed and accelerometer.');
 
-  // UI: file input & drag-drop
+  // UI
   fileEl.addEventListener('change', async (e) => {
     const f = e.target.files && e.target.files[0];
     if (f) await handleFile(f);
@@ -119,34 +123,31 @@
       debugBox.style.display = 'none';
       debugPre.textContent = '';
       destroyCharts();
+      speedPH.style.display = 'none';
+      accPH.style.display = 'none';
 
       setStatus(`Reading "${file.name}"… (${(file.size/1048576).toFixed(1)} MB)`);
       setStatus('Extracting GPMF telemetry…');
-      // Extract directly from File in browser
       const gpmf = await gpmfExtract(file, { browserMode: true });
 
       setStatus('Decoding telemetry (GPS + ACC)…');
-      // Ask for GPS and ACCL; repeatHeaders for named keys, tolerant to keep imperfect samples
       const telemetry = await goproTelemetry(gpmf, {
         stream: ['GPS', 'ACCL'],
         repeatHeaders: true,
         tolerant: true,
         decimalPlaces: 7
-      });
+      }) || {};
 
       // 1) Map path from GPS
       const gps = collectGps(telemetry);
-      if (gps.latlngs.length >= 2) {
-        drawTrack(gps.latlngs);
-      }
+      if ((gps.latlngs?.length || 0) >= 2) drawTrack(gps.latlngs);
 
-      // 2) Speed series (km/h)
+      // 2) Speed series
       const speed = buildSpeedSeries(gps);
-      // 3) Accelerometer series (m/s^2)
+      // 3) Accelerometer series
       const acc = collectAcc(telemetry);
 
-      if (!gps.latlngs.length) {
-        // Debug: show a quick preview of GPS samples + stream list
+      if (!gps.latlngs?.length) {
         const streamList = await goproTelemetry(gpmf, { streamList: true });
         debugPre.textContent =
           'Stream list:\n' + JSON.stringify(streamList, null, 2) +
@@ -155,15 +156,24 @@
         debugBox.open = true;
       }
 
-      // Draw charts
-      drawSpeedChart(speed);
-      drawAccChart(acc);
+      // Draw charts (skip gracefully if empty)
+      if ((speed.t?.length || 0) && (speed.v?.length || 0)) {
+        drawSpeedChart(speed);
+      } else {
+        speedPH.style.display = 'block';
+      }
 
-      const distKm = gps.latlngs.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00';
+      if ((acc.t?.length || 0)) {
+        drawAccChart(acc);
+      } else {
+        accPH.style.display = 'block';
+      }
+
+      const distKm = (gps.latlngs?.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
       const streamsUsed = [];
-      if (gps.used.length) streamsUsed.push('GPS');
+      if (gps.used?.length) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
-      setStatus(`Points: ${gps.latlngs.length} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+      setStatus(`Points: ${gps.latlngs?.length || 0} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
@@ -173,12 +183,12 @@
   // --- GPS extraction ---
   function collectGps(telemetry) {
     const latlngs = [];
-    const times = [];      // seconds from start
-    const speedsRaw = [];  // m/s if present in sample (optional)
+    const times = [];
+    const speedsRaw = [];
     const preview = [];
     const used = [];
 
-    for (const devId in telemetry) {
+    for (const devId in (telemetry || {})) {
       const dev = telemetry[devId];
       const streams = dev && dev.streams;
       if (!streams) continue;
@@ -191,22 +201,22 @@
         const samples = Array.isArray(stream?.samples) ? stream.samples : [];
 
         for (let i = 0; i < samples.length; i++) {
-          if (preview.length < 10) preview.push(samples[i]);
           const s = samples[i];
+          if (preview.length < 10) preview.push(s);
           const v = s?.value;
 
-          // Time (seconds from start) – try typical fields
-          const t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
-          // Lat/Lon extraction (repeatHeaders gives named keys like "Latitude (deg)")
-          let lat = null, lon = null, speedMs = null;
+          // Time (secs) with robust fallback
+          let t = numberOrNull(s?.cts ?? s?.time ?? s?.Time ?? s?.timestamp ?? s?.Timestamp);
+          if (t == null) t = i; // fallback to sample index
 
+          // Lat/Lon
+          let lat = null, lon = null, speedMs = null;
           if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const k of Object.keys(v)) {
               const nk = k.toLowerCase();
               if (lat === null && /(^|[^a-z])lat(itude)?/.test(nk)) lat = numberOrNull(v[k]);
               if (lon === null && /(^|[^a-z])lon(gitude)?/.test(nk)) lon = numberOrNull(v[k]);
               if (speedMs === null && /speed/.test(nk)) {
-                // If key includes unit hint, convert if needed
                 const val = numberOrNull(v[k]);
                 if (val != null) {
                   if (/km\/?h|kph/.test(nk)) speedMs = val / 3.6;
@@ -217,7 +227,6 @@
           } else if (Array.isArray(v) && v.length >= 2) {
             lat = numberOrNull(v[0]);
             lon = numberOrNull(v[1]);
-            // Some firmwares include speed in index 3/4 but we won't rely on order.
           }
 
           if (isFiniteLatLon(lat, lon)) {
@@ -229,65 +238,53 @@
       }
     }
 
-    return {
-      used: [...new Set(used)],
-      latlngs,
-      times,
-      speedsRaw,
-      preview
-    };
-  }
-
-  function numberOrNull(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : null;
-  }
-  function isFiniteLatLon(lat, lon) {
-    return Number.isFinite(lat) && Number.isFinite(lon) &&
-           Math.abs(lat) <= 90 && Math.abs(lon) <= 180 &&
-           !(lat === 0 && lon === 0);
+    return { used: [...new Set(used)], latlngs, times, speedsRaw, preview };
   }
 
   // --- Speed series (km/h) ---
   function buildSpeedSeries(gps) {
+    const T = Array.isArray(gps?.times) ? gps.times : [];
+    const P = Array.isArray(gps?.latlngs) ? gps.latlngs : [];
+    const S = Array.isArray(gps?.speedsRaw) ? gps.speedsRaw : [];
+
     const t = [];
     const vKph = [];
 
-    for (let i = 0; i < gps.latlngs.length; i++) {
-      // Prefer embedded speed if present
-      const raw = gps.speedsRaw[i];
-      if (raw != null) {
-        t.push(gps.times[i] ?? i);
-        vKph.push(raw * 3.6);
-        continue;
-      }
-
-      // Else compute from position changes if we have timestamps
-      if (i > 0) {
-        const p1 = gps.latlngs[i-1], p2 = gps.latlngs[i];
-        const dt = (gps.times[i] ?? i) - (gps.times[i-1] ?? (i-1));
-        const dMeters = haversineMeters(p1, p2);
+    for (let i = 0; i < P.length; i++) {
+      const tNow = numberOrNull(T[i]);
+      if (S[i] != null) {
+        t.push(tNow ?? i);
+        vKph.push(S[i] * 3.6);
+      } else if (i > 0) {
+        const dt = ( (tNow ?? i) - (numberOrNull(T[i-1]) ?? (i-1)) );
+        const dMeters = haversineMeters(P[i-1], P[i]);
         const speedMs = (dt > 0.001) ? (dMeters / dt) : 0;
-        t.push(gps.times[i] ?? i);
+        t.push(tNow ?? i);
         vKph.push(speedMs * 3.6);
       } else {
-        // seed first point with 0 if we will compute later
-        t.push(gps.times[i] ?? i);
+        t.push(tNow ?? i);
         vKph.push(0);
       }
     }
 
-    // Light decimation if huge (for faster plotting)
-    return decimateSeries(t, vKph, 6000);
+    // Clean any NaN
+    const tC = [], vC = [];
+    for (let i = 0; i < t.length; i++) {
+      if (Number.isFinite(t[i]) && Number.isFinite(vKph[i])) {
+        tC.push(t[i]); vC.push(vKph[i]);
+      }
+    }
+
+    return decimateSeries(tC, vC, 6000);
   }
 
   // --- Accelerometer extraction (m/s^2) ---
   function collectAcc(telemetry) {
     const t = [], ax = [], ay = [], az = [];
     let used = false;
-    let unitType = 'm/s^2'; // or 'g' -> we convert to m/s^2
+    let unitType = 'm/s^2';
 
-    for (const devId in telemetry) {
+    for (const devId in (telemetry || {})) {
       const dev = telemetry[devId];
       const streams = dev && dev.streams;
       if (!streams) continue;
@@ -297,11 +294,9 @@
         used = true;
 
         const stream = streams[key];
-        // Try to infer units from header/units field
         const units = stream?.units?.value;
-        if (Array.isArray(units)) {
-          // If any axis says 'g', assume g
-          if (units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) unitType = 'g';
+        if (Array.isArray(units) && units.some(u => typeof u === 'string' && /(^|[^a-z])g([^a-z]|$)/i.test(u))) {
+          unitType = 'g';
         }
 
         const samples = Array.isArray(stream?.samples) ? stream.samples : [];
@@ -312,7 +307,6 @@
 
           let x=null,y=null,z=null;
           if (v && typeof v === 'object' && !Array.isArray(v)) {
-            // Keys like "X (m/s^2)" "Y (g)"
             for (const k of Object.keys(v)) {
               const nk = k.toLowerCase();
               if (x===null && /\bx\b/.test(nk)) x = numberOrNull(v[k]);
@@ -334,15 +328,16 @@
       }
     }
 
-    // Light decimation for plotting speed
-    const dec = decimateMultiSeries(t, [ax, ay, az], 6000);
-    return {
-      used,
-      t: dec.t,
-      ax: dec.series[0],
-      ay: dec.series[1],
-      az: dec.series[2]
-    };
+    // Clean NaNs
+    const tC=[], axC=[], ayC=[], azC=[];
+    for (let i=0; i<t.length; i++) {
+      if ([t[i], ax[i], ay[i], az[i]].every(Number.isFinite)) {
+        tC.push(t[i]); axC.push(ax[i]); ayC.push(ay[i]); azC.push(az[i]);
+      }
+    }
+
+    const dec = decimateMultiSeries(tC, [axC, ayC, azC], 6000);
+    return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
   }
 
   // --- Drawing ---
@@ -360,52 +355,36 @@
 
   function drawSpeedChart(speed) {
     const ctx = document.getElementById('speedChart');
-    const data = speed.t.map((x, i) => ({ x, y: speed.v[i] }));
+    if (speedChart) { speedChart.destroy(); speedChart = null; }
+    const data = (speed.t || []).map((x, i) => ({ x, y: speed.v[i] }));
     speedChart = new Chart(ctx, {
       type: 'line',
-      data: {
-        datasets: [{
-          label: 'Speed',
-          data,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.1
-        }]
-      },
+      data: { datasets: [{ label: 'Speed', data, pointRadius: 0, borderWidth: 2, tension: 0.1 }] },
       options: {
-        animation: false,
-        responsive: true,
-        maintainAspectRatio: false,
+        animation: false, responsive: true, maintainAspectRatio: false,
         scales: {
           x: { type: 'linear', title: { text: 'Time (s)', display: true }, ticks: { color:'#bbb' }, grid: { color:'#222' } },
           y: { title: { text: 'km/h', display: true }, ticks: { color:'#bbb' }, grid: { color:'#222' } }
         },
-        plugins: {
-          legend: { labels: { color:'#ddd' } }
-        }
+        plugins: { legend: { labels: { color:'#ddd' } } }
       }
     });
   }
 
   function drawAccChart(acc) {
     const ctx = document.getElementById('accChart');
-    const ds = (label, arr) => ({
-      label, data: acc.t.map((x,i)=>({x, y: arr[i]})), pointRadius: 0, borderWidth: 2, tension: 0.1
-    });
+    if (accChart) { accChart.destroy(); accChart = null; }
+    const mk = (label, arr) => ({ label, data: (acc.t||[]).map((x,i)=>({x, y: arr[i]})), pointRadius: 0, borderWidth: 2, tension: 0.1 });
     accChart = new Chart(ctx, {
       type: 'line',
-      data: { datasets: [ ds('Ax', acc.ax), ds('Ay', acc.ay), ds('Az', acc.az) ] },
+      data: { datasets: [ mk('Ax', acc.ax||[]), mk('Ay', acc.ay||[]), mk('Az', acc.az||[]) ] },
       options: {
-        animation: false,
-        responsive: true,
-        maintainAspectRatio: false,
+        animation: false, responsive: true, maintainAspectRatio: false,
         scales: {
           x: { type: 'linear', title: { text: 'Time (s)', display: true }, ticks: { color:'#bbb' }, grid: { color:'#222' } },
           y: { title: { text: 'm/s²', display: true }, ticks: { color:'#bbb' }, grid: { color:'#222' } }
         },
-        plugins: {
-          legend: { labels: { color:'#ddd' } }
-        }
+        plugins: { legend: { labels: { color:'#ddd' } } }
       }
     });
   }
@@ -417,6 +396,7 @@
 
   // --- Helpers ---
   function haversineMeters(a, b) {
+    if (!a || !b) return 0;
     const R = 6371000;
     const φ1 = a[0]*Math.PI/180, φ2 = b[0]*Math.PI/180;
     const dφ = (b[0]-a[0])*Math.PI/180, dλ = (b[1]-a[1])*Math.PI/180;
@@ -425,37 +405,51 @@
   }
   function totalDistanceKm(latlngs) {
     let d = 0;
-    for (let i=1;i<latlngs.length;i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
+    for (let i=1;i<(latlngs?.length||0);i++) d += haversineMeters(latlngs[i-1], latlngs[i]);
     return d/1000;
   }
-  function decimateSeries(t, y, maxPts) {
-    if (t.length <= maxPts) return { t, v: y };
-    const step = Math.ceil(t.length / maxPts);
+
+  function decimateSeries(tIn, yIn, maxPts) {
+    const t = Array.isArray(tIn) ? tIn : [];
+    const y = Array.isArray(yIn) ? yIn : [];
+    const n = Math.min(t.length, y.length);
+    if (n === 0) return { t: [], v: [] };
+    if (n <= maxPts) return { t: t.slice(0, n), v: y.slice(0, n) };
+    const step = Math.ceil(n / maxPts);
     const td=[], yd=[];
-    for (let i=0; i<t.length; i+=step) { td.push(t[i]); yd.push(y[i]); }
+    for (let i=0; i<n; i+=step) { td.push(t[i]); yd.push(y[i]); }
     return { t: td, v: yd };
   }
-  function decimateMultiSeries(t, series, maxPts) {
-    if (t.length <= maxPts) return { t, series };
-    const step = Math.ceil(t.length / maxPts);
+
+  function decimateMultiSeries(tIn, seriesIn, maxPts) {
+    const t = Array.isArray(tIn) ? tIn : [];
+    const series = Array.isArray(seriesIn) ? seriesIn.map(a => Array.isArray(a) ? a : []) : [];
+    if (t.length === 0 || series.length === 0) return { t: [], series: series.map(()=>[]) };
+    const n = Math.min(t.length, ...series.map(a => a.length));
+    if (!Number.isFinite(n) || n === 0) return { t: [], series: series.map(()=>[]) };
+    if (n <= maxPts) return { t: t.slice(0,n), series: series.map(a=>a.slice(0,n)) };
+    const step = Math.ceil(n / maxPts);
     const td=[]; const out = series.map(()=>[]);
-    for (let i=0;i<t.length;i+=step) {
+    for (let i=0;i<n;i+=step) {
       td.push(t[i]);
       for (let k=0;k<series.length;k++) out[k].push(series[k][i]);
     }
     return { t: td, series: out };
   }
 
-  // Quick demo (just to check UI)
+  function numberOrNull(x) {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Demo
   demoBtn.addEventListener('click', () => {
-    // Small path near SF
     const demoLatLngs = [
       [37.807, -122.475], [37.8076, -122.472], [37.8088, -122.469],
       [37.81, -122.466], [37.811, -122.463], [37.812, -122.460],
     ];
     drawTrack(demoLatLngs);
 
-    // Fake time and data
     const t = Array.from({length: 300}, (_,i)=> i*0.2);
     const speed = t.map(x => 50 + 10*Math.sin(x/4));
     const ax = t.map(x =>  0.5*Math.sin(x*2));
@@ -463,6 +457,8 @@
     const az = t.map(x => -0.3*Math.sin(x*1.8+0.5));
 
     destroyCharts();
+    speedPH.style.display = 'none';
+    accPH.style.display = 'none';
     drawSpeedChart(decimateSeries(t, speed, 6000));
     drawAccChart({ used:true, t, ax, ay, az });
     setStatus(`Demo: ${demoLatLngs.length} map points · charts rendered`);
