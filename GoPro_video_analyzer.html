@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GoPro MP4 → Map + Speed + Accelerometer (no-length-crash)</title>
+  <title>GoPro MP4 → Map + Speed + Accelerometer (robust)</title>
 
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -85,6 +85,24 @@
   const len = (x) => (Array.isArray(x) ? x.length : 0);
   const numberOrNull = (x) => Number.isFinite(Number(x)) ? Number(x) : null;
 
+  // NEW: normalize timestamp arrays to seconds (ms → s if detected)
+  function normalizeTimesToSeconds(arr) {
+    const t = (Array.isArray(arr) ? arr.slice() : []).map(x => Number.isFinite(+x) ? +x : null);
+    const diffs = [];
+    for (let i = 1; i < t.length; i++) {
+      const a = t[i-1], b = t[i];
+      if (Number.isFinite(a) && Number.isFinite(b)) diffs.push(b - a);
+    }
+    if (!diffs.length) return t;
+    diffs.sort((a,b)=>a-b);
+    const med = diffs[Math.floor(diffs.length/2)];
+    // If median step looks like ms (e.g., ~10, 20, 33), convert to seconds.
+    if (med > 5) {
+      for (let i = 0; i < t.length; i++) if (Number.isFinite(t[i])) t[i] = t[i] / 1000;
+    }
+    return t;
+  }
+
   // Leaflet
   const map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -122,7 +140,7 @@
     if (f) await handleFile(f);
   });
 
-  // Main
+  // Main (DEFENSIVE)
   async function handleFile(file) {
     try {
       debugBox.style.display = 'none';
@@ -131,9 +149,11 @@
       speedPH.style.display = 'none';
       accPH.style.display = 'none';
 
-      setStatus(`Reading "${file.name}"… (${(file.size/1048576).toFixed(1)} MB)`);
+      setStatus(`Reading "${file?.name ?? 'file'}"… (${file && Number.isFinite(file.size) ? (file.size/1048576).toFixed(1) : '?' } MB)`);
+
       setStatus('Extracting GPMF telemetry…');
       const gpmf = await gpmfExtract(file, { browserMode: true });
+      if (!gpmf) throw new Error('gpmfExtract returned nothing (file may have no telemetry)');
 
       setStatus('Decoding telemetry (GPS + ACC)…');
       const telemetry = (await goproTelemetry(gpmf, {
@@ -145,40 +165,45 @@
 
       // 1) GPS path
       const gps = collectGps(telemetry) || { used: [], latlngs: [], times: [], speedsRaw: [], preview: [] };
-      if (len(gps.latlngs) >= 2) drawTrack(gps.latlngs);
+      if (Array.isArray(gps.latlngs) && gps.latlngs.length >= 2) {
+        drawTrack(gps.latlngs);
+      }
 
       // 2) Speed series
       const speed = buildSpeedSeries(gps) || { t: [], v: [] };
+
       // 3) ACC series
       const acc = collectAcc(telemetry) || { used: false, t: [], ax: [], ay: [], az: [] };
 
-      if (len(gps.latlngs) === 0) {
+      // If GPS didn’t decode, show a helpful debug dump
+      if (!Array.isArray(gps.latlngs) || gps.latlngs.length === 0) {
         const streamList = await goproTelemetry(gpmf, { streamList: true });
         debugPre.textContent =
-          'Stream list:\n' + JSON.stringify(streamList, null, 2) +
-          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((gps.preview||[]).slice(0,10), null, 2);
+          'No GPS points decoded.\n\nStream list:\n' + JSON.stringify(streamList, null, 2) +
+          '\n\nGPS preview (first 10 samples):\n' + JSON.stringify((Array.isArray(gps.preview) ? gps.preview.slice(0,10) : []), null, 2);
         debugBox.style.display = 'block';
         debugBox.open = true;
       }
 
-      // Charts (guarded)
-      if (len(speed.t) && len(speed.v)) {
+      // Charts (with guards)
+      if (Array.isArray(speed.t) && Array.isArray(speed.v) && speed.t.length && speed.v.length) {
         drawSpeedChart(speed);
       } else {
         speedPH.style.display = 'block';
       }
 
-      if (len(acc.t)) {
+      if (Array.isArray(acc.t) && acc.t.length) {
         drawAccChart(acc);
       } else {
         accPH.style.display = 'block';
       }
 
-      const distKm = (len(gps.latlngs) ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
+      // Footer status
+      const distKm = (Array.isArray(gps.latlngs) && gps.latlngs.length ? totalDistanceKm(gps.latlngs).toFixed(2) : '0.00');
       const streamsUsed = [];
-      if (len(gps.used)) streamsUsed.push('GPS');
+      if (Array.isArray(gps.used) && gps.used.length) streamsUsed.push('GPS');
       if (acc.used) streamsUsed.push('ACCL');
-      setStatus(`Points: ${len(gps.latlngs)} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
+      setStatus(`Points: ${Array.isArray(gps.latlngs) ? gps.latlngs.length : 0} · Dist: ${distKm} km · Streams: ${streamsUsed.join(', ') || '—'}`);
     } catch (err) {
       console.error(err);
       setStatus('Failed: ' + (err && err.message ? err.message : err));
@@ -243,9 +268,11 @@
 
   // --- Speed series (km/h) ---
   function buildSpeedSeries(gps) {
-    const T = isArr(gps?.times) ? gps.times : [];
+    const Traw = isArr(gps?.times) ? gps.times : [];
     const P = isArr(gps?.latlngs) ? gps.latlngs : [];
     const S = isArr(gps?.speedsRaw) ? gps.speedsRaw : [];
+
+    const T = normalizeTimesToSeconds(Traw);
 
     const t = [];
     const vKph = [];
@@ -254,9 +281,10 @@
       const tNow = numberOrNull(T[i]);
       if (S[i] != null) {
         t.push(tNow ?? i);
-        vKph.push(S[i] * 3.6);
+        vKph.push(S[i] * 3.6); // S is m/s -> km/h
       } else if (i > 0) {
-        const dt = ((tNow ?? i) - (numberOrNull(T[i-1]) ?? (i-1)));
+        const tPrev = numberOrNull(T[i-1]) ?? (i-1);
+        const dt = (tNow ?? i) - tPrev;
         const dMeters = haversineMeters(P[i-1], P[i]);
         const speedMs = (dt > 0.001) ? (dMeters / dt) : 0;
         t.push(tNow ?? i);
@@ -336,7 +364,9 @@
       }
     }
 
-    const dec = decimateMultiSeries(tC, [axC, ayC, azC], 6000);
+    // Normalize time base to seconds before decimation
+    const tSec = normalizeTimesToSeconds(tC);
+    const dec = decimateMultiSeries(tSec, [axC, ayC, azC], 6000);
     return { used, t: dec.t, ax: dec.series[0] || [], ay: dec.series[1] || [], az: dec.series[2] || [] };
   }
 
