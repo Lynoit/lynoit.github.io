@@ -74,7 +74,7 @@
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 
   <script>
-    // === UI helpers ===
+    // ==== UI helpers ====
     const RANGE_M = () => parseInt(document.getElementById('range').value, 10) || 60;
     const RANGE_KM = () => RANGE_M() / 1000;
     const SEG_M = () => parseInt(document.getElementById('seglen').value, 10) || 2000;
@@ -85,7 +85,7 @@
     }
     function hideOverlay() { document.getElementById('searchOverlay').style.display = 'none'; }
 
-    // === Map ===
+    // ==== Map ====
     const map = L.map('map').setView([0, 0], 2);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
     const routeLayer = L.geoJSON(null, { style: { color: 'blue', weight: 4 }, pointToLayer: () => null }).addTo(map);
@@ -102,7 +102,7 @@
       }
     });
 
-    // === Feature definitions ===
+    // ==== Feature definitions ====
     const featureSettings = [
       ['man_made', 'bridge', 'Bridge'],
       ['tunnel', 'yes', 'Tunnel'],
@@ -144,7 +144,7 @@
       document.getElementById('seqBody').innerHTML = '';
     }
 
-    // === Utilities: extract lines, merge, slice ===
+    // ==== Route utilities: extract lines, merge, slice ====
     function extractRouteLines(gj) {
       const lines = [];
       (gj.features || []).forEach(f => {
@@ -163,7 +163,7 @@
     }
 
     function sliceRoute(lineString, segmentMeters) {
-      const segKm = Math.max(0.2, segmentMeters / 1000); // clamp to >= 200 m
+      const segKm = Math.max(0.2, segmentMeters / 1000); // >= 200 m
       const total = turf.length(lineString, { units: 'kilometers' });
       const slices = [];
       for (let start = 0; start < total; start += segKm) {
@@ -179,24 +179,26 @@
     // pad bbox by radius (approx meters->degrees)
     function padBbox(bbox, meters, atLat) {
       // bbox: [minLon, minLat, maxLon, maxLat]
-      const dLat = meters / 111320; // deg per meter
+      const dLat = meters / 111320;
       const dLon = meters / (111320 * Math.max(0.1, Math.cos(atLat * Math.PI / 180)));
       return [bbox[0]-dLon, bbox[1]-dLat, bbox[2]+dLon, bbox[3]+dLat];
     }
 
-    // === Overpass mirrors (CORS-friendly) ===
+    // ==== Overpass mirrors ====
     const OVERPASS_ENDPOINTS = [
       'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter'
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.openstreetmap.fr/api/interpreter'
     ];
 
-    // Build query for a small set of features within a bbox (south,west,north,east)
+    // Build query for a small set of features restricted by global [bbox:]
     function buildBBoxQuery(pairs, swne) {
       const [south, west, north, east] = swne;
+      const head = `[out:json][timeout:50][bbox:${south},${west},${north},${east}];`;
       const blocks = pairs.map(([k, v]) =>
-        `(node["${k}"="${v}"](${south},${west},${north},${east});way["${k}"="${v}"](${south},${west},${north},${east});)`
+        `(node["${k}"="${v}"];way["${k}"="${v}"];);`
       ).join('');
-      return `[out:json][timeout:50];(${blocks});out center;`;
+      return `${head}(${blocks})out center;`;
     }
 
     // chunk helper
@@ -206,32 +208,50 @@
       return out;
     }
 
-    // GET first (short URLs), POST fallback
+    // robust fetch: GET-first, POST fallback, show server text, backoff
     async function fetchOverpass(query) {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       let lastErr;
       for (const base of OVERPASS_ENDPOINTS) {
+        // Try GET (short URL only)
         const urlGet = `${base}?data=${encodeURIComponent(query)}`;
-        if (urlGet.length < 7000) {
+        if (urlGet.length < 4000) {
           try {
-            const res = await fetch(urlGet, { method: 'GET' });
-            if (!res.ok) throw new Error(`GET ${res.status} at ${base}`);
+            const res = await fetch(urlGet, { method: 'GET', mode: 'cors', cache: 'no-store' });
+            if (!res.ok) {
+              const txt = await res.text().catch(()=> '');
+              throw new Error(`GET ${res.status} at ${base}: ${txt.slice(0,200)}`);
+            }
             return await res.json();
-          } catch (e) { lastErr = e; }
+          } catch (e) {
+            lastErr = e;
+            console.warn('Overpass GET failed:', e.message);
+          }
         }
+        // Fallback POST
         try {
           const res = await fetch(base, {
             method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
             body: 'data=' + encodeURIComponent(query)
           });
-          if (!res.ok) throw new Error(`POST ${res.status} at ${base}`);
+          if (!res.ok) {
+            const txt = await res.text().catch(()=> '');
+            throw new Error(`POST ${res.status} at ${base}: ${txt.slice(0,200)}`);
+          }
           return await res.json();
-        } catch (e) { lastErr = e; }
+        } catch (e) {
+          lastErr = e;
+          console.warn('Overpass POST failed:', e.message);
+          await sleep(800);
+        }
       }
       throw lastErr || new Error('All Overpass mirrors failed');
     }
 
-    // === Load KMZ and convert to GeoJSON ===
+    // ==== Load KMZ and convert to GeoJSON ====
     document.getElementById('loadRouteBtn').addEventListener('click', () => {
       const file = document.getElementById('kmzInput').files[0];
       if (!file) { alert('Select a KMZ file first'); return; }
@@ -251,7 +271,7 @@
         .catch(err => alert('Failed to load KMZ: ' + err));
     });
 
-    // === Search features (route-sliced bboxes) ===
+    // ==== Search features (route-sliced bboxes, small chunks) ====
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearAll();
       window._dedup = new Set();  // reset per search
@@ -270,16 +290,16 @@
       // For each slice: tiny bbox padded by radius
       const sliceBBoxes = slices.map(ls => {
         const b = turf.bbox(ls); // [minLon, minLat, maxLon, maxLat]
-        // use midpoint latitude for lon scaling
         const midLat = (b[1] + b[3]) / 2;
         const padded = padBbox(b, RANGE_M(), midLat);
         // Overpass expects south,west,north,east
-        return [padded[1], padded[0], padded[3], padded[2]];
+        const swne = [padded[1], padded[0], padded[3], padded[2]];
+        return swne;
       });
 
       // Chunk features + bboxes
-      const FEATURE_CHUNK = 6;
-      const BOX_CHUNK = 1; // keep requests tiny
+      const FEATURE_CHUNK = 3;  // smaller chunks
+      const BOX_CHUNK = 1;      // tiny requests
       const featureChunks = chunk(featureSettings.map(a => [a[0], a[1], a[2]]), FEATURE_CHUNK);
       const bboxChunks = chunk(sliceBBoxes, BOX_CHUNK);
 
@@ -295,6 +315,8 @@
             const pairs = featureChunks[fi].map(([k, v]) => [k, v]);
             const swne = bboxChunks[bi][0]; // one box per chunk
             const q = buildBBoxQuery(pairs, swne);
+            // polite delay to avoid spikes
+            await new Promise(r => setTimeout(r, 400));
             const json = await fetchOverpass(q);
             const els = (json && Array.isArray(json.elements)) ? json.elements : [];
 
@@ -311,7 +333,6 @@
               }
               if (!matches.length) return;
 
-              // de-dup by label set @ coord
               const key = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
               if (window._dedup.has(key)) return;
               window._dedup.add(key);
@@ -331,7 +352,8 @@
         }
       } catch (e) {
         hideOverlay();
-        alert('Overpass query failed: ' + e);
+        console.error('Overpass error detail:', e);
+        alert('Overpass query failed: ' + e.message);
         return;
       }
 
@@ -358,11 +380,11 @@
       hideOverlay();
 
       if (!addedCount) {
-        alert('No features found near the route.\nTry increasing Radius to 80–120 m, and ensure you’re testing on a well-mapped area.');
+        alert('No features found near the route.\nTry increasing Radius to 80–120 m, and ensure you’re testing in a well-mapped area.');
       }
     });
 
-    // === Export tables to Excel ===
+    // ==== Export tables to Excel ====
     document.getElementById('exportBtn').addEventListener('click', () => {
       const wb = XLSX.utils.book_new();
       const ws1 = XLSX.utils.table_to_sheet(document.getElementById('typeTable'));
