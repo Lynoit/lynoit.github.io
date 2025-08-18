@@ -9,10 +9,10 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- Telemetry libs (UMD builds expose window.gpmfExtract and window.goproTelemetry) -->
+  <!-- Telemetry libs (UMD builds expose window.gpmfExtract & window.goproTelemetry) -->
   <script src="https://unpkg.com/mp4box@0.5.4/dist/mp4box.all.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gpmf-extract/dist/gpmf-extract.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gopro-telemetry/dist/gopro-telemetry.min.js"></script>
+  <script src="https://unpkg.com/gpmf-extract@0.3.2/dist/gpmf-extract.umd.js"></script>
+  <script src="https://unpkg.com/gopro-telemetry@4.2.2/dist/gopro-telemetry.umd.js"></script>
 
   <style>
     :root { color-scheme: light dark; }
@@ -56,18 +56,16 @@
   <div id="map"></div>
 
   <footer>
-    <div>© OSM contributors · Tiles by OpenStreetMap</div>
-    <div>Tip: On HERO10 Black, enable <em>GPS</em> in Preferences. Start recording only after GPS lock.</div>
+    <div>© OpenStreetMap contributors · Tiles by OSM</div>
+    <div>Tip: On HERO10 Black, enable <em>GPS</em> in Preferences. Start recording after GPS lock.</div>
   </footer>
 
 <script>
 /* ========= Leaflet map setup ========= */
-let map = L.map('map', { zoomControl: true, attributionControl: true })
-            .setView([20, 0], 2);
-const osm = L.tileLayer(
-  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-  { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }
-).addTo(map);
+let map = L.map('map', { zoomControl: true, attributionControl: true }).setView([20, 0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
 
 let trackLayer; // polyline + markers group
 const statusEl = document.getElementById('status');
@@ -82,11 +80,10 @@ fileEl.addEventListener('change', async (e) => {
   const f = e.target.files && e.target.files[0];
   if (f) await handleFile(f);
 });
-
-;['dragenter','dragover'].forEach(evt =>
+['dragenter','dragover'].forEach(evt =>
   dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
 );
-;['dragleave','drop'].forEach(evt =>
+['dragleave','drop'].forEach(evt =>
   dropzone.addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
 );
 dropzone.addEventListener('drop', async (e) => {
@@ -97,7 +94,7 @@ dropzone.addEventListener('drop', async (e) => {
 /* ========= Core: parse GoPro telemetry & plot ========= */
 async function handleFile(file) {
   try {
-    if (!window.gpmfExtract || !window.goproTelemetry) {
+    if (typeof window.gpmfExtract !== 'function' || typeof window.goproTelemetry !== 'function') {
       setStatus('Libraries not loaded. Check the <script> URLs for gpmf-extract & gopro-telemetry (UMD builds).');
       return;
     }
@@ -106,15 +103,15 @@ async function handleFile(file) {
 
     setStatus('Extracting GPMF telemetry…');
     // Extract the GPMF payload from MP4 (browser-friendly)
-    const gpmf = await window.gpmfExtract(buffer); // uses mp4box under the hood
+    const gpmf = await window.gpmfExtract(buffer); // mp4box is used under the hood
 
-    setStatus('Decoding telemetry (this can take a few seconds)…');
-    // Decode to structured JS object. We only need GPS, so keep defaults lean if possible.
-    const telemetry = await window.goproTelemetry(gpmf, {/* options can go here */});
+    setStatus('Decoding telemetry…');
+    // Keep the default parsing; we mainly want GPS streams
+    const telemetry = await window.goproTelemetry(gpmf, { /* e.g., streams: ['GPS5'] */ });
 
     const points = extractGpsPoints(telemetry);
     if (!points.length) {
-      setStatus('No GPS points found. Make sure GPS was enabled and had lock before recording.');
+      setStatus('No GPS points found. Ensure GPS was enabled and locked before recording.');
       return;
     }
 
@@ -127,18 +124,16 @@ async function handleFile(file) {
   }
 }
 
-/* Heuristic extractor: digs through the telemetry object for GPS samples with [lat, lon] values */
+/* Extract GPS samples with [lat, lon] */
 function extractGpsPoints(telemetry) {
   const pts = [];
 
-  // Common case: telemetry[deviceId].streams.GPS5.samples => value: [lat, lon, alt, speed3D, speed2D]
   function dig(obj) {
     if (!obj || typeof obj !== 'object') return;
-    // If this object looks like a stream with samples:
+
     if (Array.isArray(obj.samples)) {
       for (const s of obj.samples) {
         const v = s?.value ?? s?.Values ?? s;
-        // Try [lat, lon, ...]
         if (Array.isArray(v) && v.length >= 2) {
           const lat = Number(v[0]), lon = Number(v[1]);
           if (Number.isFinite(lat) && Number.isFinite(lon) &&
@@ -149,17 +144,16 @@ function extractGpsPoints(telemetry) {
         }
       }
     }
-    // Recurse
     for (const k in obj) {
-      if (obj.hasOwnProperty(k)) dig(obj[k]);
+      if (Object.prototype.hasOwnProperty.call(obj, k)) dig(obj[k]);
     }
   }
   dig(telemetry);
 
-  // Deduplicate consecutive identical coords and lightly thin if huge
+  // Deduplicate & thin if huge
   const deduped = [];
   let last;
-  const THIN = pts.length > 20000 ? 3 : pts.length > 5000 ? 2 : 1; // simple every-N thinning
+  const THIN = pts.length > 20000 ? 3 : pts.length > 5000 ? 2 : 1;
   for (let i = 0; i < pts.length; i += THIN) {
     const p = pts[i];
     if (!last || last[0] !== p[0] || last[1] !== p[1]) {
@@ -202,7 +196,7 @@ function totalDistanceKm(latlngs) {
   return d;
 }
 
-/* Tiny built-in demo (a short polyline around SF) so you can verify the UI without a video */
+/* Tiny built-in demo polyline */
 demoBtn.addEventListener('click', () => {
   const demo = [
     [37.807, -122.475], [37.8076, -122.472], [37.8088, -122.469],
