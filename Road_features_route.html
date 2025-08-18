@@ -33,7 +33,7 @@
     <button id="searchBtn">Sequential Search</button>
     <button id="exportBtn" style="margin-left:10px;">Export to Excel</button>
     <label style="margin-left:10px;">
-      Radius (m): <input type="number" id="range" value="20" min="1" step="1" style="width:80px;" />
+      Radius (m): <input type="number" id="range" value="30" min="1" step="1" style="width:80px;" />
     </label>
     <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
   </div>
@@ -154,41 +154,75 @@
       return lines;
     }
 
-    // === Batched Overpass query builder ===
-    function buildBatchedOverpassQuery(bboxStr) {
-      const parts = featureSettings.map(([key, val]) =>
+    // === Overpass mirrors (CORS-friendly) ===
+    const OVERPASS_ENDPOINTS = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter'
+    ];
+
+    // Build a batched Overpass snippet for a set of [k,v] pairs
+    function buildQueryForPairs(bboxStr, pairs) {
+      const parts = pairs.map(([key, val]) =>
         `(node["${key}"="${val}"](${bboxStr});way["${key}"="${val}"](${bboxStr});)`
       );
       return `[out:json][timeout:60];(${parts.join("")});out center;`;
     }
 
-    // === Resilient Overpass fetch with mirror fallback ===
-    const OVERPASS_ENDPOINTS = [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://overpass.openstreetmap.ru/api/interpreter'
-    ];
+    // Split featureSettings into chunks
+    function chunk(arr, size) {
+      const out = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    }
 
-    async function fetchOverpassJSON(query) {
+    // GET first (to dodge some preflights), POST fallback
+    async function fetchOverpassChunk(query) {
       let lastErr;
-      for (let i = 0; i < OVERPASS_ENDPOINTS.length; i++) {
-        const url = OVERPASS_ENDPOINTS[i];
+      // Try each endpoint
+      for (const base of OVERPASS_ENDPOINTS) {
+        // 1) Try GET if not too long
+        const urlGet = `${base}?data=${encodeURIComponent(query)}`;
+        if (urlGet.length < 7000) {
+          try {
+            const res = await fetch(urlGet, { method: 'GET' });
+            if (!res.ok) throw new Error(`GET ${res.status} at ${base}`);
+            return await res.json();
+          } catch (e) { lastErr = e; }
+        }
+        // 2) Fallback POST
         try {
-          setOverlay(`Querying Overpass (${i+1}/${OVERPASS_ENDPOINTS.length})…`);
-          const res = await fetch(url, {
+          const res = await fetch(base, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
             body: 'data=' + encodeURIComponent(query)
           });
-          if (!res.ok) throw new Error(`HTTP ${res.status} at ${url}`);
-          const json = await res.json();
-          return json;
-        } catch (e) {
-          console.warn('Overpass mirror failed:', url, e);
-          lastErr = e;
+          if (!res.ok) throw new Error(`POST ${res.status} at ${base}`);
+          return await res.json();
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('All mirrors failed for chunk');
+    }
+
+    async function fetchAllOverpass(bboxStr) {
+      const CHUNK_SIZE = 6; // 6 tags per request — small and fast
+      const chunks = chunk(featureSettings, CHUNK_SIZE);
+      let all = [];
+      for (let i = 0; i < chunks.length; i++) {
+        setOverlay(`Querying Overpass… chunk ${i+1}/${chunks.length}`);
+        const q = buildQueryForPairs(bboxStr, chunks[i].map(a=>[a[0],a[1]]));
+        const json = await fetchOverpassChunk(q);
+        if (json && Array.isArray(json.elements)) {
+          all.push(...json.elements);
         }
       }
-      throw lastErr || new Error('All Overpass mirrors failed');
+      // de-dup by OSM id + type
+      const seen = new Set();
+      const unique = [];
+      for (const el of all) {
+        const key = `${el.type}:${el.id}`;
+        if (!seen.has(key)) { seen.add(key); unique.push(el); }
+      }
+      return { elements: unique };
     }
 
     // === Load KMZ and convert to GeoJSON ===
@@ -208,10 +242,10 @@
           routeLayer.clearLayers().addData(gj);
           map.fitBounds(routeLayer.getBounds());
         })
-        .catch(err => alert('Failed to load KMZ: ' + err));
+        .catch(err => alert('Failed to load KMZ: ' ' + err));
     });
 
-    // === Search features and populate tables (batched) ===
+    // === Search features and populate tables (chunked, GET/POST fallback) ===
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearAll();
       window._dedup = new Set();  // reset per search
@@ -219,13 +253,14 @@
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) { alert('Load a route first'); return; }
 
-      // collect route lines
       const routeLines = getRouteLineSegments(gj);
       if (!routeLines.length) { alert('No line geometry found in the KMZ route.'); return; }
 
-      // Warn if bbox is huge (very slow query)
+      // BBox
       const bbox = turf.bbox(gj); // [minLon, minLat, maxLon, maxLat]
       const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`; // south,west,north,east
+
+      // Optional large-bbox warning
       try {
         const diagKm = turf.distance(
           turf.point([bbox[0], bbox[1]]),
@@ -233,17 +268,15 @@
           { units: 'kilometers' }
         );
         if (diagKm > 400) {
-          const proceed = confirm(`Warning: The route bounding box is large (~${diagKm.toFixed(0)} km diagonal).\nThis query may be slow and could be rate-limited. Continue?`);
+          const proceed = confirm(`Warning: The route bounding box is large (~${diagKm.toFixed(0)} km diagonal).\nThis query may be slow. Continue?`);
           if (!proceed) { return; }
         }
       } catch (_) {}
 
-      setOverlay('Building query…');
-      const query = buildBatchedOverpassQuery(bboxStr);
-
+      setOverlay('Querying Overpass…');
       let data;
       try {
-        data = await fetchOverpassJSON(query);
+        data = await fetchAllOverpass(bboxStr);
       } catch (e) {
         hideOverlay();
         alert('Overpass query failed: ' + e);
@@ -252,7 +285,7 @@
 
       setOverlay('Filtering results near the route…');
 
-      // map of tag k=v -> label
+      // tag k=v -> label
       const labelFor = new Map(featureSettings.map(([k, v, l]) => [`${k}=${v}`, l]));
       const allFound = [];
       let addedCount = 0;
@@ -273,25 +306,19 @@
         const pt = turf.point([lon, lat]);
         const nearAnyLine = routeLines.some(coords => {
           try {
-            // Turf expects lon/lat coords; distance in km
             const d = turf.pointToLineDistance(pt, turf.lineString(coords), { units: 'kilometers' });
             return d <= RANGE_KM();
-          } catch (e) {
-            // if any bad geometry slips in, skip that segment
-            return false;
-          }
+          } catch (_) { return false; }
         });
         if (!nearAnyLine) return;
 
-        // De-duplicate (same labels at same coord)
+        // De-duplicate by labels@coord
         const dedupKey = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
         if (window._dedup.has(dedupKey)) return;
         window._dedup.add(dedupKey);
 
-        // Add a marker (use first label for tooltip)
         addMarker(matches[0], [lat, lon]);
 
-        // Add table rows (By Type)
         matches.forEach(label => {
           document.getElementById('resultsBody').insertAdjacentHTML(
             'beforeend',
@@ -305,7 +332,7 @@
 
       // === Sequential along route (per coordinate aggregate) ===
       setOverlay('Aggregating by route coordinate…');
-      const allCoords = routeLines.flat(); // array of [lon,lat]
+      const allCoords = routeLines.flat(); // [ [lon,lat], ... ]
 
       allCoords.forEach((c, i) => {
         const [lng, lat] = c;
@@ -327,7 +354,7 @@
       hideOverlay();
 
       if (!addedCount) {
-        alert('No features found within the specified radius of the route.\nTry increasing the Radius (m) to 30–50 m.');
+        alert('No features found within the specified radius of the route.\nTry increasing Radius (m) to 30–50 m, or zoom to a well-mapped urban area.');
       }
     });
 
