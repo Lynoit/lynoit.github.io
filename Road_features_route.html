@@ -33,7 +33,10 @@
     <button id="searchBtn">Sequential Search</button>
     <button id="exportBtn" style="margin-left:10px;">Export to Excel</button>
     <label style="margin-left:10px;">
-      Radius (m): <input type="number" id="range" value="30" min="1" step="1" style="width:80px;" />
+      Radius (m): <input type="number" id="range" value="40" min="1" step="1" style="width:80px;" />
+    </label>
+    <label style="margin-left:10px;">
+      Sample (m): <input type="number" id="sample" value="500" min="50" step="50" style="width:80px;" title="Distance between sampled points along the route"/>
     </label>
     <div style="margin-top:4px; font-size:0.8em;">Double-click map to toggle manual point.</div>
   </div>
@@ -71,9 +74,10 @@
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 
   <script>
-    // === Controls & overlay ===
+    // === UI helpers ===
     const RANGE_METERS = () => parseInt(document.getElementById('range').value, 10) || 5;
     const RANGE_KM = () => RANGE_METERS() / 1000;
+    const SAMPLE_METERS = () => parseInt(document.getElementById('sample').value, 10) || 500;
     function setOverlay(text) {
       const el = document.getElementById('searchOverlay');
       el.textContent = text; el.style.display = 'flex';
@@ -105,7 +109,7 @@
       ['junction', 'roundabout', 'Roundabout'],
       ['highway', 'stop', 'Stop Sign'],
       ['highway', 'traffic_signals', 'Traffic Light'],
-      ['junction', 'yes', 'Intersection'],          // note: rare in OSM
+      ['junction', 'yes', 'Intersection'],          // rare in OSM
       ['traffic_calming', 'speed_bump', 'Speed Bump'],
       ['maxspeed', '10', '10 kph'],
       ['maxspeed', '20', '20 kph'],
@@ -139,8 +143,8 @@
       document.getElementById('seqBody').innerHTML = '';
     }
 
-    // === Build a list of line segments from the route (ignore non-line features) ===
-    function getRouteLineSegments(gj) {
+    // === Utilities: get lines, sample along route ===
+    function getRouteLineStrings(gj) {
       const lines = [];
       (gj.features || []).forEach(f => {
         const g = f.geometry;
@@ -154,21 +158,46 @@
       return lines;
     }
 
+    function mergeToLineString(lines) {
+      // simple concat in sequence; assumes route features are already ordered
+      const coords = [];
+      lines.forEach(ls => coords.push(...ls));
+      return turf.lineString(coords);
+    }
+
+    function sampleRoutePoints(lineString, stepMeters) {
+      const pts = [];
+      const lengthKm = turf.length(lineString, { units: 'kilometers' });
+      const stepKm = Math.max(0.05, stepMeters / 1000); // clamp to >=50m
+      for (let d = 0; d <= lengthKm; d += stepKm) {
+        const p = turf.along(lineString, d, { units: 'kilometers' });
+        const [lon, lat] = p.geometry.coordinates;
+        pts.push([lat, lon]);
+      }
+      return pts;
+    }
+
     // === Overpass mirrors (CORS-friendly) ===
     const OVERPASS_ENDPOINTS = [
       'https://overpass-api.de/api/interpreter',
       'https://overpass.kumi.systems/api/interpreter'
     ];
 
-    // Build a batched Overpass snippet for a set of [k,v] pairs
-    function buildQueryForPairs(bboxStr, pairs) {
-      const parts = pairs.map(([key, val]) =>
-        `(node["${key}"="${val}"](${bboxStr});way["${key}"="${val}"](${bboxStr});)`
-      );
-      return `[out:json][timeout:60];(${parts.join("")});out center;`;
+    // Build query for a small set of features around a chunk of sampled points
+    function buildAroundQuery(pairs, points, radiusMeters) {
+      const R = Math.max(1, Math.round(radiusMeters)); // integer meters
+      const blocks = [];
+      for (const [k, v] of pairs) {
+        // for each sampled point, query node+way around(lat,lon)
+        const perPoint = points.map(([lat, lon]) =>
+          `(node["${k}"="${v}"](around:${R},${lat},${lon});way["${k}"="${v}"](around:${R},${lat},${lon});)`
+        ).join("");
+        blocks.push(perPoint);
+      }
+      return `[out:json][timeout:60];(${blocks.join("")});out center;`;
     }
 
-    // Split featureSettings into chunks
+    // Split into chunks
     function chunk(arr, size) {
       const out = [];
       for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -176,11 +205,9 @@
     }
 
     // GET first (to dodge some preflights), POST fallback
-    async function fetchOverpassChunk(query) {
+    async function fetchOverpass(query) {
       let lastErr;
-      // Try each endpoint
       for (const base of OVERPASS_ENDPOINTS) {
-        // 1) Try GET if not too long
         const urlGet = `${base}?data=${encodeURIComponent(query)}`;
         if (urlGet.length < 7000) {
           try {
@@ -189,7 +216,6 @@
             return await res.json();
           } catch (e) { lastErr = e; }
         }
-        // 2) Fallback POST
         try {
           const res = await fetch(base, {
             method: 'POST',
@@ -200,52 +226,30 @@
           return await res.json();
         } catch (e) { lastErr = e; }
       }
-      throw lastErr || new Error('All mirrors failed for chunk');
+      throw lastErr || new Error('All Overpass mirrors failed');
     }
 
-    async function fetchAllOverpass(bboxStr) {
-      const CHUNK_SIZE = 6; // 6 tags per request — small and fast
-      const chunks = chunk(featureSettings, CHUNK_SIZE);
-      let all = [];
-      for (let i = 0; i < chunks.length; i++) {
-        setOverlay(`Querying Overpass… chunk ${i+1}/${chunks.length}`);
-        const q = buildQueryForPairs(bboxStr, chunks[i].map(a=>[a[0],a[1]]));
-        const json = await fetchOverpassChunk(q);
-        if (json && Array.isArray(json.elements)) {
-          all.push(...json.elements);
-        }
-      }
-      // de-dup by OSM id + type
-      const seen = new Set();
-      const unique = [];
-      for (const el of all) {
-        const key = `${el.type}:${el.id}`;
-        if (!seen.has(key)) { seen.add(key); unique.push(el); }
-      }
-      return { elements: unique };
-    }
+    // === Load KMZ and convert to GeoJSON ===
+    document.getElementById('loadRouteBtn').addEventListener('click', () => {
+      const file = document.getElementById('kmzInput').files[0];
+      if (!file) { alert('Select a KMZ file first'); return; }
+      JSZip.loadAsync(file)
+        .then(zip => {
+          const kmlFile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
+          if (!kmlFile) throw new Error('No .kml found inside the KMZ.');
+          return zip.file(kmlFile).async('string');
+        })
+        .then(kmlText => {
+          const kmlDoc = new DOMParser().parseFromString(kmlText, 'application/xml');
+          const gj = toGeoJSON.kml(kmlDoc);
+          if (!gj.features?.length) throw new Error('No features found in KML.');
+          routeLayer.clearLayers().addData(gj);
+          map.fitBounds(routeLayer.getBounds());
+        })
+        .catch(err => alert('Failed to load KMZ: ' + err));
+    });
 
-// === Load KMZ and convert to GeoJSON ===
-document.getElementById('loadRouteBtn').addEventListener('click', () => {
-  const file = document.getElementById('kmzInput').files[0];
-  if (!file) { alert('Select a KMZ file first'); return; }
-  JSZip.loadAsync(file)
-    .then(zip => {
-      const kmlFile = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.kml'));
-      if (!kmlFile) throw new Error('No .kml found inside the KMZ.');
-      return zip.file(kmlFile).async('string');
-    })
-    .then(kmlText => {
-      const kmlDoc = new DOMParser().parseFromString(kmlText, 'application/xml');
-      const gj = toGeoJSON.kml(kmlDoc);
-      if (!gj.features?.length) throw new Error('No features found in KML.');
-      routeLayer.clearLayers().addData(gj);
-      map.fitBounds(routeLayer.getBounds());
-    })
-    .catch(err => alert('Failed to load KMZ: ' + err));
-});
-
-    // === Search features and populate tables (chunked, GET/POST fallback) ===
+    // === Search features (route-sampled, chunked) ===
     document.getElementById('searchBtn').addEventListener('click', async () => {
       clearAll();
       window._dedup = new Set();  // reset per search
@@ -253,87 +257,75 @@ document.getElementById('loadRouteBtn').addEventListener('click', () => {
       const gj = routeLayer.toGeoJSON();
       if (!gj.features.length) { alert('Load a route first'); return; }
 
-      const routeLines = getRouteLineSegments(gj);
-      if (!routeLines.length) { alert('No line geometry found in the KMZ route.'); return; }
+      const lines = getRouteLineStrings(gj);
+      if (!lines.length) { alert('No line geometry found in the KMZ route.'); return; }
+      const fullLine = mergeToLineString(lines);
 
-      // BBox
-      const bbox = turf.bbox(gj); // [minLon, minLat, maxLon, maxLat]
-      const bboxStr = `${bbox[1]},${bbox[0]},${bbox[3]},${bbox[2]}`; // south,west,north,east
+      // sample points along route
+      const samples = sampleRoutePoints(fullLine, SAMPLE_METERS());
+      if (samples.length === 0) { alert('Sampling failed.'); return; }
 
-      // Optional large-bbox warning
-      try {
-        const diagKm = turf.distance(
-          turf.point([bbox[0], bbox[1]]),
-          turf.point([bbox[2], bbox[3]]),
-          { units: 'kilometers' }
-        );
-        if (diagKm > 400) {
-          const proceed = confirm(`Warning: The route bounding box is large (~${diagKm.toFixed(0)} km diagonal).\nThis query may be slow. Continue?`);
-          if (!proceed) { return; }
-        }
-      } catch (_) {}
-
-      setOverlay('Querying Overpass…');
-      let data;
-      try {
-        data = await fetchAllOverpass(bboxStr);
-      } catch (e) {
-        hideOverlay();
-        alert('Overpass query failed: ' + e);
-        return;
-      }
-
-      setOverlay('Filtering results near the route…');
+      // chunk features & sampled points to keep queries small
+      const FEATURE_CHUNK = 6;        // features per request
+      const POINT_CHUNK = 40;         // sampled points per request
+      const featureChunks = chunk(featureSettings.map(a => [a[0], a[1], a[2]]), FEATURE_CHUNK);
+      const pointChunks = chunk(samples, POINT_CHUNK);
 
       // tag k=v -> label
       const labelFor = new Map(featureSettings.map(([k, v, l]) => [`${k}=${v}`, l]));
       const allFound = [];
       let addedCount = 0;
 
-      (data.elements || []).forEach(el => {
-        const lat = el.lat != null ? el.lat : el.center?.lat;
-        const lon = el.lon != null ? el.lon : el.center?.lon;
-        if (lat == null || lon == null) return;
+      try {
+        for (let fi = 0; fi < featureChunks.length; fi++) {
+          for (let pi = 0; pi < pointChunks.length; pi++) {
+            setOverlay(`Querying Overpass… features ${fi+1}/${featureChunks.length}, points ${pi+1}/${pointChunks.length}`);
+            const pairs = featureChunks[fi].map(([k,v]) => [k,v]);
+            const pts = pointChunks[pi];
+            const q = buildAroundQuery(pairs, pts, RANGE_METERS());
+            const json = await fetchOverpass(q);
+            const els = (json && Array.isArray(json.elements)) ? json.elements : [];
 
-        const tags = el.tags || {};
-        const matches = [];
-        for (const [k, v] of Object.entries(tags)) {
-          const lbl = labelFor.get(`${k}=${v}`);
-          if (lbl) matches.push(lbl);
+            els.forEach(el => {
+              const lat = el.lat != null ? el.lat : el.center?.lat;
+              const lon = el.lon != null ? el.lon : el.center?.lon;
+              if (lat == null || lon == null) return;
+
+              const tags = el.tags || {};
+              const matches = [];
+              for (const [k, v] of Object.entries(tags)) {
+                const lbl = labelFor.get(`${k}=${v}`);
+                if (lbl) matches.push(lbl);
+              }
+              if (!matches.length) return;
+
+              // dedupe by label set @ coord
+              const key = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
+              if (window._dedup.has(key)) return;
+              window._dedup.add(key);
+
+              addMarker(matches[0], [lat, lon]);
+              matches.forEach(label => {
+                document.getElementById('resultsBody').insertAdjacentHTML(
+                  'beforeend',
+                  `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
+                );
+                addedCount++;
+              });
+
+              allFound.push({ el, labels: matches });
+            });
+          }
         }
-        if (!matches.length) return;
+      } catch (e) {
+        hideOverlay();
+        alert('Overpass query failed: ' + e);
+        return;
+      }
 
-        const pt = turf.point([lon, lat]);
-        const nearAnyLine = routeLines.some(coords => {
-          try {
-            const d = turf.pointToLineDistance(pt, turf.lineString(coords), { units: 'kilometers' });
-            return d <= RANGE_KM();
-          } catch (_) { return false; }
-        });
-        if (!nearAnyLine) return;
-
-        // De-duplicate by labels@coord
-        const dedupKey = `${matches.slice().sort().join('|')}@${lat.toFixed(6)},${lon.toFixed(6)}`;
-        if (window._dedup.has(dedupKey)) return;
-        window._dedup.add(dedupKey);
-
-        addMarker(matches[0], [lat, lon]);
-
-        matches.forEach(label => {
-          document.getElementById('resultsBody').insertAdjacentHTML(
-            'beforeend',
-            `<tr><td>${label}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td></tr>`
-          );
-          addedCount++;
-        });
-
-        allFound.push({ el, labels: matches });
-      });
-
-      // === Sequential along route (per coordinate aggregate) ===
+      // === Sequential along route (per vertex aggregate) ===
       setOverlay('Aggregating by route coordinate…');
-      const allCoords = routeLines.flat(); // [ [lon,lat], ... ]
-
+      const allCoords = lines.flat(); // [ [lon,lat], ... ]
       allCoords.forEach((c, i) => {
         const [lng, lat] = c;
         const labels = allFound.flatMap(({ el, labels }) => {
@@ -354,7 +346,7 @@ document.getElementById('loadRouteBtn').addEventListener('click', () => {
       hideOverlay();
 
       if (!addedCount) {
-        alert('No features found within the specified radius of the route.\nTry increasing Radius (m) to 30–50 m, or zoom to a well-mapped urban area.');
+        alert('No features found within the specified radius of the route.\nTry increasing Radius to 50–80 m, or reduce Sample to 300–400 m.');
       }
     });
 
@@ -370,4 +362,3 @@ document.getElementById('loadRouteBtn').addEventListener('click', () => {
   </script>
 </body>
 </html>
-
