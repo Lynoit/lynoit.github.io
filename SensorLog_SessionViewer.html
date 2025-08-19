@@ -210,6 +210,13 @@ Chart.defaults.font = {
   size: 14,             // base font size for everything
   weight: '400',
 };
+
+  // Read CSS variable color (fallback to provided default if missing)
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
   
 function overpassFetch(query) {
   const run = async () => {
@@ -283,6 +290,102 @@ function distMeters(a, b) {
   const dx = a[0]-b[0], dy = a[1]-b[1];
   return Math.hypot(dx, dy);
 }
+
+  function makeMultiLineChart(canvas, { labels, datasets, yTitle, min, max }) {
+  const ctx = canvas.getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 } },
+        y: {
+          ticks: { color: '#b9c0cc' },
+          title: { display: true, text: yTitle, color: '#b9c0cc' },
+          ...(Number.isFinite(min) ? { min } : {}),
+          ...(Number.isFinite(max) ? { max } : {})
+        }
+      },
+      plugins: { legend: { display: true } }
+    }
+  });
+}
+
+
+  function computeAccelXYZSeries(accelRows) {
+  if (!accelRows?.length) return null;
+
+  // local helper: mm:ss or "Xs"
+  function formatRelative(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
+  }
+
+  const sample = accelRows[0];
+  const xK = pick(['x','ax'], sample);
+  const yK = pick(['y','ay'], sample);
+  const zK = pick(['z','az'], sample);
+  const tK = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], sample);
+  if (!xK || !yK || !zK) return null;
+
+  // collect rows with valid xyz + time (or index fallback)
+  const raw = [];
+  const idxFallback = []; // if no timestamp, use index
+  for (let i = 0; i < accelRows.length; i++) {
+    const r = accelRows[i];
+    const ax = Number(r[xK]), ay = Number(r[yK]), az = Number(r[zK]);
+    if (![ax, ay, az].every(Number.isFinite)) continue;
+
+    let tms = null;
+    if (tK) {
+      if (String(tK).toLowerCase().includes('elapsed')) {
+        const secs = Number(r[tK]);
+        if (Number.isFinite(secs)) tms = secs * 1000;
+      } else {
+        const dt = parseTime(r[tK]);
+        if (dt instanceof Date && !isNaN(dt)) tms = dt.getTime();
+      }
+    }
+
+    if (tms != null) raw.push({ t: tms, ax, ay, az });
+    else idxFallback.push({ i, ax, ay, az });
+  }
+
+  // Prefer timestamped series (relative to t0)
+  if (raw.length) {
+    const t0 = raw[0].t;
+    const zipped = raw.map(p => ({
+      l: formatRelative(p.t - t0),
+      ax: p.ax, ay: p.ay, az: p.az
+    }));
+    const slim = decimate(zipped, 2000);
+    return {
+      labels: slim.map(x => x.l),
+      ax:     slim.map(x => x.ax),
+      ay:     slim.map(x => x.ay),
+      az:     slim.map(x => x.az)
+    };
+  }
+
+  // Fallback: index labels (no timestamps anywhere)
+  if (idxFallback.length) {
+    const zipped = idxFallback.map(p => ({ l: String(p.i), ax: p.ax, ay: p.ay, az: p.az }));
+    const slim = decimate(zipped, 2000);
+    return {
+      labels: slim.map(x => x.l),
+      ax:     slim.map(x => x.ax),
+      ay:     slim.map(x => x.ay),
+      az:     slim.map(x => x.az)
+    };
+  }
+
+  return null;
+}
+
 
 /* ------------------- ZIP helpers ------------------- */
 async function loadCsvFromZip(zip, namePattern) {
@@ -718,6 +821,14 @@ async function processZipFile(file) {
   const ui = createSessionCard(sessionName);
   document.getElementById('sessions').appendChild(ui.wrap);
 
+  // local helper for relative time labels (mm:ss or "Xs")
+  function fmtRel(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
+  }
+
   try {
     ui.status.textContent = 'Reading ZIP…';
     const zip = await JSZip.loadAsync(file);
@@ -745,19 +856,19 @@ async function processZipFile(file) {
     ]);
 
     // Track & map
-    const track = extractTrack(locationRows);
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, attribution: '&copy; OpenStreetMap'
+      maxZoom: 19, attribution: '© OpenStreetMap'
     }).addTo(map);
 
+    const track = extractTrack(locationRows);
     if (track?.length) {
       const latlngs = track.map(p => [p.lat, p.lon]);
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-      /* Start marker + label (label matches marker color) */
+      /* Start marker + label */
       const startColor = '#00e676';
       const startLatLng = latlngs[0];
       const start = L.circleMarker(startLatLng, {
@@ -768,20 +879,18 @@ async function processZipFile(file) {
       });
       colorizeTooltip(start, startColor);
 
-      /* Direction arrow along the path (one arrow near the end) */
+      /* Direction arrow */
       try {
         L.polylineDecorator(poly, {
-          patterns: [
-            {
-              offset: '85%',
-              repeat: 0,
-              symbol: L.Symbol.arrowHead({
-                pixelSize: 14,
-                headAngle: 60,
-                pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
-              })
-            }
-          ]
+          patterns: [{
+            offset: '85%',
+            repeat: 0,
+            symbol: L.Symbol.arrowHead({
+              pixelSize: 14,
+              headAngle: 60,
+              pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
+            })
+          }]
         }).addTo(map);
       } catch (e) {
         console.warn('PolylineDecorator unavailable; skipping arrow.', e);
@@ -801,12 +910,12 @@ async function processZipFile(file) {
         ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
       }
     } else {
-      // fallback view (Stockholm) if no coords
+      // fallback view if no coords
       map.setView([59.3293, 18.0686], 10);
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed: per-session axis => [min(speed)-5, max(speed)+5]
+    // Speed chart
     ui.status.textContent = 'Preparing speed…';
     const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
     const finiteSpeeds = speedValues.filter(v => Number.isFinite(v));
@@ -824,35 +933,83 @@ async function processZipFile(file) {
       max: yMax
     });
 
-    // Acceleration: linear (already gravity-free) from Accelerometer.csv; fallback to TotalAcceleration - 9.81
+    // Acceleration: prefer Ax, Ay, Az from Accelerometer.csv; fallback to magnitude
     ui.status.textContent = 'Preparing acceleration…';
-    let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
-    if ((!accValues || !accValues.length) && totalAccRows?.length) {
-      const tk = pick(['time','timestamp','datetime','seconds_elapsed'], totalAccRows[0]);
-      const ak = pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
-      const lbl = [], val = [];
-      for (const r of totalAccRows) {
-        const t = tk
-          ? (String(tk).toLowerCase().includes('elapsed') ? new Date(Number(r[tk])*1000) : parseTime(r[tk]))
-          : null;
-        const a = Number(r[ak]);
-        if (Number.isFinite(a)) {
-          lbl.push(t ? formatHHMMSS(t) : String(lbl.length));
-          val.push(Math.max(0, a - 9.81));
+
+    const accelXYZ = computeAccelXYZSeries(accelRows);
+    if (accelXYZ && accelXYZ.labels.length) {
+      const cBlue  = cssVar('--blue',  '#3a86ff');
+      const cGreen = cssVar('--green', '#38c172');
+      const cRed   = cssVar('--red',   '#ff4d4d');
+
+      // Symmetric Y range around zero with a small padding
+      const all = [...accelXYZ.ax, ...accelXYZ.ay, ...accelXYZ.az].filter(Number.isFinite);
+      let ymin, ymax;
+      if (all.length) {
+        ymin = Math.min(...all);
+        ymax = Math.max(...all);
+        const pad = Math.max(0.3, (ymax - ymin) * 0.05);
+        ymin -= pad; ymax += pad;
+        if (ymin > 0) ymin = 0;
+        if (ymax < 0) ymax = 0;
+      }
+
+      makeMultiLineChart(ui.accCanvas, {
+        labels: accelXYZ.labels,
+        yTitle: 'm/s²',
+        min: ymin,
+        max: ymax,
+        datasets: [
+          { label: 'Ax', data: accelXYZ.ax, borderColor: cBlue,  pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
+          { label: 'Ay', data: accelXYZ.ay, borderColor: cGreen, pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
+          { label: 'Az', data: accelXYZ.az, borderColor: cRed,   pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
+        ]
+      });
+
+    } else {
+      // Fallback: magnitude from Accelerometer.csv (if available) else from TotalAcceleration.csv
+      let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
+
+      if ((!accValues || !accValues.length) && totalAccRows?.length) {
+        const tk = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], totalAccRows[0]);
+        const ak = pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
+
+        // Build relative-time labels for total acceleration as well
+        const raw = [];
+        for (const r of totalAccRows) {
+          let tms = null;
+          if (tk) {
+            if (String(tk).toLowerCase().includes('elapsed')) {
+              const secs = Number(r[tk]);
+              if (Number.isFinite(secs)) tms = secs * 1000;
+            } else {
+              const dt = parseTime(r[tk]);
+              if (dt instanceof Date && !isNaN(dt)) tms = dt.getTime();
+            }
+          }
+          const a = Number(r[ak]);
+          if (tms != null && Number.isFinite(a)) {
+            raw.push({ t: tms, v: Math.max(0, a - 9.81) });
+          }
+        }
+        if (raw.length) {
+          const t0 = raw[0].t;
+          const zipped = raw.map(p => ({ l: fmtRel(p.t - t0), v: p.v }));
+          const slim = decimate(zipped, 2000);
+          accLabels = slim.map(x=>x.l);
+          accValues = slim.map(x=>x.v);
+        } else {
+          accLabels = []; accValues = [];
         }
       }
-      const zipped = lbl.map((l,i)=>({l, v: val[i]}));
-      const slim = decimate(zipped, 2000);
-      accLabels = slim.map(x=>x.l);
-      accValues = slim.map(x=>x.v);
+
+      makeLineChart(ui.accCanvas, {
+        labels: accLabels || [],
+        values: accValues || [],
+        label: 'Linear acceleration |a| (m/s²)',
+        yTitle: 'm/s²'
+      });
     }
-    makeLineChart(ui.accCanvas, {
-      labels: accLabels || [],
-      values: accValues || [],
-      label: 'Linear acceleration |a| (m/s²)',
-      yTitle: 'm/s²',
-      beginAtZero: true
-    });
 
     ui.status.textContent = 'Ready.';
   } catch (err) {
