@@ -84,7 +84,7 @@
     .session-title { margin: 0; font-size: 15px; font-weight: 600 }
     .session-body { padding: 12px; display: grid; gap: 12px }
 
-    /* -------- Camera gallery -------- */
+    /* Camera gallery */
     .gallery {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -113,20 +113,17 @@
       width: 100%; height: 320px;
       border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
     }
-
-    /* CHARTS: stack vertically (speed on top, acceleration below) */
     .charts {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 8px;
     }
     canvas {
       width: 100%;
-      height: 140px;   /* smaller charts */
+      height: 140px;
       background: #101215; border: 1px solid var(--border); border-radius: 12px;
       padding: 4px;
     }
-
     .status { font-size: 12px; color: var(--muted) }
     .row {
       display: flex; align-items: center; justify-content: space-between;
@@ -253,18 +250,6 @@ function decimate(xs, max=2000) {
   return out;
 }
 
-/* small vector helpers for route projection (meters) */
-function toXY(lat, lon, lat0) {
-  const R = 6371008.8;
-  const x = (lon * Math.PI/180) * R * Math.cos(lat0 * Math.PI/180);
-  const y = (lat * Math.PI/180) * R;
-  return [x, y];
-}
-function distMeters(a, b) {
-  const dx = a[0]-b[0], dy = a[1]-b[1];
-  return Math.hypot(dx, dy);
-}
-
 /* ------------------- ZIP helpers ------------------- */
 async function loadCsvFromZip(zip, namePattern) {
   const entries = Object.values(zip.files);
@@ -275,7 +260,6 @@ async function loadCsvFromZip(zip, namePattern) {
   if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
   return parse.data;
 }
-/* Load ALL images under Camera/ (case-insensitive) */
 async function loadAllCameraImagesFromZip(zip) {
   const out = [];
   const entries = Object.values(zip.files)
@@ -359,7 +343,7 @@ function computeLinearAccMagnitude(accelRows) {
           : parseTime(r[tK]);
       }
       labels.push(t ? formatHHMMSS(t) : String(labels.length));
-      values.push(Math.sqrt(x*x + y*y + z*z)); // |linear a|
+      values.push(Math.sqrt(x*x + y*y + z*z));
     }
   }
   const zipped = labels.map((l,i) => ({ l, v: values[i] }));
@@ -392,7 +376,7 @@ function overpassQueryForBBox(bbox) {
   node["highway"="motorway_junction"](${s},${w},${n},${e});
   way["junction"="roundabout"](${s},${w},${n},${e});
   relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
-  way["maxspeed"](${s},${w},${n},${e});  /* speed limits */
+  way["maxspeed"](${s},${w},${n},${e});
 );
 out center tags;
   `.trim();
@@ -427,8 +411,6 @@ function parseMaxspeedToKmh(tag) {
   const kmh = s.match(/(\d+(?:\.\d+)?)/);
   return kmh ? Math.round(parseFloat(kmh[1])) : null;
 }
-
-/* make tooltip bg/border match marker color */
 function colorizeTooltip(marker, color) {
   setTimeout(() => {
     const el = marker.getTooltip && marker.getTooltip && marker.getTooltip().getElement
@@ -442,7 +424,15 @@ function colorizeTooltip(marker, color) {
   }, 0);
 }
 
-/* project a point to polyline to get chainage (meters from start) */
+/* Chainage helpers for speed-limit change labeling */
+function toXY(lat, lon, lat0) {
+  const R = 6371008.8;
+  return [(lon*Math.PI/180)*R*Math.cos(lat0*Math.PI/180), (lat*Math.PI/180)*R];
+}
+function distMeters(a, b) {
+  const dx = a[0]-b[0], dy = a[1]-b[1];
+  return Math.hypot(dx, dy);
+}
 function toXYChain(latlngs) {
   const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
   const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
@@ -450,7 +440,8 @@ function toXYChain(latlngs) {
   for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
   return { xy, cum, lat0 };
 }
-function projectChainage({xy, cum, lat0}, lat, lon) {
+function projectChainage(chain, lat, lon) {
+  const {xy, cum, lat0} = chain;
   const p = toXY(lat, lon, lat0);
   let best = { d: Infinity, s: 0 };
   for (let i=0; i<xy.length-1; i++) {
@@ -466,12 +457,9 @@ function projectChainage({xy, cum, lat0}, lat, lon) {
   }
   return best.s;
 }
-
-/* Add OSM features; speed-limit labels only on change along the route */
 function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
   const els = geojson?.elements || [];
-  const others = [];
-  const speedWays = [];
+  const others = [], speedWays = [];
 
   for (const el of els) {
     let lat=null, lon=null;
@@ -482,9 +470,8 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     if (lat==null || lon==null) continue;
 
     const tags = el.tags || {};
-    if (tags.maxspeed) {
-      speedWays.push({ lat, lon, tags });
-    } else {
+    if (tags.maxspeed) speedWays.push({ lat, lon, tags });
+    else {
       let label='', color='#4da3ff';
       if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
       else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
@@ -494,7 +481,7 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     }
   }
 
-  /* draw non-speed features (always labeled) */
+  // Non-speed features
   for (const f of others) {
     const m = L.circleMarker([f.lat, f.lon], {
       radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
@@ -503,7 +490,7 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     colorizeTooltip(m, f.color);
   }
 
-  /* handle speed limits: only label when value changes along route */
+  // Speed limits: label only when value changes along route
   if (speedWays.length && latlngs?.length >= 2) {
     const chain = toXYChain(latlngs);
     const pts = speedWays.map(sw => {
@@ -524,10 +511,8 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
         colorizeTooltip(m, f.color);
         prev = f.v;
       }
-      // if not changed, keep ring without label
     }
   } else {
-    // Fallback: no route context — label them all
     for (const sw of speedWays) {
       const v = parseMaxspeedToKmh(sw.tags.maxspeed);
       const color = getSpeedColor(v ?? sw.tags.maxspeed);
@@ -560,14 +545,14 @@ function makeLineChart(canvas, {labels, values, label, yTitle, min, max, beginAt
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      parsing: false,
-      animation: false,
+      parsing: false,                 // ensure raw numbers are used
+      animation: false,               // snappier + avoids transient autoscale
       scales: {
         x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 } },
         y: {
           type: 'linear',
-          bounds: 'ticks',
-          grace: 0,
+          bounds: 'ticks',            // respect our hard limits
+          grace: 0,                   // no extra padding
           min: Number.isFinite(min) ? min : undefined,
           max: Number.isFinite(max) ? max : undefined,
           beginAtZero: beginAtZero === true ? true : false,
@@ -615,7 +600,7 @@ function createSessionCard(sessionName) {
   const charts = document.createElement('div'); charts.className='charts';
   const speedCanvas = document.createElement('canvas');
   const accCanvas = document.createElement('canvas');
-  charts.append(speedCanvas, accCanvas); // speed first, then acceleration
+  charts.append(speedCanvas, accCanvas);
 
   body.append(gallery, map, row, charts);
   wrap.append(head, body);
@@ -643,7 +628,7 @@ async function processZipFile(file) {
     ui.status.textContent = 'Reading ZIP…';
     const zip = await JSZip.loadAsync(file);
 
-    /* Camera gallery */
+    // Photos
     ui.status.textContent = 'Loading photos…';
     const images = await loadAllCameraImagesFromZip(zip);
     if (images.length) {
@@ -665,7 +650,7 @@ async function processZipFile(file) {
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // Track & map
+    // Map
     const track = extractTrack(locationRows);
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
@@ -678,32 +663,22 @@ async function processZipFile(file) {
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-      /* Start marker + label (label matches marker color) */
+      // Start marker + label
       const startColor = '#00e676';
-      const startLatLng = latlngs[0];
-      const start = L.circleMarker(startLatLng, {
+      const start = L.circleMarker(latlngs[0], {
         radius: 6, color: startColor, weight: 2, fillColor: startColor, fillOpacity: 0.6
       }).addTo(map);
-      start.bindTooltip('Start', {
-        permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag'
-      });
+      start.bindTooltip('Start', { permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag' });
       colorizeTooltip(start, startColor);
 
-      /* Direction arrow along the path */
+      // Direction arrow
       try {
         L.polylineDecorator(poly, {
-          patterns: [{
-            offset: '85%',
-            repeat: 0,
-            symbol: L.Symbol.arrowHead({
-              pixelSize: 14, headAngle: 60,
-              pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
-            })
-          }]
+          patterns: [{ offset: '85%', repeat: 0, symbol: L.Symbol.arrowHead({ pixelSize: 14, headAngle: 60, pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 } }) }]
         }).addTo(map);
-      } catch (e) { console.warn('PolylineDecorator unavailable; skipping arrow.', e); }
+      } catch {}
 
-      // OSM features via Overpass
+      // OSM features
       ui.status.textContent = 'Fetching OSM features…';
       const bbox = bboxForTrack(track, 80);
       const query = overpassQueryForBBox(bbox);
@@ -717,12 +692,11 @@ async function processZipFile(file) {
         ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
       }
     } else {
-      // fallback view (Stockholm)
       map.setView([59.3293, 18.0686], 10);
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed: per-session axis => [min(speed)-5, max(speed)+5]
+    // Speed: Y axis = [min-5, max+5] km/h per session
     ui.status.textContent = 'Preparing speed…';
     const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
     const sp = speedValues.filter(v => Number.isFinite(v));
@@ -741,7 +715,7 @@ async function processZipFile(file) {
       beginAtZero: false
     });
 
-    // Acceleration: linear (gravity-free) from Accelerometer.csv; fallback to TotalAcceleration - 9.81
+    // Acceleration: linear from Accelerometer.csv; fallback to TotalAcceleration - 9.81
     ui.status.textContent = 'Preparing acceleration…';
     let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
     if ((!accValues || !accValues.length) && totalAccRows?.length) {
