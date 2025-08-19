@@ -84,7 +84,7 @@
     .session-title { margin: 0; font-size: 15px; font-weight: 600 }
     .session-body { padding: 12px; display: grid; gap: 12px }
 
-    /* Camera gallery */
+    /* -------- Camera gallery -------- */
     .gallery {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -115,12 +115,12 @@
     }
     .charts {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); /* side-by-side when room */
       gap: 8px;
     }
     canvas {
       width: 100%;
-      height: 140px;
+      height: 140px;   /* smaller charts */
       background: #101215; border: 1px solid var(--border); border-radius: 12px;
       padding: 4px;
     }
@@ -140,10 +140,10 @@
     .dot-green  { background: var(--green) }
     .dot-orange { background: var(--speedlimit) }
 
-    /* Map labels (colored via JS to match markers) */
+    /* Base tooltip style; background/border color set dynamically per-dot via JS */
     .leaflet-tooltip.feature-tag {
       background: rgba(0,0,0,0.75);
-      color: #000;
+      color: #000;                  /* readable on colored backgrounds */
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 2px 6px;
@@ -182,7 +182,7 @@
 
   <main class="grid" id="sessions"></main>
 
-  <!-- One global lightbox -->
+  <!-- One global lightbox for all sessions -->
   <div id="lightbox" class="lightbox" tabindex="0" aria-label="Image viewer">
     <img id="lightboxImg" alt="Full size"/>
   </div>
@@ -220,10 +220,10 @@ function slugWithoutExt(fileName) {
 function parseTime(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'number') {
-    if (v > 1e17) return new Date(v / 1e6);
-    if (v > 1e14) return new Date(v / 1e3);
-    if (v > 1e12) return new Date(v);
-    if (v > 1e9)  return new Date(v * 1000);
+    if (v > 1e17) return new Date(v / 1e6);   // ns -> ms
+    if (v > 1e14) return new Date(v / 1e3);   // µs -> ms
+    if (v > 1e12) return new Date(v);         // ms
+    if (v > 1e9)  return new Date(v * 1000);  // s -> ms
     return null;
   }
   const num = Number(v);
@@ -250,6 +250,18 @@ function decimate(xs, max=2000) {
   return out;
 }
 
+/* small vector helpers for route projection (meters) */
+function toXY(lat, lon, lat0) {
+  const R = 6371008.8;
+  const x = (lon * Math.PI/180) * R * Math.cos(lat0 * Math.PI/180);
+  const y = (lat * Math.PI/180) * R;
+  return [x, y];
+}
+function distMeters(a, b) {
+  const dx = a[0]-b[0], dy = a[1]-b[1];
+  return Math.hypot(dx, dy);
+}
+
 /* ------------------- ZIP helpers ------------------- */
 async function loadCsvFromZip(zip, namePattern) {
   const entries = Object.values(zip.files);
@@ -260,6 +272,7 @@ async function loadCsvFromZip(zip, namePattern) {
   if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
   return parse.data;
 }
+/* Load ALL images under Camera/ (case-insensitive) */
 async function loadAllCameraImagesFromZip(zip) {
   const out = [];
   const entries = Object.values(zip.files)
@@ -343,7 +356,7 @@ function computeLinearAccMagnitude(accelRows) {
           : parseTime(r[tK]);
       }
       labels.push(t ? formatHHMMSS(t) : String(labels.length));
-      values.push(Math.sqrt(x*x + y*y + z*z));
+      values.push(Math.sqrt(x*x + y*y + z*z)); // |linear a|
     }
   }
   const zipped = labels.map((l,i) => ({ l, v: values[i] }));
@@ -376,7 +389,7 @@ function overpassQueryForBBox(bbox) {
   node["highway"="motorway_junction"](${s},${w},${n},${e});
   way["junction"="roundabout"](${s},${w},${n},${e});
   relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
-  way["maxspeed"](${s},${w},${n},${e});
+  way["maxspeed"](${s},${w},${n},${e});  /* speed limits */
 );
 out center tags;
   `.trim();
@@ -411,28 +424,22 @@ function parseMaxspeedToKmh(tag) {
   const kmh = s.match(/(\d+(?:\.\d+)?)/);
   return kmh ? Math.round(parseFloat(kmh[1])) : null;
 }
+
+/* make tooltip bg/border match marker color */
 function colorizeTooltip(marker, color) {
   setTimeout(() => {
-    const el = marker.getTooltip && marker.getTooltip && marker.getTooltip().getElement
+    const el = marker.getTooltip && marker.getTooltip() && marker.getTooltip().getElement
       ? marker.getTooltip().getElement()
       : null;
     if (el) {
       el.style.background = color;
       el.style.borderColor = color;
-      el.style.color = '#000';
+      el.style.color = '#000'; // readable on bright colors
     }
   }, 0);
 }
 
-/* Chainage helpers for speed-limit change labeling */
-function toXY(lat, lon, lat0) {
-  const R = 6371008.8;
-  return [(lon*Math.PI/180)*R*Math.cos(lat0*Math.PI/180), (lat*Math.PI/180)*R];
-}
-function distMeters(a, b) {
-  const dx = a[0]-b[0], dy = a[1]-b[1];
-  return Math.hypot(dx, dy);
-}
+/* project a point to polyline to get chainage (meters from start) */
 function toXYChain(latlngs) {
   const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
   const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
@@ -440,8 +447,7 @@ function toXYChain(latlngs) {
   for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
   return { xy, cum, lat0 };
 }
-function projectChainage(chain, lat, lon) {
-  const {xy, cum, lat0} = chain;
+function projectChainage({xy, cum}, lat0, lat, lon) {
   const p = toXY(lat, lon, lat0);
   let best = { d: Infinity, s: 0 };
   for (let i=0; i<xy.length-1; i++) {
@@ -457,9 +463,12 @@ function projectChainage(chain, lat, lon) {
   }
   return best.s;
 }
+
+/* Add OSM features; speed-limit labels only on change along the route */
 function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
   const els = geojson?.elements || [];
-  const others = [], speedWays = [];
+  const others = [];
+  const speedWays = [];
 
   for (const el of els) {
     let lat=null, lon=null;
@@ -470,8 +479,9 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     if (lat==null || lon==null) continue;
 
     const tags = el.tags || {};
-    if (tags.maxspeed) speedWays.push({ lat, lon, tags });
-    else {
+    if (tags.maxspeed) {
+      speedWays.push({ lat, lon, tags });
+    } else {
       let label='', color='#4da3ff';
       if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
       else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
@@ -481,7 +491,7 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     }
   }
 
-  // Non-speed features
+  /* draw non-speed features (always labeled) */
   for (const f of others) {
     const m = L.circleMarker([f.lat, f.lon], {
       radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
@@ -490,13 +500,13 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
     colorizeTooltip(m, f.color);
   }
 
-  // Speed limits: label only when value changes along route
+  /* handle speed limits: only label when value changes along route */
   if (speedWays.length && latlngs?.length >= 2) {
     const chain = toXYChain(latlngs);
     const pts = speedWays.map(sw => {
       const v = parseMaxspeedToKmh(sw.tags.maxspeed);
       const color = getSpeedColor(v ?? sw.tags.maxspeed);
-      const s = projectChainage(chain, sw.lat, sw.lon);
+      const s = projectChainage(chain, chain.lat0, sw.lat, sw.lon);
       return { lat: sw.lat, lon: sw.lon, v, color, s };
     }).sort((a,b)=>a.s-b.s);
 
@@ -511,8 +521,10 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
         colorizeTooltip(m, f.color);
         prev = f.v;
       }
+      // if not changed, keep ring without label
     }
   } else {
+    // Fallback: no route context — label them all
     for (const sw of speedWays) {
       const v = parseMaxspeedToKmh(sw.tags.maxspeed);
       const color = getSpeedColor(v ?? sw.tags.maxspeed);
@@ -528,7 +540,17 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
 }
 
 /* ------------------- Charts ------------------- */
-function makeLineChart(canvas, {labels, values, label, yTitle, min, max, beginAtZero}) {
+function makeLineChart(canvas, {labels, values, label, yTitle, min, max, suggestedMin, suggestedMax, beginAtZero}) {
+  const y = {
+    ticks: { color: '#b9c0cc' },
+    title: { display: true, text: yTitle, color: '#b9c0cc' }
+  };
+  if (beginAtZero === true) y.beginAtZero = true;
+  if (Number.isFinite(min)) y.min = min;
+  if (Number.isFinite(max)) y.max = max;
+  if (!Number.isFinite(min) && Number.isFinite(suggestedMin)) y.suggestedMin = suggestedMin;
+  if (!Number.isFinite(max) && Number.isFinite(suggestedMax)) y.suggestedMax = suggestedMax;
+
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
     type: 'line',
@@ -539,26 +561,15 @@ function makeLineChart(canvas, {labels, values, label, yTitle, min, max, beginAt
         data: values,
         borderWidth: 1.2,
         tension: 0.12,
-        pointRadius: 0
+        pointRadius: 0,
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      parsing: false,                 // ensure raw numbers are used
-      animation: false,               // snappier + avoids transient autoscale
       scales: {
-        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 } },
-        y: {
-          type: 'linear',
-          bounds: 'ticks',            // respect our hard limits
-          grace: 0,                   // no extra padding
-          min: Number.isFinite(min) ? min : undefined,
-          max: Number.isFinite(max) ? max : undefined,
-          beginAtZero: beginAtZero === true ? true : false,
-          ticks: { color: '#b9c0cc' },
-          title: { display: true, text: yTitle, color: '#b9c0cc' }
-        }
+        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 }},
+        y
       },
       plugins: { legend: { display: false } }
     }
@@ -594,7 +605,7 @@ function createSessionCard(sessionName) {
     <span><span class="dot" style="background:#4da3ff"></span> Junction</span>
     <span><span class="dot dot-orange"></span> Speed limit</span>
   `;
-  const status = document.createElement('div'); status.className='status'; status.textContent = 'Loading…';
+  const status = document.createElement('div'); status.className='status'; text = 'Loading…'; status.textContent = text;
   row.append(legend, status);
 
   const charts = document.createElement('div'); charts.className='charts';
@@ -616,7 +627,9 @@ function openLightbox(src) {
   lightbox.focus();
 }
 lightbox.addEventListener('click', () => lightbox.classList.remove('show'));
-lightbox.addEventListener('keydown', (e) => { if (e.key === 'Escape') lightbox.classList.remove('show'); });
+lightbox.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') lightbox.classList.remove('show');
+});
 
 /* ------------------- Main processing ------------------- */
 async function processZipFile(file) {
@@ -628,7 +641,7 @@ async function processZipFile(file) {
     ui.status.textContent = 'Reading ZIP…';
     const zip = await JSZip.loadAsync(file);
 
-    // Photos
+    /* Camera gallery */
     ui.status.textContent = 'Loading photos…';
     const images = await loadAllCameraImagesFromZip(zip);
     if (images.length) {
@@ -650,7 +663,7 @@ async function processZipFile(file) {
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // Map
+    // Track & map
     const track = extractTrack(locationRows);
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
@@ -663,22 +676,37 @@ async function processZipFile(file) {
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-      // Start marker + label
+      /* Start marker + label (label matches marker color) */
       const startColor = '#00e676';
-      const start = L.circleMarker(latlngs[0], {
+      const startLatLng = latlngs[0];
+      const start = L.circleMarker(startLatLng, {
         radius: 6, color: startColor, weight: 2, fillColor: startColor, fillOpacity: 0.6
       }).addTo(map);
-      start.bindTooltip('Start', { permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag' });
+      start.bindTooltip('Start', {
+        permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag'
+      });
       colorizeTooltip(start, startColor);
 
-      // Direction arrow
+      /* Direction arrow along the path (one arrow near the end) */
       try {
         L.polylineDecorator(poly, {
-          patterns: [{ offset: '85%', repeat: 0, symbol: L.Symbol.arrowHead({ pixelSize: 14, headAngle: 60, pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 } }) }]
+          patterns: [
+            {
+              offset: '85%',
+              repeat: 0,
+              symbol: L.Symbol.arrowHead({
+                pixelSize: 14,
+                headAngle: 60,
+                pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
+              })
+            }
+          ]
         }).addTo(map);
-      } catch {}
+      } catch (e) {
+        console.warn('PolylineDecorator unavailable; skipping arrow.', e);
+      }
 
-      // OSM features
+      // OSM features via Overpass
       ui.status.textContent = 'Fetching OSM features…';
       const bbox = bboxForTrack(track, 80);
       const query = overpassQueryForBBox(bbox);
@@ -692,18 +720,19 @@ async function processZipFile(file) {
         ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
       }
     } else {
+      // fallback view (Stockholm) if no coords
       map.setView([59.3293, 18.0686], 10);
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed: Y axis = [min-5, max+5] km/h per session
+    // Speed: per-session axis => [min(speed)-5, max(speed)+5]
     ui.status.textContent = 'Preparing speed…';
     const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
-    const sp = speedValues.filter(v => Number.isFinite(v));
+    const finiteSpeeds = speedValues.filter(v => Number.isFinite(v));
     let yMin, yMax;
-    if (sp.length) {
-      yMin = Math.min(...sp) - 5;
-      yMax = Math.max(...sp) + 5;
+    if (finiteSpeeds.length) {
+      yMin = Math.min(...finiteSpeeds) - 5;
+      yMax = Math.max(...finiteSpeeds) + 5;
     }
     makeLineChart(ui.speedCanvas, {
       labels: speedLabels,
@@ -711,11 +740,10 @@ async function processZipFile(file) {
       label: 'Speed (km/h)',
       yTitle: 'km/h',
       min: yMin,
-      max: yMax,
-      beginAtZero: false
+      max: yMax
     });
 
-    // Acceleration: linear from Accelerometer.csv; fallback to TotalAcceleration - 9.81
+    // Acceleration: linear (already gravity-free) from Accelerometer.csv; fallback to TotalAcceleration - 9.81
     ui.status.textContent = 'Preparing acceleration…';
     let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
     if ((!accValues || !accValues.length) && totalAccRows?.length) {
