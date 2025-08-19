@@ -212,6 +212,7 @@ Chart.defaults.font = {
   size: 14,             // base font size for everything
   weight: '400',
 };
+  
 
   // Read CSS variable color (fallback to provided default if missing)
 function cssVar(name, fallback) {
@@ -291,6 +292,59 @@ function toXY(lat, lon, lat0) {
 function distMeters(a, b) {
   const dx = a[0]-b[0], dy = a[1]-b[1];
   return Math.hypot(dx, dy);
+}
+  
+  function makeLineChart(canvas, {
+  labels, values, label, yTitle,
+  min, max, suggestedMin, suggestedMax, beginAtZero,
+  vlines   // array of { index, color, label }
+}) {
+  const y = {
+    ticks: { color: '#b9c0cc' },
+    title: { display: true, text: yTitle, color: '#b9c0cc' }
+  };
+  if (beginAtZero === true) y.beginAtZero = true;
+  if (Number.isFinite(min)) y.min = min;
+  if (Number.isFinite(max)) y.max = max;
+  if (!Number.isFinite(min) && Number.isFinite(suggestedMin)) y.suggestedMin = suggestedMin;
+  if (!Number.isFinite(max) && Number.isFinite(suggestedMax)) y.suggestedMax = suggestedMax;
+
+  const ctx = canvas.getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label,
+        data: values,
+        borderWidth: 1.2,
+        tension: 0.12,
+        pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 }},
+        y
+      },
+      plugins: {
+        legend: { display: false },
+        // requires the dashedVLines plugin you registered at the top of the script
+        dashedVLines: {
+          lines: vlines || [],
+          fontSize: 11,
+          textColor: '#fff',
+          boxColor: 'rgba(0,0,0,0.65)',
+          at: 'top',     // or 'bottom'
+          rotate: -90,   // 0 for horizontal text
+          yPad: 4,
+          xPad: 6
+        }
+      }
+    }
+  });
 }
 
   function makeMultiLineChart(canvas, { labels, datasets, yTitle, min, max }) {
@@ -709,75 +763,84 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
 /* ------------------- Charts ------------------- */
 
   /* 1) Register dashed vertical lines plugin — paste at very top of this block */
+// Dashed vertical lines WITH labels (top/bottom, rotated)
 const dashedVLinesPlugin = {
   id: 'dashedVLines',
   afterDatasetsDraw(chart, args, opts) {
     const lines = (opts && opts.lines) || [];
     if (!lines.length) return;
-    const {ctx, chartArea, scales} = chart;
+
+    const { ctx, chartArea, scales } = chart;
     const x = scales.x;
-    if (!x) return;
+    if (!x || !x.ticks || !x.ticks.length) return;
+
+    // Options (you can tweak)
+    const fontSize   = opts.fontSize ?? 11;
+    const textColor  = opts.textColor ?? '#ffffff';
+    const boxColor   = opts.boxColor  ?? 'rgba(0,0,0,0.65)';
+    const dash       = opts.dash ?? [6,4];
+    const lineWidth  = opts.lineWidth ?? 1;
+    const at         = opts.at ?? 'top';          // 'top' | 'bottom'
+    const rotateDeg  = opts.rotate ?? -90;        // rotate label to save space
+    const yPad       = opts.yPad ?? 4;
+    const xPad       = opts.xPad ?? 6;
+
+    // Simple collision-avoidance: alternate top/bottom if lines are very close
+    let lastXP = -Infinity;
+    let flip = false;
 
     ctx.save();
-    ctx.setLineDash([6, 4]);
+    ctx.setLineDash(dash);
+    ctx.lineWidth = lineWidth;
+
     for (const ln of lines) {
-      const tickIdx = Math.max(0, Math.min((x.ticks?.length || 1)-1, ln.index));
-      const xp = x.getPixelForTick(tickIdx);
+      const idx = Math.max(0, Math.min(x.ticks.length - 1, ln.index|0));
+      const xp  = x.getPixelForTick(idx);
+
+      // draw line
       ctx.beginPath();
+      ctx.strokeStyle = ln.color || '#ffffff';
       ctx.moveTo(xp, chartArea.top);
       ctx.lineTo(xp, chartArea.bottom);
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = ln.color || '#ffffff';
       ctx.stroke();
+
+      if (!ln.label) continue;
+
+      // label placement
+      const tooClose = Math.abs(xp - lastXP) < 10;
+      lastXP = xp;
+
+      const placeAt = (tooClose ? (flip = !flip, flip ? 'bottom' : 'top') : at);
+      const baseY = placeAt === 'top' ? (chartArea.top + yPad + fontSize) : (chartArea.bottom - yPad);
+
+      // text box metrics
+      ctx.font = `${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif`;
+      const metrics = ctx.measureText(ln.label);
+      const textW = Math.ceil(metrics.width);
+      const textH = fontSize + 4;
+
+      // draw background box (rotated context)
+      ctx.translate(xp, baseY);
+      ctx.rotate((rotateDeg * Math.PI) / 180);
+
+      ctx.fillStyle = boxColor;
+      // draw centered box around (0,0)
+      ctx.fillRect(-textW/2 - xPad/2, -textH, textW + xPad, textH + 2);
+
+      // text
+      ctx.fillStyle = textColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(ln.label, 0, -2);
+
+      // restore transform
+      ctx.setTransform(1,0,0,1,0,0);
     }
+
     ctx.restore();
   }
 };
 Chart.register(dashedVLinesPlugin);
-  
-function makeLineChart(canvas, {
-  labels, values, label, yTitle,
-  min, max, suggestedMin, suggestedMax, beginAtZero,
-  vlines   // <— NEW: array of { index, color }
-}) {
-  const y = {
-    ticks: { color: '#b9c0cc' },
-    title: { display: true, text: yTitle, color: '#b9c0cc' }
-  };
-  if (beginAtZero === true) y.beginAtZero = true;
-  if (Number.isFinite(min)) y.min = min;
-  if (Number.isFinite(max)) y.max = max;
-  if (!Number.isFinite(min) && Number.isFinite(suggestedMin)) y.suggestedMin = suggestedMin;
-  if (!Number.isFinite(max) && Number.isFinite(suggestedMax)) y.suggestedMax = suggestedMax;
-
-  const ctx = canvas.getContext('2d');
-  return new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label,
-        data: values,
-        borderWidth: 1.2,
-        tension: 0.12,
-        pointRadius: 0,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 }},
-        y
-      },
-      plugins: {
-        legend: { display: false },
-        // NEW: pass lines to the dashedVLines plugin you registered in step 1
-        dashedVLines: { lines: vlines || [] }
-      }
-    }
-  });
-}
 
 /* ------------------- Session UI ------------------- */
 function createSessionCard(sessionName) {
