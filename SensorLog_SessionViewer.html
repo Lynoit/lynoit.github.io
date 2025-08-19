@@ -83,16 +83,32 @@
     }
     .session-title { margin: 0; font-size: 15px; font-weight: 600 }
     .session-body { padding: 12px; display: grid; gap: 12px }
-    .media-row {
+
+    /* -------- Camera gallery -------- */
+    .gallery {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 8px;
     }
-    .snap {
+    .thumb {
       width: 100%; aspect-ratio: 4/3; object-fit: cover;
       border-radius: 10px; border: 1px solid var(--border);
-      background: #0a0b0d;
+      background: #0a0b0d; cursor: pointer;
     }
+    .thumb:hover { filter: brightness(1.05) }
+
+    /* Lightbox */
+    .lightbox {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+      display: none; align-items: center; justify-content: center;
+      z-index: 1000;
+    }
+    .lightbox.show { display: flex }
+    .lightbox img {
+      max-width: 95vw; max-height: 92vh; border-radius: 12px; border: 1px solid var(--border);
+      box-shadow: 0 10px 32px rgba(0,0,0,0.5);
+    }
+
     .map {
       width: 100%; height: 320px;
       border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
@@ -124,10 +140,10 @@
     .dot-green  { background: var(--green) }
     .dot-orange { background: var(--speedlimit) }
 
-    /* Base tooltip style; background/border are set dynamically per-dot via JS */
+    /* Base tooltip style; background/border color set dynamically per-dot via JS */
     .leaflet-tooltip.feature-tag {
       background: rgba(0,0,0,0.75);
-      color: #000;                  /* will be dark on colored backgrounds */
+      color: #000;                  /* readable on colored backgrounds */
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 2px 6px;
@@ -165,6 +181,11 @@
   </header>
 
   <main class="grid" id="sessions"></main>
+
+  <!-- One global lightbox for all sessions -->
+  <div id="lightbox" class="lightbox" tabindex="0" aria-label="Image viewer">
+    <img id="lightboxImg" alt="Full size"/>
+  </div>
 
   <footer>© Lynoit 2025</footer>
 
@@ -229,6 +250,18 @@ function decimate(xs, max=2000) {
   return out;
 }
 
+/* small vector helpers for route projection (meters) */
+function toXY(lat, lon, lat0) {
+  const R = 6371008.8;
+  const x = (lon * Math.PI/180) * R * Math.cos(lat0 * Math.PI/180);
+  const y = (lat * Math.PI/180) * R;
+  return [x, y];
+}
+function distMeters(a, b) {
+  const dx = a[0]-b[0], dy = a[1]-b[1];
+  return Math.hypot(dx, dy);
+}
+
 /* ------------------- ZIP helpers ------------------- */
 async function loadCsvFromZip(zip, namePattern) {
   const entries = Object.values(zip.files);
@@ -239,14 +272,16 @@ async function loadCsvFromZip(zip, namePattern) {
   if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
   return parse.data;
 }
-async function loadImagesFromZip(zip, max=2) {
+/* Load ALL images under Camera/ (case-insensitive) */
+async function loadAllCameraImagesFromZip(zip) {
+  const out = [];
   const entries = Object.values(zip.files)
     .filter(e => !e.dir && /\.(jpe?g|png|webp)$/i.test(e.name))
-    .sort((a,b) => a.name.localeCompare(b.name));
-  const out = [];
-  for (let i=0; i<entries.length && out.length<max; i++) {
-    const blob = await entries[i].async('blob');
-    out.push({ url: URL.createObjectURL(blob), name: entries[i].name });
+    .filter(e => /(^|\/)camera\//i.test(e.name)); // in Camera/ folder
+  entries.sort((a,b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const blob = await entry.async('blob');
+    out.push({ url: URL.createObjectURL(blob), name: entry.name });
   }
   return out;
 }
@@ -360,9 +395,18 @@ out center tags;
   `.trim();
 }
 
-function getSpeedColor(maxspeedTag) {
-  const str = String(maxspeedTag || '').toLowerCase();
-  const num = parseFloat(str.replace(/[^0-9.]/g,''));
+function getSpeedColor(maxspeedTagOrNumber) {
+  let num;
+  if (typeof maxspeedTagOrNumber === 'number') num = maxspeedTagOrNumber;
+  else {
+    const str = String(maxspeedTagOrNumber || '').toLowerCase();
+    const mph = str.match(/(\d+(?:\.\d+)?)\s*mph/);
+    if (mph) num = parseFloat(mph[1]) * 1.60934;
+    else {
+      const kmh = str.match(/(\d+(?:\.\d+)?)/);
+      num = kmh ? parseFloat(kmh[1]) : NaN;
+    }
+  }
   if (!isFinite(num)) return '#ff8800';
   if (num <= 30) return '#ff8800';
   if (num <= 50) return '#ffaa33';
@@ -370,6 +414,15 @@ function getSpeedColor(maxspeedTag) {
   if (num <= 90) return '#c8d400';
   if (num <= 110) return '#89dd00';
   return '#38c172';
+}
+function parseMaxspeedToKmh(tag) {
+  if (!tag) return null;
+  const s = String(tag).toLowerCase().trim();
+  if (s === 'signals' || s === 'variable' || s === 'none') return null;
+  const mph = s.match(/(\d+(?:\.\d+)?)\s*mph/);
+  if (mph) return Math.round(parseFloat(mph[1]) * 1.60934);
+  const kmh = s.match(/(\d+(?:\.\d+)?)/);
+  return kmh ? Math.round(parseFloat(kmh[1])) : null;
 }
 
 /* make tooltip bg/border match marker color */
@@ -386,39 +439,105 @@ function colorizeTooltip(marker, color) {
   }, 0);
 }
 
-function addOsmFeaturesToMap(map, geojson, groupLayer) {
+/* project a point to polyline to get chainage (meters from start) */
+function computeChainages(latlngs, featurePoints) {
+  if (!latlngs?.length) return [];
+  const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
+  const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
+  const cum = [0];
+  for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
+
+  function project(lat, lon) {
+    const p = toXY(lat, lon, lat0);
+    let best = { d: Infinity, s: 0, t: 0, i: 0 };
+    for (let i=0; i<xy.length-1; i++) {
+      const a = xy[i], b = xy[i+1];
+      const abx = b[0]-a[0], aby = b[1]-a[1];
+      const apx = p[0]-a[0], apy = p[1]-a[1];
+      const ab2 = abx*abx + aby*aby;
+      let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const proj = [a[0] + abx*t, a[1] + aby*t];
+      const d = distMeters(p, proj);
+      if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])), t, i };
+    }
+    return best.s; // chainage in meters
+  }
+
+  return featurePoints.map(fp => ({ ...fp, chainage: project(fp.lat, fp.lon) }));
+}
+
+/* Add OSM features; speed-limit labels only on change along the route */
+function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
   const els = geojson?.elements || [];
+  const others = [];
+  const speedWays = [];
+
   for (const el of els) {
-    let lat=null, lon=null, label='';
+    let lat=null, lon=null;
     if (el.type === 'node') { lat = el.lat; lon = el.lon; }
     else if ((el.type === 'way' || el.type === 'relation') && el.center) {
       lat = el.center.lat; lon = el.center.lon;
     }
+    if (lat==null || lon==null) continue;
+
     const tags = el.tags || {};
-    if (tags.highway === 'traffic_signals') label = 'Traffic light';
-    else if (tags.highway === 'stop') label = 'Stop sign';
-    else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') label = 'Junction';
-    else if (tags.junction === 'roundabout') label = 'Roundabout';
-    else if (tags.maxspeed) label = `Speed limit: ${tags.maxspeed}`;
+    if (tags.maxspeed) {
+      speedWays.push({ lat, lon, tags });
+    } else {
+      let label='', color='#4da3ff';
+      if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
+      else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
+      else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
+      else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
+      if (label) others.push({ lat, lon, label, color });
+    }
+  }
 
-    if (lat!=null && lon!=null && label) {
-      let color = '#4da3ff';
-      if (label.startsWith('Speed limit')) color = getSpeedColor(tags.maxspeed);
-      else if (label === 'Traffic light') color = '#ffcc00';
-      else if (label === 'Stop sign')     color = '#ff4d4d';
-      else if (label === 'Roundabout')    color = '#38c172';
+  /* draw non-speed features (always labeled) */
+  for (const f of others) {
+    const m = L.circleMarker([f.lat, f.lon], {
+      radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
+    }).addTo(groupLayer);
+    m.bindTooltip(f.label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+    colorizeTooltip(m, f.color);
+  }
 
-      const m = L.circleMarker([lat,lon], {
-        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+  /* handle speed limits: only label when value changes along route */
+  if (speedWays.length && latlngs?.length >= 2) {
+    const pts = speedWays.map(sw => {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      return { lat: sw.lat, lon: sw.lon, v, color, label: v!=null ? `Speed limit: ${v}` : `Speed limit` };
+    });
+
+    const withChain = computeChainages(latlngs, pts).sort((a,b)=>a.chainage-b.chainage);
+    let prev = null;
+    for (const f of withChain) {
+      const m = L.circleMarker([f.lat, f.lon], {
+        radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
       }).addTo(groupLayer);
 
-      m.bindTooltip(label, {
-        permanent: true,
-        direction: 'right',
-        offset: [8, 0],
-        className: 'feature-tag'
-      });
-      colorizeTooltip(m, color);
+      const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
+      if (changed) {
+        m.bindTooltip(`Speed limit: ${f.v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+        colorizeTooltip(m, f.color);
+        prev = f.v;
+      }
+      // if not changed, keep ring without label
+    }
+  } else {
+    // Fallback: no route context — label them all
+    for (const sw of speedWays) {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      const m = L.circleMarker([sw.lat, sw.lon], {
+        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      if (v != null) {
+        m.bindTooltip(`Speed limit: ${v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+        colorizeTooltip(m, color);
+      }
     }
   }
 }
@@ -472,10 +591,8 @@ function createSessionCard(sessionName) {
   const body = document.createElement('div');
   body.className = 'session-body';
 
-  const media = document.createElement('div'); media.className = 'media-row';
-  const img1 = document.createElement('img'); img1.className='snap'; img1.alt='Snapshot 1';
-  const img2 = document.createElement('img'); img2.className='snap'; img2.alt='Snapshot 2';
-  media.append(img1, img2);
+  const gallery = document.createElement('div');
+  gallery.className = 'gallery';
 
   const map = document.createElement('div'); map.className='map';
 
@@ -497,10 +614,23 @@ function createSessionCard(sessionName) {
   const accCanvas = document.createElement('canvas');
   charts.append(speedCanvas, accCanvas);
 
-  body.append(media, map, row, charts);
+  body.append(gallery, map, row, charts);
   wrap.append(head, body);
-  return { wrap, img1, img2, map, status, speedCanvas, accCanvas };
+  return { wrap, gallery, map, status, speedCanvas, accCanvas };
 }
+
+/* ------------------- Lightbox ------------------- */
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightboxImg');
+function openLightbox(src) {
+  lightboxImg.src = src;
+  lightbox.classList.add('show');
+  lightbox.focus();
+}
+lightbox.addEventListener('click', () => lightbox.classList.remove('show'));
+lightbox.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') lightbox.classList.remove('show');
+});
 
 /* ------------------- Main processing ------------------- */
 async function processZipFile(file) {
@@ -512,10 +642,19 @@ async function processZipFile(file) {
     ui.status.textContent = 'Reading ZIP…';
     const zip = await JSZip.loadAsync(file);
 
-    // images
-    const images = await loadImagesFromZip(zip, 2);
-    if (images[0]) ui.img1.src = images[0].url;
-    if (images[1]) ui.img2.src = images[1].url;
+    /* Camera gallery */
+    ui.status.textContent = 'Loading photos…';
+    const images = await loadAllCameraImagesFromZip(zip);
+    if (images.length) {
+      for (const img of images) {
+        const t = document.createElement('img');
+        t.className = 'thumb';
+        t.src = img.url;
+        t.alt = img.name;
+        t.addEventListener('click', () => openLightbox(img.url));
+        ui.gallery.appendChild(t);
+      }
+    }
 
     // CSVs
     ui.status.textContent = 'Parsing CSVs…';
@@ -575,7 +714,7 @@ async function processZipFile(file) {
       try {
         const osm = await overpassFetch(query);
         const layer = L.layerGroup().addTo(map);
-        addOsmFeaturesToMap(map, osm, layer);
+        addOsmFeaturesToMap(map, osm, layer, latlngs);
         ui.status.textContent = 'Map ready.';
       } catch (e) {
         console.warn('Overpass failed:', e);
