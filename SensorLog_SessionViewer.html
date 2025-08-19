@@ -15,7 +15,7 @@
   <!-- Papa Parse -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
-  <!-- Chart.js (v4) -->
+  <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 
   <style>
@@ -29,6 +29,7 @@
       --red: #ff4d4d;
       --green: #38c172;
       --yellow: #ffcc00;
+      --speedlimit: #ff8800;
       --border: #2a2d33;
     }
     * { box-sizing: border-box }
@@ -94,25 +95,19 @@
     }
     .charts {
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); /* side-by-side when possible */
+      gap: 8px;
     }
-canvas {
-  width: 100%; 
-  height: 140px;   /* much smaller than 240px */
-  background: #101215; 
-  border: 1px solid var(--border); 
-  border-radius: 12px;
-  padding: 4px;
-}
+    canvas {
+      width: 100%;
+      height: 140px;   /* smaller charts */
+      background: #101215; border: 1px solid var(--border); border-radius: 12px;
+      padding: 4px;
+    }
     .status { font-size: 12px; color: var(--muted) }
     .row {
       display: flex; align-items: center; justify-content: space-between;
       gap: 10px; flex-wrap: wrap;
-    }
-    .badge {
-      font-size: 11px; color: #000; background: var(--accent);
-      padding: 2px 8px; border-radius: 999px;
     }
     .legend {
       display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
@@ -123,6 +118,7 @@ canvas {
     .dot-red { background: var(--red) }
     .dot-yellow { background: var(--yellow) }
     .dot-green { background: var(--green) }
+    .dot-orange { background: var(--speedlimit) }
     footer {
       text-align: center; padding: 16px; color: var(--muted);
       border-top: 1px solid var(--border);
@@ -148,7 +144,7 @@ canvas {
         Open ZIP files
       </label>
       <span class="hint">Each ZIP should look like your sample (Location.csv, TotalAcceleration.csv, Camera/*.jpg, etc.).</span>
-      <span class="tiny">OSM features fetched via Overpass; please don’t hammer it 🕊️</span>
+      <span class="tiny">OSM features via Overpass; gentle throttling applied 🕊️</span>
     </div>
   </header>
 
@@ -157,72 +153,51 @@ canvas {
   <footer>© Lynoit 2025</footer>
 
 <script>
-/** ------------------- Overpass setup (multiple mirrors + throttling) ------------------- */
+/* ------------------- Overpass setup (mirrors + throttling) ------------------- */
 const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
   'https://overpass.nchc.org.tw/api/interpreter'
 ];
-// simple queue: one query at a time with small delay
 let overpassQueue = Promise.resolve();
-function overpassQueryForBBox(bbox) {
-  const [s,w,n,e] = bbox;
-  return `
-[out:json][timeout:25];
-(
-  node["highway"="traffic_signals"](${s},${w},${n},${e});
-  node["highway"="stop"](${s},${w},${n},${e});
-  node["highway"="motorway_junction"](${s},${w},${n},${e});
-  way["junction"="roundabout"](${s},${w},${n},${e});
-  relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
-
-  // ✅ legal speed limits
-  way["maxspeed"](${s},${w},${n},${e});
-);
-out center tags;
-  `.trim();
+function overpassFetch(query) {
+  const run = async () => {
+    for (const url of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: query, headers: { 'Content-Type': 'text/plain' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (e) { console.warn('Overpass failed on', url, e); }
+    }
+    throw new Error('All Overpass endpoints failed');
+  };
+  overpassQueue = overpassQueue.then(() => new Promise(r => setTimeout(r, 500))).then(run);
+  return overpassQueue;
 }
 
-/** ------------------- Utilities ------------------- */
+/* ------------------- Utilities ------------------- */
 function slugWithoutExt(fileName) {
   const base = fileName.split('/').pop();
   return base.replace(/\.zip$/i, '');
 }
 function haversineMeters(a, b) {
-  const R = 6371008.8;
-  const toRad = deg => deg * Math.PI / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
+  const R = 6371008.8, toRad = d => d * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
   const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
-  const sinDLat = Math.sin(dLat/2), sinDLon = Math.sin(dLon/2);
-  const h = sinDLat*sinDLat + Math.cos(lat1)*Math.cos(lat2)*sinDLon*sinDLon;
-  const c = 2 * Math.asin(Math.min(1, Math.sqrt(h)));
-  return R * c;
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 function parseTime(v) {
-  // Return a Date object if possible, else null.
   if (v == null || v === '') return null;
-
-  // Numbers: detect unit (ns / µs / ms / s)
   if (typeof v === 'number') {
-    if (v > 1e17) {              // nanoseconds
-      return new Date(v / 1e6);  // -> ms
-    } else if (v > 1e14) {       // microseconds
-      return new Date(v / 1e3);  // -> ms
-    } else if (v > 1e12) {       // milliseconds
-      return new Date(v);
-    } else if (v > 1e9) {        // seconds
-      return new Date(v * 1000);
-    } else {
-      return null;
-    }
+    if (v > 1e17) return new Date(v / 1e6);   // ns -> ms
+    if (v > 1e14) return new Date(v / 1e3);   // µs -> ms
+    if (v > 1e12) return new Date(v);         // ms
+    if (v > 1e9)  return new Date(v * 1000);  // s -> ms
+    return null;
   }
-
-  // Numeric string?
   const num = Number(v);
   if (!Number.isNaN(num)) return parseTime(num);
-
-  // ISO/date string?
   const d = new Date(v);
   return isNaN(d) ? null : d;
 }
@@ -245,9 +220,8 @@ function decimate(xs, max=2000) {
   return out;
 }
 
-/** ------------------- ZIP parsing helpers ------------------- */
+/* ------------------- ZIP helpers ------------------- */
 async function loadCsvFromZip(zip, namePattern) {
-  // find first entry that matches pattern (case-insensitive)
   const entries = Object.values(zip.files);
   const entry = entries.find(e => !e.dir && namePattern.test(e.name));
   if (!entry) return null;
@@ -268,15 +242,13 @@ async function loadImagesFromZip(zip, max=2) {
   return out;
 }
 
-/** ------------------- Data extraction per session ------------------- */
+/* ------------------- Extraction / Computations ------------------- */
 function extractTrack(locationRows) {
   if (!locationRows?.length) return null;
   const sample = locationRows[0];
-
   const latK  = pick(['lat','latitude','y'], sample);
   const lonK  = pick(['lon','long','longitude','x'], sample);
   const timeK = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], sample);
-
   if (!latK || !lonK) return null;
 
   const pts = [];
@@ -284,11 +256,9 @@ function extractTrack(locationRows) {
     const lat = Number(row[latK]);
     const lon = Number(row[lonK]);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-
     let t = null;
     if (timeK) {
       const raw = row[timeK];
-      // If key looks like seconds_elapsed, synthesize a Date from it
       if (String(timeK).toLowerCase().includes('elapsed')) {
         const secs = Number(raw);
         if (Number.isFinite(secs)) t = new Date(secs * 1000);
@@ -303,7 +273,6 @@ function extractTrack(locationRows) {
 
 function computeSpeedSeriesFromLocation(locationRows) {
   if (!locationRows?.length) return { labels: [], values: [] };
-
   const speedKey = pick(['speed','spd'], locationRows[0]);
   if (!speedKey) return { labels: [], values: [] };
 
@@ -317,36 +286,35 @@ function computeSpeedSeriesFromLocation(locationRows) {
       values.push(v * 3.6); // m/s → km/h
     }
   }
-
-  // Decimate if too many points
   const zipped = labels.map((l,i) => ({ l, v: values[i] }));
   const slim = decimate(zipped, 2000);
   return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
 }
 
 function extractTotalAcc(totalAccRows, accelRows) {
-  // Prefer TotalAcceleration.csv; fallback to Accelerometer.csv magnitude
   const rows = totalAccRows?.length ? totalAccRows : accelRows;
   if (!rows?.length) return { labels: [], values: [] };
   const sample = rows[0];
-  const timeK = pick(['time','timestamp','datetime'], sample);
-  const totK = pick(['total','magnitude','acc','accel','a_total'], sample);
+  const timeK = pick(['time','timestamp','datetime','seconds_elapsed'], sample);
+  const totK  = pick(['total','magnitude','acc','accel','a_total'], sample);
   const xK = pick(['x','ax'], sample);
   const yK = pick(['y','ay'], sample);
   const zK = pick(['z','az'], sample);
 
-  const labels = [];
-  const values = [];
+  const labels = [], values = [];
   for (const r of rows) {
-    const t = timeK ? parseTime(r[timeK]) : null;
+    let t = null;
+    if (timeK) {
+      if (String(timeK).toLowerCase().includes('elapsed')) {
+        const secs = Number(r[timeK]); if (Number.isFinite(secs)) t = new Date(secs*1000);
+      } else t = parseTime(r[timeK]);
+    }
     let val = null;
     if (totK && Number.isFinite(Number(r[totK]))) {
       val = Number(r[totK]);
     } else if (xK && yK && zK) {
       const x = Number(r[xK]), y = Number(r[yK]), z = Number(r[zK]);
-      if ([x,y,z].every(Number.isFinite)) {
-        val = Math.sqrt(x*x + y*y + z*z);
-      }
+      if ([x,y,z].every(Number.isFinite)) val = Math.sqrt(x*x + y*y + z*z);
     }
     if (val != null) {
       labels.push(t ? formatHHMMSS(t) : String(labels.length));
@@ -358,8 +326,8 @@ function extractTotalAcc(totalAccRows, accelRows) {
   return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
 }
 
-/** ------------------- Map + OSM features ------------------- */
-function bboxForTrack(track, padMeters = 60) {
+/* ------------------- Map + OSM features ------------------- */
+function bboxForTrack(track, padMeters = 80) {
   let minLat=  90, minLon= 180, maxLat= -90, maxLon= -180;
   for (const p of track) {
     if (p.lat<minLat) minLat=p.lat;
@@ -367,8 +335,7 @@ function bboxForTrack(track, padMeters = 60) {
     if (p.lon<minLon) minLon=p.lon;
     if (p.lon>maxLon) maxLon=p.lon;
   }
-  // pad bbox by approx degrees
-  const padLat = padMeters / 111320; // deg per m
+  const padLat = padMeters / 111320;
   const midLat = (minLat+maxLat)/2;
   const padLon = padMeters / (111320 * Math.cos(midLat*Math.PI/180));
   return [minLat-padLat, minLon-padLon, maxLat+padLat, maxLon+padLon];
@@ -384,6 +351,7 @@ function overpassQueryForBBox(bbox) {
   node["highway"="motorway_junction"](${s},${w},${n},${e});
   way["junction"="roundabout"](${s},${w},${n},${e});
   relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
+  way["maxspeed"](${s},${w},${n},${e});  /* speed limits */
 );
 out center tags;
   `.trim();
@@ -398,7 +366,6 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
       lat = el.center.lat; lon = el.center.lon;
     }
     const tags = el.tags || {};
-
     if (tags.highway === 'traffic_signals') label = 'Traffic light';
     else if (tags.highway === 'stop') label = 'Stop sign';
     else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') label = 'Junction';
@@ -407,10 +374,10 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
 
     if (lat!=null && lon!=null && label) {
       let color = '#4da3ff';
-      if (label.startsWith('Speed limit')) color = '#ff8800';
+      if (label.startsWith('Speed limit')) color = getSpeedColor(tags.maxspeed);
       else if (label === 'Traffic light') color = '#ffcc00';
-      else if (label === 'Stop sign') color = '#ff4d4d';
-      else if (label === 'Roundabout') color = '#38c172';
+      else if (label === 'Stop sign')     color = '#ff4d4d';
+      else if (label === 'Roundabout')    color = '#38c172';
 
       const m = L.circleMarker([lat,lon], {
         radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
@@ -419,8 +386,20 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
     }
   }
 }
+function getSpeedColor(maxspeedTag) {
+  // simple color ramp by numeric limit; fallback orange
+  const str = String(maxspeedTag || '').toLowerCase();
+  const num = parseFloat(str.replace(/[^0-9.]/g,''));
+  if (!isFinite(num)) return '#ff8800';
+  if (num <= 30) return '#ff8800';
+  if (num <= 50) return '#ffaa33';
+  if (num <= 70) return '#ffcc00';
+  if (num <= 90) return '#c8d400';
+  if (num <= 110) return '#89dd00';
+  return '#38c172';
+}
 
-/** ------------------- Chart helpers ------------------- */
+/* ------------------- Charts ------------------- */
 function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, suggestedMax}) {
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
@@ -430,8 +409,8 @@ function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, sug
       datasets: [{
         label,
         data: values,
-        borderWidth: 1.5,
-        tension: 0.15,
+        borderWidth: 1.2,
+        tension: 0.12,
         pointRadius: 0,
       }]
     },
@@ -439,21 +418,19 @@ function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, sug
       responsive: true,
       maintainAspectRatio: false,
       scales: {
-        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 8 }},
+        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 }},
         y: {
           ticks: { color: '#b9c0cc' },
           title: { display: true, text: yTitle, color: '#b9c0cc' },
           suggestedMin, suggestedMax
         }
       },
-      plugins: {
-        legend: { display: false }
-      }
+      plugins: { legend: { display: false } }
     }
   });
 }
 
-/** ------------------- Session UI ------------------- */
+/* ------------------- Session UI ------------------- */
 function createSessionCard(sessionName) {
   const wrap = document.createElement('section');
   wrap.className = 'session';
@@ -482,7 +459,7 @@ function createSessionCard(sessionName) {
     <span><span class="dot dot-red"></span> Stop sign</span>
     <span><span class="dot dot-green"></span> Roundabout</span>
     <span><span class="dot" style="background:#4da3ff"></span> Junction</span>
-    <span><span class="dot" style="background:#ff8800"></span> Speed limit</span>
+    <span><span class="dot dot-orange"></span> Speed limit</span>
   `;
   const status = document.createElement('div'); status.className='status'; status.textContent = 'Loading…';
   row.append(legend, status);
@@ -497,7 +474,7 @@ function createSessionCard(sessionName) {
   return { wrap, img1, img2, map, status, speedCanvas, accCanvas };
 }
 
-/** ------------------- Main processing ------------------- */
+/* ------------------- Main processing ------------------- */
 async function processZipFile(file) {
   const sessionName = slugWithoutExt(file.name);
   const ui = createSessionCard(sessionName);
@@ -520,55 +497,51 @@ async function processZipFile(file) {
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // Track
+    // Track & map
     const track = extractTrack(locationRows);
-    if (!track) {
-      ui.status.textContent = 'No coordinates found in Location.csv';
-      // Still draw empty map
-      const map = L.map(ui.map).setView([59.3293, 18.0686], 10);
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19, attribution: '&copy; OpenStreetMap'
-      }).addTo(map);
-      return;
-    }
-
-    // Map + trace
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19, attribution: '&copy; OpenStreetMap'
     }).addTo(map);
-    const latlngs = track.map(p => [p.lat, p.lon]);
-    const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
-    map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-    // OSM features via Overpass (bbox around track)
-    ui.status.textContent = 'Fetching OSM road features…';
-    const bbox = bboxForTrack(track, 80);
-    const query = overpassQueryForBBox(bbox);
-    try {
-      const osm = await overpassFetch(query);
-      const layer = L.layerGroup().addTo(map);
-      addOsmFeaturesToMap(map, osm, layer);
-      ui.status.textContent = 'Done.';
-    } catch (e) {
-      console.warn('Overpass failed:', e);
-      ui.status.textContent = 'Trace rendered. Road features unavailable (Overpass error).';
+    if (track?.length) {
+      const latlngs = track.map(p => [p.lat, p.lon]);
+      const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
+      map.fitBounds(poly.getBounds(), { padding: [16,16] });
+
+      // OSM features via Overpass
+      ui.status.textContent = 'Fetching OSM features…';
+      const bbox = bboxForTrack(track, 80);
+      const query = overpassQueryForBBox(bbox);
+      try {
+        const osm = await overpassFetch(query);
+        const layer = L.layerGroup().addTo(map);
+        addOsmFeaturesToMap(map, osm, layer);
+        ui.status.textContent = 'Map ready.';
+      } catch (e) {
+        console.warn('Overpass failed:', e);
+        ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
+      }
+    } else {
+      // fallback view (Stockholm) if no coords
+      map.setView([59.3293, 18.0686], 10);
+      ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed chart (from GPS)
-ui.status.textContent = 'Preparing speed plot…';
-const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows);
-makeLineChart(ui.speedCanvas, {
-  labels: speedLabels,
-  values: speedValues,
-  label: 'Speed (km/h)',
-  yTitle: 'km/h',
-  suggestedMin: 0,
-  suggestedMax: Math.max(60, Math.min(150, Math.ceil((Math.max(...speedValues)||60)/10)*10))
+    // Speed: use Location.csv speed column (m/s → km/h)
+    ui.status.textContent = 'Preparing speed…';
+    const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
+    makeLineChart(ui.speedCanvas, {
+      labels: speedLabels,
+      values: speedValues,
+      label: 'Speed (km/h)',
+      yTitle: 'km/h',
+      suggestedMin: 0,
+      suggestedMax: Math.max(60, Math.min(150, Math.ceil((Math.max(...speedValues)||60)/10)*10))
     });
 
-    // Total acceleration chart
+    // Total acceleration
     ui.status.textContent = 'Preparing acceleration…';
     const { labels: accLabels, values: accValues } = extractTotalAcc(totalAccRows, accelRows);
     makeLineChart(ui.accCanvas, {
@@ -576,7 +549,7 @@ makeLineChart(ui.speedCanvas, {
       values: accValues,
       label: 'Total acceleration (m/s²)',
       yTitle: 'm/s²',
-      suggestedMin: 0 // magnitude; if you prefer signed, feed a different series
+      suggestedMin: 0
     });
 
     ui.status.textContent = 'Ready.';
@@ -586,7 +559,7 @@ makeLineChart(ui.speedCanvas, {
   }
 }
 
-/** ------------------- Inputs ------------------- */
+/* ------------------- Inputs ------------------- */
 const folderInput = document.getElementById('folderInput');
 const filesInput  = document.getElementById('filesInput');
 
@@ -604,9 +577,7 @@ function uniqueZipFilesFromFileList(fileList) {
 folderInput.addEventListener('change', async (e) => {
   const files = uniqueZipFilesFromFileList(e.target.files);
   if (!files.length) return;
-  // Clear previous
   document.getElementById('sessions').innerHTML = '';
-  // Process sequentially to be nicer to Overpass
   for (const f of files) await processZipFile(f);
   folderInput.value = '';
 });
