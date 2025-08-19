@@ -162,23 +162,22 @@ const OVERPASS_ENDPOINTS = [
 ];
 // simple queue: one query at a time with small delay
 let overpassQueue = Promise.resolve();
-function overpassFetch(query) {
-  const run = async () => {
-    for (const url of OVERPASS_ENDPOINTS) {
-      try {
-        const res = await fetch(url, { method: 'POST', body: query, headers: { 'Content-Type': 'text/plain' } });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const json = await res.json();
-        return json;
-      } catch (e) {
-        console.warn('Overpass failed on', url, e);
-      }
-    }
-    throw new Error('All Overpass endpoints failed');
-  };
-  // chain: wait 500ms between requests to be nice
-  overpassQueue = overpassQueue.then(() => new Promise(r => setTimeout(r, 500))).then(run);
-  return overpassQueue;
+function overpassQueryForBBox(bbox) {
+  const [s,w,n,e] = bbox;
+  return `
+[out:json][timeout:25];
+(
+  node["highway"="traffic_signals"](${s},${w},${n},${e});
+  node["highway"="stop"](${s},${w},${n},${e});
+  node["highway"="motorway_junction"](${s},${w},${n},${e});
+  way["junction"="roundabout"](${s},${w},${n},${e});
+  relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
+
+  // ✅ legal speed limits
+  way["maxspeed"](${s},${w},${n},${e});
+);
+out center tags;
+  `.trim();
 }
 
 /** ------------------- Utilities ------------------- */
@@ -369,21 +368,24 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
   for (const el of els) {
     let lat=null, lon=null, label='';
     if (el.type === 'node') { lat = el.lat; lon = el.lon; }
-    else if (el.type === 'way' || el.type === 'relation') {
-      if (el.center) { lat = el.center.lat; lon = el.center.lon; }
+    else if ((el.type === 'way' || el.type === 'relation') && el.center) {
+      lat = el.center.lat; lon = el.center.lon;
     }
     const tags = el.tags || {};
+
     if (tags.highway === 'traffic_signals') label = 'Traffic light';
     else if (tags.highway === 'stop') label = 'Stop sign';
     else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') label = 'Junction';
     else if (tags.junction === 'roundabout') label = 'Roundabout';
+    else if (tags.maxspeed) label = `Speed limit: ${tags.maxspeed}`;
 
     if (lat!=null && lon!=null && label) {
-      const color =
-        label === 'Traffic light' ? '#ffcc00' :
-        label === 'Stop sign'     ? '#ff4d4d' :
-        label === 'Roundabout'    ? '#38c172' :
-                                    '#4da3ff';
+      let color = '#4da3ff';
+      if (label.startsWith('Speed limit')) color = '#ff8800';
+      else if (label === 'Traffic light') color = '#ffcc00';
+      else if (label === 'Stop sign') color = '#ff4d4d';
+      else if (label === 'Roundabout') color = '#38c172';
+
       const m = L.circleMarker([lat,lon], {
         radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
       }).addTo(groupLayer);
