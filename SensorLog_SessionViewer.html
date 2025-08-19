@@ -298,28 +298,24 @@ function extractTrack(locationRows) {
   return pts.length ? pts : null;
 }
 
+function computeSpeedSeriesFromLocation(locationRows) {
+  if (!locationRows?.length) return { labels: [], values: [] };
 
-function computeSpeedSeries(track) {
-  if (!track || track.length < 2) return { labels: [], values: [] };
+  const speedKey = pick(['speed','spd'], locationRows[0]);
+  if (!speedKey) return { labels: [], values: [] };
+
   const labels = [];
   const values = [];
-  let prev = track[0];
-  for (let i=1; i<track.length; i++) {
-    const cur = track[i];
-    if (!prev.t || !cur.t) { prev = cur; continue; }
-    const dt = (cur.t - prev.t) / 1000; // seconds
-    const d = haversineMeters(prev, cur); // meters
-    if (dt > 0 && d >= 0) {
-      const speedKmh = (d / dt) * 3.6;
-      // reject insane spikes > 250 km/h unless dt big
-      if (speedKmh < 250 || dt > 5) {
-        labels.push(formatHHMMSS(cur.t));
-        values.push(speedKmh);
-      }
+  for (const row of locationRows) {
+    const t = parseTime(row.time) || (row.seconds_elapsed != null ? new Date(row.seconds_elapsed * 1000) : null);
+    const v = Number(row[speedKey]);
+    if (Number.isFinite(v)) {
+      labels.push(t ? formatHHMMSS(t) : String(labels.length));
+      values.push(v * 3.6); // m/s → km/h
     }
-    prev = cur;
   }
-  // decimate if large
+
+  // Decimate if too many points
   const zipped = labels.map((l,i) => ({ l, v: values[i] }));
   const slim = decimate(zipped, 2000);
   return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
@@ -558,15 +554,15 @@ async function processZipFile(file) {
     }
 
     // Speed chart (from GPS)
-    ui.status.textContent = 'Computing speed…';
-    const { labels: speedLabels, values: speedValues } = computeSpeedSeries(track);
-    makeLineChart(ui.speedCanvas, {
-      labels: speedLabels,
-      values: speedValues,
-      label: 'Speed (km/h)',
-      yTitle: 'km/h',
-      suggestedMin: 0,
-      suggestedMax: Math.max(60, Math.min(150, Math.ceil((Math.max(...speedValues)||60)/10)*10))
+ui.status.textContent = 'Preparing speed plot…';
+const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows);
+makeLineChart(ui.speedCanvas, {
+  labels: speedLabels,
+  values: speedValues,
+  label: 'Speed (km/h)',
+  yTitle: 'km/h',
+  suggestedMin: 0,
+  suggestedMax: Math.max(60, Math.min(150, Math.ceil((Math.max(...speedValues)||60)/10)*10))
     });
 
     // Total acceleration chart
