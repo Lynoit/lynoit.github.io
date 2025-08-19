@@ -197,15 +197,29 @@ function haversineMeters(a, b) {
   return R * c;
 }
 function parseTime(v) {
+  // Return a Date object if possible, else null.
   if (v == null || v === '') return null;
+
+  // Numbers: detect unit (ns / µs / ms / s)
   if (typeof v === 'number') {
-    if (v > 1e12) return new Date(v);       // ms epoch
-    if (v > 1e9) return new Date(v * 1000); // s epoch
-    return new Date( (v + 1700000000) * 1000 ); // fallback (unlikely)
+    if (v > 1e17) {              // nanoseconds
+      return new Date(v / 1e6);  // -> ms
+    } else if (v > 1e14) {       // microseconds
+      return new Date(v / 1e3);  // -> ms
+    } else if (v > 1e12) {       // milliseconds
+      return new Date(v);
+    } else if (v > 1e9) {        // seconds
+      return new Date(v * 1000);
+    } else {
+      return null;
+    }
   }
-  // numeric string?
+
+  // Numeric string?
   const num = Number(v);
   if (!Number.isNaN(num)) return parseTime(num);
+
+  // ISO/date string?
   const d = new Date(v);
   return isNaN(d) ? null : d;
 }
@@ -255,22 +269,35 @@ async function loadImagesFromZip(zip, max=2) {
 function extractTrack(locationRows) {
   if (!locationRows?.length) return null;
   const sample = locationRows[0];
-  const latK = pick(['lat','latitude','y'], sample);
-  const lonK = pick(['lon','long','longitude','x'], sample);
-  const timeK = pick(['time','timestamp','datetime'], sample);
+
+  const latK  = pick(['lat','latitude','y'], sample);
+  const lonK  = pick(['lon','long','longitude','x'], sample);
+  const timeK = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], sample);
+
   if (!latK || !lonK) return null;
 
   const pts = [];
   for (const row of locationRows) {
     const lat = Number(row[latK]);
     const lon = Number(row[lonK]);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      const t = timeK ? parseTime(row[timeK]) : null;
-      pts.push({ lat, lon, t });
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    let t = null;
+    if (timeK) {
+      const raw = row[timeK];
+      // If key looks like seconds_elapsed, synthesize a Date from it
+      if (String(timeK).toLowerCase().includes('elapsed')) {
+        const secs = Number(raw);
+        if (Number.isFinite(secs)) t = new Date(secs * 1000);
+      } else {
+        t = parseTime(raw);
+      }
     }
+    pts.push({ lat, lon, t });
   }
   return pts.length ? pts : null;
 }
+
 
 function computeSpeedSeries(track) {
   if (!track || track.length < 2) return { labels: [], values: [] };
