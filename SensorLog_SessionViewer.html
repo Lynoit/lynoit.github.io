@@ -218,6 +218,14 @@ function overpassFetch(query) {
 }
 
 /* ------------------- Utilities ------------------- */
+  function formatRelativeTime(ms) {
+  // ms = elapsed milliseconds since session start
+  const totalSec = Math.floor(ms / 1000);
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
+}
+
 function slugWithoutExt(fileName) {
   const base = fileName.split('/').pop();
   return base.replace(/\.zip$/i, '');
@@ -323,19 +331,23 @@ function extractTrack(locationRows) {
 function computeSpeedSeriesFromLocation(locationRows) {
   if (!locationRows?.length) return { labels: [], values: [] };
   const speedKey = pick(['speed','spd'], locationRows[0]);
-  if (!speedKey) return { labels: [], values: [] };
+  const timeKey  = pick(['time','timestamp','datetime','seconds_elapsed'], locationRows[0]);
+  if (!speedKey || !timeKey) return { labels: [], values: [] };
 
-  const labels = [];
-  const values = [];
+  // Collect raw times + values
+  const raw = [];
   for (const row of locationRows) {
-    const t = parseTime(row.time) || (row.seconds_elapsed != null ? new Date(row.seconds_elapsed * 1000) : null);
+    const t = String(timeKey).toLowerCase().includes('elapsed')
+      ? Number(row[timeKey]) * 1000
+      : parseTime(row[timeKey])?.getTime();
     const v = Number(row[speedKey]);
-    if (Number.isFinite(v)) {
-      labels.push(t ? formatHHMMSS(t) : String(labels.length));
-      values.push(v * 3.6); // m/s → km/h
-    }
+    if (Number.isFinite(t) && Number.isFinite(v)) raw.push({t,v: v*3.6});
   }
-  const zipped = labels.map((l,i) => ({ l, v: values[i] }));
+  if (!raw.length) return { labels: [], values: [] };
+
+  // Normalize times to session start
+  const t0 = raw[0].t;
+  const zipped = raw.map(p => ({ l: formatRelativeTime(p.t - t0), v: p.v }));
   const slim = decimate(zipped, 2000);
   return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
 }
@@ -343,30 +355,66 @@ function computeSpeedSeriesFromLocation(locationRows) {
 /* Linear acceleration magnitude directly from Accelerometer.csv (already gravity-free) */
 function computeLinearAccMagnitude(accelRows) {
   if (!accelRows?.length) return { labels: [], values: [] };
+
+  // local helper (mm:ss or "Xs")
+  function formatRelative(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    return mm > 0 ? `${mm}:${String(ss).padStart(2, '0')}` : `${ss}s`;
+  }
+
   const sample = accelRows[0];
   const xK = pick(['x','ax'], sample);
   const yK = pick(['y','ay'], sample);
   const zK = pick(['z','az'], sample);
-  const tK = pick(['time','timestamp','datetime','seconds_elapsed'], sample);
+  const tK = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], sample);
   if (!xK || !yK || !zK) return { labels: [], values: [] };
 
-  const labels = [], values = [];
-  for (const r of accelRows) {
+  const raw = [];
+  const fallbackLabels = [];
+  const fallbackValues = [];
+
+  for (let i = 0; i < accelRows.length; i++) {
+    const r = accelRows[i];
     const x = Number(r[xK]), y = Number(r[yK]), z = Number(r[zK]);
-    if ([x,y,z].every(Number.isFinite)) {
-      let t = null;
-      if (tK) {
-        t = String(tK).toLowerCase().includes('elapsed')
-          ? new Date(Number(r[tK]) * 1000)
-          : parseTime(r[tK]);
+    if (![x, y, z].every(Number.isFinite)) continue;
+
+    const mag = Math.sqrt(x*x + y*y + z*z);
+
+    // Try to read time in ms
+    let tms = null;
+    if (tK) {
+      if (String(tK).toLowerCase().includes('elapsed')) {
+        const secs = Number(r[tK]);
+        if (Number.isFinite(secs)) tms = secs * 1000;
+      } else {
+        const dt = parseTime(r[tK]); // uses your existing util
+        if (dt instanceof Date && !isNaN(dt)) tms = dt.getTime();
       }
-      labels.push(t ? formatHHMMSS(t) : String(labels.length));
-      values.push(Math.sqrt(x*x + y*y + z*z)); // |linear a|
+    }
+
+    if (tms != null) {
+      raw.push({ t: tms, v: mag });
+    } else {
+      // keep a fallback series with index labels if time is missing
+      fallbackLabels.push(String(fallbackLabels.length));
+      fallbackValues.push(mag);
     }
   }
-  const zipped = labels.map((l,i) => ({ l, v: values[i] }));
+
+  // Prefer relative-time labeling if we got any timestamps
+  if (raw.length) {
+    const t0 = raw[0].t;
+    const zipped = raw.map(p => ({ l: formatRelative(p.t - t0), v: p.v }));
+    const slim = decimate(zipped, 2000);
+    return { labels: slim.map(x => x.l), values: slim.map(x => x.v) };
+  }
+
+  // Fallback: index-based labels (no timestamps available)
+  const zipped = fallbackLabels.map((l, i) => ({ l, v: fallbackValues[i] }));
   const slim = decimate(zipped, 2000);
-  return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
+  return { labels: slim.map(x => x.l), values: slim.map(x => x.v) };
 }
 
 /* ------------------- Map + OSM features ------------------- */
