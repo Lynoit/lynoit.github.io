@@ -20,8 +20,6 @@
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 
-  
-
   <style>
     :root {
       --bg: #0e0f11;
@@ -707,42 +705,18 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
 }
 
 /* ------------------- Charts ------------------- */
-
-  /* 1) Register dashed vertical lines plugin — paste at very top of this block */
-const dashedVLinesPlugin = {
-  id: 'dashedVLines',
-  afterDatasetsDraw(chart, args, opts) {
-    const lines = (opts && opts.lines) || [];
-    if (!lines.length) return;
-    const {ctx, chartArea, scales} = chart;
-    const x = scales.x;
-    if (!x) return;
-
-    ctx.save();
-    ctx.setLineDash([6, 4]);
-    for (const ln of lines) {
-      const tickIdx = Math.max(0, Math.min((x.ticks?.length || 1)-1, ln.index));
-      const xp = x.getPixelForTick(tickIdx);
-      ctx.beginPath();
-      ctx.moveTo(xp, chartArea.top);
-      ctx.lineTo(xp, chartArea.bottom);
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = ln.color || '#ffffff';
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-};
-Chart.register(dashedVLinesPlugin);
-  
-function makeLineChart(canvas, {
-  labels, values, label, yTitle,
-  min, max, suggestedMin, suggestedMax, beginAtZero,
-  vlines   // <— NEW: array of { index, color }
-}) {
+function makeLineChart(canvas, {labels, values, label, yTitle, min, max, suggestedMin, suggestedMax, beginAtZero}) {
   const y = {
-    ticks: { color: '#b9c0cc' },
-    title: { display: true, text: yTitle, color: '#b9c0cc' }
+    ticks: {
+      color: '#b9c0cc',
+      font: { size: 15 }          // Y tick size
+    },
+    title: {
+      display: true,
+      text: yTitle,
+      color: '#b9c0cc',
+      font: { size: 14, weight: '600' }  // Y title size
+    }
   };
   if (beginAtZero === true) y.beginAtZero = true;
   if (Number.isFinite(min)) y.min = min;
@@ -758,7 +732,7 @@ function makeLineChart(canvas, {
       datasets: [{
         label,
         data: values,
-        borderWidth: 1.2,
+        borderWidth: 1.4,
         tension: 0.12,
         pointRadius: 0,
       }]
@@ -767,14 +741,18 @@ function makeLineChart(canvas, {
       responsive: true,
       maintainAspectRatio: false,
       scales: {
-        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 6 }},
+        x: {
+          ticks: {
+            color: '#b9c0cc',
+            font: { size: 13 },     // X tick size
+            maxTicksLimit: 6
+          },
+          // Uncomment if you want an X-axis title:
+          // title: { display: true, text: 'Time (relative)', color:'#b9c0cc', font:{ size: 14, weight:'600' } }
+        },
         y
       },
-      plugins: {
-        legend: { display: false },
-        // NEW: pass lines to the dashedVLines plugin you registered in step 1
-        dashedVLines: { lines: vlines || [] }
-      }
+      plugins: { legend: { display: false } }
     }
   });
 }
@@ -843,17 +821,12 @@ async function processZipFile(file) {
   const ui = createSessionCard(sessionName);
   document.getElementById('sessions').appendChild(ui.wrap);
 
-  // Helpers for relative-time parsing/formatting used to align lines to ticks
-  function formatRel(ms) {
-    const s = Math.floor(ms/1000); const m = Math.floor(s/60); const r = s%60;
-    return m>0 ? `${m}:${String(r).padStart(2,'0')}` : `${s}s`;
-  }
-  function parseRelToSec(lbl) {
-    const s = String(lbl||'').trim();
-    if (/^\d+s$/.test(s)) return parseInt(s);
-    let m = s.match(/^(\d+):(\d{1,2})$/); if (m) return (+m[1])*60 + (+m[2]);
-    m = s.match(/^(\d+):(\d{2}):(\d{2})$/); if (m) return (+m[1])*3600+(+m[2])*60+(+m[3]);
-    const n = Number(s); return Number.isFinite(n) ? n : NaN;
+  // local helper for relative time labels (mm:ss or "Xs")
+  function fmtRel(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const mm = Math.floor(totalSec / 60);
+    const ss = totalSec % 60;
+    return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
   }
 
   try {
@@ -882,7 +855,7 @@ async function processZipFile(file) {
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // Track + map scaffold
+    // Track & map
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -890,175 +863,91 @@ async function processZipFile(file) {
     }).addTo(map);
 
     const track = extractTrack(locationRows);
-    let latlngs = null, chain = null, t0ms = null;
     if (track?.length) {
-      latlngs = track.map(p => [p.lat, p.lon]);
-      chain = toXYChain(latlngs);
-      const t0 = track.find(p => p.t instanceof Date && !isNaN(p.t));
-      t0ms = t0 ? t0.t.getTime() : null;
-
+      const latlngs = track.map(p => [p.lat, p.lon]);
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
+      /* Start marker + label */
       const startColor = '#00e676';
-      const start = L.circleMarker(latlngs[0], {
+      const startLatLng = latlngs[0];
+      const start = L.circleMarker(startLatLng, {
         radius: 6, color: startColor, weight: 2, fillColor: startColor, fillOpacity: 0.6
       }).addTo(map);
-      start.bindTooltip('Start', { permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag' });
+      start.bindTooltip('Start', {
+        permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag'
+      });
       colorizeTooltip(start, startColor);
 
+      /* Direction arrow */
       try {
         L.polylineDecorator(poly, {
-          patterns: [{ offset: '85%', repeat: 0, symbol: L.Symbol.arrowHead({
-            pixelSize: 14, headAngle: 60, pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
-          })}]
+          patterns: [{
+            offset: '85%',
+            repeat: 0,
+            symbol: L.Symbol.arrowHead({
+              pixelSize: 14,
+              headAngle: 60,
+              pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
+            })
+          }]
         }).addTo(map);
-      } catch {}
+      } catch (e) {
+        console.warn('PolylineDecorator unavailable; skipping arrow.', e);
+      }
 
-      // OSM features
+      // OSM features via Overpass
       ui.status.textContent = 'Fetching OSM features…';
       const bbox = bboxForTrack(track, 80);
       const query = overpassQueryForBBox(bbox);
-
-      // Helpers to project chainage -> time
-      function timeMsAtS(s) {
-        if (!chain || !track?.length) return null;
-        const cum = chain.cum;
-        let i1 = cum.findIndex(v => v >= s);
-        if (i1 <= 0) i1 = 1;
-        let i0 = i1 - 1;
-
-        function prevWithTime(i){ for(let k=i;k>=0;k--) if(track[k].t instanceof Date && !isNaN(track[k].t)) return k; return null; }
-        function nextWithTime(i){ for(let k=i;k<track.length;k++) if(track[k].t instanceof Date && !isNaN(track[k].t)) return k; return null; }
-
-        const a = prevWithTime(i0), b = nextWithTime(i1);
-        if (a==null && b==null) return null;
-        if (a!=null && b!=null && b!==a) {
-          const sA = cum[a], sB = cum[b];
-          const tA = track[a].t.getTime(), tB = track[b].t.getTime();
-          const r = sB> sA ? (s - sA) / (sB - sA) : 0;
-          return Math.round(tA + r*(tB - tA));
-        }
-        return (a!=null) ? track[a].t.getTime() : track[b].t.getTime();
-      }
-
-      let featureTimes = [];
       try {
         const osm = await overpassFetch(query);
         const layer = L.layerGroup().addTo(map);
         addOsmFeaturesToMap(map, osm, layer, latlngs);
-
-        // Build time markers for vertical lines
-        const els = osm?.elements || [];
-        const speedCands = [];
-        const feats = [];
-
-        for (const el of els) {
-          let lat=null, lon=null;
-          if (el.type === 'node') { lat = el.lat; lon = el.lon; }
-          else if ((el.type === 'way' || el.type === 'relation') && el.center) {
-            lat = el.center.lat; lon = el.center.lon;
-          }
-          if (lat==null || lon==null) continue;
-
-          const tags = el.tags || {};
-          if (tags.maxspeed) {
-            const v = parseMaxspeedToKmh(tags.maxspeed);
-            const color = getSpeedColor(v ?? tags.maxspeed);
-            const s = projectChainage(chain, chain.lat0, lat, lon);
-            speedCands.push({ s, v, color });
-          } else {
-            let label='', color='#4da3ff';
-            if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
-            else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
-            else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
-            else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
-            if (label) {
-              const s = projectChainage(chain, chain.lat0, lat, lon);
-              const tms = timeMsAtS(s);
-              if (tms != null) feats.push({ tms, label, color });
-            }
-          }
-        }
-        // Only label speed limit changes when value changes along route
-        speedCands.sort((a,b)=>a.s-b.s);
-        let prev = null;
-        for (const c of speedCands) {
-          if (c.v != null && (prev === null || c.v !== prev)) {
-            const tms = timeMsAtS(c.s);
-            if (tms != null) feats.push({ tms, label: `Speed limit ${c.v}`, color: c.color });
-            prev = c.v;
-          }
-        }
-        feats.sort((a,b)=>a.tms - b.tms);
-        featureTimes = feats;
         ui.status.textContent = 'Map ready.';
       } catch (e) {
         console.warn('Overpass failed:', e);
         ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
       }
-
-      // Speed chart (with dashed vlines)
-      ui.status.textContent = 'Preparing speed…';
-      const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
-      const finiteSpeeds = speedValues.filter(v => Number.isFinite(v));
-      let yMin, yMax;
-      if (finiteSpeeds.length) {
-        yMin = Math.min(...finiteSpeeds) - 5;
-        yMax = Math.max(...finiteSpeeds) + 5;
-      }
-
-      // Map feature times to nearest x-tick index
-      let vlines = [];
-      if (t0ms != null && featureTimes.length && speedLabels.length) {
-        const labelSecs = speedLabels.map(parseRelToSec); // expects relative labels
-        for (const f of featureTimes) {
-          const sec = (f.tms - t0ms) / 1000;
-          if (!Number.isFinite(sec)) continue;
-          let bestIdx = 0, bestDiff = Infinity;
-          for (let i=0;i<labelSecs.length;i++) {
-            const s = labelSecs[i];
-            if (!Number.isFinite(s)) continue;
-            const d = Math.abs(s - sec);
-            if (d < bestDiff) { bestDiff = d; bestIdx = i; }
-          }
-          vlines.push({ index: bestIdx, color: f.color, label: f.label });
-        }
-      }
-
-      makeLineChart(ui.speedCanvas, {
-        labels: speedLabels,
-        values: speedValues,
-        label: 'Speed (km/h)',
-        yTitle: 'km/h',
-        min: yMin, max: yMax,
-        vlines
-      });
-
     } else {
-      // No coordinates: show map default and still draw speed chart if present
+      // fallback view if no coords
       map.setView([59.3293, 18.0686], 10);
       ui.status.textContent = 'No coordinates found.';
-
-      ui.status.textContent = 'Preparing speed…';
-      const { labels, values } = computeSpeedSeriesFromLocation(locationRows || []);
-      makeLineChart(ui.speedCanvas, {
-        labels, values, label: 'Speed (km/h)', yTitle: 'km/h'
-      });
     }
 
-    // Acceleration panel (unchanged from your XYZ/magnitude logic)
+    // Speed chart
+    ui.status.textContent = 'Preparing speed…';
+    const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
+    const finiteSpeeds = speedValues.filter(v => Number.isFinite(v));
+    let yMin, yMax;
+    if (finiteSpeeds.length) {
+      yMin = Math.min(...finiteSpeeds) - 5;
+      yMax = Math.max(...finiteSpeeds) + 5;
+    }
+    makeLineChart(ui.speedCanvas, {
+      labels: speedLabels,
+      values: speedValues,
+      label: 'Speed (km/h)',
+      yTitle: 'km/h',
+      min: yMin,
+      max: yMax
+    });
+
+    // Acceleration: prefer Ax, Ay, Az from Accelerometer.csv; fallback to magnitude
     ui.status.textContent = 'Preparing acceleration…';
+
     const accelXYZ = computeAccelXYZSeries(accelRows);
     if (accelXYZ && accelXYZ.labels.length) {
-      const cBlue  = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim()  || '#3a86ff';
-      const cGreen = getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#38c172';
-      const cRed   = getComputedStyle(document.documentElement).getPropertyValue('--red').trim()   || '#ff4d4d';
+      const cBlue  = cssVar('--blue',  '#3a86ff');
+      const cGreen = cssVar('--green', '#38c172');
+      const cRed   = cssVar('--red',   '#ff4d4d');
 
+      // Symmetric Y range around zero with a small padding
       const all = [...accelXYZ.ax, ...accelXYZ.ay, ...accelXYZ.az].filter(Number.isFinite);
       let ymin, ymax;
       if (all.length) {
-        ymin = Math.min(...all); ymax = Math.max(...all);
+        ymin = Math.min(...all);
+        ymax = Math.max(...all);
         const pad = Math.max(0.3, (ymax - ymin) * 0.05);
         ymin -= pad; ymax += pad;
         if (ymin > 0) ymin = 0;
@@ -1068,41 +957,55 @@ async function processZipFile(file) {
       makeMultiLineChart(ui.accCanvas, {
         labels: accelXYZ.labels,
         yTitle: 'm/s²',
-        min: ymin, max: ymax,
+        min: ymin,
+        max: ymax,
         datasets: [
           { label: 'Ax', data: accelXYZ.ax, borderColor: cBlue,  pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
           { label: 'Ay', data: accelXYZ.ay, borderColor: cGreen, pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
           { label: 'Az', data: accelXYZ.az, borderColor: cRed,   pointRadius: 0, borderWidth: 1.2, tension: 0.12 },
         ]
       });
+
     } else {
+      // Fallback: magnitude from Accelerometer.csv (if available) else from TotalAcceleration.csv
       let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
+
       if ((!accValues || !accValues.length) && totalAccRows?.length) {
         const tk = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], totalAccRows[0]);
         const ak = pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
+
+        // Build relative-time labels for total acceleration as well
         const raw = [];
         for (const r of totalAccRows) {
-          let tms=null;
+          let tms = null;
           if (tk) {
             if (String(tk).toLowerCase().includes('elapsed')) {
-              const s = Number(r[tk]); if (Number.isFinite(s)) tms = s*1000;
+              const secs = Number(r[tk]);
+              if (Number.isFinite(secs)) tms = secs * 1000;
             } else {
-              const dt = parseTime(r[tk]); if (dt instanceof Date && !isNaN(dt)) tms = dt.getTime();
+              const dt = parseTime(r[tk]);
+              if (dt instanceof Date && !isNaN(dt)) tms = dt.getTime();
             }
           }
           const a = Number(r[ak]);
-          if (tms!=null && Number.isFinite(a)) raw.push({ t:tms, v: Math.max(0, a-9.81) });
+          if (tms != null && Number.isFinite(a)) {
+            raw.push({ t: tms, v: Math.max(0, a - 9.81) });
+          }
         }
         if (raw.length) {
           const t0 = raw[0].t;
-          const zipped = raw.map(p => ({ l: formatRel(p.t - t0), v: p.v }));
+          const zipped = raw.map(p => ({ l: fmtRel(p.t - t0), v: p.v }));
           const slim = decimate(zipped, 2000);
           accLabels = slim.map(x=>x.l);
           accValues = slim.map(x=>x.v);
-        } else { accLabels=[]; accValues=[]; }
+        } else {
+          accLabels = []; accValues = [];
+        }
       }
+
       makeLineChart(ui.accCanvas, {
-        labels: accLabels, values: accValues,
+        labels: accLabels || [],
+        values: accValues || [],
         label: 'Linear acceleration |a| (m/s²)',
         yTitle: 'm/s²'
       });
