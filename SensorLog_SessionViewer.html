@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sensor Sessions Viewer (ZIP → Map + Plots)</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- JSZip -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <!-- Papa Parse -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <!-- Chart.js (v4) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0e0f11;
+      --card: #17181b;
+      --muted: #a9b0bc;
+      --fg: #e7eaf0;
+      --accent: #4da3ff;
+      --blue: #3a86ff;
+      --red: #ff4d4d;
+      --green: #38c172;
+      --yellow: #ffcc00;
+      --border: #2a2d33;
+    }
+    * { box-sizing: border-box }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: linear-gradient(180deg, rgba(14,15,17,0.95), rgba(14,15,17,0.85) 60%, transparent);
+      backdrop-filter: blur(6px);
+      padding: 16px 16px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; letter-spacing: .2px }
+    #controls {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--card); color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 8px 12px; border-radius: 10px; cursor: pointer;
+    }
+    .btn:hover { border-color: #3b3f46 }
+    .hint { color: var(--muted); font-size: 12px }
+    .tiny { font-size: 11px; color: var(--muted) }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 16px;
+      padding: 16px;
+    }
+    .session {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .session header {
+      background: linear-gradient(180deg, #1b1d22, #17181b);
+      padding: 12px 14px; border-bottom: 1px solid var(--border);
+    }
+    .session-title { margin: 0; font-size: 15px; font-weight: 600 }
+    .session-body { padding: 12px; display: grid; gap: 12px }
+    .media-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .snap {
+      width: 100%; aspect-ratio: 4/3; object-fit: cover;
+      border-radius: 10px; border: 1px solid var(--border);
+      background: #0a0b0d;
+    }
+    .map {
+      width: 100%; height: 320px;
+      border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
+    }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    canvas {
+      width: 100%; height: 240px;
+      background: #101215; border: 1px solid var(--border); border-radius: 12px;
+      padding: 6px;
+    }
+    .status { font-size: 12px; color: var(--muted) }
+    .row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; flex-wrap: wrap;
+    }
+    .badge {
+      font-size: 11px; color: #000; background: var(--accent);
+      padding: 2px 8px; border-radius: 999px;
+    }
+    .legend {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      font-size: 12px; color: var(--muted);
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block }
+    .dot-blue { background: var(--blue) }
+    .dot-red { background: var(--red) }
+    .dot-yellow { background: var(--yellow) }
+    .dot-green { background: var(--green) }
+    footer {
+      text-align: center; padding: 16px; color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    a { color: var(--accent); text-decoration: none }
+    a:hover { text-decoration: underline }
+    input[type=file] { display:none }
+    #openFolderLabel::before, #openFilesLabel::before {
+      content: "📁"; filter: grayscale(100%); margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sensor Sessions Viewer</h1>
+    <div id="controls">
+      <label class="btn" id="openFolderLabel" title="Pick a folder with multiple ZIPs">
+        <input id="folderInput" type="file" webkitdirectory directory multiple accept=".zip"/>
+        Open folder of ZIPs
+      </label>
+      <label class="btn" id="openFilesLabel" title="Or pick several ZIP files">
+        <input id="filesInput" type="file" multiple accept=".zip"/>
+        Open ZIP files
+      </label>
+      <span class="hint">Each ZIP should look like your sample (Location.csv, TotalAcceleration.csv, Camera/*.jpg, etc.).</span>
+      <span class="tiny">OSM features fetched via Overpass; please don’t hammer it 🕊️</span>
+    </div>
+  </header>
+
+  <main class="grid" id="sessions"></main>
+
+  <footer>© Lynoit 2025</footer>
+
+<script>
+/** ------------------- Overpass setup (multiple mirrors + throttling) ------------------- */
+const OVERPASS_ENDPOINTS = [
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.nchc.org.tw/api/interpreter'
+];
+// simple queue: one query at a time with small delay
+let overpassQueue = Promise.resolve();
+function overpassFetch(query) {
+  const run = async () => {
+    for (const url of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: query, headers: { 'Content-Type': 'text/plain' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        return json;
+      } catch (e) {
+        console.warn('Overpass failed on', url, e);
+      }
+    }
+    throw new Error('All Overpass endpoints failed');
+  };
+  // chain: wait 500ms between requests to be nice
+  overpassQueue = overpassQueue.then(() => new Promise(r => setTimeout(r, 500))).then(run);
+  return overpassQueue;
+}
+
+/** ------------------- Utilities ------------------- */
+function slugWithoutExt(fileName) {
+  const base = fileName.split('/').pop();
+  return base.replace(/\.zip$/i, '');
+}
+function haversineMeters(a, b) {
+  const R = 6371008.8;
+  const toRad = deg => deg * Math.PI / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const sinDLat = Math.sin(dLat/2), sinDLon = Math.sin(dLon/2);
+  const h = sinDLat*sinDLat + Math.cos(lat1)*Math.cos(lat2)*sinDLon*sinDLon;
+  const c = 2 * Math.asin(Math.min(1, Math.sqrt(h)));
+  return R * c;
+}
+function parseTime(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') {
+    if (v > 1e12) return new Date(v);       // ms epoch
+    if (v > 1e9) return new Date(v * 1000); // s epoch
+    return new Date( (v + 1700000000) * 1000 ); // fallback (unlikely)
+  }
+  // numeric string?
+  const num = Number(v);
+  if (!Number.isNaN(num)) return parseTime(num);
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+function formatHHMMSS(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function pick(keys, obj) {
+  for (const k of keys) {
+    const found = Object.keys(obj).find(x => x.toLowerCase() === k.toLowerCase());
+    if (found) return found;
+  }
+  return null;
+}
+function decimate(xs, max=2000) {
+  if (xs.length <= max) return xs;
+  const step = Math.ceil(xs.length / max);
+  const out = [];
+  for (let i=0; i<xs.length; i+=step) out.push(xs[i]);
+  return out;
+}
+
+/** ------------------- ZIP parsing helpers ------------------- */
+async function loadCsvFromZip(zip, namePattern) {
+  // find first entry that matches pattern (case-insensitive)
+  const entries = Object.values(zip.files);
+  const entry = entries.find(e => !e.dir && namePattern.test(e.name));
+  if (!entry) return null;
+  const text = await entry.async('string');
+  const parse = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+  if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
+  return parse.data;
+}
+async function loadImagesFromZip(zip, max=2) {
+  const entries = Object.values(zip.files)
+    .filter(e => !e.dir && /\.(jpe?g|png|webp)$/i.test(e.name))
+    .sort((a,b) => a.name.localeCompare(b.name));
+  const out = [];
+  for (let i=0; i<entries.length && out.length<max; i++) {
+    const blob = await entries[i].async('blob');
+    out.push({ url: URL.createObjectURL(blob), name: entries[i].name });
+  }
+  return out;
+}
+
+/** ------------------- Data extraction per session ------------------- */
+function extractTrack(locationRows) {
+  if (!locationRows?.length) return null;
+  const sample = locationRows[0];
+  const latK = pick(['lat','latitude','y'], sample);
+  const lonK = pick(['lon','long','longitude','x'], sample);
+  const timeK = pick(['time','timestamp','datetime'], sample);
+  if (!latK || !lonK) return null;
+
+  const pts = [];
+  for (const row of locationRows) {
+    const lat = Number(row[latK]);
+    const lon = Number(row[lonK]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      const t = timeK ? parseTime(row[timeK]) : null;
+      pts.push({ lat, lon, t });
+    }
+  }
+  return pts.length ? pts : null;
+}
+
+function computeSpeedSeries(track) {
+  if (!track || track.length < 2) return { labels: [], values: [] };
+  const labels = [];
+  const values = [];
+  let prev = track[0];
+  for (let i=1; i<track.length; i++) {
+    const cur = track[i];
+    if (!prev.t || !cur.t) { prev = cur; continue; }
+    const dt = (cur.t - prev.t) / 1000; // seconds
+    const d = haversineMeters(prev, cur); // meters
+    if (dt > 0 && d >= 0) {
+      const speedKmh = (d / dt) * 3.6;
+      // reject insane spikes > 250 km/h unless dt big
+      if (speedKmh < 250 || dt > 5) {
+        labels.push(formatHHMMSS(cur.t));
+        values.push(speedKmh);
+      }
+    }
+    prev = cur;
+  }
+  // decimate if large
+  const zipped = labels.map((l,i) => ({ l, v: values[i] }));
+  const slim = decimate(zipped, 2000);
+  return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
+}
+
+function extractTotalAcc(totalAccRows, accelRows) {
+  // Prefer TotalAcceleration.csv; fallback to Accelerometer.csv magnitude
+  const rows = totalAccRows?.length ? totalAccRows : accelRows;
+  if (!rows?.length) return { labels: [], values: [] };
+  const sample = rows[0];
+  const timeK = pick(['time','timestamp','datetime'], sample);
+  const totK = pick(['total','magnitude','acc','accel','a_total'], sample);
+  const xK = pick(['x','ax'], sample);
+  const yK = pick(['y','ay'], sample);
+  const zK = pick(['z','az'], sample);
+
+  const labels = [];
+  const values = [];
+  for (const r of rows) {
+    const t = timeK ? parseTime(r[timeK]) : null;
+    let val = null;
+    if (totK && Number.isFinite(Number(r[totK]))) {
+      val = Number(r[totK]);
+    } else if (xK && yK && zK) {
+      const x = Number(r[xK]), y = Number(r[yK]), z = Number(r[zK]);
+      if ([x,y,z].every(Number.isFinite)) {
+        val = Math.sqrt(x*x + y*y + z*z);
+      }
+    }
+    if (val != null) {
+      labels.push(t ? formatHHMMSS(t) : String(labels.length));
+      values.push(val);
+    }
+  }
+  const zipped = labels.map((l,i) => ({ l, v: values[i] }));
+  const slim = decimate(zipped, 2000);
+  return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
+}
+
+/** ------------------- Map + OSM features ------------------- */
+function bboxForTrack(track, padMeters = 60) {
+  let minLat=  90, minLon= 180, maxLat= -90, maxLon= -180;
+  for (const p of track) {
+    if (p.lat<minLat) minLat=p.lat;
+    if (p.lat>maxLat) maxLat=p.lat;
+    if (p.lon<minLon) minLon=p.lon;
+    if (p.lon>maxLon) maxLon=p.lon;
+  }
+  // pad bbox by approx degrees
+  const padLat = padMeters / 111320; // deg per m
+  const midLat = (minLat+maxLat)/2;
+  const padLon = padMeters / (111320 * Math.cos(midLat*Math.PI/180));
+  return [minLat-padLat, minLon-padLon, maxLat+padLat, maxLon+padLon];
+}
+
+function overpassQueryForBBox(bbox) {
+  const [s,w,n,e] = bbox;
+  return `
+[out:json][timeout:25];
+(
+  node["highway"="traffic_signals"](${s},${w},${n},${e});
+  node["highway"="stop"](${s},${w},${n},${e});
+  node["highway"="motorway_junction"](${s},${w},${n},${e});
+  way["junction"="roundabout"](${s},${w},${n},${e});
+  relation["type"="multipolygon"]["junction"="roundabout"](${s},${w},${n},${e});
+);
+out center tags;
+  `.trim();
+}
+
+function addOsmFeaturesToMap(map, geojson, groupLayer) {
+  const els = geojson?.elements || [];
+  for (const el of els) {
+    let lat=null, lon=null, label='';
+    if (el.type === 'node') { lat = el.lat; lon = el.lon; }
+    else if (el.type === 'way' || el.type === 'relation') {
+      if (el.center) { lat = el.center.lat; lon = el.center.lon; }
+    }
+    const tags = el.tags || {};
+    if (tags.highway === 'traffic_signals') label = 'Traffic light';
+    else if (tags.highway === 'stop') label = 'Stop sign';
+    else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') label = 'Junction';
+    else if (tags.junction === 'roundabout') label = 'Roundabout';
+
+    if (lat!=null && lon!=null && label) {
+      const color =
+        label === 'Traffic light' ? '#ffcc00' :
+        label === 'Stop sign'     ? '#ff4d4d' :
+        label === 'Roundabout'    ? '#38c172' :
+                                    '#4da3ff';
+      const m = L.circleMarker([lat,lon], {
+        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      m.bindTooltip(label, { permanent: false, direction:'top', offset:[0,-6] });
+    }
+  }
+}
+
+/** ------------------- Chart helpers ------------------- */
+function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, suggestedMax}) {
+  const ctx = canvas.getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label,
+        data: values,
+        borderWidth: 1.5,
+        tension: 0.15,
+        pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: '#b9c0cc', maxTicksLimit: 8 }},
+        y: {
+          ticks: { color: '#b9c0cc' },
+          title: { display: true, text: yTitle, color: '#b9c0cc' },
+          suggestedMin, suggestedMax
+        }
+      },
+      plugins: {
+        legend: { display: false }
+      }
+    }
+  });
+}
+
+/** ------------------- Session UI ------------------- */
+function createSessionCard(sessionName) {
+  const wrap = document.createElement('section');
+  wrap.className = 'session';
+
+  const head = document.createElement('header');
+  const h = document.createElement('h2');
+  h.className = 'session-title';
+  h.textContent = sessionName;
+  head.appendChild(h);
+
+  const body = document.createElement('div');
+  body.className = 'session-body';
+
+  const media = document.createElement('div'); media.className = 'media-row';
+  const img1 = document.createElement('img'); img1.className='snap'; img1.alt='Snapshot 1';
+  const img2 = document.createElement('img'); img2.className='snap'; img2.alt='Snapshot 2';
+  media.append(img1, img2);
+
+  const map = document.createElement('div'); map.className='map';
+
+  const row = document.createElement('div'); row.className='row';
+  const legend = document.createElement('div'); legend.className='legend';
+  legend.innerHTML = `
+    <span><span class="dot dot-blue"></span> Trace</span>
+    <span><span class="dot dot-yellow"></span> Traffic light</span>
+    <span><span class="dot dot-red"></span> Stop sign</span>
+    <span><span class="dot dot-green"></span> Roundabout</span>
+    <span><span class="dot" style="background:#4da3ff"></span> Junction</span>
+  `;
+  const status = document.createElement('div'); status.className='status'; status.textContent = 'Loading…';
+  row.append(legend, status);
+
+  const charts = document.createElement('div'); charts.className='charts';
+  const speedCanvas = document.createElement('canvas');
+  const accCanvas = document.createElement('canvas');
+  charts.append(speedCanvas, accCanvas);
+
+  body.append(media, map, row, charts);
+  wrap.append(head, body);
+  return { wrap, img1, img2, map, status, speedCanvas, accCanvas };
+}
+
+/** ------------------- Main processing ------------------- */
+async function processZipFile(file) {
+  const sessionName = slugWithoutExt(file.name);
+  const ui = createSessionCard(sessionName);
+  document.getElementById('sessions').appendChild(ui.wrap);
+
+  try {
+    ui.status.textContent = 'Reading ZIP…';
+    const zip = await JSZip.loadAsync(file);
+
+    // images
+    const images = await loadImagesFromZip(zip, 2);
+    if (images[0]) ui.img1.src = images[0].url;
+    if (images[1]) ui.img2.src = images[1].url;
+
+    // CSVs
+    ui.status.textContent = 'Parsing CSVs…';
+    const [locationRows, totalAccRows, accelRows] = await Promise.all([
+      loadCsvFromZip(zip, /(^|\/)Location\.csv$/i),
+      loadCsvFromZip(zip, /(^|\/)TotalAcceleration\.csv$/i),
+      loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
+    ]);
+
+    // Track
+    const track = extractTrack(locationRows);
+    if (!track) {
+      ui.status.textContent = 'No coordinates found in Location.csv';
+      // Still draw empty map
+      const map = L.map(ui.map).setView([59.3293, 18.0686], 10);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19, attribution: '&copy; OpenStreetMap'
+      }).addTo(map);
+      return;
+    }
+
+    // Map + trace
+    ui.status.textContent = 'Rendering map…';
+    const map = L.map(ui.map);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+    const latlngs = track.map(p => [p.lat, p.lon]);
+    const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
+    map.fitBounds(poly.getBounds(), { padding: [16,16] });
+
+    // OSM features via Overpass (bbox around track)
+    ui.status.textContent = 'Fetching OSM road features…';
+    const bbox = bboxForTrack(track, 80);
+    const query = overpassQueryForBBox(bbox);
+    try {
+      const osm = await overpassFetch(query);
+      const layer = L.layerGroup().addTo(map);
+      addOsmFeaturesToMap(map, osm, layer);
+      ui.status.textContent = 'Done.';
+    } catch (e) {
+      console.warn('Overpass failed:', e);
+      ui.status.textContent = 'Trace rendered. Road features unavailable (Overpass error).';
+    }
+
+    // Speed chart (from GPS)
+    ui.status.textContent = 'Computing speed…';
+    const { labels: speedLabels, values: speedValues } = computeSpeedSeries(track);
+    makeLineChart(ui.speedCanvas, {
+      labels: speedLabels,
+      values: speedValues,
+      label: 'Speed (km/h)',
+      yTitle: 'km/h',
+      suggestedMin: 0,
+      suggestedMax: Math.max(60, Math.min(150, Math.ceil((Math.max(...speedValues)||60)/10)*10))
+    });
+
+    // Total acceleration chart
+    ui.status.textContent = 'Preparing acceleration…';
+    const { labels: accLabels, values: accValues } = extractTotalAcc(totalAccRows, accelRows);
+    makeLineChart(ui.accCanvas, {
+      labels: accLabels,
+      values: accValues,
+      label: 'Total acceleration (m/s²)',
+      yTitle: 'm/s²',
+      suggestedMin: 0 // magnitude; if you prefer signed, feed a different series
+    });
+
+    ui.status.textContent = 'Ready.';
+  } catch (err) {
+    console.error(err);
+    ui.status.textContent = 'Failed: ' + (err?.message || err);
+  }
+}
+
+/** ------------------- Inputs ------------------- */
+const folderInput = document.getElementById('folderInput');
+const filesInput  = document.getElementById('filesInput');
+
+function uniqueZipFilesFromFileList(fileList) {
+  const out = [];
+  const seen = new Set();
+  for (const f of fileList) {
+    if (!/\.zip$/i.test(f.name)) continue;
+    const key = f.webkitRelativePath || f.name;
+    if (!seen.has(key)) { seen.add(key); out.push(f); }
+  }
+  return out;
+}
+
+folderInput.addEventListener('change', async (e) => {
+  const files = uniqueZipFilesFromFileList(e.target.files);
+  if (!files.length) return;
+  // Clear previous
+  document.getElementById('sessions').innerHTML = '';
+  // Process sequentially to be nicer to Overpass
+  for (const f of files) await processZipFile(f);
+  folderInput.value = '';
+});
+
+filesInput.addEventListener('change', async (e) => {
+  const files = uniqueZipFilesFromFileList(e.target.files);
+  if (!files.length) return;
+  document.getElementById('sessions').innerHTML = '';
+  for (const f of files) await processZipFile(f);
+  filesInput.value = '';
+});
+</script>
+</body>
+</html>
