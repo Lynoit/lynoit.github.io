@@ -8,7 +8,7 @@
   <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <!-- PolylineDecorator for direction arrow (optional; we’ll fallback if unavailable) -->
+  <!-- PolylineDecorator for direction arrow -->
   <script src="https://unpkg.com/leaflet-polylinedecorator@1.7.0/dist/leaflet.polylineDecorator.min.js"></script>
 
   <!-- JSZip -->
@@ -114,7 +114,7 @@
       border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
     }
 
-    /* Charts stacked: speed on top, acceleration below */
+    /* CHARTS: stack vertically (speed on top, acceleration below) */
     .charts {
       display: flex;
       flex-direction: column;
@@ -122,7 +122,7 @@
     }
     canvas {
       width: 100%;
-      height: 140px;   /* compact charts */
+      height: 140px;   /* smaller charts */
       background: #101215; border: 1px solid var(--border); border-radius: 12px;
       padding: 4px;
     }
@@ -154,9 +154,16 @@
       box-shadow: 0 1px 2px rgba(0,0,0,0.3);
     }
 
-    /* Fallback arrow icon */
-    .dir-arrow { pointer-events: none; }
-    .dir-arrow svg { display: block; filter: drop-shadow(0 0 2px rgba(0,0,0,0.6)); }
+    footer {
+      text-align: center; padding: 16px; color: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    a { color: var(--accent); text-decoration: none }
+    a:hover { text-decoration: underline }
+    input[type=file] { display:none }
+    #openFolderLabel::before, #openFilesLabel::before {
+      content: "📁"; filter: grayscale(100%); margin-right: 6px;
+    }
   </style>
 </head>
 <body>
@@ -216,10 +223,10 @@ function slugWithoutExt(fileName) {
 function parseTime(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'number') {
-    if (v > 1e17) return new Date(v / 1e6);   // ns -> ms
-    if (v > 1e14) return new Date(v / 1e3);   // µs -> ms
-    if (v > 1e12) return new Date(v);         // ms
-    if (v > 1e9)  return new Date(v * 1000);  // s -> ms
+    if (v > 1e17) return new Date(v / 1e6);
+    if (v > 1e14) return new Date(v / 1e3);
+    if (v > 1e12) return new Date(v);
+    if (v > 1e9)  return new Date(v * 1000);
     return null;
   }
   const num = Number(v);
@@ -246,7 +253,7 @@ function decimate(xs, max=2000) {
   return out;
 }
 
-/* small vector helpers (meters) */
+/* small vector helpers for route projection (meters) */
 function toXY(lat, lon, lat0) {
   const R = 6371008.8;
   const x = (lon * Math.PI/180) * R * Math.cos(lat0 * Math.PI/180);
@@ -268,6 +275,7 @@ async function loadCsvFromZip(zip, namePattern) {
   if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
   return parse.data;
 }
+/* Load ALL images under Camera/ (case-insensitive) */
 async function loadAllCameraImagesFromZip(zip) {
   const out = [];
   const entries = Object.values(zip.files)
@@ -434,81 +442,104 @@ function colorizeTooltip(marker, color) {
   }, 0);
 }
 
-/* ---- Direction arrow helpers (fallback when PolylineDecorator is missing) ---- */
-function bearingDeg(lat1, lon1, lat2, lon2) {
-  const φ1 = lat1 * Math.PI/180, φ2 = lat2 * Math.PI/180;
-  const Δλ = (lon2 - lon1) * Math.PI/180;
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1)*Math.cos(φ2) + Math.sin(φ1)*Math.sin(φ2)*Math.cos(Δλ);
-  const θ = Math.atan2(y, x);
-  let deg = (θ * 180/Math.PI);
-  return (deg + 360) % 360;
-}
-function pointAlong(latlngs, fraction=0.85) {
-  if (!latlngs || latlngs.length < 2) return null;
+/* project a point to polyline to get chainage (meters from start) */
+function toXYChain(latlngs) {
   const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
   const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
-  const segLen = [];
-  let total = 0;
-  for (let i=0;i<xy.length-1;i++) {
-    const d = distMeters(xy[i], xy[i+1]);
-    segLen.push(d); total += d;
-  }
-  if (total === 0) return null;
-  const target = total * Math.min(1, Math.max(0, fraction));
-  let acc = 0;
-  for (let i=0;i<segLen.length;i++) {
-    const d = segLen[i];
-    if (acc + d >= target) {
-      const t = (target - acc) / d;
-      const a = latlngs[i], b = latlngs[i+1];
-      const lat = a[0] + (b[0]-a[0]) * t;
-      const lon = a[1] + (b[1]-a[1]) * t;
-      const hdg = bearingDeg(a[0], a[1], b[0], b[1]);
-      return { lat, lon, heading: hdg };
-    }
-    acc += d;
-  }
-  // fallback to last segment end
-  const a = latlngs[latlngs.length-2], b = latlngs[latlngs.length-1];
-  return { lat: b[0], lon: b[1], heading: bearingDeg(a[0], a[1], b[0], b[1]) };
+  const cum = [0];
+  for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
+  return { xy, cum, lat0 };
 }
-function addDirectionArrow(map, poly, latlngs) {
-  // Preferred: PolylineDecorator plugin
-  if (window.L && L.polylineDecorator && L.Symbol && typeof L.Symbol.arrowHead === 'function') {
-    try {
-      L.polylineDecorator(poly, {
-        patterns: [
-          {
-            offset: '85%',
-            repeat: 0,
-            symbol: L.Symbol.arrowHead({
-              pixelSize: 14,
-              headAngle: 60,
-              pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
-            })
-          }
-        ]
-      }).addTo(map);
-      return;
-    } catch (e) {
-      console.warn('PolylineDecorator present but failed, using fallback.', e);
+function projectChainage({xy, cum, lat0}, lat, lon) {
+  const p = toXY(lat, lon, lat0);
+  let best = { d: Infinity, s: 0 };
+  for (let i=0; i<xy.length-1; i++) {
+    const a = xy[i], b = xy[i+1];
+    const abx = b[0]-a[0], aby = b[1]-a[1];
+    const apx = p[0]-a[0], apy = p[1]-a[1];
+    const ab2 = abx*abx + aby*aby;
+    let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const proj = [a[0] + abx*t, a[1] + aby*t];
+    const d = distMeters(p, proj);
+    if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])) };
+  }
+  return best.s;
+}
+
+/* Add OSM features; speed-limit labels only on change along the route */
+function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
+  const els = geojson?.elements || [];
+  const others = [];
+  const speedWays = [];
+
+  for (const el of els) {
+    let lat=null, lon=null;
+    if (el.type === 'node') { lat = el.lat; lon = el.lon; }
+    else if ((el.type === 'way' || el.type === 'relation') && el.center) {
+      lat = el.center.lat; lon = el.center.lon;
+    }
+    if (lat==null || lon==null) continue;
+
+    const tags = el.tags || {};
+    if (tags.maxspeed) {
+      speedWays.push({ lat, lon, tags });
+    } else {
+      let label='', color='#4da3ff';
+      if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
+      else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
+      else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
+      else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
+      if (label) others.push({ lat, lon, label, color });
     }
   }
-  // Fallback: a small rotated SVG arrow marker at ~85% of route
-  const p = pointAlong(latlngs, 0.85);
-  if (!p) return;
-  const html = `
-    <svg width="22" height="22" viewBox="0 0 24 24" style="transform: rotate(${p.heading}deg);">
-      <polygon points="5,12 16,6 16,10 20,10 20,14 16,14 16,18" fill="#3a86ff"></polygon>
-    </svg>`;
-  const icon = L.divIcon({
-    className: 'dir-arrow',
-    html,
-    iconSize: [22,22],
-    iconAnchor: [11,11]
-  });
-  L.marker([p.lat, p.lon], { icon }).addTo(map);
+
+  /* draw non-speed features (always labeled) */
+  for (const f of others) {
+    const m = L.circleMarker([f.lat, f.lon], {
+      radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
+    }).addTo(groupLayer);
+    m.bindTooltip(f.label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+    colorizeTooltip(m, f.color);
+  }
+
+  /* handle speed limits: only label when value changes along route */
+  if (speedWays.length && latlngs?.length >= 2) {
+    const chain = toXYChain(latlngs);
+    const pts = speedWays.map(sw => {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      const s = projectChainage(chain, sw.lat, sw.lon);
+      return { lat: sw.lat, lon: sw.lon, v, color, s };
+    }).sort((a,b)=>a.s-b.s);
+
+    let prev = null;
+    for (const f of pts) {
+      const m = L.circleMarker([f.lat, f.lon], {
+        radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
+      if (changed) {
+        m.bindTooltip(`Speed limit: ${f.v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+        colorizeTooltip(m, f.color);
+        prev = f.v;
+      }
+      // if not changed, keep ring without label
+    }
+  } else {
+    // Fallback: no route context — label them all
+    for (const sw of speedWays) {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      const m = L.circleMarker([sw.lat, sw.lon], {
+        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      if (v != null) {
+        m.bindTooltip(`Speed limit: ${v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+        colorizeTooltip(m, color);
+      }
+    }
+  }
 }
 
 /* ------------------- Charts ------------------- */
@@ -658,8 +689,19 @@ async function processZipFile(file) {
       });
       colorizeTooltip(start, startColor);
 
-      /* Direction arrow: plugin if available, otherwise fallback SVG marker */
-      addDirectionArrow(map, poly, latlngs);
+      /* Direction arrow along the path */
+      try {
+        L.polylineDecorator(poly, {
+          patterns: [{
+            offset: '85%',
+            repeat: 0,
+            symbol: L.Symbol.arrowHead({
+              pixelSize: 14, headAngle: 60,
+              pathOptions: { color: '#3a86ff', weight: 2, opacity: 0.9 }
+            })
+          }]
+        }).addTo(map);
+      } catch (e) { console.warn('PolylineDecorator unavailable; skipping arrow.', e); }
 
       // OSM features via Overpass
       ui.status.textContent = 'Fetching OSM features…';
@@ -688,7 +730,6 @@ async function processZipFile(file) {
     if (sp.length) {
       yMin = Math.min(...sp) - 5;
       yMax = Math.max(...sp) + 5;
-      if (yMin === yMax) { yMin -= 5; yMax += 5; }  // guard for flat series
     }
     makeLineChart(ui.speedCanvas, {
       labels: speedLabels,
