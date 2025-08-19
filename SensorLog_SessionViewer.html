@@ -124,11 +124,11 @@
     .dot-green  { background: var(--green) }
     .dot-orange { background: var(--speedlimit) }
 
-    /* Base style for map labels; background/border are set dynamically to match dot color */
+    /* Base tooltip style; background/border are set dynamically per-dot via JS */
     .leaflet-tooltip.feature-tag {
-      background: rgba(0,0,0,0.75); /* will be overridden inline */
-      color: #000;                  /* set to dark text if you prefer */
-      border: 1px solid var(--border); /* will be overridden inline */
+      background: rgba(0,0,0,0.75);
+      color: #000;                  /* will be dark on colored backgrounds */
+      border: 1px solid var(--border);
       border-radius: 6px;
       padding: 2px 6px;
       font-size: 11px;
@@ -159,7 +159,7 @@
         <input id="filesInput" type="file" multiple accept=".zip"/>
         Open ZIP files
       </label>
-      <span class="hint">Each ZIP like your sample (Location.csv, Accelerometer.csv, Gravity.csv, Camera/*.jpg).</span>
+      <span class="hint">Each ZIP like your sample (Location.csv, Accelerometer.csv, TotalAcceleration.csv, Camera/*.jpg).</span>
       <span class="tiny">OSM features via Overpass; gentle throttling applied 🕊️</span>
     </div>
   </header>
@@ -196,13 +196,6 @@ function slugWithoutExt(fileName) {
   const base = fileName.split('/').pop();
   return base.replace(/\.zip$/i, '');
 }
-function haversineMeters(a, b) {
-  const R = 6371008.8, toRad = d => d * Math.PI / 180;
-  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
-  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
-  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-}
 function parseTime(v) {
   if (v == null || v === '') return null;
   if (typeof v === 'number') {
@@ -216,15 +209,6 @@ function parseTime(v) {
   if (!Number.isNaN(num)) return parseTime(num);
   const d = new Date(v);
   return isNaN(d) ? null : d;
-}
-function timeMs(row) {
-  if (!row) return null;
-  const raw = row.time ?? row.timestamp ?? row.datetime ?? row.seconds_elapsed;
-  if (raw == null) return null;
-  const d = (String(raw).toLowerCase().includes('e') || typeof raw === 'number' || /^\d+$/.test(String(raw)))
-    ? parseTime(raw)
-    : new Date(raw);
-  return d ? d.getTime() : null;
 }
 function formatHHMMSS(d) {
   const pad = n => String(n).padStart(2, '0');
@@ -316,42 +300,33 @@ function computeSpeedSeriesFromLocation(locationRows) {
   return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
 }
 
-/* ---- NEW: Linear acceleration (gravity-removed) from Accelerometer - Gravity ---- */
-function extractLinearAcc(accelRows, gravityRows) {
-  // If both present: combine vectors and compute |a - g|.
-  if (accelRows?.length && gravityRows?.length) {
-    const aTime = accelRows.map(r => timeMs(r));
-    const gTime = gravityRows.map(r => timeMs(r));
-    const axK = pick(['x','ax'], accelRows[0]) , ayK = pick(['y','ay'], accelRows[0]) , azK = pick(['z','az'], accelRows[0]);
-    const gxK = pick(['x','ax'], gravityRows[0]), gyK = pick(['y','ay'], gravityRows[0]), gzK = pick(['z','az'], gravityRows[0]);
+/* Linear acceleration magnitude directly from Accelerometer.csv (already gravity-free) */
+function computeLinearAccMagnitude(accelRows) {
+  if (!accelRows?.length) return { labels: [], values: [] };
+  const sample = accelRows[0];
+  const xK = pick(['x','ax'], sample);
+  const yK = pick(['y','ay'], sample);
+  const zK = pick(['z','az'], sample);
+  const tK = pick(['time','timestamp','datetime','seconds_elapsed'], sample);
+  if (!xK || !yK || !zK) return { labels: [], values: [] };
 
-    const labels = [], values = [];
-    let j = 0;
-    for (let i = 0; i < accelRows.length; i++) {
-      const tA = aTime[i];
-      if (tA == null) continue;
-      // advance gravity pointer to the nearest timestamp
-      while (j + 1 < gTime.length && Math.abs(tA - gTime[j+1]) <= Math.abs(tA - gTime[j])) j++;
-
-      const a = accelRows[i], g = gravityRows[j];
-      const ax = Number(a[axK]), ay = Number(a[ayK]), az = Number(a[azK]);
-      const gx = Number(g[gxK]), gy = Number(g[gyK]), gz = Number(g[gzK]);
-      if ([ax,ay,az,gx,gy,gz].every(Number.isFinite)) {
-        const lx = ax - gx, ly = ay - gy, lz = az - gz;
-        const mag = Math.sqrt(lx*lx + ly*ly + lz*lz);
-        labels.push(formatHHMMSS(new Date(tA)));
-        values.push(mag);
+  const labels = [], values = [];
+  for (const r of accelRows) {
+    const x = Number(r[xK]), y = Number(r[yK]), z = Number(r[zK]);
+    if ([x,y,z].every(Number.isFinite)) {
+      let t = null;
+      if (tK) {
+        t = String(tK).toLowerCase().includes('elapsed')
+          ? new Date(Number(r[tK]) * 1000)
+          : parseTime(r[tK]);
       }
+      labels.push(t ? formatHHMMSS(t) : String(labels.length));
+      values.push(Math.sqrt(x*x + y*y + z*z)); // |linear a|
     }
-    const zipped = labels.map((l,i) => ({ l, v: values[i] }));
-    const slim = decimate(zipped, 2000);
-    return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
   }
-
-  // Fallbacks:
-  // 1) If only TotalAcceleration.csv exists, approximate linear by (|a| - 9.81) clipped >= 0
-  // 2) Else compute |a| from Accelerometer.csv (still contains gravity)
-  return { labels: [], values: [] }; // We'll build below in process if needed
+  const zipped = labels.map((l,i) => ({ l, v: values[i] }));
+  const slim = decimate(zipped, 2000);
+  return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
 }
 
 /* ------------------- Map + OSM features ------------------- */
@@ -397,9 +372,8 @@ function getSpeedColor(maxspeedTag) {
   return '#38c172';
 }
 
-/* helper: color the tooltip background/border to match the marker color */
+/* make tooltip bg/border match marker color */
 function colorizeTooltip(marker, color) {
-  // Make sure tooltip exists in DOM (permanent tooltips are created sync, but ensure next tick)
   setTimeout(() => {
     const el = marker.getTooltip && marker.getTooltip() && marker.getTooltip().getElement
       ? marker.getTooltip().getElement()
@@ -407,8 +381,7 @@ function colorizeTooltip(marker, color) {
     if (el) {
       el.style.background = color;
       el.style.borderColor = color;
-      // Optional: adjust text color for contrast (light on dark)
-      el.style.color = '#000';
+      el.style.color = '#000'; // readable on bright colors
     }
   }, 0);
 }
@@ -546,11 +519,10 @@ async function processZipFile(file) {
 
     // CSVs
     ui.status.textContent = 'Parsing CSVs…';
-    const [locationRows, totalAccRows, accelRows, gravityRows] = await Promise.all([
+    const [locationRows, totalAccRows, accelRows] = await Promise.all([
       loadCsvFromZip(zip, /(^|\/)Location\.csv$/i),
       loadCsvFromZip(zip, /(^|\/)TotalAcceleration\.csv$/i),
-      loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i),
-      loadCsvFromZip(zip, /(^|\/)Gravity\.csv$/i)
+      loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
     // Track & map
@@ -566,7 +538,7 @@ async function processZipFile(file) {
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-      /* Start marker with label (label color matches marker color) */
+      /* Start marker + label (label matches marker color) */
       const startColor = '#00e676';
       const startLatLng = latlngs[0];
       const start = L.circleMarker(startLatLng, {
@@ -625,33 +597,32 @@ async function processZipFile(file) {
       yTitle: 'km/h'
     });
 
-    // Linear acceleration (gravity removed)
+    // Acceleration: linear (already gravity-free) from Accelerometer.csv; fallback to TotalAcceleration - 9.81
     ui.status.textContent = 'Preparing acceleration…';
-    let { labels: accLabels, values: accValues } = extractLinearAcc(accelRows, gravityRows);
+    let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
     if ((!accValues || !accValues.length) && totalAccRows?.length) {
-      // Fallback: approximate from TotalAcceleration by subtracting g
-      const timeK = pick(['time','timestamp','datetime','seconds_elapsed'], totalAccRows[0]);
-      const totK  = pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
-      if (totK) {
-        const lbl = [], val = [];
-        for (const r of totalAccRows) {
-          const t = timeK ? (String(timeK).toLowerCase().includes('elapsed') ? new Date(Number(r[timeK]) * 1000) : parseTime(r[timeK])) : null;
-          const a = Number(r[totK]);
-          if (Number.isFinite(a)) {
-            lbl.push(t ? formatHHMMSS(t) : String(lbl.length));
-            val.push(Math.max(0, a - 9.81));
-          }
+      const tk = pick(['time','timestamp','datetime','seconds_elapsed'], totalAccRows[0]);
+      const ak = pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
+      const lbl = [], val = [];
+      for (const r of totalAccRows) {
+        const t = tk
+          ? (String(tk).toLowerCase().includes('elapsed') ? new Date(Number(r[tk])*1000) : parseTime(r[tk]))
+          : null;
+        const a = Number(r[ak]);
+        if (Number.isFinite(a)) {
+          lbl.push(t ? formatHHMMSS(t) : String(lbl.length));
+          val.push(Math.max(0, a - 9.81));
         }
-        const zipped = lbl.map((l,i) => ({ l, v: val[i] }));
-        const slim = decimate(zipped, 2000);
-        accLabels = slim.map(x=>x.l);
-        accValues = slim.map(x=>x.v);
       }
+      const zipped = lbl.map((l,i)=>({l, v: val[i]}));
+      const slim = decimate(zipped, 2000);
+      accLabels = slim.map(x=>x.l);
+      accValues = slim.map(x=>x.v);
     }
     makeLineChart(ui.accCanvas, {
       labels: accLabels || [],
       values: accValues || [],
-      label: 'Linear acceleration |a − g| (m/s²)',
+      label: 'Linear acceleration |a| (m/s²)',
       yTitle: 'm/s²',
       beginAtZero: true
     });
