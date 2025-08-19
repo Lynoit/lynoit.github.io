@@ -250,6 +250,20 @@ function decimate(xs, max=2000) {
   return out;
 }
 
+/* NEW: per-session autoscale helper for charts */
+function autoscaleBounds(values, padPct = 0.08) {
+  const arr = (values || []).filter(v => Number.isFinite(v));
+  if (!arr.length) return {};
+  let vmin = Math.min(...arr);
+  let vmax = Math.max(...arr);
+  if (vmax === vmin) { // flat line — add breathing room
+    const pad = Math.max(1, Math.abs(vmin) * padPct || 1);
+    return { min: vmin - pad, max: vmax + pad };
+  }
+  const pad = (vmax - vmin) * padPct;
+  return { min: vmin - pad, max: vmax + pad };
+}
+
 /* small vector helpers for route projection (meters) */
 function toXY(lat, lon, lat0) {
   const R = 6371008.8;
@@ -277,7 +291,7 @@ async function loadAllCameraImagesFromZip(zip) {
   const out = [];
   const entries = Object.values(zip.files)
     .filter(e => !e.dir && /\.(jpe?g|png|webp)$/i.test(e.name))
-    .filter(e => /(^|\/)camera\//i.test(e.name)); // in Camera/ folder
+    .filter(e => /(^|\/)camera\//i.test(e.name));
   entries.sort((a,b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     const blob = await entry.async('blob');
@@ -440,31 +454,28 @@ function colorizeTooltip(marker, color) {
 }
 
 /* project a point to polyline to get chainage (meters from start) */
-function computeChainages(latlngs, featurePoints) {
-  if (!latlngs?.length) return [];
+function toXYChain(latlngs) {
   const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
   const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
   const cum = [0];
   for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
-
-  function project(lat, lon) {
-    const p = toXY(lat, lon, lat0);
-    let best = { d: Infinity, s: 0, t: 0, i: 0 };
-    for (let i=0; i<xy.length-1; i++) {
-      const a = xy[i], b = xy[i+1];
-      const abx = b[0]-a[0], aby = b[1]-a[1];
-      const apx = p[0]-a[0], apy = p[1]-a[1];
-      const ab2 = abx*abx + aby*aby;
-      let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
-      t = Math.max(0, Math.min(1, t));
-      const proj = [a[0] + abx*t, a[1] + aby*t];
-      const d = distMeters(p, proj);
-      if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])), t, i };
-    }
-    return best.s; // chainage in meters
+  return { xy, cum, lat0 };
+}
+function projectChainage({xy, cum}, lat0, lat, lon) {
+  const p = toXY(lat, lon, lat0);
+  let best = { d: Infinity, s: 0 };
+  for (let i=0; i<xy.length-1; i++) {
+    const a = xy[i], b = xy[i+1];
+    const abx = b[0]-a[0], aby = b[1]-a[1];
+    const apx = p[0]-a[0], apy = p[1]-a[1];
+    const ab2 = abx*abx + aby*aby;
+    let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const proj = [a[0] + abx*t, a[1] + aby*t];
+    const d = distMeters(p, proj);
+    if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])) };
   }
-
-  return featurePoints.map(fp => ({ ...fp, chainage: project(fp.lat, fp.lon) }));
+  return best.s;
 }
 
 /* Add OSM features; speed-limit labels only on change along the route */
@@ -505,19 +516,19 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
 
   /* handle speed limits: only label when value changes along route */
   if (speedWays.length && latlngs?.length >= 2) {
+    const chain = toXYChain(latlngs);
     const pts = speedWays.map(sw => {
       const v = parseMaxspeedToKmh(sw.tags.maxspeed);
       const color = getSpeedColor(v ?? sw.tags.maxspeed);
-      return { lat: sw.lat, lon: sw.lon, v, color, label: v!=null ? `Speed limit: ${v}` : `Speed limit` };
-    });
+      const s = projectChainage(chain, chain.lat0, sw.lat, sw.lon);
+      return { lat: sw.lat, lon: sw.lon, v, color, s };
+    }).sort((a,b)=>a.s-b.s);
 
-    const withChain = computeChainages(latlngs, pts).sort((a,b)=>a.chainage-b.chainage);
     let prev = null;
-    for (const f of withChain) {
+    for (const f of pts) {
       const m = L.circleMarker([f.lat, f.lon], {
         radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
       }).addTo(groupLayer);
-
       const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
       if (changed) {
         m.bindTooltip(`Speed limit: ${f.v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
@@ -543,14 +554,16 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
 }
 
 /* ------------------- Charts ------------------- */
-function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, suggestedMax, beginAtZero}) {
+function makeLineChart(canvas, {labels, values, label, yTitle, min, max, suggestedMin, suggestedMax, beginAtZero}) {
   const y = {
     ticks: { color: '#b9c0cc' },
     title: { display: true, text: yTitle, color: '#b9c0cc' }
   };
   if (beginAtZero === true) y.beginAtZero = true;
-  if (Number.isFinite(suggestedMin)) y.suggestedMin = suggestedMin;
-  if (Number.isFinite(suggestedMax)) y.suggestedMax = suggestedMax;
+  if (Number.isFinite(min)) y.min = min;
+  if (Number.isFinite(max)) y.max = max;
+  if (!Number.isFinite(min) && Number.isFinite(suggestedMin)) y.suggestedMin = suggestedMin;
+  if (!Number.isFinite(max) && Number.isFinite(suggestedMax)) y.suggestedMax = suggestedMax;
 
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
@@ -726,14 +739,17 @@ async function processZipFile(file) {
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed: use Location.csv speed (m/s → km/h), autoscale Y
+    // Speed: use Location.csv speed (m/s → km/h), with PER-SESSION autoscale
     ui.status.textContent = 'Preparing speed…';
     const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
+    const { min: yMin, max: yMax } = autoscaleBounds(speedValues, 0.10); // 10% padding
     makeLineChart(ui.speedCanvas, {
       labels: speedLabels,
       values: speedValues,
       label: 'Speed (km/h)',
-      yTitle: 'km/h'
+      yTitle: 'km/h',
+      min: yMin,
+      max: yMax
     });
 
     // Acceleration: linear (already gravity-free) from Accelerometer.csv; fallback to TotalAcceleration - 9.81
