@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Sensor Sessions Viewer (ZIP → Map + Plots)</title>
+<title>Sensor Sessions Viewer (robust speed/accel parsing)</title>
 
 <!-- Leaflet -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -20,47 +20,34 @@
 
 <style>
   :root {
-    --bg: #0e0f11; --card: #17181b; --muted: #a9b0bc; --fg: #e7eaf0;
-    --accent:#4da3ff; --blue:#3a86ff; --red:#ff4d4d; --green:#38c172; --yellow:#ffcc00; --speedlimit:#ff8800;
-    --border:#2a2d33;
+    --bg:#0e0f11; --card:#17181b; --muted:#a9b0bc; --fg:#e7eaf0; --accent:#4da3ff;
+    --blue:#3a86ff; --red:#ff4d4d; --green:#38c172; --yellow:#ffcc00; --speedlimit:#ff8800; --border:#2a2d33;
   }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Noto Sans",sans-serif}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Noto Sans",sans-serif}
   header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,rgba(14,15,17,.95),rgba(14,15,17,.85) 60%,transparent);backdrop-filter:blur(6px);padding:16px 16px 8px;border-bottom:1px solid var(--border)}
   h1{margin:0 0 8px;font-size:18px;font-weight:600}
   #controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
   .btn{display:inline-flex;align-items:center;gap:8px;background:var(--card);color:var(--fg);border:1px solid var(--border);padding:8px 12px;border-radius:10px;cursor:pointer}
-  .btn:hover{border-color:#3b3f46}
-  .hint{color:var(--muted);font-size:12px}
-  .tiny{font-size:11px;color:var(--muted)}
-  input[type=file]{display:none}
-  #openFolderLabel::before,#openFilesLabel::before{content:"📁";filter:grayscale(100%);margin-right:6px}
-
+  .btn:hover{border-color:#3b3f46} .hint{color:var(--muted);font-size:12px} .tiny{font-size:11px;color:var(--muted)}
+  input[type=file]{display:none} #openFolderLabel::before,#openFilesLabel::before{content:"📁";filter:grayscale(100%);margin-right:6px}
   .grid{display:flex;flex-direction:column;gap:20px;padding:16px}
-
   .session{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
   .session header{background:linear-gradient(180deg,#1b1d22,#17181b);padding:12px 14px;border-bottom:1px solid var(--border)}
   .session-title{margin:0;font-size:15px;font-weight:600}
   .session-body{padding:12px;display:grid;gap:12px}
-
   .gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
   .thumb{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:10px;border:1px solid var(--border);background:#0a0b0d;cursor:pointer}
   .thumb:hover{filter:brightness(1.05)}
-
   .map{width:100%;height:320px;border-radius:12px;border:1px solid var(--border);overflow:hidden}
-
   .charts{display:flex;flex-direction:column;gap:8px}
   canvas{width:100%;height:140px;background:#101215;border:1px solid var(--border);border-radius:12px;padding:4px}
-
   .row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
   .status{font-size:12px;color:var(--muted)}
   .legend{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}
   .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
   .dot-blue{background:var(--blue)} .dot-red{background:var(--red)} .dot-yellow{background:var(--yellow)} .dot-green{background:var(--green)} .dot-orange{background:var(--speedlimit)}
-
   .leaflet-tooltip.feature-tag{background:rgba(0,0,0,.75);color:#000;border:1px solid var(--border);border-radius:6px;padding:2px 6px;font-size:11px;box-shadow:0 1px 2px rgba(0,0,0,.3)}
-  .dir-arrow{pointer-events:none}
-  .dir-arrow svg{display:block;filter:drop-shadow(0 0 2px rgba(0,0,0,.6))}
+  .dir-arrow{pointer-events:none} .dir-arrow svg{display:block;filter:drop-shadow(0 0 2px rgba(0,0,0,.6))}
 </style>
 </head>
 <body>
@@ -70,7 +57,7 @@
     <label class="btn" id="openFolderLabel"><input id="folderInput" type="file" webkitdirectory directory multiple accept=".zip"/>Open folder of ZIPs</label>
     <label class="btn" id="openFilesLabel"><input id="filesInput" type="file" multiple accept=".zip"/>Open ZIP files</label>
     <span class="hint">ZIP must include Location.csv, Accelerometer.csv, TotalAcceleration.csv, Camera/*.jpg</span>
-    <span class="tiny">OSM features fetched with CORS-safe fallbacks.</span>
+    <span class="tiny">Charts render even if OSM is rate-limited.</span>
   </div>
 </header>
 
@@ -84,127 +71,274 @@
 <footer style="text-align:center;padding:16px;color:var(--muted);border-top:1px solid var(--border)">© Lynoit 2025</footer>
 
 <script>
-/* ---------- Overpass with CORS fallbacks (not blocking charts) ---------- */
+/* ===================== Robust column matching helpers ===================== */
+function findColByRegex(obj, patterns) {
+  const keys = Object.keys(obj || {});
+  for (const p of patterns) {
+    const rx = typeof p === 'string' ? new RegExp(p, 'i') : p;
+    const k = keys.find(key => rx.test(key));
+    if (k) return k;
+  }
+  return null;
+}
+function detectTimeKey(sample) {
+  return findColByRegex(sample, [
+    /^time$/i, /^timestamp$/i, /^datetime$/i, /utc/i, /epoch/i,
+    /seconds?_?elapsed/i, /elapsed/i, /time.*since/i, /^t$/i
+  ]);
+}
+function timeLabel(row, tKey, idx) {
+  if (!tKey) return String(idx);
+  const isElapsed = /elapsed|epoch|^t$/i.test(tKey);
+  const raw = row[tKey];
+  let d = null;
+  if (isElapsed && Number.isFinite(+raw)) d = new Date(+raw * (raw < 1e7 ? 1000 : 1)); // seconds→ms if small
+  else {
+    const n = Number(raw);
+    if (!Number.isNaN(n)) {
+      if (n > 1e17) d = new Date(n/1e6);  // ns
+      else if (n > 1e14) d = new Date(n/1e3); // µs
+      else if (n > 1e12) d = new Date(n);    // ms
+      else if (n > 1e9)  d = new Date(n*1000); // s
+    } else {
+      const tmp = new Date(raw);
+      if (!isNaN(tmp)) d = tmp;
+    }
+  }
+  if (!d) return String(idx);
+  const pad = n => String(n).padStart(2,'0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/* ===================== ZIP helpers ===================== */
+async function loadCsvFromZip(zip, namePattern) {
+  const entry = Object.values(zip.files).find(e => !e.dir && namePattern.test(e.name));
+  if (!entry) return null;
+  const text = await entry.async('string');
+  const parse = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+  if (parse.errors?.length) console.warn('CSV parse issues', parse.errors.slice(0,3));
+  return parse.data;
+}
+async function loadAllCameraImagesFromZip(zip) {
+  const out = [];
+  const entries = Object.values(zip.files)
+    .filter(e => !e.dir && /\.(jpe?g|png|webp)$/i.test(e.name))
+    .filter(e => /(^|\/)camera\//i.test(e.name))
+    .sort((a,b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const blob = await entry.async('blob');
+    out.push({ url: URL.createObjectURL(blob), name: entry.name });
+  }
+  return out;
+}
+
+/* ===================== Track + Haversine speed fallback ===================== */
+function toRad(x){return x*Math.PI/180}
+function haversineMeters(a,b){
+  const R=6371000, dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon);
+  const s=Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+function extractTrack(locationRows) {
+  if (!locationRows?.length) return null;
+  const s = locationRows[0];
+  const latK = findColByRegex(s, [/^lat$|latitude|y/i]);
+  const lonK = findColByRegex(s, [/^lon$|^long$|longitude|x/i]);
+  const tK   = detectTimeKey(s);
+  if (!latK || !lonK) return null;
+  const pts = [];
+  for (const r of locationRows) {
+    const lat = Number(r[latK]), lon = Number(r[lonK]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    pts.push({ lat, lon, rawT: r[tK], tK });
+  }
+  return pts.length ? pts : null;
+}
+
+/* ===================== SPEED (robust) ===================== */
+function detectSpeedKey(sample) {
+  // Prefer exact "speed" first, then variants
+  return findColByRegex(sample, [
+    /^speed$/i,
+    /^speed[^a-z0-9]/i,         // e.g., "Speed (m/s)"
+    /(?:^|_)speed(?:_|$)/i,     // speed_mps
+    /\bkmh\b|\bkph\b/i,
+    /\bvelocity\b/i,
+    /\bmph\b/i
+  ]);
+}
+function inferSpeedUnitFromHeader(key) {
+  if (!key) return 'mps'; // best guess
+  const k = key.toLowerCase();
+  if (k.includes('km/h') || k.includes('kmh') || k.includes('kph')) return 'kmh';
+  if (k.includes('mph')) return 'mph';
+  return 'mps';
+}
+function convertToKmh(v, unit) {
+  if (!Number.isFinite(v)) return NaN;
+  if (unit === 'kmh') return v;
+  if (unit === 'mph') return v * 1.60934;
+  return v * 3.6; // assume m/s
+}
+function computeSpeedSeries(locationRows) {
+  if (!locationRows?.length) return { labels: [], values: [], meta: { source: 'none' } };
+  const s = locationRows[0];
+  const tK = detectTimeKey(s);
+  const spK = detectSpeedKey(s);
+
+  // First attempt: direct speed column
+  if (spK) {
+    const unit = inferSpeedUnitFromHeader(spK);
+    const rows = [];
+    for (let i=0;i<locationRows.length;i++) {
+      const r = locationRows[i];
+      const v = convertToKmh(Number(r[spK]), unit);
+      if (Number.isFinite(v)) rows.push({ l: timeLabel(r, tK, i), v });
+    }
+    if (rows.length) {
+      console.debug('Speed source: column', { spK, unit, points: rows.length });
+      return {
+        labels: rows.map(o=>o.l),
+        values: rows.map(o=>o.v),
+        meta: { source: 'column', key: spK, unit }
+      };
+    }
+  }
+
+  // Fallback: derive from GPS (distance / dt)
+  const latK = findColByRegex(s, [/^lat$|latitude|y/i]);
+  const lonK = findColByRegex(s, [/^lon$|^long$|longitude|x/i]);
+  if (latK && lonK && tK) {
+    const pts = [];
+    for (let i=0;i<locationRows.length;i++){
+      const r = locationRows[i];
+      const lat = Number(r[latK]), lon = Number(r[lonK]);
+      const label = timeLabel(r, tK, i);
+      pts.push({ lat, lon, label, raw: r[tK] });
+    }
+    const times = pts.map(p => {
+      const raw = p.raw;
+      const n = Number(raw);
+      if (!Number.isNaN(n)) {
+        if (n > 1e17) return n/1e6;
+        if (n > 1e14) return n/1e3;
+        if (n > 1e12) return n;
+        if (n > 1e9)  return n*1000;
+      }
+      const d = new Date(raw); return +d;
+    });
+
+    const labels = [], values = [];
+    for (let i=1;i<pts.length;i++){
+      const dtMs = times[i] - times[i-1];
+      if (!Number.isFinite(dtMs) || dtMs <= 0) continue;
+      const dM = haversineMeters(pts[i-1], pts[i]);
+      const vKmh = (dM / (dtMs/1000)) * 3.6;
+      if (Number.isFinite(vKmh)) {
+        labels.push(pts[i].label);
+        values.push(vKmh);
+      }
+    }
+    if (values.length) {
+      console.debug('Speed source: GPS derived', { points: values.length });
+      return { labels, values, meta: { source: 'gps' } };
+    }
+  }
+
+  console.warn('No speed data found.');
+  return { labels: [], values: [], meta: { source: 'none' } };
+}
+
+/* ===================== ACCELERATION (robust) ===================== */
+function detectAccelKeys(sample) {
+  // Try many common names for linear/user acceleration
+  const x = findColByRegex(sample, [/^(ax|x)$/i, /user.*accel.*x/i, /linear.*accel.*x/i, /accel.*x/i, /acceleration.*x/i]);
+  const y = findColByRegex(sample, [/^(ay|y)$/i, /user.*accel.*y/i, /linear.*accel.*y/i, /accel.*y/i, /acceleration.*y/i]);
+  const z = findColByRegex(sample, [/^(az|z)$/i, /user.*accel.*z/i, /linear.*accel.*z/i, /accel.*z/i, /acceleration.*z/i]);
+  return { x, y, z };
+}
+function computeLinearAccMagnitude(accelRows) {
+  if (!accelRows?.length) return { labels: [], values: [], meta: { source: 'none' } };
+  const s = accelRows[0];
+  const tK = detectTimeKey(s);
+  const { x, y, z } = detectAccelKeys(s);
+  if (!(x && y && z)) return { labels: [], values: [], meta: { source: 'none' } };
+
+  const rows = [];
+  for (let i=0;i<accelRows.length;i++){
+    const r = accelRows[i];
+    const ax = Number(r[x]), ay = Number(r[y]), az = Number(r[z]);
+    if ([ax,ay,az].every(Number.isFinite)) {
+      rows.push({ l: timeLabel(r, tK, i), v: Math.sqrt(ax*ax + ay*ay + az*az) });
+    }
+  }
+  return {
+    labels: rows.map(o=>o.l),
+    values: rows.map(o=>o.v),
+    meta: { source: 'accelerometer', keys: {x,y,z} }
+  };
+}
+
+/* ===================== Charts ===================== */
+function decimate(xs, max=2000){ if(xs.length<=max) return xs; const step=Math.ceil(xs.length/max); const out=[]; for(let i=0;i<xs.length;i+=step) out.push(xs[i]); return out; }
+function makeLineChart(canvas, {labels, values, yTitle, min, max, beginAtZero}) {
+  return new Chart(canvas.getContext('2d'), {
+    type:'line',
+    data:{ labels, datasets:[{ data: values, borderWidth:1.2, tension:.12, pointRadius:0 }] },
+    options:{
+      responsive:true, maintainAspectRatio:false, parsing:false, animation:false,
+      scales:{
+        x:{ ticks:{ color:'#b9c0cc', maxTicksLimit:6 } },
+        y:{ type:'linear', bounds:'ticks', grace:0,
+            min: Number.isFinite(min)?min:undefined,
+            max: Number.isFinite(max)?max:undefined,
+            beginAtZero: beginAtZero===true,
+            ticks:{ color:'#b9c0cc' },
+            title:{ display:true, text:yTitle, color:'#b9c0cc' } }
+      },
+      plugins:{ legend:{ display:false } }
+    }
+  });
+}
+
+/* ===================== OSM (non-blocking; rate-limit safe) ===================== */
 const OVERPASS_MIRRORS = [
-  { url: 'https://overpass-api.de/api/interpreter', method: 'GET' },
-  { url: 'https://overpass.kumi.systems/api/interpreter', method: 'GET' },
-  { url: 'https://overpass.nchc.org.tw/api/interpreter', method: 'GET' },
-  { url: 'https://overpass-api.de/api/interpreter', method: 'POST' },
-  { url: 'https://overpass.kumi.systems/api/interpreter', method: 'POST' },
-  { url: 'https://overpass.nchc.org.tw/api/interpreter', method: 'POST' },
+  { url:'https://overpass-api.de/api/interpreter', method:'GET' },
+  { url:'https://overpass.kumi.systems/api/interpreter', method:'GET' },
+  { url:'https://overpass.nchc.org.tw/api/interpreter', method:'GET' },
+  { url:'https://overpass-api.de/api/interpreter', method:'POST' },
 ];
 const OVERPASS_PROXIES = [
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://cors.isomorphic-git.org/${u}`,
+  (u)=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u)=>`https://cors.isomorphic-git.org/${u}`,
 ];
 let overpassQueue = Promise.resolve();
-
 async function overpassTry(url, method, query) {
-  const headers = { 'Accept': 'application/json' };
-  let res;
-  if (method === 'GET') res = await fetch(`${url}?data=${encodeURIComponent(query)}`, { headers });
-  else res = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=UTF-8',...headers}, body:query });
+  const headers = { 'Accept':'application/json' };
+  const full = method==='GET' ? `${url}?data=${encodeURIComponent(query)}` : url;
+  const res = await fetch(method==='GET' ? full : url, {
+    method, headers: method==='GET'? headers : { 'Content-Type':'text/plain;charset=UTF-8', ...headers },
+    body: method==='GET'? undefined : query
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.json();
+  return res.json();
 }
 function overpassFetch(query) {
   const run = async () => {
-    for (const m of OVERPASS_MIRRORS) {
-      try { return await overpassTry(m.url, m.method, query); }
-      catch(e){ console.warn('Overpass failed on', m.url, e); }
-    }
+    for (const m of OVERPASS_MIRRORS) { try { return await overpassTry(m.url, m.method, query); } catch(e){ console.warn('Overpass failed on', m.url, e); } }
     for (const m of OVERPASS_MIRRORS.filter(x=>x.method==='GET')) {
       const full = `${m.url}?data=${encodeURIComponent(query)}`;
       for (const wrap of OVERPASS_PROXIES) {
-        try {
-          const res = await fetch(wrap(full), { headers:{'Accept':'application/json'} });
-          if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
-          return await res.json();
-        } catch(e){ console.warn('Overpass via proxy failed', wrap(full), e); }
+        try { const res = await fetch(wrap(full)); if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`); return await res.json(); }
+        catch(e){ console.warn('Overpass via proxy failed', wrap(full), e); }
       }
     }
     throw new Error('All Overpass attempts failed');
   };
-  overpassQueue = overpassQueue.then(()=>new Promise(r=>setTimeout(r,400))).then(run);
+  overpassQueue = overpassQueue.then(()=>new Promise(r=>setTimeout(r,500))).then(run);
   return overpassQueue;
 }
-
-/* ---------- Utils ---------- */
-function slugWithoutExt(name){return (name||'').split('/').pop().replace(/\.zip$/i,'');}
-function parseTime(v){
-  if (v==null||v==='') return null;
-  if (typeof v==='number'){ if(v>1e17)return new Date(v/1e6); if(v>1e14)return new Date(v/1e3); if(v>1e12)return new Date(v); if(v>1e9)return new Date(v*1000); return null; }
-  const n=Number(v); if(!Number.isNaN(n)) return parseTime(n);
-  const d=new Date(v); return isNaN(d)?null:d;
-}
-function tLabelFromRow(row, tKey, idx){
-  if (!tKey) return String(idx);
-  const raw = row[tKey];
-  const isElapsed = /elapsed/.test(String(tKey).toLowerCase());
-  const d = isElapsed ? new Date(Number(raw)*1000) : parseTime(raw);
-  if (!d) return String(idx);
-  const pad = n=>String(n).padStart(2,'0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-function pick(keys,obj){for(const k of keys){const f=Object.keys(obj).find(x=>x.toLowerCase()===k.toLowerCase()); if(f) return f;} return null;}
-function decimate(xs,max=2000){ if(xs.length<=max) return xs; const step=Math.ceil(xs.length/max); const out=[]; for(let i=0;i<xs.length;i+=step) out.push(xs[i]); return out; }
-function toXY(lat,lon,lat0){ const R=6371008.8; return [(lon*Math.PI/180)*R*Math.cos(lat0*Math.PI/180),(lat*Math.PI/180)*R]; }
-function distMeters(a,b){const dx=a[0]-b[0],dy=a[1]-b[1]; return Math.hypot(dx,dy);}
-
-/* ---------- ZIP helpers ---------- */
-async function loadCsvFromZip(zip, re){ const e=Object.values(zip.files).find(f=>!f.dir && re.test(f.name)); if(!e) return null; const txt=await e.async('string'); const p=Papa.parse(txt,{header:true,dynamicTyping:true,skipEmptyLines:true}); if(p.errors?.length) console.warn('CSV parse issues', p.errors.slice(0,3)); return p.data; }
-async function loadAllCameraImagesFromZip(zip){
-  const out=[]; const entries=Object.values(zip.files).filter(e=>!e.dir && /\.(jpe?g|png|webp)$/i.test(e.name)).filter(e=>/(^|\/)camera\//i.test(e.name));
-  entries.sort((a,b)=>a.name.localeCompare(b.name));
-  for (const entry of entries){ const blob=await entry.async('blob'); out.push({url:URL.createObjectURL(blob), name:entry.name}); }
-  return out;
-}
-
-/* ---------- Series builders ---------- */
-function extractTrack(locationRows){
-  if (!locationRows?.length) return null;
-  const s=locationRows[0];
-  const latK=pick(['lat','latitude','y'],s), lonK=pick(['lon','long','longitude','x'],s);
-  if(!latK||!lonK) return null;
-  const tK=pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], s);
-  const pts=[];
-  for (const r of locationRows){
-    const lat=Number(r[latK]), lon=Number(r[lonK]);
-    if (!Number.isFinite(lat)||!Number.isFinite(lon)) continue;
-    pts.push({lat,lon,t:tK? r[tK]:null});
-  }
-  return pts.length?pts:null;
-}
-function computeSpeedSeriesFromLocation(locationRows){
-  if (!locationRows?.length) return {labels:[],values:[]};
-  const s=locationRows[0];
-  const spK=pick(['speed','spd'], s);
-  if (!spK) return {labels:[],values:[]};
-  const tK=pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], s);
-  const rows = locationRows.map((r,i)=>({ l: tLabelFromRow(r,tK,i), v: Number(r[spK])*3.6 })).filter(o=>Number.isFinite(o.v));
-  const slim = decimate(rows, 2000);
-  return { labels: slim.map(o=>o.l), values: slim.map(o=>o.v) };
-}
-function computeLinearAccMagnitude(accelRows){
-  if (!accelRows?.length) return {labels:[],values:[]};
-  const s=accelRows[0];
-  const xK=pick(['x','ax'],s), yK=pick(['y','ay'],s), zK=pick(['z','az'],s);
-  if(!xK||!yK||!zK) return {labels:[],values:[]};
-  const tK=pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], s);
-  const rows=[];
-  for (let i=0;i<accelRows.length;i++){
-    const r=accelRows[i];
-    const x=Number(r[xK]), y=Number(r[yK]), z=Number(r[zK]);
-    if ([x,y,z].every(Number.isFinite)){
-      rows.push({ l: tLabelFromRow(r,tK,i), v: Math.sqrt(x*x+y*y+z*z) });
-    }
-  }
-  const slim=decimate(rows,2000);
-  return { labels: slim.map(o=>o.l), values: slim.map(o=>o.v) };
-}
-
-/* ---------- Map helpers & OSM features ---------- */
-function bboxForTrack(track,padMeters=80){
+function bboxForTrack(track, padMeters=80){
   let minLat=90,minLon=180,maxLat=-90,maxLon=-180;
   for (const p of track){ if(p.lat<minLat)minLat=p.lat; if(p.lat>maxLat)maxLat=p.lat; if(p.lon<minLon)minLon=p.lon; if(p.lon>maxLon)maxLon=p.lon; }
   const padLat=padMeters/111320, midLat=(minLat+maxLat)/2, padLon=padMeters/(111320*Math.cos(midLat*Math.PI/180));
@@ -225,7 +359,7 @@ out center tags;`.trim();
 }
 function parseMaxspeedToKmh(tag){
   if (!tag) return null;
-  const s=String(tag).toLowerCase().trim();
+  const s=String(tag).toLowerCase();
   if (s==='signals'||s==='variable'||s==='none') return null;
   const mph=s.match(/(\d+(?:\.\d+)?)\s*mph/); if (mph) return Math.round(parseFloat(mph[1])*1.60934);
   const kmh=s.match(/(\d+(?:\.\d+)?)/); return kmh? Math.round(parseFloat(kmh[1])): null;
@@ -233,7 +367,7 @@ function parseMaxspeedToKmh(tag){
 function getSpeedColor(val){ const v=typeof val==='number'?val:parseMaxspeedToKmh(val); if(!isFinite(v)) return '#ff8800';
   if(v<=30)return'#ff8800'; if(v<=50)return'#ffaa33'; if(v<=70)return'#ffcc00'; if(v<=90)return'#c8d400'; if(v<=110)return'#89dd00'; return'#38c172'; }
 function colorizeTooltip(marker,color){ setTimeout(()=>{ const el=marker.getTooltip && marker.getTooltip() && marker.getTooltip().getElement ? marker.getTooltip().getElement() : null; if(el){ el.style.background=color; el.style.borderColor=color; el.style.color='#000'; }},0); }
-function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs){
+function addOsmFeaturesToMap(map, geojson, layer, latlngs){
   const els=geojson?.elements||[]; const others=[], speedWays=[];
   for (const el of els){
     let lat=null,lon=null;
@@ -252,80 +386,33 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs){
     }
   }
   for (const f of others){
-    const m=L.circleMarker([f.lat,f.lon],{radius:6,color:f.color,weight:2,fillColor:f.color,fillOpacity:.25}).addTo(groupLayer);
+    const m=L.circleMarker([f.lat,f.lon],{radius:6,color:f.color,weight:2,fillColor:f.color,fillOpacity:.25}).addTo(layer);
     m.bindTooltip(f.label,{permanent:true,direction:'right',offset:[8,0],className:'feature-tag'}); colorizeTooltip(m,f.color);
   }
   if (speedWays.length && latlngs?.length>=2){
     const lat0=(latlngs[0][0]+latlngs[latlngs.length-1][0])/2;
-    const xy=latlngs.map(([la,lo])=>toXY(la,lo,lat0)); const cum=[0]; for(let i=1;i<xy.length;i++) cum[i]=cum[i-1]+distMeters(xy[i],xy[i-1]);
-    function project(lat,lon){ const p=toXY(lat,lon,lat0); let best={d:Infinity,s:0};
-      for(let i=0;i<xy.length-1;i++){ const a=xy[i],b=xy[i+1]; const abx=b[0]-a[0], aby=b[1]-a[1]; const apx=p[0]-a[0], apy=p[1]-a[1];
-        const ab2=abx*abx+aby*aby; let t=ab2? (abx*apx+aby*apy)/ab2 : 0; t=Math.max(0,Math.min(1,t));
-        const proj=[a[0]+abx*t, a[1]+aby*t]; const d=distMeters(p,proj);
-        if(d<best.d) best={d, s: cum[i]+Math.hypot(proj[0]-a[0],proj[1]-a[1])}; }
-      return best.s; }
-    const pts=speedWays.map(sw=>{ const v=parseMaxspeedToKmh(sw.tags.maxspeed); const color=getSpeedColor(v??sw.tags.maxspeed); const s=project(sw.lat,sw.lon); return {lat:sw.lat,lon:sw.lon,v,color,s}; }).sort((a,b)=>a.s-b.s);
+    const toXY=(lat,lon)=>{const R=6371008.8;return[(lon*Math.PI/180)*R*Math.cos(lat0*Math.PI/180),(lat*Math.PI/180)*R];};
+    const xy=latlngs.map(([la,lo])=>toXY(la,lo)); const cum=[0]; for(let i=1;i<xy.length;i++) cum[i]=cum[i-1]+Math.hypot(xy[i][0]-xy[i-1][0],xy[i][1]-xy[i-1][1]);
+    const project=(lat,lon)=>{const p=toXY(lat,lon); let best={d:Infinity,s:0}; for(let i=0;i<xy.length-1;i++){const a=xy[i],b=xy[i+1]; const abx=b[0]-a[0],aby=b[1]-a[1], apx=p[0]-a[0],apy=p[1]-a[1]; const ab2=abx*abx+aby*aby; let t=ab2? (abx*apx+aby*apy)/ab2 : 0; t=Math.max(0,Math.min(1,t)); const proj=[a[0]+abx*t,a[1]+aby*t]; const d=Math.hypot(p[0]-proj[0],p[1]-proj[1]); if(d<best.d) best={d,s:cum[i]+Math.hypot(proj[0]-a[0],proj[1]-a[1])};} return best.s;};
+    const pts=speedWays.map(sw=>({ lat:sw.lat, lon:sw.lon, v:parseMaxspeedToKmh(sw.tags.maxspeed), color:getSpeedColor(sw.tags.maxspeed), s:project(sw.lat,sw.lon) })).sort((a,b)=>a.s-b.s);
     let prev=null;
-    for (const f of pts){
-      const m=L.circleMarker([f.lat,f.lon],{radius:6,color:f.color,weight:2,fillColor:f.color,fillOpacity:.25}).addTo(groupLayer);
-      const changed=(f.v!=null)?(prev===null||f.v!==prev):false;
+    for (const f of pts){ const m=L.circleMarker([f.lat,f.lon],{radius:6,color:f.color,weight:2,fillColor:f.color,fillOpacity:.25}).addTo(layer);
+      const changed = f.v!=null ? (prev===null || f.v!==prev) : false;
       if (changed){ m.bindTooltip(`Speed limit: ${f.v}`,{permanent:true,direction:'right',offset:[8,0],className:'feature-tag'}); colorizeTooltip(m,f.color); prev=f.v; }
     }
   } else {
-    for (const sw of speedWays){
-      const v=parseMaxspeedToKmh(sw.tags.maxspeed); const color=getSpeedColor(v??sw.tags.maxspeed);
-      const m=L.circleMarker([sw.lat,sw.lon],{radius:6,color,weight:2,fillColor:color,fillOpacity:.25}).addTo(groupLayer);
+    for (const sw of speedWays){ const v=parseMaxspeedToKmh(sw.tags.maxspeed), color=getSpeedColor(sw.tags.maxspeed);
+      const m=L.circleMarker([sw.lat,sw.lon],{radius:6,color,weight:2,fillColor:color,fillOpacity:.25}).addTo(layer);
       if (v!=null){ m.bindTooltip(`Speed limit: ${v}`,{permanent:true,direction:'right',offset:[8,0],className:'feature-tag'}); colorizeTooltip(m,color); }
     }
   }
 }
-function addDirectionArrow(map, latlngs){
-  if(!latlngs||latlngs.length<2) return;
-  const lat0=(latlngs[0][0]+latlngs[latlngs.length-1][0])/2;
-  const xy=latlngs.map(([la,lo])=>toXY(la,lo,lat0));
-  const seg=[]; let total=0; for(let i=0;i<xy.length-1;i++){const d=distMeters(xy[i],xy[i+1]); seg.push(d); total+=d;}
-  if(total===0) return;
-  const target=total*0.85; let acc=0;
-  for(let i=0;i<seg.length;i++){
-    const d=seg[i]; if(acc+d>=target){
-      const t=(target-acc)/d; const a=latlngs[i], b=latlngs[i+1];
-      const lat=a[0]+(b[0]-a[0])*t, lon=a[1]+(b[1]-a[1])*t;
-      const φ1=a[0]*Math.PI/180, φ2=b[0]*Math.PI/180, Δλ=(b[1]-a[1])*Math.PI/180;
-      const y=Math.sin(Δλ)*Math.cos(φ2), x=Math.cos(φ1)*Math.cos(φ2)+Math.sin(φ1)*Math.sin(φ2)*Math.cos(Δλ);
-      const heading=((Math.atan2(y,x)*180/Math.PI)+360)%360;
-      const html=`<svg width="22" height="22" viewBox="0 0 24 24" style="transform: rotate(${heading}deg);"><polygon points="5,12 16,6 16,10 20,10 20,14 16,14 16,18" fill="#3a86ff"></polygon></svg>`;
-      const icon=L.divIcon({className:'dir-arrow',html,iconSize:[22,22],iconAnchor:[11,11]});
-      L.marker([lat,lon],{icon}).addTo(map);
-      break;
-    } acc+=d;
-  }
-}
 
-/* ---------- Charts ---------- */
-function makeLineChart(canvas, {labels, values, label, yTitle, min, max, beginAtZero}){
-  return new Chart(canvas.getContext('2d'), {
-    type:'line',
-    data:{ labels, datasets:[{ label, data: values, borderWidth:1.2, tension:.12, pointRadius:0 }] },
-    options:{
-      responsive:true, maintainAspectRatio:false, parsing:false, animation:false,
-      scales:{
-        x:{ ticks:{ color:'#b9c0cc', maxTicksLimit:6 } },
-        y:{ type:'linear', bounds:'ticks', grace:0,
-            min: Number.isFinite(min)?min:undefined,
-            max: Number.isFinite(max)?max:undefined,
-            beginAtZero: beginAtZero===true,
-            ticks:{ color:'#b9c0cc' },
-            title:{ display:true, text:yTitle, color:'#b9c0cc' } }
-      },
-      plugins:{ legend:{ display:false } }
-    }
-  });
-}
-
-/* ---------- Session UI ---------- */
-function createSessionCard(sessionName){
+/* ===================== UI scaffolding ===================== */
+function slugWithoutExt(fileName){ return (fileName||'').split('/').pop().replace(/\.zip$/i,''); }
+function createSessionCard(name){
   const wrap=document.createElement('section'); wrap.className='session';
-  const head=document.createElement('header'); const h=document.createElement('h2'); h.className='session-title'; h.textContent=sessionName; head.appendChild(h);
+  const head=document.createElement('header'); const h=document.createElement('h2'); h.className='session-title'; h.textContent=name; head.appendChild(h);
   const body=document.createElement('div'); body.className='session-body';
   const gallery=document.createElement('div'); gallery.className='gallery';
   const map=document.createElement('div'); map.className='map';
@@ -346,17 +433,34 @@ function createSessionCard(sessionName){
   wrap.append(head, body);
   return { wrap, gallery, map, status, speedCanvas, accCanvas };
 }
+function openLightbox(src){ const box=document.getElementById('lightbox'); const img=document.getElementById('lightboxImg'); img.src=src; box.style.display='flex'; box.focus(); }
+document.getElementById('lightbox').addEventListener('click',()=>document.getElementById('lightbox').style.display='none');
+document.getElementById('lightbox').addEventListener('keydown',e=>{ if(e.key==='Escape') document.getElementById('lightbox').style.display='none'; });
 
-/* ---------- Lightbox ---------- */
-const lightbox=document.getElementById('lightbox'); const lightboxImg=document.getElementById('lightboxImg');
-function openLightbox(src){ lightboxImg.src=src; lightbox.style.display='flex'; lightbox.focus(); }
-lightbox.addEventListener('click', ()=> lightbox.style.display='none');
-lightbox.addEventListener('keydown', e=>{ if(e.key==='Escape') lightbox.style.display='none'; });
+/* Direction arrow fallback */
+function addDirectionArrow(map, latlngs){
+  if(!latlngs||latlngs.length<2) return;
+  const toXY=(lat,lon,lat0)=>{const R=6371008.8;return[(lon*Math.PI/180)*R*Math.cos(lat0*Math.PI/180),(lat*Math.PI/180)*R];};
+  const lat0=(latlngs[0][0]+latlngs[latlngs.length-1][0])/2;
+  const xy=latlngs.map(([la,lo])=>toXY(la,lo,lat0)); const seg=[]; let total=0; for(let i=0;i<xy.length-1;i++){const d=Math.hypot(xy[i+1][0]-xy[i][0],xy[i+1][1]-xy[i][1]); seg.push(d); total+=d;}
+  if(total===0) return;
+  const target=total*0.85; let acc=0;
+  for(let i=0;i<seg.length;i++){ const d=seg[i]; if(acc+d>=target){
+    const t=(target-acc)/d; const a=latlngs[i], b=latlngs[i+1];
+    const lat=a[0]+(b[0]-a[0])*t, lon=a[1]+(b[1]-a[1])*t;
+    const φ1=a[0]*Math.PI/180, φ2=b[0]*Math.PI/180, Δλ=(b[1]-a[1])*Math.PI/180;
+    const y=Math.sin(Δλ)*Math.cos(φ2), x=Math.cos(φ1)*Math.cos(φ2)+Math.sin(φ1)*Math.sin(φ2)*Math.cos(Δλ);
+    const heading=((Math.atan2(y,x)*180/Math.PI)+360)%360;
+    const html=`<svg width="22" height="22" viewBox="0 0 24 24" style="transform: rotate(${heading}deg);"><polygon points="5,12 16,6 16,10 20,10 20,14 16,14 16,18" fill="#3a86ff"></polygon></svg>`;
+    const icon=L.divIcon({className:'dir-arrow',html,iconSize:[22,22],iconAnchor:[11,11]});
+    L.marker([lat,lon],{icon}).addTo(map); break;
+  } acc+=d; }
+}
 
-/* ---------- Main ---------- */
+/* ===================== Main processing ===================== */
 async function processZipFile(file){
-  const sessionName=slugWithoutExt(file.name);
-  const ui=createSessionCard(sessionName);
+  const name=slugWithoutExt(file.name);
+  const ui=createSessionCard(name);
   document.getElementById('sessions').appendChild(ui.wrap);
 
   try{
@@ -370,86 +474,80 @@ async function processZipFile(file){
 
     // CSVs
     ui.status.textContent='Parsing CSVs…';
-    const [locationRows, totalAccRows, accelRows]=await Promise.all([
+    const [locationRows, totalAccRows, accelRows] = await Promise.all([
       loadCsvFromZip(zip, /(^|\/)Location\.csv$/i),
       loadCsvFromZip(zip, /(^|\/)TotalAcceleration\.csv$/i),
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // ----- CHARTS FIRST (so Overpass never blocks them) -----
-    // Speed
-    const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows||[]);
-    const sp = speedValues.filter(v=>Number.isFinite(v));
-    let yMin, yMax; if (sp.length){ yMin=Math.min(...sp)-5; yMax=Math.max(...sp)+5; if (yMin===yMax){ yMin-=5; yMax+=5; } }
-    makeLineChart(ui.speedCanvas, { labels: speedLabels, values: speedValues, label:'Speed (km/h)', yTitle:'km/h', min:yMin, max:yMax, beginAtZero:false });
-    console.debug(`[${sessionName}] speed points:`, speedValues.length);
-
-    // Acceleration: prefer linear Accelerometer.csv; else TotalAcceleration-9.81
-    let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows||[]);
-    if ((!accValues || !accValues.length) && totalAccRows?.length){
-      const tk=pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], totalAccRows[0]);
-      const ak=pick(['total','magnitude','acc','accel','a_total'], totalAccRows[0]);
-      const rows=[];
-      for (let i=0;i<totalAccRows.length;i++){
-        const r=totalAccRows[i];
-        const a=Number(r[ak]);
-        if (Number.isFinite(a)){
-          rows.push({ l: tLabelFromRow(r, tk, i), v: Math.max(0, a - 9.81) });
-        }
-      }
-      const slim=decimate(rows,2000); accLabels=slim.map(o=>o.l); accValues=slim.map(o=>o.v);
+    /* ------- CHARTS FIRST (never blocked by OSM) ------- */
+    // SPEED
+    const sp = computeSpeedSeries(locationRows || []);
+    const spPairs = sp.labels.map((l,i)=>({l, v: sp.values[i]}));
+    const spSlim = decimate(spPairs, 2000);
+    const spLabels = spSlim.map(x=>x.l), spValues = spSlim.map(x=>x.v);
+    let yMin, yMax;
+    if (spValues.length) {
+      yMin = Math.min(...spValues) - 5;
+      yMax = Math.max(...spValues) + 5;
+      if (yMin === yMax) { yMin -= 5; yMax += 5; }
     }
-    makeLineChart(ui.accCanvas, { labels: accLabels||[], values: accValues||[], label:'Linear acceleration |a| (m/s²)', yTitle:'m/s²', beginAtZero:true });
-    console.debug(`[${sessionName}] accel points:`, (accValues||[]).length);
+    makeLineChart(ui.speedCanvas, { labels: spLabels, values: spValues, yTitle: 'km/h', min: yMin, max: yMax, beginAtZero: false });
 
-    // ----- MAP & OSM (after charts) -----
+    // ACCELERATION
+    let acc = computeLinearAccMagnitude(accelRows || []);
+    if ((!acc.values || !acc.values.length) && totalAccRows?.length) {
+      // fallback: TotalAcceleration - 9.81 (clamped)
+      const s = totalAccRows[0]; const tK = detectTimeKey(s);
+      const magK = findColByRegex(s, [/^total$/i, /magnitude/i, /^acc/i, /a_total/i]);
+      const rows = [];
+      for (let i=0;i<totalAccRows.length;i++){
+        const r=totalAccRows[i]; const a=Number(r[magK]);
+        if (Number.isFinite(a)) rows.push({ l: timeLabel(r,tK,i), v: Math.max(0, a - 9.81) });
+      }
+      const slim = decimate(rows, 2000);
+      acc = { labels: slim.map(x=>x.l), values: slim.map(x=>x.v), meta:{source:'total-accel-minus-g', key: magK} };
+    }
+    makeLineChart(ui.accCanvas, { labels: acc.labels || [], values: acc.values || [], yTitle: 'm/s²', beginAtZero: true });
+
+    console.debug(`[${name}] speed:`, { source: sp.meta.source, key: sp.meta.key, unit: sp.meta.unit, points: sp.values.length });
+    console.debug(`[${name}] accel:`, acc.meta || {});
+
+    /* ------- MAP & OSM (non-blocking) ------- */
     const map=L.map(ui.map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
 
-    const track=extractTrack(locationRows);
+    const track=extractTrack(locationRows || []);
     if (track?.length){
-      const latlngs=track.map(p=>[p.lat,p.lon]);
-      const poly=L.polyline(latlngs,{color:'#3a86ff',weight:3}).addTo(map);
-      map.fitBounds(poly.getBounds(),{padding:[16,16]});
-
-      // Start marker + label
+      const latlngs = track.map(p=>[p.lat,p.lon]);
+      const poly = L.polyline(latlngs, { color:'#3a86ff', weight:3 }).addTo(map);
+      map.fitBounds(poly.getBounds(), { padding:[16,16] });
+      // Start label
       const startColor='#00e676';
       const start=L.circleMarker(latlngs[0],{radius:6,color:startColor,weight:2,fillColor:startColor,fillOpacity:.6}).addTo(map);
       start.bindTooltip('Start',{permanent:true,direction:'right',offset:[8,0],className:'feature-tag'}); colorizeTooltip(start,startColor);
-
-      // Direction arrow (lightweight fallback)
+      // Direction arrow
       addDirectionArrow(map, latlngs);
 
-      // OSM features (don’t block UI if it’s slow)
       ui.status.textContent='Map ready. Loading features…';
-      const bbox=bboxForTrack(track,80);
+      const bbox=bboxForTrack(track, 80);
       const query=overpassQueryForBBox(bbox);
       overpassFetch(query)
-        .then(osm=>{
-          const layer=L.layerGroup().addTo(map);
-          addOsmFeaturesToMap(map, osm, layer, latlngs);
-          ui.status.textContent='Ready.';
-        })
-        .catch(e=>{
-          console.warn('Overpass failed:', e);
-          ui.status.textContent='Ready (OSM features unavailable).';
-        });
+        .then(osm => { const layer=L.layerGroup().addTo(map); addOsmFeaturesToMap(map, osm, layer, latlngs); ui.status.textContent='Ready.'; })
+        .catch(e => { console.warn('Overpass failed:', e); ui.status.textContent='Ready (OSM features unavailable).'; });
     } else {
       map.setView([59.3293,18.0686],10);
-      ui.status.textContent='Ready (no coordinates).';
+      ui.status.textContent = 'Ready (no coordinates).';
     }
-
   } catch(err){
-    console.error(err);
-    ui.status.textContent='Failed: ' + (err?.message||err);
+    console.error(err); ui.status.textContent = 'Failed: ' + (err?.message || err);
   }
 }
 
-/* ---------- Inputs ---------- */
+/* ===================== Inputs ===================== */
 const folderInput=document.getElementById('folderInput');
 const filesInput=document.getElementById('filesInput');
 function uniqueZipFilesFromFileList(list){ const out=[], seen=new Set(); for(const f of list){ if(!/\.zip$/i.test(f.name)) continue; const key=f.webkitRelativePath||f.name; if(!seen.has(key)){ seen.add(key); out.push(f); } } return out; }
-
 folderInput.addEventListener('change', async (e)=>{ const files=uniqueZipFilesFromFileList(e.target.files); if(!files.length) return; document.getElementById('sessions').innerHTML=''; for (const f of files) await processZipFile(f); folderInput.value=''; });
 filesInput.addEventListener('change', async (e)=>{ const files=uniqueZipFilesFromFileList(e.target.files); if(!files.length) return; document.getElementById('sessions').innerHTML=''; for (const f of files) await processZipFile(f); filesInput.value=''; });
 </script>
