@@ -60,12 +60,13 @@
     .hint { color: var(--muted); font-size: 12px }
     .tiny { font-size: 11px; color: var(--muted) }
 
-.grid {
-  display: flex;
-  flex-direction: column;   /* stack vertically */
-  gap: 20px;                /* space between sessions */
-  padding: 16px;
-}
+    /* Stack sessions vertically */
+    .grid {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      padding: 16px;
+    }
 
     .session {
       background: var(--card);
@@ -96,7 +97,7 @@
     }
     .charts {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); /* side-by-side when possible */
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); /* side-by-side when room */
       gap: 8px;
     }
     canvas {
@@ -120,6 +121,18 @@
     .dot-yellow { background: var(--yellow) }
     .dot-green { background: var(--green) }
     .dot-orange { background: var(--speedlimit) }
+
+    /* Permanent feature labels on map */
+    .leaflet-tooltip.feature-tag {
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 11px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    }
+
     footer {
       text-align: center; padding: 16px; color: var(--muted);
       border-top: 1px solid var(--border);
@@ -130,17 +143,6 @@
     #openFolderLabel::before, #openFilesLabel::before {
       content: "📁"; filter: grayscale(100%); margin-right: 6px;
     }
-    /* put this with your other styles */
-.leaflet-tooltip.feature-tag {
-  background: rgba(0,0,0,0.75);
-  color: #fff;
-  border: 1px solid #2a2d33;
-  border-radius: 6px;
-  padding: 2px 6px;
-  font-size: 11px;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
-}
-
   </style>
 </head>
 <body>
@@ -155,7 +157,7 @@
         <input id="filesInput" type="file" multiple accept=".zip"/>
         Open ZIP files
       </label>
-      <span class="hint">Each ZIP should look like your sample (Location.csv, TotalAcceleration.csv, Camera/*.jpg, etc.).</span>
+      <span class="hint">Each ZIP like your sample (Location.csv, TotalAcceleration.csv, Camera/*.jpg).</span>
       <span class="tiny">OSM features via Overpass; gentle throttling applied 🕊️</span>
     </div>
   </header>
@@ -369,6 +371,19 @@ out center tags;
   `.trim();
 }
 
+function getSpeedColor(maxspeedTag) {
+  // simple color ramp by numeric limit; fallback orange
+  const str = String(maxspeedTag || '').toLowerCase();
+  const num = parseFloat(str.replace(/[^0-9.]/g,''));
+  if (!isFinite(num)) return '#ff8800';
+  if (num <= 30) return '#ff8800';
+  if (num <= 50) return '#ffaa33';
+  if (num <= 70) return '#ffcc00';
+  if (num <= 90) return '#c8d400';
+  if (num <= 110) return '#89dd00';
+  return '#38c172';
+}
+
 function addOsmFeaturesToMap(map, geojson, groupLayer) {
   const els = geojson?.elements || [];
   for (const el of els) {
@@ -377,7 +392,6 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
     else if ((el.type === 'way' || el.type === 'relation') && el.center) {
       lat = el.center.lat; lon = el.center.lon;
     }
-
     const tags = el.tags || {};
     if (tags.highway === 'traffic_signals') label = 'Traffic light';
     else if (tags.highway === 'stop') label = 'Stop sign';
@@ -393,14 +407,10 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
       else if (label === 'Roundabout')    color = '#38c172';
 
       const m = L.circleMarker([lat,lon], {
-        radius: 6,
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.25
+        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
       }).addTo(groupLayer);
 
-      // ✅ permanent label next to the ring
+      // permanent text label for each feature
       m.bindTooltip(label, {
         permanent: true,
         direction: 'right',
@@ -409,19 +419,6 @@ function addOsmFeaturesToMap(map, geojson, groupLayer) {
       });
     }
   }
-}
-
-function getSpeedColor(maxspeedTag) {
-  // simple color ramp by numeric limit; fallback orange
-  const str = String(maxspeedTag || '').toLowerCase();
-  const num = parseFloat(str.replace(/[^0-9.]/g,''));
-  if (!isFinite(num)) return '#ff8800';
-  if (num <= 30) return '#ff8800';
-  if (num <= 50) return '#ffaa33';
-  if (num <= 70) return '#ffcc00';
-  if (num <= 90) return '#c8d400';
-  if (num <= 110) return '#89dd00';
-  return '#38c172';
 }
 
 /* ------------------- Charts ------------------- */
@@ -458,7 +455,6 @@ function makeLineChart(canvas, {labels, values, label, yTitle, suggestedMin, sug
     }
   });
 }
-
 
 /* ------------------- Session UI ------------------- */
 function createSessionCard(sessionName) {
@@ -559,19 +555,17 @@ async function processZipFile(file) {
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed: use Location.csv speed column (m/s → km/h)
+    // Speed: use Location.csv speed (m/s → km/h), autoscale Y
     ui.status.textContent = 'Preparing speed…';
     const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
-makeLineChart(ui.speedCanvas, {
-  labels: speedLabels,
-  values: speedValues,
-  label: 'Speed (km/h)',
-  yTitle: 'km/h'
-});
-
+    makeLineChart(ui.speedCanvas, {
+      labels: speedLabels,
+      values: speedValues,
+      label: 'Speed (km/h)',
+      yTitle: 'km/h'
     });
 
-    // Total acceleration
+    // Total acceleration (begin at 0)
     ui.status.textContent = 'Preparing acceleration…';
     const { labels: accLabels, values: accValues } = extractTotalAcc(totalAccRows, accelRows);
     makeLineChart(ui.accCanvas, {
@@ -579,7 +573,7 @@ makeLineChart(ui.speedCanvas, {
       values: accValues,
       label: 'Total acceleration (m/s²)',
       yTitle: 'm/s²',
-      suggestedMin: 0
+      beginAtZero: true
     });
 
     ui.status.textContent = 'Ready.';
