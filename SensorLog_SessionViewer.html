@@ -887,6 +887,7 @@ lightbox.addEventListener('keydown', (e) => {
 });
 
 /* ------------------- Main processing ------------------- */
+/* ------------------- Main processing ------------------- */
 async function processZipFile(file) {
   const sessionName = slugWithoutExt(file.name);
   const ui = createSessionCard(sessionName);
@@ -899,6 +900,10 @@ async function processZipFile(file) {
     const ss = totalSec % 60;
     return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
   }
+
+  // Keep these in outer scope so charts can use them later
+  let latlngs = null;                 // [[lat, lon], ...]
+  let maxspeedProfile = [];           // [{s, v}] from OSM (s in meters along route)
 
   try {
     ui.status.textContent = 'Reading ZIP…';
@@ -935,7 +940,7 @@ async function processZipFile(file) {
 
     const track = extractTrack(locationRows);
     if (track?.length) {
-      const latlngs = track.map(p => [p.lat, p.lon]);
+      latlngs = track.map(p => [p.lat, p.lon]);
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
@@ -975,13 +980,10 @@ async function processZipFile(file) {
         const osm = await overpassFetch(query);
         const layer = L.layerGroup().addTo(map);
         addOsmFeaturesToMap(map, osm, layer, latlngs);
-const layer = L.layerGroup().addTo(map);
-addOsmFeaturesToMap(map, osm, layer, latlngs);
 
-// NEW: extract maxspeed profile here
-maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
+        // Build the maxspeed profile once (chainage -> km/h)
+        maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
 
-ui.status.textContent = 'Map ready.';
         ui.status.textContent = 'Map ready.';
       } catch (e) {
         console.warn('Overpass failed:', e);
@@ -993,46 +995,44 @@ ui.status.textContent = 'Map ready.';
       ui.status.textContent = 'No coordinates found.';
     }
 
-// Speed chart
-ui.status.textContent = 'Preparing speed…';
-const speedSeries = computeSpeedSeriesFromLocation(locationRows || []);
-const speedLabels = speedSeries.labels;
-const speedValues = speedSeries.values;
+    // ------------------- Speed chart (+ maxspeed) -------------------
+    ui.status.textContent = 'Preparing speed…';
+    const speedSeries = computeSpeedSeriesFromLocation(locationRows || []);
+    const speedLabels = speedSeries.labels;
+    const speedValues = speedSeries.values;
 
-// Build a maxspeed array aligned to the decimated speed series by using the original row indices
-let maxspeedValues = [];
-if (latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length) {
-  // Precompute full per-sample maxspeed along the route
-  const perSampleMax = computeMaxspeedSeriesAligned(latlngs, maxspeedProfile); // length == latlngs.length
-  // Downsample it using the same indices that produced speedLabels
-  maxspeedValues = speedSeries.idx.map(i => perSampleMax[i] ?? null);
-} else {
-  maxspeedValues = new Array(speedLabels.length).fill(null);
-}
+    // Build a maxspeed array aligned to the decimated speed series by using original row indices
+    let maxspeedValues = [];
+    if (latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length) {
+      // Per-sample maxspeed for full track
+      const perSampleMax = computeMaxspeedSeriesAligned(latlngs, maxspeedProfile); // length == latlngs.length
+      // Downsample using same indices as the speed labels
+      maxspeedValues = speedSeries.idx.map(i => perSampleMax[i] ?? null);
+    } else {
+      maxspeedValues = new Array(speedLabels.length).fill(null);
+    }
 
-// Y-range to cover both series
-const finiteSpeeds = [...speedValues, ...maxspeedValues].filter(Number.isFinite);
-let yMin, yMax;
-if (finiteSpeeds.length) {
-  yMin = Math.min(...finiteSpeeds) - 5;
-  yMax = Math.max(...finiteSpeeds) + 5;
-}
+    // Y-range to cover both series
+    const finiteSpeeds = [...speedValues, ...maxspeedValues].filter(Number.isFinite);
+    let yMin, yMax;
+    if (finiteSpeeds.length) {
+      yMin = Math.min(...finiteSpeeds) - 5;
+      yMax = Math.max(...finiteSpeeds) + 5;
+    }
 
-// Plot both series on the same axes
-makeMultiLineChart(ui.speedCanvas, {
-  labels: speedLabels,
-  yTitle: 'km/h',
-  min: yMin, max: yMax,
-  datasets: [
-    { label: 'Speed',     data: speedValues,     borderColor: cssVar('--blue', '#3a86ff'),  pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
-    { label: 'Maxspeed',  data: maxspeedValues,  borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0,
-      borderDash: [6,3] }
-  ]
-});
+    // Plot both series
+    makeMultiLineChart(ui.speedCanvas, {
+      labels: speedLabels,
+      yTitle: 'km/h',
+      min: yMin, max: yMax,
+      datasets: [
+        { label: 'Speed',     data: speedValues,     borderColor: cssVar('--blue', '#3a86ff'),       pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
+        { label: 'Maxspeed',  data: maxspeedValues,  borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3] }
+      ]
+    });
 
-    // Acceleration: prefer Ax, Ay, Az from Accelerometer.csv; fallback to magnitude
+    // ------------------- Acceleration chart -------------------
     ui.status.textContent = 'Preparing acceleration…';
-
     const accelXYZ = computeAccelXYZSeries(accelRows);
     if (accelXYZ && accelXYZ.labels.length) {
       const cBlue  = cssVar('--blue',  '#3a86ff');
