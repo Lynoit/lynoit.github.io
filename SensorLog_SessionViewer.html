@@ -352,6 +352,102 @@ function computeMaxspeedSeriesAligned(latlngs, profile) {
   return out; // length = latlngs.length, values in km/h (or null)
 }
 
+  /* ------- Chart.js marker plugin (A, B, and A↔B bubble) ------- */
+const MarkerPlugin = {
+  id: 'twoMarkers',
+  afterDatasetsDraw(chart) {
+    const markers = chart.$markers;
+    if (!markers) return;
+
+    const { ctx, chartArea, scales } = chart;
+    const xScale = scales.x, yScale = scales.y;
+    const labels = chart.data.labels;
+    const speedDataset = chart.data.datasets[0]; // dataset[0] = vehicle speed
+
+    function drawOne(i, color, tag) {
+      if (i == null || i < 0 || i >= labels.length) return;
+      const yVal = speedDataset.data[i];
+      if (!Number.isFinite(yVal)) return;
+
+      const x = xScale.getPixelForValue(i);
+      const y = yScale.getPixelForValue(yVal);
+
+      ctx.save();
+      // hairline
+      ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+      ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // dot
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
+
+      // bubble (time • speed)
+      const text = `${labels[i]} • ${yVal.toFixed(1)} km/h`;
+      ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      const pad = 6, r = 6, tw = ctx.measureText(text).width;
+      const bw = tw + pad*2 + 16, bh = 24; // space for tag
+      let bx = Math.min(Math.max(x - bw/2, chartArea.left+2), chartArea.right - bw - 2);
+      let by = y - 10 - bh; if (by < chartArea.top + 2) by = y + 12;
+
+      // rounded rect
+      ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx+r,by); ctx.lineTo(bx+bw-r,by); ctx.quadraticCurveTo(bx+bw,by,bx+bw,by+r);
+      ctx.lineTo(bx+bw,by+bh-r); ctx.quadraticCurveTo(bx+bw,by+bh,bx+bw-r,by+bh);
+      ctx.lineTo(bx+r,by+bh); ctx.quadraticCurveTo(bx,by+bh,bx,by+bh-r);
+      ctx.lineTo(bx,by+r); ctx.quadraticCurveTo(bx,by,bx+r,by); ctx.closePath(); ctx.fill(); ctx.stroke();
+
+      // tag
+      const tagR = 7, tagCx = bx + pad + tagR, tagCy = by + bh/2;
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(tagCx, tagCy, tagR, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#000'; ctx.font = 'bold 10px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tag, tagCx, tagCy);
+
+      // text
+      ctx.fillStyle = '#e7eaf0'; ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + pad + 2*tagR + 6, by + bh/2);
+      ctx.restore();
+    }
+
+    // draw A and B
+    drawOne(markers.A, markers.colorA || '#00e5ff', 'A');
+    drawOne(markers.B, markers.colorB || '#ff5ec4', 'B');
+
+    // draw A↔B acceleration bubble at midpoint
+    if (markers.A != null && markers.B != null && markers.A !== markers.B) {
+      const iA = markers.A, iB = markers.B;
+      const vAkph = speedDataset.data[iA], vBkph = speedDataset.data[iB];
+      const tAms = chart.$series?.relMs?.[iA], tBms = chart.$series?.relMs?.[iB];
+      if ([vAkph,vBkph,tAms,tBms].every(Number.isFinite) && tAms !== tBms) {
+        const a = ((vBkph/3.6) - (vAkph/3.6)) / ((tBms - tAms)/1000); // m/s²
+        const xA = xScale.getPixelForValue(iA), yA = yScale.getPixelForValue(vAkph);
+        const xB = xScale.getPixelForValue(iB), yB = yScale.getPixelForValue(vBkph);
+        const mx = (xA + xB)/2, my = (yA + yB)/2 - 30;
+
+        const text = `a = ${a.toFixed(3)} m/s²`;
+        const pad = 6, r = 6, bh = 20;
+        const tw = chart.ctx.measureText(text).width, bw = tw + pad*2;
+        let bx = mx - bw/2, by = my - bh/2;
+
+        chart.ctx.save();
+        chart.ctx.fillStyle = 'rgba(0,0,0,0.85)'; chart.ctx.strokeStyle = '#ffd166'; chart.ctx.lineWidth = 1;
+        chart.ctx.beginPath();
+        chart.ctx.moveTo(bx+r,by); chart.ctx.lineTo(bx+bw-r,by);
+        chart.ctx.quadraticCurveTo(bx+bw,by,bx+bw,by+r);
+        chart.ctx.lineTo(bx+bw,by+bh-r); chart.ctx.quadraticCurveTo(bx+bw,by+bh,bx+bw-r,by+bh);
+        chart.ctx.lineTo(bx+r,by+bh); chart.ctx.quadraticCurveTo(bx,by+bh,bx,by+bh-r);
+        chart.ctx.lineTo(bx,by+r); chart.ctx.quadraticCurveTo(bx,by,bx+r,by);
+        chart.ctx.closePath(); chart.ctx.fill(); chart.ctx.stroke();
+        chart.ctx.fillStyle = '#fff'; chart.ctx.textAlign = 'center'; chart.ctx.textBaseline = 'middle';
+        chart.ctx.fillText(text, bx + bw/2, by + bh/2);
+        chart.ctx.restore();
+      }
+    }
+  }
+};
+Chart.register(MarkerPlugin);
+  
   function makeMultiLineChart(canvas, { labels, datasets, yTitle, min, max }) {
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
@@ -860,13 +956,19 @@ function createSessionCard(sessionName) {
   const status = document.createElement('div'); status.className='status'; text = 'Loading…'; status.textContent = text;
   row.append(legend, status);
 
-  const charts = document.createElement('div'); charts.className='charts';
+const charts = document.createElement('div'); charts.className='charts';
   const speedCanvas = document.createElement('canvas');
   const accCanvas = document.createElement('canvas');
-  speedCanvas.height = 220;   // explicit pixel height
-  accCanvas.height   = 220;
-  
-  charts.append(speedCanvas, accCanvas);
+
+  const markerControls = document.createElement('div');
+  markerControls.style.display = 'flex'; markerControls.style.gap = '8px'; markerControls.style.alignItems = 'center';
+  const btnSetA = document.createElement('button'); btnSetA.className='btn'; btnSetA.textContent='Set A';
+  const btnSetB = document.createElement('button'); btnSetB.className='btn'; btnSetB.textContent='Set B';
+  const btnClear = document.createElement('button'); btnClear.className='btn'; btnClear.textContent='Clear';
+  const tip = document.createElement('span'); tip.className='tiny'; tip.textContent='Click on the speed plot after choosing A/B.';
+  markerControls.append(btnSetA, btnSetB, btnClear, tip);
+
+  charts.append(speedCanvas, markerControls, accCanvas);
 
   body.append(gallery, map, row, charts);
   wrap.append(head, body);
@@ -1021,15 +1123,19 @@ async function processZipFile(file) {
     }
 
     // Plot both series
-    makeMultiLineChart(ui.speedCanvas, {
-      labels: speedLabels,
-      yTitle: 'km/h',
-      min: yMin, max: yMax,
-      datasets: [
-        { label: 'Speed',     data: speedValues,     borderColor: cssVar('--blue', '#3a86ff'),       pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
-        { label: 'Maxspeed',  data: maxspeedValues,  borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3] }
-      ]
-    });
+const speedChart = makeMultiLineChart(ui.speedCanvas, {
+  labels: speedLabels,
+  yTitle: 'km/h',
+  min: yMin, max: yMax,
+  datasets: [
+    { label: 'Speed',    data: speedValues,    borderColor: cssVar('--blue', '#3a86ff'), pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
+    { label: 'Maxspeed', data: maxspeedValues, borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3] }
+  ]
+});
+
+// Provide marker + series data for the plugin
+speedChart.$markers = { A: null, B: null, active: 'A', colorA:'#00e5ff', colorB:'#ff5ec4' };
+speedChart.$series  = { relMs: speedSeries.relMs, speedKmH: speedValues };
 
     // ------------------- Acceleration chart -------------------
     ui.status.textContent = 'Preparing acceleration…';
@@ -1114,6 +1220,31 @@ async function processZipFile(file) {
     ui.status.textContent = 'Failed: ' + (err?.message || err);
   }
 }
+
+  function nearestIndexFromEvent(chart, evt) {
+  const rect = chart.canvas.getBoundingClientRect();
+  const xPix = evt.clientX - rect.left;
+  const xScale = chart.scales.x;
+  let bestI = 0, bestD = Infinity;
+  for (let i=0;i<chart.data.labels.length;i++) {
+    const px = xScale.getPixelForValue(i);
+    const d = Math.abs(px - xPix);
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  return bestI;
+}
+
+ui.btnSetA.addEventListener('click', () => { speedChart.$markers.active = 'A'; });
+ui.btnSetB.addEventListener('click', () => { speedChart.$markers.active = 'B'; });
+ui.btnClear.addEventListener('click', () => { speedChart.$markers.A = speedChart.$markers.B = null; speedChart.update(); });
+
+ui.speedCanvas.addEventListener('click', (evt) => {
+  const i = nearestIndexFromEvent(speedChart, evt);
+  const which = speedChart.$markers.active || 'A';
+  speedChart.$markers[which] = i;
+  speedChart.update();                 // plugin redraws A, B, and the A↔B bubble
+});
+
 
 /* ------------------- Inputs ------------------- */
 const folderInput = document.getElementById('folderInput');
