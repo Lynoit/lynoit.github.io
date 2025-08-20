@@ -291,6 +291,67 @@ function distMeters(a, b) {
   return Math.hypot(dx, dy);
 }
 
+  // Build a speed-limit profile along the route (chainage s in meters).
+function extractMaxspeedProfile(geojson, latlngs) {
+  const els = geojson?.elements || [];
+  if (!latlngs || latlngs.length < 2) return [];
+
+  const chain = toXYChain(latlngs);
+  const pts = [];
+
+  for (const el of els) {
+    const tags = el.tags || {};
+    if (!('maxspeed' in tags)) continue;
+
+    let lat = null, lon = null;
+    if (el.type === 'node') { lat = el.lat; lon = el.lon; }
+    else if ((el.type === 'way' || el.type === 'relation') && el.center) {
+      lat = el.center.lat; lon = el.center.lon;
+    }
+    if (lat == null || lon == null) continue;
+
+    const v = parseMaxspeedToKmh(tags.maxspeed);   // -> km/h or null
+    if (v == null) continue;
+
+    const s = projectChainage(chain, chain.lat0, lat, lon); // meters from start
+    pts.push({ s, v });
+  }
+
+  // Sort and compress consecutive duplicates
+  pts.sort((a,b)=>a.s-b.s);
+  const profile = [];
+  let lastV = null;
+  for (const p of pts) {
+    if (p.v !== lastV) { profile.push(p); lastV = p.v; }
+  }
+  return profile; // [{s, v}] at change points
+}
+
+// For each location sample, map chainage -> current speed limit (km/h).
+function computeMaxspeedSeriesAligned(latlngs, profile) {
+  if (!latlngs?.length || !profile?.length) return new Array(latlngs.length).fill(null);
+  const chain = toXYChain(latlngs);
+
+  // Binary search for last change <= s
+  function atS(s) {
+    let lo = 0, hi = profile.length - 1, ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (profile[mid].s <= s) { ans = mid; lo = mid + 1; }
+      else { hi = mid - 1; }
+    }
+    return ans >= 0 ? profile[ans].v : null;
+  }
+
+  const out = new Array(latlngs.length);
+  for (let i=0; i<latlngs.length; i++) {
+    const [lat, lon] = latlngs[i];
+    const s = projectChainage(chain, chain.lat0, lat, lon);
+    out[i] = atS(s);
+  }
+  return out; // length = latlngs.length, values in km/h (or null)
+}
+
   function makeMultiLineChart(canvas, { labels, datasets, yTitle, min, max }) {
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
@@ -441,28 +502,36 @@ function extractTrack(locationRows) {
 }
 
 function computeSpeedSeriesFromLocation(locationRows) {
-  if (!locationRows?.length) return { labels: [], values: [] };
+  if (!locationRows?.length) return { labels: [], values: [], relMs: [], idx: [] };
   const speedKey = pick(['speed','spd'], locationRows[0]);
-  const timeKey  = pick(['time','timestamp','datetime','seconds_elapsed'], locationRows[0]);
-  if (!speedKey || !timeKey) return { labels: [], values: [] };
+  const timeKey  = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], locationRows[0]);
+  if (!speedKey || !timeKey) return { labels: [], values: [], relMs: [], idx: [] };
 
   // Collect raw times + values
   const raw = [];
-  for (const row of locationRows) {
+  for (let i=0;i<locationRows.length;i++) {
+    const row = locationRows[i];
     const t = String(timeKey).toLowerCase().includes('elapsed')
       ? Number(row[timeKey]) * 1000
       : parseTime(row[timeKey])?.getTime();
     const v = Number(row[speedKey]);
-    if (Number.isFinite(t) && Number.isFinite(v)) raw.push({t,v: v*3.6});
+    if (Number.isFinite(t) && Number.isFinite(v)) raw.push({i, t, v: v*3.6});
   }
-  if (!raw.length) return { labels: [], values: [] };
+  if (!raw.length) return { labels: [], values: [], relMs: [], idx: [] };
 
   // Normalize times to session start
   const t0 = raw[0].t;
-  const zipped = raw.map(p => ({ l: formatRelativeTime(p.t - t0), v: p.v }));
+  const zipped = raw.map(p => ({ l: formatRelativeTime(p.t - t0), ms: (p.t - t0), v: p.v, i: p.i }));
   const slim = decimate(zipped, 2000);
-  return { labels: slim.map(x=>x.l), values: slim.map(x=>x.v) };
+
+  return {
+    labels: slim.map(x=>x.l),
+    values: slim.map(x=>x.v),
+    relMs:  slim.map(x=>x.ms),  // relative milliseconds from t0
+    idx:    slim.map(x=>x.i)    // original row indices (so we can align with lat/lon)
+  };
 }
+
 
 /* Linear acceleration magnitude directly from Accelerometer.csv (already gravity-free) */
 function computeLinearAccMagnitude(accelRows) {
@@ -906,6 +975,14 @@ async function processZipFile(file) {
         const osm = await overpassFetch(query);
         const layer = L.layerGroup().addTo(map);
         addOsmFeaturesToMap(map, osm, layer, latlngs);
+        const osm = await overpassFetch(query);
+const layer = L.layerGroup().addTo(map);
+addOsmFeaturesToMap(map, osm, layer, latlngs);
+
+// NEW: extract maxspeed profile here
+maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
+
+ui.status.textContent = 'Map ready.';
         ui.status.textContent = 'Map ready.';
       } catch (e) {
         console.warn('Overpass failed:', e);
@@ -917,23 +994,42 @@ async function processZipFile(file) {
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // Speed chart
-    ui.status.textContent = 'Preparing speed…';
-    const { labels: speedLabels, values: speedValues } = computeSpeedSeriesFromLocation(locationRows || []);
-    const finiteSpeeds = speedValues.filter(v => Number.isFinite(v));
-    let yMin, yMax;
-    if (finiteSpeeds.length) {
-      yMin = Math.min(...finiteSpeeds) - 5;
-      yMax = Math.max(...finiteSpeeds) + 5;
-    }
-    makeLineChart(ui.speedCanvas, {
-      labels: speedLabels,
-      values: speedValues,
-      label: 'Speed (km/h)',
-      yTitle: 'km/h',
-      min: yMin,
-      max: yMax
-    });
+// Speed chart
+ui.status.textContent = 'Preparing speed…';
+const speedSeries = computeSpeedSeriesFromLocation(locationRows || []);
+const speedLabels = speedSeries.labels;
+const speedValues = speedSeries.values;
+
+// Build a maxspeed array aligned to the decimated speed series by using the original row indices
+let maxspeedValues = [];
+if (latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length) {
+  // Precompute full per-sample maxspeed along the route
+  const perSampleMax = computeMaxspeedSeriesAligned(latlngs, maxspeedProfile); // length == latlngs.length
+  // Downsample it using the same indices that produced speedLabels
+  maxspeedValues = speedSeries.idx.map(i => perSampleMax[i] ?? null);
+} else {
+  maxspeedValues = new Array(speedLabels.length).fill(null);
+}
+
+// Y-range to cover both series
+const finiteSpeeds = [...speedValues, ...maxspeedValues].filter(Number.isFinite);
+let yMin, yMax;
+if (finiteSpeeds.length) {
+  yMin = Math.min(...finiteSpeeds) - 5;
+  yMax = Math.max(...finiteSpeeds) + 5;
+}
+
+// Plot both series on the same axes
+makeMultiLineChart(ui.speedCanvas, {
+  labels: speedLabels,
+  yTitle: 'km/h',
+  min: yMin, max: yMax,
+  datasets: [
+    { label: 'Speed',     data: speedValues,     borderColor: cssVar('--blue', '#3a86ff'),  pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
+    { label: 'Maxspeed',  data: maxspeedValues,  borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0,
+      borderDash: [6,3] }
+  ]
+});
 
     // Acceleration: prefer Ax, Ay, Az from Accelerometer.csv; fallback to magnitude
     ui.status.textContent = 'Preparing acceleration…';
