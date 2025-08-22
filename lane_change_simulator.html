@@ -81,10 +81,6 @@
       <canvas id="chart"></canvas>
     </section>
 
-    <section id="timelineWrap" style="background:var(--panel); padding:10px; border-radius:14px; height:140px;">
-      <canvas id="timeline"></canvas>
-    </section>
-
     <section id="stageWrap">
       <div id="hint">Space: Play/Pause • R: Reset</div>
       <canvas id="stage"></canvas>
@@ -104,8 +100,19 @@
   const ctx = canvas.getContext('2d');
   const chart = document.getElementById('chart');
   const cctx = chart.getContext('2d');
-  const timeline = document.getElementById('timeline');
-  const tlctx = timeline.getContext('2d');
+  const playBtn = document.getElementById('playBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const trailChk = document.getElementById('trailChk');
+  const tOut = document.getElementById('tOut');
+  const stateOut = document.getElementById('stateOut');
+  const vEgoOut = document.getElementById('vEgoOut');
+  const vOthOut = document.getElementById('vOthOut');
+  const clrOut = document.getElementById('clrOut');
+  const lcProg = document.getElementById('lcProg');
+  const gapMode = document.getElementById('gapMode');
+  const buffer = document.getElementById('buffer');
+  const bufferNum = document.getElementById('bufferNum');
+  const lcDur = document.getElementById('lcDur');
   const lcDurNum = document.getElementById('lcDurNum');
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
@@ -123,15 +130,9 @@
     chart.width = cr.width * pr; chart.height = cr.height * pr;
     chart.style.width = cr.width + 'px'; chart.style.height = cr.height + 'px';
     cctx.setTransform(pr,0,0,pr,0,0);
-
-    const tr = timeline.parentElement.getBoundingClientRect();
-    timeline.width = tr.width * pr; timeline.height = tr.height * pr;
-    timeline.style.width = tr.width + 'px'; timeline.style.height = tr.height + 'px';
-    tlctx.setTransform(pr,0,0,pr,0,0);
   }
   new ResizeObserver(resizeCanvas).observe(document.getElementById('stageWrap'));
   new ResizeObserver(resizeCanvas).observe(document.getElementById('chartWrap'));
-  new ResizeObserver(resizeCanvas).observe(document.getElementById('timelineWrap'));
 
   // World state
   let world;
@@ -155,13 +156,7 @@
       lcEndT: null,
       trail: [],
       // logs for plotting
-      logT: [], logVego: [], logVoth: [],
-      // timeline events
-      tStart: 0,
-      tIndicator: null,
-      tLongAdaptStart: null,
-      tLateralStart: null,
-      tCentered: null
+      logT: [], logVego: [], logVoth: []
     };
     updateReadout();
   }
@@ -189,10 +184,8 @@
 
     // State transitions
     if(w.state === 'cruise' && w.t >= 3){
-      w.indicatorOn = true; // indicator on at 3s
-      if(w.tIndicator == null) w.tIndicator = w.t;
+      w.indicatorOn = true; // indicator toggles on at 3s
       w.state = 'buildGap';
-      if(w.tLongAdaptStart == null) w.tLongAdaptStart = w.t; // start of longitudinal speed adaptation
     }
 
     // --- Longitudinal control ---
@@ -218,8 +211,6 @@
     if(w.state === 'buildGap' && clr >= need){
       w.state = 'laneChange';
       w.lcStartT = w.t; w.lcStartY = w.ego.y; w.lcEndT = w.lcStartT + w.lcDur;
-      if(w.tLateralStart == null) w.tLateralStart = w.lcStartT; // start of lateral maneuver
-      w.tCentered = w.lcStartT + w.lcDur/2; // vehicle centered in target lane
     }
 
     // --- Lateral lane change (half-sine) ---
@@ -325,7 +316,6 @@
 
     // Draw speed chart
     drawChart();
-    drawTimeline();
   }
 
   // Simulation loop (fixed dt with accumulator)
@@ -371,45 +361,42 @@
   function drawChart(){
     const w = world; if(!w) return;
     const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
+    // axes
+    cctx.fillStyle = '#c9d2e6'; cctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
     const padL=40, padR=10, padT=10, padB=20; const iw = cw - padL - padR, ih = ch - padT - padB;
     cctx.strokeStyle = '#2b3656'; cctx.strokeRect(padL, padT, iw, ih);
 
-    const span = 20;
+    const span = 20; // seconds visible
     const tmax = w.logT.length? w.logT[w.logT.length-1]:0;
     const tmin = Math.max(0, tmax - span);
-    const yMin = 0, yMax = 120;
-    const xPix = t=> padL + ((t - tmin)/span) * iw;
-    const yPix = v=> padT + ih - ((v - yMin)/(yMax - yMin)) * ih;
 
+    const yMin = 0, yMax = 120; // km/h scale
+    const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
+    const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
+
+    // grid lines
     cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
     for(let v=0; v<=120; v+=20){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
     cctx.setLineDash([]);
 
+    // series
     function line(series, color){
-      cctx.strokeStyle = color; cctx.lineWidth = 2; cctx.beginPath(); let moved=false;
+      cctx.strokeStyle = color; cctx.lineWidth = 2; cctx.beginPath();
+      let moved=false;
       for(let i=0;i<w.logT.length;i++){
         const t=w.logT[i]; if(t<tmin) continue; const v=series[i];
         const x=xPix(t), y=yPix(v); if(!moved){ cctx.moveTo(x,y); moved=true; } else cctx.lineTo(x,y);
       }
       cctx.stroke();
     }
-    line(w.logVoth, '#ff9f43');
-    line(w.logVego, '#4da3ff');
-
-    // vertical markers timeline
-    cctx.strokeStyle = '#ffd166'; cctx.setLineDash([2,6]);
-    function mark(t,label){ if(t==null) return; if(t<tmin||t>tmax) return; const x=xPix(t); cctx.beginPath(); cctx.moveTo(x,padT); cctx.lineTo(x,padT+ih); cctx.stroke(); cctx.fillStyle='#c9d2e6'; cctx.fillText(label,x+4,padT+12);}    
-    mark(0,'Start');
-    if(w.t>=3) mark(3,'Indicator');
-    if(w.state!=='cruise') mark(3,'Longitudinal');
-    if(w.lcStartT) mark(w.lcStartT,'Lateral start');
-    if(w.lcEndT) mark(w.lcEndT,'Centered');
-    cctx.setLineDash([]);
+    line(w.logVoth, '#ff9f43'); // other
+    line(w.logVego, '#4da3ff'); // ego
 
     // labels
     cctx.fillStyle='#9aa4b2';
     cctx.fillText('Speed (km/h)', padL, padT-2);
     cctx.fillText('time (last 20 s)', cw-130, ch-4);
+    // legend
     cctx.fillStyle='#ff9f43'; cctx.fillRect(padL+6, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_other', padL+22, padT+15);
     cctx.fillStyle='#4da3ff'; cctx.fillRect(padL+90, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_ego', padL+106, padT+15);
   }
@@ -428,51 +415,6 @@
 
   updateReadout();
   requestAnimationFrame(loop);
-
-  // ----- Timeline -----
-  function drawTimeline(){
-    const w = world; if(!w) return;
-    const cw = timeline.width, ch = timeline.height; tlctx.clearRect(0,0,cw,ch);
-    const padL=60, padR=20, padT=16, padB=24; const iw = cw - padL - padR, ih = ch - padT - padB;
-    // Axis
-    tlctx.strokeStyle = '#2b3656'; tlctx.strokeRect(padL, padT, iw, ih);
-    const tmax = Math.max(8, w.t + 1);
-    const xPix = t => padL + (t/tmax)*iw;
-
-    // Baseline
-    tlctx.strokeStyle = '#1e2740'; tlctx.beginPath(); tlctx.moveTo(padL, padT+ih/2); tlctx.lineTo(padL+iw, padT+ih/2); tlctx.stroke();
-
-    // Helper to draw marker
-    function marker(t, label, color){
-      if(t==null) return; const x = xPix(t), y = padT + ih/2;
-      tlctx.fillStyle = color; tlctx.beginPath(); tlctx.arc(x, y, 5, 0, Math.PI*2); tlctx.fill();
-      tlctx.fillStyle = '#c9d2e6'; tlctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
-      tlctx.fillText(label+` (t=${t.toFixed(2)}s)`, x+8, y-8);
-    }
-
-    tlctx.fillStyle = '#9aa4b2'; tlctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
-    tlctx.fillText('Timeline', padL, padT-2);
-
-    marker(w.tStart, 'Start of simulation', '#8fa8ff');
-    marker(w.tIndicator, 'Turn indicator on', '#ffd166');
-    marker(w.tLongAdaptStart, 'Start longitudinal adaptation', '#ff8b8b');
-    marker(w.tLateralStart, 'Start lateral maneuver', '#79e2b1');
-    marker(w.tCentered, 'Centered in target lane', '#4da3ff');
-
-    // Current time marker
-    const xc = xPix(w.t);
-    tlctx.strokeStyle = '#c9d2e6'; tlctx.setLineDash([5,5]);
-    tlctx.beginPath(); tlctx.moveTo(xc, padT); tlctx.lineTo(xc, padT+ih); tlctx.stroke(); tlctx.setLineDash([]);
-
-    // Ticks every second
-    tlctx.fillStyle = '#6f7b96'; tlctx.textAlign='center';
-    for(let ts=0; ts<=tmax; ts+=1){
-      const x = xPix(ts); tlctx.fillRect(x, padT+ih, 1, 6);
-      if(ts%2===0) tlctx.fillText(ts.toString(), x, padT+ih+14);
-    }
-    tlctx.textAlign='left';
-  }
-
 })();
 </script>
 </body>
