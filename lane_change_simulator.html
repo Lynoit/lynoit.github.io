@@ -7,7 +7,7 @@
   <style>
     :root { --bg:#0f1117; --panel:#151924; --text:#e8eaf2; --muted:#9aa4b2; --accent:#4da3ff; }
     html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
-    .wrap { display:grid; grid-template-columns: 320px 1fr; grid-template-rows:auto auto auto 1fr; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
+    .wrap { display:grid; grid-template-columns: 320px 1fr; grid-template-rows:auto auto auto auto auto; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
     header { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between }
     header h1 { font-size:18px; margin:0; letter-spacing:0.3px }
     #controls { background:var(--panel); padding:12px; border-radius:14px; display:flex; flex-direction:column; gap:12px }
@@ -29,7 +29,7 @@
     table.mtab th { color:#aab3c2; font-weight:600 }
     table.mtab td.time { font-variant-numeric:tabular-nums; color:#e8eaf2 }
     table.mtab td.evt { color:#d6d9e6 }
-    #stageWrap { position:relative; background:var(--panel); border-radius:14px; overflow:hidden; height: calc(100vh - 160px); min-height: 640px; }
+    #stageWrap { position:relative; background:var(--panel); border-radius:14px; overflow:hidden; height:auto; min-height:0; }
     canvas { width:100%; height:100%; display:block }
     #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
   </style>
@@ -109,10 +109,11 @@
 <script>
 (function(){
   // ---------- Parameters ----------
-  const PX_PER_M = 18;              // big birdview
-  const MAX_DECEL = 1.0;            // m/s^2 (also used as +accel)
-  const V0 = 25.0;                  // m/s (90 km/h)
-  const DT_SIM = 1/120;             // fixed physics step
+  const V0 = 25.0;       // m/s (90 km/h)
+  const MAX_DECEL = 1.0; // m/s^2 (also used as +accel back to V0)
+  const DT_SIM = 1/120;
+  const VERTICAL_MARGIN_M = 0.3; // very little space above/below cars
+  const VERTICAL_PAD_PX = 8;     // tiny pixel padding inside canvas
 
   // DOM
   const canvas = document.getElementById('stage');
@@ -136,23 +137,39 @@
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
   const laneWNum = document.getElementById('laneW');
+  const milestones = document.getElementById('milestones');
   const milestonesBody = document.getElementById('milestonesBody');
+  const stageWrap = document.getElementById('stageWrap');
 
-  // HiDPI
+  // HiDPI & layout
   function resizeCanvas(){
+    // Make stageWrap height ≈ milestones height
+    syncStageHeight();
+
     const pr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
     const rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * pr; canvas.height = rect.height * pr;
-    canvas.style.width = rect.width + 'px'; canvas.style.height = rect.height + 'px';
+    canvas.width = Math.max(1, Math.floor(rect.width * pr));
+    canvas.height = Math.max(1, Math.floor(rect.height * pr));
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
     ctx.setTransform(pr,0,0,pr,0,0);
 
     const cr = chart.parentElement.getBoundingClientRect();
-    chart.width = cr.width * pr; chart.height = cr.height * pr;
-    chart.style.width = cr.width + 'px'; chart.style.height = cr.height + 'px';
+    chart.width = Math.max(1, Math.floor(cr.width * pr));
+    chart.height = Math.max(1, Math.floor(cr.height * pr));
+    chart.style.width = cr.width + 'px';
+    chart.style.height = cr.height + 'px';
     cctx.setTransform(pr,0,0,pr,0,0);
   }
-  new ResizeObserver(resizeCanvas).observe(document.getElementById('stageWrap'));
-  new ResizeObserver(resizeCanvas).observe(document.getElementById('chartWrap'));
+
+  function syncStageHeight(){
+    const h = Math.round(milestones.getBoundingClientRect().height);
+    // keep a sensible minimum so it never collapses
+    stageWrap.style.height = Math.max(160, h) + 'px';
+  }
+
+  new ResizeObserver(resizeCanvas).observe(document.body);
+  new ResizeObserver(()=>{ syncStageHeight(); resizeCanvas(); }).observe(milestones);
 
   // World
   let world;
@@ -174,17 +191,11 @@
       lcEndT: null,
       trail: [],
       logT: [], logVego: [], logVoth: [],
-      // milestone times
-      ms: {
-        start: 0,
-        indicator: null,
-        speedAdapt: null,
-        lateralStart: null,
-        lateralDone: null
-      }
+      ms: { start: 0, indicator: null, speedAdapt: null, lateralStart: null, lateralDone: null }
     };
-    renderMilestones(); // show table immediately with start
+    renderMilestones();
     updateReadout();
+    resizeCanvas();
   }
 
   // Utils
@@ -194,7 +205,7 @@
   function clearanceRearMinusFront(){
     const L = world.L;
     const otherRear = world.other.x - L/2;
-    const egoFront = world.ego.x + L/2;
+    const egoFront  = world.ego.x + L/2;
     return otherRear - egoFront;
   }
   function clearanceNeeded(){
@@ -202,7 +213,7 @@
     return base + world.buffer;
   }
 
-  // ---- Physics step ----
+  // ---- Physics ----
   function step(dt){
     const w = world; if(!w) return;
     w.t += dt;
@@ -216,11 +227,11 @@
       renderMilestones();
     }
 
-    // Longitudinal control
+    // Longitudinal
     if (w.state === 'buildGap') {
-      w.ego.ax = -MAX_DECEL; // decel up to 1 m/s²
+      w.ego.ax = -MAX_DECEL;
     } else if ((w.state === 'laneChange' || w.state === 'done') && w.ego.v < V0) {
-      w.ego.ax = +MAX_DECEL; // re-accelerate to 90
+      w.ego.ax = +MAX_DECEL;
     } else {
       w.ego.ax = 0;
     }
@@ -259,57 +270,68 @@
       w.trail.push({ x:w.ego.x, y:w.ego.y });
     } else w.trail.length = 0;
 
-    // Logs for chart
+    // Logs
     w.logT.push(w.t);
     w.logVego.push(kmh(w.ego.v));
     w.logVoth.push(kmh(w.other.v));
     if(w.logT.length>2400){ w.logT.shift(); w.logVego.shift(); w.logVoth.shift(); }
   }
 
-  // ---- Milestones table renderer ----
+  // ---- Milestones table ----
   function renderMilestones(){
     if(!world) return;
-    const rows = [];
     const fmt = t => (t===null ? '—' : t.toFixed(2));
-    const labels = [
-      {k:'start',         txt:'Simulation start'},
-      {k:'indicator',     txt:'Turn indicator deployed'},
-      {k:'speedAdapt',    txt:'Longitudinal speed adaptation start'},
-      {k:'lateralStart',  txt:'Lateral maneuver start'},
-      {k:'lateralDone',   txt:'Lateral maneuver completed'}
+    const rows = [
+      `<tr><td class="time">${fmt(world.ms.start)}</td><td class="evt">Simulation start</td></tr>`,
+      `<tr><td class="time">${fmt(world.ms.indicator)}</td><td class="evt">Turn indicator deployed</td></tr>`,
+      `<tr><td class="time">${fmt(world.ms.speedAdapt)}</td><td class="evt">Longitudinal speed adaptation start</td></tr>`,
+      `<tr><td class="time">${fmt(world.ms.lateralStart)}</td><td class="evt">Lateral maneuver start</td></tr>`,
+      `<tr><td class="time">${fmt(world.ms.lateralDone)}</td><td class="evt">Lateral maneuver completed</td></tr>`
     ];
-    for(const it of labels){
-      rows.push(`<tr><td class="time">${fmt(world.ms[it.k])}</td><td class="evt">${it.txt}</td></tr>`);
-    }
     milestonesBody.innerHTML = rows.join('');
+    // keep stage height in sync when table changes
+    syncStageHeight();
   }
 
-  // ---- Drawing (top-down) ----
+  // ---- Drawing (auto-zoomed bird view) ----
   function draw(){
     const w = world; if(!w) return;
     const cw = canvas.width, ch = canvas.height;
     ctx.clearRect(0,0,cw,ch);
 
-    const camX = w.ego.x, camY = w.laneW/2;
-    const toScreen = (xm,ym)=>{
-      const x = (cw/2) + (xm - camX) * PX_PER_M;
-      const y = (ch/2) - (ym - camY) * PX_PER_M;
-      return [x,y];
-    };
+    // compute scale so the visible vertical span is laneW + small margins
+    const mSpanM = w.laneW + 2*VERTICAL_MARGIN_M;
+    const pxPerM = Math.max(1, (ch - 2*VERTICAL_PAD_PX) / mSpanM);
 
-    // Road
-    ctx.fillStyle = '#0c1020'; ctx.fillRect(0,0,cw,ch);
-    ctx.strokeStyle = '#d6d9e6'; ctx.setLineDash([16,16]); ctx.lineWidth = 2;
+    const camX = w.ego.x;         // follow ego longitudinally
+    const camY = w.laneW/2;       // center between lanes
+
+    function toScreen(xm, ym){
+      const x = (cw/2) + (xm - camX) * pxPerM;
+      const y = (ch/2) - (ym - camY) * pxPerM;
+      return [x,y];
+    }
+
+    // Road background
+    ctx.fillStyle = '#0c1020';
+    ctx.fillRect(0,0,cw,ch);
+
+    // Center dashed line
+    ctx.strokeStyle = '#d6d9e6';
+    ctx.setLineDash([16,16]);
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    let [sx,sy] = toScreen(camX - (cw/PX_PER_M), w.laneW/2);
+    let [sx,sy] = toScreen(camX - (cw/pxPerM), w.laneW/2);
     ctx.moveTo(sx, sy);
-    [sx,sy] = toScreen(camX + (cw/PX_PER_M), w.laneW/2);
+    [sx,sy] = toScreen(camX + (cw/pxPerM), w.laneW/2);
     ctx.lineTo(sx, sy);
-    ctx.stroke(); ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
     // Trail
     if(w.trail.length > 1){
-      ctx.strokeStyle = 'rgba(77,163,255,0.35)'; ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(77,163,255,0.35)';
+      ctx.lineWidth = 2;
       ctx.beginPath();
       for(let i=0;i<w.trail.length;i++){
         const p = w.trail[i]; const [x,y] = toScreen(p.x,p.y);
@@ -321,7 +343,7 @@
     // Cars
     function drawCar(car, color){
       const [cx,cy] = toScreen(car.x, car.y);
-      const Lpx = w.L * PX_PER_M; const Wpx = w.W * PX_PER_M;
+      const Lpx = w.L * pxPerM; const Wpx = w.W * pxPerM;
       ctx.fillStyle = color; ctx.strokeStyle = '#0008';
       ctx.beginPath(); ctx.rect(cx - Lpx/2, cy - Wpx/2, Lpx, Wpx); ctx.fill(); ctx.stroke();
       if(color === '#4da3ff' && w.indicatorOn){
@@ -361,6 +383,48 @@
     drawChart();
   }
 
+  // ---- Chart ----
+  function drawChart(){
+    const w = world; if(!w) return;
+    const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
+    cctx.fillStyle = '#c9d2e6'; cctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
+    const padL=48, padR=10, padT=14, padB=22; const iw = cw - padL - padR, ih = ch - padT - padB;
+    cctx.strokeStyle = '#2b3656'; cctx.strokeRect(padL, padT, iw, ih);
+
+    const span = 20;
+    const tmax = world.logT.length? world.logT[world.logT.length-1]:0;
+    const tmin = Math.max(0, tmax - span);
+
+    const yMin = 0, yMax = 120;
+    const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
+    const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
+
+    // grid
+    cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
+    for(let v=0; v<=120; v+=20){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
+    cctx.setLineDash([]);
+
+    // series
+    function line(series, color){
+      cctx.strokeStyle = color; cctx.lineWidth = 2; cctx.beginPath();
+      let moved=false;
+      for(let i=0;i<world.logT.length;i++){
+        const t=world.logT[i]; if(t<tmin) continue; const v=series[i];
+        const x=xPix(t), y=yPix(v); if(!moved){ cctx.moveTo(x,y); moved=true; } else cctx.lineTo(x,y);
+      }
+      cctx.stroke();
+    }
+    line(world.logVoth, '#ff9f43');
+    line(world.logVego, '#4da3ff');
+
+    // labels & legend
+    cctx.fillStyle='#9aa4b2';
+    cctx.fillText('Speed (km/h)', padL, padT-2);
+    cctx.fillText('time (last 20 s)', cw-130, ch-4);
+    cctx.fillStyle='#ff9f43'; cctx.fillRect(padL+6, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_other', padL+22, padT+15);
+    cctx.fillStyle='#4da3ff'; cctx.fillRect(padL+90, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_ego', padL+106, padT+15);
+  }
+
   // ---- Loop ----
   let running = false, lastT = 0, acc = 0;
   function loop(ts){
@@ -384,66 +448,23 @@
     } else if(w.state === 'done') lcProg.textContent = '100%'; else lcProg.textContent = '0%';
   }
 
-  // Input sync
+  // Inputs
   function linkRangeNumber(rangeEl, numEl, onChange){
     const sync = v=>{ rangeEl.value = v; numEl.value = v; if (typeof onChange === 'function' && world) onChange(+v); };
     rangeEl.addEventListener('input', ()=> sync(rangeEl.value));
     numEl.addEventListener('input', ()=> sync(numEl.value));
   }
   gapMode.addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
-  lenNum.addEventListener('change', reset);
-  widNum.addEventListener('change', reset);
-  laneWNum.addEventListener('change', reset);
+  lenNum.addEventListener('change', ()=>{ reset(); });
+  widNum.addEventListener('change', ()=>{ reset(); });
+  laneWNum.addEventListener('change', ()=>{ reset(); });
 
   playBtn.addEventListener('click', ()=>{ running = !running; playBtn.textContent = running ? '❚❚ Pause' : '▶ Play'; });
-  resetBtn.addEventListener('click', ()=>{ reset(); renderMilestones(); });
-
-  // ---- Speed chart ----
-  function drawChart(){
-    const w = world; if(!w) return;
-    const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
-    cctx.fillStyle = '#c9d2e6'; cctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
-    const padL=48, padR=10, padT=14, padB=22; const iw = cw - padL - padR, ih = ch - padT - padB;
-    cctx.strokeStyle = '#2b3656'; cctx.strokeRect(padL, padT, iw, ih);
-
-    const span = 20;
-    const tmax = w.logT.length? w.logT[w.logT.length-1]:0;
-    const tmin = Math.max(0, tmax - span);
-
-    const yMin = 0, yMax = 120;
-    const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
-    const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
-
-    // grid
-    cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
-    for(let v=0; v<=120; v+=20){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
-    cctx.setLineDash([]);
-
-    // series
-    function line(series, color){
-      cctx.strokeStyle = color; cctx.lineWidth = 2; cctx.beginPath();
-      let moved=false;
-      for(let i=0;i<w.logT.length;i++){
-        const t=w.logT[i]; if(t<tmin) continue; const v=series[i];
-        const x=xPix(t), y=yPix(v); if(!moved){ cctx.moveTo(x,y); moved=true; } else cctx.lineTo(x,y);
-      }
-      cctx.stroke();
-    }
-    line(w.logVoth, '#ff9f43');
-    line(w.logVego, '#4da3ff');
-
-    // labels & legend
-    cctx.fillStyle='#9aa4b2';
-    cctx.fillText('Speed (km/h)', padL, padT-2);
-    cctx.fillText('time (last 20 s)', cw-130, ch-4);
-    cctx.fillStyle='#ff9f43'; cctx.fillRect(padL+6, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_other', padL+22, padT+15);
-    cctx.fillStyle='#4da3ff'; cctx.fillRect(padL+90, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_ego', padL+106, padT+15);
-  }
+  resetBtn.addEventListener('click', ()=>{ reset(); });
 
   // Init
-  resizeCanvas();
   reset();
-  linkRangeNumber(buffer, bufferNum, v => { world.buffer = v; });
+  linkRangeNumber(buffer, bufferNum, v => { world.buffer = v; renderMilestones(); });
   linkRangeNumber(lcDur, lcDurNum, v => { world.lcDur = v; if(world.state==='laneChange'){ world.lcEndT = world.lcStartT + world.lcDur; } });
   buffer.dispatchEvent(new Event('input'));
   lcDur.dispatchEvent(new Event('input'));
