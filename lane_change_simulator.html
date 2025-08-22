@@ -9,8 +9,7 @@
     html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
     .wrap {
       display:grid;
-      /*grid-template-columns: 340px 1fr;     /* left controls + right birdview */
-      grid-template-columns: minmax(380px, 480px) 1fr;
+      grid-template-columns: 380px 1fr;   /* widen left column a bit */
       grid-auto-rows: auto;
       gap:12px; padding:12px; height:100vh; box-sizing:border-box;
     }
@@ -22,49 +21,26 @@
       grid-column: 1;
       background:var(--panel); border-radius:14px;
     }
-#controls {
-  padding:6px;                 /* tighter padding */
-  display:flex;
-  flex-direction:column;
-  gap:6px;                     /* less vertical gap between rows */
-}
-
-#controls .row { gap:6px }      /* compress gaps inside rows */
-
-#controls label { 
-  font-size:12px;              /* smaller font */
-  min-width:110px;             /* narrower labels */
-}
-
-#controls input[type="range"] { width:120px }   /* shorter sliders */
-#controls input[type="number"], #controls select {
-  width:80px; 
-  font-size:12px;
-  padding:4px;                 /* tighter boxes */
-  border-radius:6px;
-}
-#controls button {
-  padding:6px 10px;            /* smaller buttons */
-  font-size:12px;
-  border-radius:8px;
-}
+    /* compressed controls */
+    #controls { padding:6px; display:flex; flex-direction:column; gap:6px }
+    #controls .row { display:flex; align-items:center; gap:6px; flex-wrap:wrap }
+    #controls label { font-size:12px; color:var(--muted); min-width:120px }
+    #controls input[type="range"] { width:140px }
+    #controls input[type="number"], #controls select {
+      width:84px; background:#0c0f16; color:var(--text); border:1px solid #26304a; border-radius:6px; padding:4px; font-size:12px
+    }
     #controls select { width:auto }
-    #controls button { background:var(--accent); color:#08111c; border:0; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer }
+    #controls button { background:var(--accent); color:#08111c; border:0; padding:6px 10px; border-radius:8px; font-weight:600; cursor:pointer; font-size:12px }
     #controls button.secondary { background:#22314d; color:var(--text) }
 
-    #readout {
-  padding:6px;                  /* was 12px */
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:4px;                      /* was 8px */
-  font-size:12px;               /* smaller text */
-  line-height:1.2;              /* tighter spacing */
-  font-variant-numeric:tabular-nums
-}
+    /* compressed readout */
+    #readout { padding:6px; display:grid; grid-template-columns:1fr 1fr; gap:4px; font-size:12px; line-height:1.2; font-variant-numeric:tabular-nums }
     #readout .cell { color:var(--muted) }
-    #readout b { color:var(--text) }
+    #readout b { color:var(--text); font-size:12px }
 
-    #chartWrap { padding:10px; height:120px }
+    /* compressed plot */
+    #chartWrap { padding:6px; height:140px }
+
     #milestones { padding:12px; }
     #milestones h3 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:600; letter-spacing:0.2px }
     table.mtab { width:100%; border-collapse:collapse; font-size:13px }
@@ -137,6 +113,13 @@
         <input id="lcDurNum" type="number" step="0.1" value="4" />
       </div>
 
+      <!-- NEW: initial longitudinal offset -->
+      <div class="row" title="Other car position relative to ego at t=0 (m). Positive = other ahead.">
+        <label for="offsetX">Initial longitudinal offset (m)</label>
+        <input id="offsetX" type="range" min="-80" max="80" step="0.5" value="0" />
+        <input id="offsetXNum" type="number" step="0.5" value="0" />
+      </div>
+
       <div class="row">
         <label>Vehicle length / width (m)</label>
         <input id="lenNum" type="number" step="0.1" value="4.5" />
@@ -187,7 +170,7 @@
   const VERTICAL_PAD_PX     = 8;
   const HORIZONTAL_MARGIN_M = 6;    // left/right space in meters so both cars fit
   const HORIZONTAL_PAD_PX   = 12;   // left/right padding in px
-  const CAR_VISUAL_SCALE    = 1.0; // drawn rectangles only (visual)
+  const CAR_VISUAL_SCALE    = 0.50; // drawn rectangles only (visual)
 
   // DOM
   const canvas = document.getElementById('stage');
@@ -219,6 +202,9 @@
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
   const laneWNum = document.getElementById('laneW');
+
+  const offX = document.getElementById('offsetX');
+  const offXNum = document.getElementById('offsetXNum');
 
   const milestones = document.getElementById('milestones');
   const milestonesBody = document.getElementById('milestonesBody');
@@ -260,6 +246,7 @@
     const V0_ms   = (+speedKmh.value) / 3.6;
     const maxAms2 = +maxA.value;
     const bufS    = +bufSec.value;
+    const offsetM = +offX.value;
 
     const laneW = +laneWNum.value;
     const L = +lenNum.value, W = +widNum.value;
@@ -274,9 +261,11 @@
       lcDur: +lcDur.value,
       mode: gapMode.value,
       indicatorOn: false,
-      ego:   { x:0, y:0,      v:V0_ms, ax:0 },
-      other: { x:0, y:laneW,  v:V0_ms, ax:0 },
+      offsetX: offsetM,               // NEW: store initial longitudinal offset
+      ego:   { x:0,       y:0,     v:V0_ms, ax:0 },
+      other: { x:offsetM, y:laneW, v:V0_ms, ax:0 },
       lcStartT: null, lcStartY: 0, lcEndT: null,
+      simEndT: null,
       trail: [],
       logT: [], logVego: [], logVoth: [],
       ms: { start: 0, indicator: null, speedAdapt: null, lateralStart: null, lateralDone: null }
@@ -351,15 +340,14 @@
     if(w.state === 'laneChange'){
       const tau = clamp((w.t - w.lcStartT)/w.lcDur, 0, 1);
       w.ego.y = w.lcStartY + 0.5*w.laneW*(1 - Math.cos(Math.PI * tau));
-if (tau >= 1){
-  w.state = 'done';
-  w.indicatorOn = false;
-  if (w.ms.lateralDone === null) {
-    w.ms.lateralDone = +w.t;
-    w.simEndT = w.t + 3;   // schedule sim end 3s later
-  }
-  renderMilestones();
-}
+      if(tau >= 1){
+        w.state = 'done'; w.indicatorOn = false;
+        if(w.ms.lateralDone === null) { 
+          w.ms.lateralDone = +w.t; 
+          w.simEndT = w.t + 3;     // end simulation 3 s later
+        }
+        renderMilestones();
+      }
     }
 
     // Trail
@@ -372,11 +360,11 @@ if (tau >= 1){
     w.logT.push(w.t); w.logVego.push(kmh(w.ego.v)); w.logVoth.push(kmh(w.other.v));
     if(w.logT.length>2400){ w.logT.shift(); w.logVego.shift(); w.logVoth.shift(); }
 
+    // End simulation after 3 s in "done" state
     if (w.state === 'done' && w.simEndT && w.t >= w.simEndT) {
-  running = false;
-  playBtn.textContent = '▶ Play';
-}
-    
+      running = false;
+      playBtn.textContent = '▶ Play';
+    }
   }
 
   // Milestones table
@@ -495,7 +483,7 @@ if (tau >= 1){
     drawChart();
   }
 
-  // Speed chart
+  // Speed chart (autoscaled vertically)
   function drawChart(){
     const w = world; if(!w) return;
     const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
@@ -507,13 +495,19 @@ if (tau >= 1){
     const tmax = w.logT.length? w.logT[w.logT.length-1]:0;
     const tmin = Math.max(0, tmax - span);
 
-    const yMin = 0, yMax = 130; // match UI upper bound
+    // autoscale Y with margin
+    const vMin = Math.min(...w.logVego, ...w.logVoth);
+    const vMax = Math.max(...w.logVego, ...w.logVoth);
+    const yMin = Math.max(0, Math.floor(vMin - 2));
+    const yMax = Math.ceil(vMax + 2) || 1;
+
     const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
-    const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
+    const yPix = v=> padT + ih - ( (v - yMin)/Math.max(1e-6,(yMax - yMin)) ) * ih;
 
     // grid
     cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
-    for(let v=0; v<=130; v+=10){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
+    const gridStep = Math.max(5, Math.round((yMax-yMin)/8/5)*5);
+    for(let v=yMin; v<=yMax; v+=gridStep){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
     cctx.setLineDash([]);
 
     // series
@@ -567,8 +561,7 @@ if (tau >= 1){
     numEl.addEventListener('input', ()=> sync(numEl.value));
   }
 
-  // React to control changes live
-  // ⬇️ Scenario speed applies to: (1) target V0, (2) other car (always), (3) ego initial speed when t===0
+  // Scenario speed applies to: (1) target V0, (2) other car (always), (3) ego initial speed when t===0
   linkRangeNumber(speedKmh, speedKmhNum, v => {
     if (world) {
       world.V0 = v / 3.6;        // scenario target (m/s)
@@ -578,6 +571,19 @@ if (tau >= 1){
       }
       draw();
       updateReadout();
+    }
+  });
+
+  // NEW: initial longitudinal offset control (applies live only before start; always on reset)
+  linkRangeNumber(offX, offXNum, v => {
+    if (world) {
+      world.offsetX = +v;
+      if (world.t === 0) {
+        world.ego.x = 0;
+        world.other.x = world.offsetX;
+        draw();
+        updateReadout();
+      }
     }
   });
 
@@ -600,6 +606,7 @@ if (tau >= 1){
   maxA.dispatchEvent(new Event('input'));
   bufSec.dispatchEvent(new Event('input'));
   lcDur.dispatchEvent(new Event('input'));
+  offX.dispatchEvent(new Event('input'));
   gapMode.dispatchEvent(new Event('change'));
   updateReadout();
   requestAnimationFrame(loop);
