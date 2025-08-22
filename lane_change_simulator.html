@@ -7,7 +7,7 @@
   <style>
     :root { --bg:#0f1117; --panel:#151924; --text:#e8eaf2; --muted:#9aa4b2; --accent:#4da3ff; }
     html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
-    .wrap { display:grid; grid-template-columns: 340px 1fr; grid-template-rows:auto 1fr; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
+    .wrap { display:grid; grid-template-columns: 320px 1fr; grid-template-rows:auto 1fr; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
     header { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between }
     header h1 { font-size:18px; margin:0; letter-spacing:0.3px }
     #controls { background:var(--panel); padding:12px; border-radius:14px; display:flex; flex-direction:column; gap:12px }
@@ -21,8 +21,8 @@
     #readout { background:var(--panel); padding:12px; border-radius:14px; display:grid; grid-template-columns:1fr 1fr; gap:8px; font-variant-numeric:tabular-nums }
     #readout .cell { color:var(--muted) }
     #readout b { color:var(--text) }
-    #chartWrap { background:var(--panel); padding:10px; border-radius:14px; height:220px }
-    #stageWrap { position:relative; background:var(--panel); border-radius:14px; overflow:hidden; height: calc(100vh - 170px); min-height: 560px; }
+    #chartWrap { background:var(--panel); padding:10px; border-radius:14px; height:210px }
+    #stageWrap { position:relative; background:var(--panel); border-radius:14px; overflow:hidden; height: calc(100vh - 160px); min-height: 640px; }
     canvas { width:100%; height:100%; display:block }
     #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
   </style>
@@ -31,7 +31,7 @@
   <div class="wrap">
     <header>
       <h1>Live Lane-Change Simulator</h1>
-      <div style="color:var(--muted); font-size:12px">Start parallel at 90 km/h. Hold 3 s, then indicator → speed adaptation (≤1 m/s²) → merge behind.</div>
+      <div style="color:var(--muted); font-size:12px">Start parallel at 90 km/h. Hold 3 s, then indicator → speed adaptation (≤1 m/s²) → merge behind. During LC, re-accelerate to 90 km/h at +1 m/s².</div>
     </header>
 
     <section id="controls">
@@ -90,8 +90,8 @@
 <script>
 (function(){
   // ---------- Parameters (defaults) ----------
-  const PX_PER_M = 12;              // scaling (px per meter)
-  const MAX_DECEL = 1.0;            // m/s^2
+  const PX_PER_M = 18;              // scaling (px per meter) — larger for a "bigger" bird view
+  const MAX_DECEL = 1.0;            // m/s^2  (also used as +accel back to 90 km/h)
   const V0 = 25.0;                  // m/s (90 km/h)
   const DT_SIM = 1/120;             // fixed physics step (s)
 
@@ -156,7 +156,9 @@
       lcEndT: null,
       trail: [],
       // logs for plotting
-      logT: [], logVego: [], logVoth: []
+      logT: [], logVego: [], logVoth: [],
+      // timeline events (for chart markers)
+      events: [{ t:0, label:'Start of simulation' }]
     };
     updateReadout();
   }
@@ -186,19 +188,22 @@
     if(w.state === 'cruise' && w.t >= 3){
       w.indicatorOn = true; // indicator toggles on at 3s
       w.state = 'buildGap';
+      w.events.push({ t:w.t, label:'Applying turn indicator' });
+      w.events.push({ t:w.t, label:'Start of longitudinal speed adaption' });
     }
 
     // --- Longitudinal control ---
     if (w.state === 'buildGap') {
-      w.ego.ax = -MAX_DECEL; // start speed adaptation
+      // start speed adaptation (decelerate up to 1 m/s²)
+      w.ego.ax = -MAX_DECEL;
     } else if ((w.state === 'laneChange' || w.state === 'done') && w.ego.v < V0) {
-      // keep re-accelerating during lane change AND after merge until we hit 90 km/h
+      // re-accelerate during LC and afterwards back to 90 km/h
       w.ego.ax = +MAX_DECEL;
     } else {
-      w.ego.ax = 0; // hold speed
+      w.ego.ax = 0; // hold speed in cruise, or at target speed
     }
 
-    // Integrate longitudinal motion
+    // Integrate longitudinal motion (cap at V0 = 90 km/h)
     w.ego.v = Math.max(0, Math.min(V0, w.ego.v + w.ego.ax * dt));
     w.ego.x += w.ego.v * dt;
 
@@ -211,6 +216,10 @@
     if(w.state === 'buildGap' && clr >= need){
       w.state = 'laneChange';
       w.lcStartT = w.t; w.lcStartY = w.ego.y; w.lcEndT = w.lcStartT + w.lcDur;
+      w.events.push({ t:w.lcStartT, label:'Start of lateral maneuver' });
+      // Predict "centered" time (midpoint of LC)
+      const tCentered = w.lcStartT + w.lcDur/2;
+      w.events.push({ t:tCentered, label:'Vehicle centered in target lane' });
     }
 
     // --- Lateral lane change (half-sine) ---
@@ -363,7 +372,7 @@
     const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
     // axes
     cctx.fillStyle = '#c9d2e6'; cctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
-    const padL=40, padR=10, padT=10, padB=20; const iw = cw - padL - padR, ih = ch - padT - padB;
+    const padL=48, padR=10, padT=14, padB=22; const iw = cw - padL - padR, ih = ch - padT - padB;
     cctx.strokeStyle = '#2b3656'; cctx.strokeRect(padL, padT, iw, ih);
 
     const span = 20; // seconds visible
@@ -392,11 +401,33 @@
     line(w.logVoth, '#ff9f43'); // other
     line(w.logVego, '#4da3ff'); // ego
 
-    // labels
+    // timeline markers
+    const markers = w.events || [];
+    cctx.save();
+    for(const ev of markers){
+      if(ev.t < tmin || ev.t > tmax) continue;
+      const x = xPix(ev.t);
+      // vertical line
+      cctx.strokeStyle = '#6d7aa5'; cctx.lineWidth = 1; cctx.setLineDash([3,5]);
+      cctx.beginPath(); cctx.moveTo(x, padT); cctx.lineTo(x, padT+ih); cctx.stroke();
+      cctx.setLineDash([]);
+      // label (with background for readability)
+      const label = ev.label;
+      cctx.font = '11px system-ui,Segoe UI,Roboto,Arial';
+      const textW = cctx.measureText(label).width + 8;
+      const tx = Math.min(Math.max(x - textW/2, padL+2), padL+iw - textW - 2);
+      const ty = padT + 12;
+      cctx.fillStyle = '#0c1324cc';
+      cctx.fillRect(tx, ty-10, textW, 14);
+      cctx.fillStyle = '#cfe3ff';
+      cctx.fillText(label, tx+4, ty+1);
+    }
+    cctx.restore();
+
+    // labels & legend
     cctx.fillStyle='#9aa4b2';
     cctx.fillText('Speed (km/h)', padL, padT-2);
     cctx.fillText('time (last 20 s)', cw-130, ch-4);
-    // legend
     cctx.fillStyle='#ff9f43'; cctx.fillRect(padL+6, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_other', padL+22, padT+15);
     cctx.fillStyle='#4da3ff'; cctx.fillRect(padL+90, padT+6, 10,10); cctx.fillStyle='#c9d2e6'; cctx.fillText('v_ego', padL+106, padT+15);
   }
@@ -415,6 +446,12 @@
 
   updateReadout();
   requestAnimationFrame(loop);
+
+  // keyboard shortcuts
+  window.addEventListener('keydown', (e)=>{
+    if(e.code==='Space'){ e.preventDefault(); playBtn.click(); }
+    else if(e.key==='r' || e.key==='R'){ resetBtn.click(); }
+  });
 })();
 </script>
 </body>
