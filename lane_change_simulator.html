@@ -7,19 +7,17 @@
   <style>
     :root { --bg:#0f1117; --panel:#151924; --text:#e8eaf2; --muted:#9aa4b2; --accent:#4da3ff; }
     html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
-
-    /* Overall 2-column grid */
     .wrap {
       display:grid;
-      grid-template-columns: 340px 1fr;     /* left (controls) | right (visuals) */
-      grid-template-rows: auto 1fr;
+      grid-template-columns: 340px 1fr;     /* left controls + right birdview */
+      grid-auto-rows: auto;
       gap:12px; padding:12px; height:100vh; box-sizing:border-box;
     }
     header { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between }
     header h1 { font-size:18px; margin:0; letter-spacing:0.3px }
 
-    /* Left column */
-    #controls, #readout {
+    /* Left column cards */
+    #controls, #readout, #chartWrap, #milestones {
       grid-column: 1;
       background:var(--panel); border-radius:14px;
     }
@@ -38,37 +36,24 @@
     #readout .cell { color:var(--muted) }
     #readout b { color:var(--text) }
 
-    /* Right column: stack birdview > plot > milestones */
-    .rightCol {
-      grid-column: 2;
-      display:grid;
-      grid-template-rows: auto auto 1fr;   /* birdview, chart, milestones */
-      gap:12px;
-      min-height: 0;                       /* prevent overflow in nested grid */
-    }
-
-    #stageWrap, #chartWrap, #milestones {
-      background:var(--panel); border-radius:14px;
-    }
-
-    /* Birdview */
-    #stageWrap { position:relative; overflow:hidden; }
-    /* give birdview a sensible default height; it grows with layout */
-    #stageWrap { height: 360px; }
-    canvas { width:100%; height:100%; display:block }
-    #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
-
-    /* Speed chart */
-    #chartWrap { padding:10px; height: 210px }
-
-    /* Milestones table */
-    #milestones { padding:12px; min-height:0; }
+    #chartWrap { padding:10px; height:210px }
+    #milestones { padding:12px; }
     #milestones h3 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:600; letter-spacing:0.2px }
     table.mtab { width:100%; border-collapse:collapse; font-size:13px }
     table.mtab th, table.mtab td { border-bottom:1px solid #26304a; padding:6px 8px; text-align:left }
     table.mtab th { color:#aab3c2; font-weight:600 }
     table.mtab td.time { font-variant-numeric:tabular-nums; color:#e8eaf2 }
     table.mtab td.evt { color:#d6d9e6 }
+
+    /* Right column: bird-view */
+    #stageWrap {
+      grid-column: 2;
+      background:var(--panel); border-radius:14px;
+      position:relative; overflow:hidden;
+      height:auto; min-height:0; align-self:start; /* height matched to milestones via JS */
+    }
+    canvas { width:100%; height:100%; display:block }
+    #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
   </style>
 </head>
 <body>
@@ -122,27 +107,23 @@
       <div class="cell">LC progress = <b id="lcProg">0%</b></div>
     </section>
 
-    <!-- Right column stacked -->
-    <div class="rightCol">
-      <section id="stageWrap">
-        <div id="hint">Space: Play/Pause • R: Reset</div>
-        <canvas id="stage"></canvas>
-      </section>
+    <section id="chartWrap"><canvas id="chart"></canvas></section>
 
-      <section id="chartWrap">
-        <canvas id="chart"></canvas>
-      </section>
+    <section id="milestones">
+      <h3>Milestones</h3>
+      <table class="mtab">
+        <thead>
+          <tr><th style="width:120px">Time (s)</th><th>Event</th></tr>
+        </thead>
+        <tbody id="milestonesBody"></tbody>
+      </table>
+    </section>
 
-      <section id="milestones">
-        <h3>Milestones</h3>
-        <table class="mtab">
-          <thead>
-            <tr><th style="width:120px">Time (s)</th><th>Event</th></tr>
-          </thead>
-          <tbody id="milestonesBody"></tbody>
-        </table>
-      </section>
-    </div>
+    <!-- Right column -->
+    <section id="stageWrap">
+      <div id="hint">Space: Play/Pause • R: Reset</div>
+      <canvas id="stage"></canvas>
+    </section>
   </div>
 
 <script>
@@ -176,30 +157,36 @@
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
   const laneWNum = document.getElementById('laneW');
+  const milestones = document.getElementById('milestones');
   const milestonesBody = document.getElementById('milestonesBody');
   const stageWrap = document.getElementById('stageWrap');
-  const chartWrap = document.getElementById('chartWrap');
 
-  // HiDPI & responsive canvases
+  // HiDPI & layout
+  function syncStageHeight(){
+    // make right-side birdview ≈ same height as the milestones table (left)
+    const h = Math.round(milestones.getBoundingClientRect().height);
+    stageWrap.style.height = Math.max(160, h) + 'px';
+  }
   function resizeCanvas(){
-    const pr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    syncStageHeight();
 
-    const rect = stageWrap.getBoundingClientRect();
+    const pr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    const rect = canvas.parentElement.getBoundingClientRect();
     canvas.width  = Math.max(1, Math.floor(rect.width  * pr));
     canvas.height = Math.max(1, Math.floor(rect.height * pr));
     canvas.style.width = rect.width + 'px';
     canvas.style.height = rect.height + 'px';
     ctx.setTransform(pr,0,0,pr,0,0);
 
-    const cr = chartWrap.getBoundingClientRect();
+    const cr = chart.parentElement.getBoundingClientRect();
     chart.width  = Math.max(1, Math.floor(cr.width  * pr));
     chart.height = Math.max(1, Math.floor(cr.height * pr));
     chart.style.width = cr.width + 'px';
     chart.style.height = cr.height + 'px';
     cctx.setTransform(pr,0,0,pr,0,0);
   }
+  new ResizeObserver(()=>{ syncStageHeight(); resizeCanvas(); }).observe(milestones);
   new ResizeObserver(resizeCanvas).observe(stageWrap);
-  new ResizeObserver(resizeCanvas).observe(chartWrap);
   new ResizeObserver(resizeCanvas).observe(document.body);
 
   // World
@@ -307,6 +294,7 @@
       `<tr><td class="time">${fmt(world.ms.lateralStart)}</td><td class="evt">Lateral maneuver start</td></tr>`,
       `<tr><td class="time">${fmt(world.ms.lateralDone)}</td><td class="evt">Lateral maneuver completed</td></tr>`
     ].join('');
+    syncStageHeight(); // keep right pane matched to table height
   }
 
   // Bird-view render (auto-zoom for tiny top/bottom margins)
@@ -460,7 +448,7 @@
     rangeEl.addEventListener('input', ()=> sync(rangeEl.value));
     numEl.addEventListener('input', ()=> sync(numEl.value));
   }
-  gapMode.addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
+  document.getElementById('gapMode').addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
   lenNum.addEventListener('change', reset);
   widNum.addEventListener('change', reset);
   laneWNum.addEventListener('change', reset);
