@@ -47,17 +47,16 @@
 
     /* Right column: bird-view */
     #stageWrap {
-  grid-column: 2;
-  grid-row: 2;        /* ⬅️ puts birdview at the top row under the header */
-  align-self: start;
-
-  background: var(--panel);
-  border-radius: 14px;
-  position: relative;
-  overflow: hidden;
-  height: auto;
-  min-height: 0;
-}
+      grid-column: 2;
+      grid-row: 2;        /* puts birdview at the top row under the header */
+      align-self: start;
+      background: var(--panel);
+      border-radius: 14px;
+      position: relative;
+      overflow: hidden;
+      height: auto;
+      min-height: 0;
+    }
 
     canvas { width:100%; height:100%; display:block }
     #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
@@ -154,9 +153,13 @@
 (function(){
   // --- Params (defaults via controls) ---
   const DT_SIM = 1/120;
-  const VERTICAL_MARGIN_M = 0.3; // tiny top/bottom space in birdview
-  const VERTICAL_PAD_PX   = 8;
-  const CAR_VISUAL_SCALE  = 0.50; // drawn rectangles only (visual)
+
+  // Birdview margins/padding & scaling
+  const VERTICAL_MARGIN_M   = 0.3;  // tiny top/bottom space in meters
+  const VERTICAL_PAD_PX     = 8;
+  const HORIZONTAL_MARGIN_M = 6;    // left/right space in meters so both cars fit
+  const HORIZONTAL_PAD_PX   = 12;   // left/right padding in px
+  const CAR_VISUAL_SCALE    = 0.50; // drawn rectangles only (visual)
 
   // DOM
   const canvas = document.getElementById('stage');
@@ -243,8 +246,8 @@
       lcDur: +lcDur.value,
       mode: gapMode.value,
       indicatorOn: false,
-      ego:   { x:0, y:0, v:V0_ms, ax:0 },
-      other: { x:0, y:laneW, v:V0_ms, ax:0 },
+      ego:   { x:0, y:0,      v:V0_ms, ax:0 },
+      other: { x:0, y:laneW,  v:V0_ms, ax:0 },
       lcStartT: null, lcStartY: 0, lcEndT: null,
       trail: [],
       logT: [], logVego: [], logVoth: [],
@@ -352,20 +355,38 @@
     syncStageHeight(); // keep right pane matched to table height
   }
 
-  // Bird-view render (auto-zoom for tiny top/bottom margins)
+  // Bird-view render (auto-zoom to keep both cars visible)
   function draw(){
     const w = world; if(!w) return;
     const cw = canvas.width, ch = canvas.height;
     ctx.clearRect(0,0,cw,ch);
 
-    const mSpanM = w.laneW + 2*VERTICAL_MARGIN_M;
-    const pxPerM = Math.max(1, (ch - 2*VERTICAL_PAD_PX) / mSpanM);
+    // Vertical scale based on lane span + margins
+    const mSpanV = w.laneW + 2*VERTICAL_MARGIN_M;
+    const pxPerM_vert = Math.max(1, (ch - 2*VERTICAL_PAD_PX) / mSpanV);
 
-    const camX = w.ego.x, camY = w.laneW/2;
-    const toScreen = (xm,ym)=>{
+    // Horizontal span that fully includes both cars (+ margins)
+    const egoFront   = w.ego.x   + w.L/2;
+    const egoRear    = w.ego.x   - w.L/2;
+    const otherFront = w.other.x + w.L/2;
+    const otherRear  = w.other.x - w.L/2;
+
+    const minX = Math.min(egoRear, otherRear)  - HORIZONTAL_MARGIN_M;
+    const maxX = Math.max(egoFront, otherFront) + HORIZONTAL_MARGIN_M;
+    const mSpanH = Math.max(8, maxX - minX); // prevent tiny span → huge zoom
+    const pxPerM_horiz = Math.max(1, (cw - 2*HORIZONTAL_PAD_PX) / mSpanH);
+
+    // Use the tighter scale so both horizontal and vertical fit
+    const pxPerM = Math.min(pxPerM_vert, pxPerM_horiz);
+
+    // Camera center between the two cars horizontally; vertically mid-lanes
+    const camX = (minX + maxX) / 2;
+    const camY = (w.ego.y + w.other.y) / 2; // typically laneW/2
+
+    const toScreen = (xm, ym) => {
       const x = (cw/2) + (xm - camX) * pxPerM;
       const y = (ch/2) - (ym - camY) * pxPerM;
-      return [x,y];
+      return [x, y];
     };
 
     // Road background + center dashed
@@ -400,7 +421,10 @@
         const blink = ((w.t*2)|0)%2 === 0;
         if(blink){
           ctx.fillStyle = '#ffd166';
-          ctx.beginPath(); ctx.moveTo(cx + Lpx/2 - 6, cy); ctx.lineTo(cx + Lpx/2 + 12, cy + 10); ctx.lineTo(cx + Lpx/2 + 12, cy - 10); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(cx + Lpx/2 - 6, cy);
+          ctx.lineTo(cx + Lpx/2 + 12, cy + 10);
+          ctx.lineTo(cx + Lpx/2 + 12, cy - 10);
+          ctx.closePath(); ctx.fill();
         }
       }
     }
@@ -506,22 +530,19 @@
   }
 
   // React to control changes live
-linkRangeNumber(speedKmh, speedKmhNum, v => {
-  if (world) {
-    world.V0 = v / 3.6;          // scenario target (m/s)
-
-    // Always keep the other vehicle at the scenario speed
-    world.other.v = world.V0;
-
-    // Only set ego's speed if we're at the very start (i.e., the "initial speed")
-    if (world.t === 0) {
-      world.ego.v = world.V0;
+  // ⬇️ Scenario speed applies to: (1) target V0, (2) other car (always), (3) ego initial speed when t===0
+  linkRangeNumber(speedKmh, speedKmhNum, v => {
+    if (world) {
+      world.V0 = v / 3.6;        // scenario target (m/s)
+      world.other.v = world.V0;  // keep other car at scenario speed
+      if (world.t === 0) {
+        world.ego.v = world.V0;  // update ego only before sim starts
+      }
+      draw();
+      updateReadout();
     }
+  });
 
-    draw();
-    updateReadout();
-  }
-});
   linkRangeNumber(maxA, maxANum, v => { if(world){ world.maxA = Math.max(0.01, v); } });
   linkRangeNumber(bufSec, bufSecNum, v => { if(world){ world.bufferSec = Math.max(0, v); } });
   linkRangeNumber(lcDur, lcDurNum, v => { if(world){ world.lcDur = v; if(world.state==='laneChange'){ world.lcEndT = world.lcStartT + world.lcDur; } } });
