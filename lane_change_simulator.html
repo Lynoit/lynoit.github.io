@@ -7,7 +7,7 @@
   <style>
     :root { --bg:#0f1117; --panel:#151924; --text:#e8eaf2; --muted:#9aa4b2; --accent:#4da3ff; }
     html,body { height:100%; margin:0; background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif }
-    .wrap { display:grid; grid-template-columns: 320px 1fr; grid-template-rows:auto 1fr; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
+    .wrap { display:grid; grid-template-columns: 320px 1fr; grid-template-rows:auto auto auto 1fr; height:100vh; gap:12px; padding:12px; box-sizing:border-box }
     header { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between }
     header h1 { font-size:18px; margin:0; letter-spacing:0.3px }
     #controls { background:var(--panel); padding:12px; border-radius:14px; display:flex; flex-direction:column; gap:12px }
@@ -22,6 +22,13 @@
     #readout .cell { color:var(--muted) }
     #readout b { color:var(--text) }
     #chartWrap { background:var(--panel); padding:10px; border-radius:14px; height:210px }
+    #milestones { background:var(--panel); padding:12px; border-radius:14px }
+    #milestones h3 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:600; letter-spacing:0.2px }
+    table.mtab { width:100%; border-collapse:collapse; font-size:13px }
+    table.mtab th, table.mtab td { border-bottom:1px solid #26304a; padding:6px 8px; text-align:left }
+    table.mtab th { color:#aab3c2; font-weight:600 }
+    table.mtab td.time { font-variant-numeric:tabular-nums; color:#e8eaf2 }
+    table.mtab td.evt { color:#d6d9e6 }
     #stageWrap { position:relative; background:var(--panel); border-radius:14px; overflow:hidden; height: calc(100vh - 160px); min-height: 640px; }
     canvas { width:100%; height:100%; display:block }
     #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
@@ -81,6 +88,18 @@
       <canvas id="chart"></canvas>
     </section>
 
+    <section id="milestones">
+      <h3>Milestones</h3>
+      <table class="mtab">
+        <thead>
+          <tr><th style="width:120px">Time (s)</th><th>Event</th></tr>
+        </thead>
+        <tbody id="milestonesBody">
+          <!-- filled by JS -->
+        </tbody>
+      </table>
+    </section>
+
     <section id="stageWrap">
       <div id="hint">Space: Play/Pause • R: Reset</div>
       <canvas id="stage"></canvas>
@@ -89,11 +108,11 @@
 
 <script>
 (function(){
-  // ---------- Parameters (defaults) ----------
-  const PX_PER_M = 18;              // scaling (px per meter) — larger for a "bigger" bird view
-  const MAX_DECEL = 1.0;            // m/s^2  (also used as +accel back to 90 km/h)
+  // ---------- Parameters ----------
+  const PX_PER_M = 18;              // big birdview
+  const MAX_DECEL = 1.0;            // m/s^2 (also used as +accel)
   const V0 = 25.0;                  // m/s (90 km/h)
-  const DT_SIM = 1/120;             // fixed physics step (s)
+  const DT_SIM = 1/120;             // fixed physics step
 
   // DOM
   const canvas = document.getElementById('stage');
@@ -117,8 +136,9 @@
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
   const laneWNum = document.getElementById('laneW');
+  const milestonesBody = document.getElementById('milestonesBody');
 
-  // HiDPI crisp pixels
+  // HiDPI
   function resizeCanvas(){
     const pr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
     const rect = canvas.parentElement.getBoundingClientRect();
@@ -134,99 +154,103 @@
   new ResizeObserver(resizeCanvas).observe(document.getElementById('stageWrap'));
   new ResizeObserver(resizeCanvas).observe(document.getElementById('chartWrap'));
 
-  // World state
+  // World
   let world;
   function reset(){
     const laneW = +laneWNum.value;
     const L = +lenNum.value, W = +widNum.value;
     world = {
       t:0,
-      state:'cruise', // cruise (90 km/h for 3s) -> buildGap -> laneChange -> done
+      state:'cruise', // 3s cruise → buildGap → laneChange → done
       laneW, L, W,
       buffer: +buffer.value,
       lcDur: +lcDur.value,
-      mode: gapMode.value, // 'behind' or 'fit'
+      mode: gapMode.value,
       indicatorOn: false,
-      // cars start parallel at same speed 25 m/s
       ego:   { x:0, y:0, v:V0, ax:0 },
       other: { x:0, y:laneW, v:V0, ax:0 },
-      // for LC
       lcStartT: null,
       lcStartY: 0,
       lcEndT: null,
       trail: [],
-      // logs for plotting
       logT: [], logVego: [], logVoth: [],
-      // timeline events (for chart markers)
-      events: [{ t:0, label:'Start of simulation' }]
+      // milestone times
+      ms: {
+        start: 0,
+        indicator: null,
+        speedAdapt: null,
+        lateralStart: null,
+        lateralDone: null
+      }
     };
+    renderMilestones(); // show table immediately with start
     updateReadout();
   }
 
-  // Utility
-  function kmh(ms){ return ms*3.6; }
-  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+  // Utils
+  const kmh = ms => ms*3.6;
+  const clamp = (v,a,b)=> Math.max(a, Math.min(b, v));
 
   function clearanceRearMinusFront(){
     const L = world.L;
     const otherRear = world.other.x - L/2;
     const egoFront = world.ego.x + L/2;
-    return otherRear - egoFront; // m
+    return otherRear - egoFront;
   }
-
   function clearanceNeeded(){
-    const base = (world.mode === 'fit') ? world.L : 0; // include vehicle length if 'fit'
+    const base = (world.mode === 'fit') ? world.L : 0;
     return base + world.buffer;
   }
 
-  // Physics step
+  // ---- Physics step ----
   function step(dt){
     const w = world; if(!w) return;
     w.t += dt;
 
     // State transitions
     if(w.state === 'cruise' && w.t >= 3){
-      w.indicatorOn = true; // indicator toggles on at 3s
+      w.indicatorOn = true;
       w.state = 'buildGap';
-      w.events.push({ t:w.t, label:'Applying turn indicator' });
-      w.events.push({ t:w.t, label:'Start of longitudinal speed adaption' });
+      if(w.ms.indicator === null) w.ms.indicator = +w.t;
+      if(w.ms.speedAdapt === null) w.ms.speedAdapt = +w.t;
+      renderMilestones();
     }
 
-    // --- Longitudinal control ---
+    // Longitudinal control
     if (w.state === 'buildGap') {
-      // start speed adaptation (decelerate up to 1 m/s²)
-      w.ego.ax = -MAX_DECEL;
+      w.ego.ax = -MAX_DECEL; // decel up to 1 m/s²
     } else if ((w.state === 'laneChange' || w.state === 'done') && w.ego.v < V0) {
-      // re-accelerate during LC and afterwards back to 90 km/h
-      w.ego.ax = +MAX_DECEL;
+      w.ego.ax = +MAX_DECEL; // re-accelerate to 90
     } else {
-      w.ego.ax = 0; // hold speed in cruise, or at target speed
+      w.ego.ax = 0;
     }
 
-    // Integrate longitudinal motion (cap at V0 = 90 km/h)
+    // Integrate
     w.ego.v = Math.max(0, Math.min(V0, w.ego.v + w.ego.ax * dt));
     w.ego.x += w.ego.v * dt;
-
-    w.other.v = V0; // constant
+    w.other.v = V0;
     w.other.x += w.other.v * dt;
 
-    // --- Check gap condition ---
+    // Gap check → LC start
     const need = clearanceNeeded();
     const clr = clearanceRearMinusFront();
     if(w.state === 'buildGap' && clr >= need){
       w.state = 'laneChange';
       w.lcStartT = w.t; w.lcStartY = w.ego.y; w.lcEndT = w.lcStartT + w.lcDur;
-      w.events.push({ t:w.lcStartT, label:'Start of lateral maneuver' });
-      // Predict "centered" time (midpoint of LC)
-      const tCentered = w.lcStartT + w.lcDur/2;
-      w.events.push({ t:tCentered, label:'Vehicle centered in target lane' });
+      if(w.ms.lateralStart === null) w.ms.lateralStart = +w.t;
+      renderMilestones();
     }
 
-    // --- Lateral lane change (half-sine) ---
+    // Lateral LC
     if(w.state === 'laneChange'){
       const tau = clamp((w.t - w.lcStartT)/w.lcDur, 0, 1);
       w.ego.y = w.lcStartY + 0.5*w.laneW*(1 - Math.cos(Math.PI * tau));
-      if(tau >= 1){ w.state = 'done'; w.indicatorOn = false; }
+      if(tau >= 1){
+        w.state = 'done';
+        w.indicatorOn = false;
+        if(w.ms.lateralDone === null) w.ms.lateralDone = +w.t;
+        renderMilestones();
+      }
     }
 
     // Trail
@@ -235,33 +259,46 @@
       w.trail.push({ x:w.ego.x, y:w.ego.y });
     } else w.trail.length = 0;
 
-    // Logging for chart
+    // Logs for chart
     w.logT.push(w.t);
     w.logVego.push(kmh(w.ego.v));
     w.logVoth.push(kmh(w.other.v));
     if(w.logT.length>2400){ w.logT.shift(); w.logVego.shift(); w.logVoth.shift(); }
   }
 
-  // Draw top-down scene
+  // ---- Milestones table renderer ----
+  function renderMilestones(){
+    if(!world) return;
+    const rows = [];
+    const fmt = t => (t===null ? '—' : t.toFixed(2));
+    const labels = [
+      {k:'start',         txt:'Simulation start'},
+      {k:'indicator',     txt:'Turn indicator deployed'},
+      {k:'speedAdapt',    txt:'Longitudinal speed adaptation start'},
+      {k:'lateralStart',  txt:'Lateral maneuver start'},
+      {k:'lateralDone',   txt:'Lateral maneuver completed'}
+    ];
+    for(const it of labels){
+      rows.push(`<tr><td class="time">${fmt(world.ms[it.k])}</td><td class="evt">${it.txt}</td></tr>`);
+    }
+    milestonesBody.innerHTML = rows.join('');
+  }
+
+  // ---- Drawing (top-down) ----
   function draw(){
     const w = world; if(!w) return;
-    const cw = canvas.width, ch = canvas.height; // device pixels (transform set)
+    const cw = canvas.width, ch = canvas.height;
     ctx.clearRect(0,0,cw,ch);
 
-    // Camera follow ego
-    const camX = w.ego.x; // center on ego
-    const camY = w.laneW/2; // midway between lanes
-
-    function toScreen(xm, ym){
+    const camX = w.ego.x, camY = w.laneW/2;
+    const toScreen = (xm,ym)=>{
       const x = (cw/2) + (xm - camX) * PX_PER_M;
       const y = (ch/2) - (ym - camY) * PX_PER_M;
       return [x,y];
-    }
+    };
 
-    // Road background
+    // Road
     ctx.fillStyle = '#0c1020'; ctx.fillRect(0,0,cw,ch);
-
-    // Center dashed line between lanes
     ctx.strokeStyle = '#d6d9e6'; ctx.setLineDash([16,16]); ctx.lineWidth = 2;
     ctx.beginPath();
     let [sx,sy] = toScreen(camX - (cw/PX_PER_M), w.laneW/2);
@@ -281,13 +318,12 @@
       ctx.stroke();
     }
 
-    // Draw cars (rects)
+    // Cars
     function drawCar(car, color){
       const [cx,cy] = toScreen(car.x, car.y);
       const Lpx = w.L * PX_PER_M; const Wpx = w.W * PX_PER_M;
       ctx.fillStyle = color; ctx.strokeStyle = '#0008';
       ctx.beginPath(); ctx.rect(cx - Lpx/2, cy - Wpx/2, Lpx, Wpx); ctx.fill(); ctx.stroke();
-      // Indicator blink for ego
       if(color === '#4da3ff' && w.indicatorOn){
         const blink = ((w.t*2)|0)%2 === 0; // ~2 Hz
         if(blink){
@@ -296,19 +332,17 @@
         }
       }
     }
-
-    drawCar(w.other, '#ff9f43'); // target-lane car (orange)
-    drawCar(w.ego,   '#4da3ff'); // ego (blue)
+    drawCar(w.other, '#ff9f43');
+    drawCar(w.ego,   '#4da3ff');
 
     // Clearance indicator
     const otherRearX = w.other.x - w.L/2;
     const egoFrontX  = w.ego.x   + w.L/2;
-    const yLine = w.ego.y; // draw near ego's current y
+    const yLine = w.ego.y;
     const [xr1, yr] = toScreen(egoFrontX, yLine + w.W*0.9);
     const [xr2, _]  = toScreen(otherRearX, yLine + w.W*0.9);
     ctx.strokeStyle = '#8fb8ff'; ctx.lineWidth = 2; ctx.setLineDash([6,6]);
     ctx.beginPath(); ctx.moveTo(xr1, yr); ctx.lineTo(xr2, yr); ctx.stroke(); ctx.setLineDash([]);
-
     const need = clearanceNeeded();
     const [needEndX, needY] = toScreen(egoFrontX + need, yLine + w.W*0.9);
     ctx.strokeStyle = '#00d07e'; ctx.beginPath(); ctx.moveTo(xr1, needY+6); ctx.lineTo(needEndX, needY+6); ctx.stroke();
@@ -318,16 +352,16 @@
     ctx.fillText(`clearance: ${clr.toFixed(2)} m`, xr1 + 6, yr - 6);
     ctx.fillStyle = '#79e2b1'; ctx.fillText(`needed: ${need.toFixed(2)} m`, xr1 + 6, needY + 22);
 
-    // HUD text
+    // HUD
     ctx.fillStyle = '#9aa4b2';
     const stateStr = (w.state==='cruise')?'Cruise (90 km/h)':(w.state==='buildGap')?'Building gap':(w.state==='laneChange')?'Lane change':'Done';
     ctx.fillText(stateStr, 10, 24);
 
-    // Draw speed chart
+    // Chart
     drawChart();
   }
 
-  // Simulation loop (fixed dt with accumulator)
+  // ---- Loop ----
   let running = false, lastT = 0, acc = 0;
   function loop(ts){
     if(!running){ lastT = ts; draw(); return requestAnimationFrame(loop); }
@@ -350,40 +384,37 @@
     } else if(w.state === 'done') lcProg.textContent = '100%'; else lcProg.textContent = '0%';
   }
 
-  // Controls wiring & syncing paired inputs
+  // Input sync
   function linkRangeNumber(rangeEl, numEl, onChange){
     const sync = v=>{ rangeEl.value = v; numEl.value = v; if (typeof onChange === 'function' && world) onChange(+v); };
     rangeEl.addEventListener('input', ()=> sync(rangeEl.value));
     numEl.addEventListener('input', ()=> sync(numEl.value));
   }
-
-  // Wire listeners that don't depend on world existing
   gapMode.addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
   lenNum.addEventListener('change', reset);
   widNum.addEventListener('change', reset);
   laneWNum.addEventListener('change', reset);
 
   playBtn.addEventListener('click', ()=>{ running = !running; playBtn.textContent = running ? '❚❚ Pause' : '▶ Play'; });
-  resetBtn.addEventListener('click', ()=>{ reset(); });
+  resetBtn.addEventListener('click', ()=>{ reset(); renderMilestones(); });
 
-  // ----- Speed chart drawing -----
+  // ---- Speed chart ----
   function drawChart(){
     const w = world; if(!w) return;
     const cw = chart.width, ch = chart.height; cctx.clearRect(0,0,cw,ch);
-    // axes
     cctx.fillStyle = '#c9d2e6'; cctx.font = '12px system-ui,Segoe UI,Roboto,Arial';
     const padL=48, padR=10, padT=14, padB=22; const iw = cw - padL - padR, ih = ch - padT - padB;
     cctx.strokeStyle = '#2b3656'; cctx.strokeRect(padL, padT, iw, ih);
 
-    const span = 20; // seconds visible
+    const span = 20;
     const tmax = w.logT.length? w.logT[w.logT.length-1]:0;
     const tmin = Math.max(0, tmax - span);
 
-    const yMin = 0, yMax = 120; // km/h scale
+    const yMin = 0, yMax = 120;
     const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
     const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
 
-    // grid lines
+    // grid
     cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
     for(let v=0; v<=120; v+=20){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
     cctx.setLineDash([]);
@@ -398,31 +429,8 @@
       }
       cctx.stroke();
     }
-    line(w.logVoth, '#ff9f43'); // other
-    line(w.logVego, '#4da3ff'); // ego
-
-    // timeline markers
-    const markers = w.events || [];
-    cctx.save();
-    for(const ev of markers){
-      if(ev.t < tmin || ev.t > tmax) continue;
-      const x = xPix(ev.t);
-      // vertical line
-      cctx.strokeStyle = '#6d7aa5'; cctx.lineWidth = 1; cctx.setLineDash([3,5]);
-      cctx.beginPath(); cctx.moveTo(x, padT); cctx.lineTo(x, padT+ih); cctx.stroke();
-      cctx.setLineDash([]);
-      // label (with background for readability)
-      const label = ev.label;
-      cctx.font = '11px system-ui,Segoe UI,Roboto,Arial';
-      const textW = cctx.measureText(label).width + 8;
-      const tx = Math.min(Math.max(x - textW/2, padL+2), padL+iw - textW - 2);
-      const ty = padT + 12;
-      cctx.fillStyle = '#0c1324cc';
-      cctx.fillRect(tx, ty-10, textW, 14);
-      cctx.fillStyle = '#cfe3ff';
-      cctx.fillText(label, tx+4, ty+1);
-    }
-    cctx.restore();
+    line(w.logVoth, '#ff9f43');
+    line(w.logVego, '#4da3ff');
 
     // labels & legend
     cctx.fillStyle='#9aa4b2';
@@ -434,20 +442,16 @@
 
   // Init
   resizeCanvas();
-  reset(); // ensure `world` exists before binding control syncs
-
-  // Now that world exists, perform initial syncs which also push values into world
+  reset();
   linkRangeNumber(buffer, bufferNum, v => { world.buffer = v; });
   linkRangeNumber(lcDur, lcDurNum, v => { world.lcDur = v; if(world.state==='laneChange'){ world.lcEndT = world.lcStartT + world.lcDur; } });
-  // Manually sync once to initialize
   buffer.dispatchEvent(new Event('input'));
   lcDur.dispatchEvent(new Event('input'));
   gapMode.dispatchEvent(new Event('change'));
-
   updateReadout();
   requestAnimationFrame(loop);
 
-  // keyboard shortcuts
+  // Keys
   window.addEventListener('keydown', (e)=>{
     if(e.code==='Space'){ e.preventDefault(); playBtn.click(); }
     else if(e.key==='r' || e.key==='R'){ resetBtn.click(); }
