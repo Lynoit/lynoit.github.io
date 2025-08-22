@@ -23,10 +23,10 @@
     }
     #controls { padding:12px; display:flex; flex-direction:column; gap:12px }
     #controls .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
-    #controls label { font-size:13px; color:var(--muted); min-width:120px }
+    #controls label { font-size:13px; color:var(--muted); min-width:140px }
     #controls input[type="range"] { width:160px }
     #controls input[type="number"], #controls select {
-      width:90px; background:#0c0f16; color:var(--text); border:1px solid #26304a; border-radius:8px; padding:6px
+      width:100px; background:#0c0f16; color:var(--text); border:1px solid #26304a; border-radius:8px; padding:6px
     }
     #controls select { width:auto }
     #controls button { background:var(--accent); color:#08111c; border:0; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer }
@@ -45,23 +45,22 @@
     table.mtab td.time { font-variant-numeric:tabular-nums; color:#e8eaf2 }
     table.mtab td.evt { color:#d6d9e6 }
 
-    /* Right column: bird-view pinned to top row after header */
+    /* Right column: bird-view */
     #stageWrap {
       grid-column: 2;
-      grid-row: 2;                 /* immediately below header */
       background:var(--panel); border-radius:14px;
       position:relative; overflow:hidden;
       height:auto; min-height:0; align-self:start; /* height matched to milestones via JS */
     }
     canvas { width:100%; height:100%; display:block }
-    #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:(--muted) }
+    #hint { position:absolute; right:10px; top:10px; background:#0c1324cc; padding:6px 10px; border-radius:10px; font-size:12px; color:var(--muted) }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Live Lane-Change Simulator</h1>
-      <div style="color:var(--muted); font-size:12px">Start parallel at 90 km/h. Hold 3 s, then indicator → speed adaptation (≤1 m/s²) → merge behind. During LC, re-accelerate to 90 km/h at +1 m/s².</div>
+      <div style="color:var(--muted); font-size:12px">Start parallel at target speed. Hold 3 s, then indicator → speed adaptation (≤|a|max) → merge behind. During/after LC, ego returns to target speed.</div>
     </header>
 
     <!-- Left column -->
@@ -71,28 +70,45 @@
         <button id="resetBtn" class="secondary">↺ Reset</button>
         <label><input id="trailChk" type="checkbox" checked> Show trails</label>
       </div>
+
+      <div class="row">
+        <label for="speedKmh">Scenario speed (km/h)</label>
+        <input id="speedKmh" type="range" min="30" max="130" step="1" value="90" />
+        <input id="speedKmhNum" type="number" min="0" step="1" value="90" />
+      </div>
+
+      <div class="row">
+        <label for="maxA">Max |a| (m/s²)</label>
+        <input id="maxA" type="range" min="0.2" max="3.0" step="0.1" value="1.0" />
+        <input id="maxANum" type="number" min="0.1" step="0.1" value="1.0" />
+      </div>
+
+      <div class="row">
+        <label for="bufSec">Buffer behind (s)</label>
+        <input id="bufSec" type="range" min="0" max="3.0" step="0.1" value="1.0" />
+        <input id="bufSecNum" type="number" min="0" step="0.1" value="1.0" />
+      </div>
+
       <div class="row">
         <label for="gapMode">Gap criterion</label>
         <select id="gapMode">
-          <option value="behind">Behind (rear − front ≥ buffer)</option>
-          <option value="fit">Fit behind (vehicle length + buffer)</option>
+          <option value="behind">Behind (rear − front ≥ time gap × v)</option>
+          <option value="fit">Fit behind (vehicle length + time gap × v)</option>
         </select>
       </div>
-      <div class="row">
-        <label for="buffer">Buffer behind (m)</label>
-        <input id="buffer" type="range" min="0" max="25" step="0.5" value="10" />
-        <input id="bufferNum" type="number" step="0.5" value="10" />
-      </div>
+
       <div class="row">
         <label for="lcDur">Lane-change duration (s)</label>
         <input id="lcDur" type="range" min="2" max="8" step="0.1" value="4" />
         <input id="lcDurNum" type="number" step="0.1" value="4" />
       </div>
+
       <div class="row">
         <label>Vehicle length / width (m)</label>
         <input id="lenNum" type="number" step="0.1" value="4.5" />
         <input id="widNum" type="number" step="0.1" value="1.8" />
       </div>
+
       <div class="row">
         <label>Lane width (m)</label>
         <input id="laneW" type="number" step="0.1" value="3.7" />
@@ -120,7 +136,7 @@
       </table>
     </section>
 
-    <!-- Right column (top) -->
+    <!-- Right column -->
     <section id="stageWrap">
       <div id="hint">Space: Play/Pause • R: Reset</div>
       <canvas id="stage"></canvas>
@@ -129,43 +145,51 @@
 
 <script>
 (function(){
-  // --- Params ---
-  const V0 = 25.0;       // m/s (90 km/h)
-  const MAX_DECEL = 1.0; // m/s^2 (also used as +accel back to V0)
+  // --- Params (defaults via controls) ---
   const DT_SIM = 1/120;
-  const VERTICAL_MARGIN_M = 0.3; // very little space above/below cars
-  const VERTICAL_PAD_PX   = 8;   // small pixel pad inside canvas
-  const CAR_VISUAL_SCALE  = 0.70; // <— smaller drawn cars (visual only)
+  const VERTICAL_MARGIN_M = 0.3; // tiny top/bottom space in birdview
+  const VERTICAL_PAD_PX   = 8;
+  const CAR_VISUAL_SCALE  = 0.70; // drawn rectangles only (visual)
 
   // DOM
   const canvas = document.getElementById('stage');
   const ctx = canvas.getContext('2d');
   const chart = document.getElementById('chart');
   const cctx = chart.getContext('2d');
+
   const playBtn = document.getElementById('playBtn');
   const resetBtn = document.getElementById('resetBtn');
   const trailChk = document.getElementById('trailChk');
+
   const tOut = document.getElementById('tOut');
   const stateOut = document.getElementById('stateOut');
   const vEgoOut = document.getElementById('vEgoOut');
   const vOthOut = document.getElementById('vOthOut');
   const clrOut = document.getElementById('clrOut');
   const lcProg = document.getElementById('lcProg');
+
+  const speedKmh = document.getElementById('speedKmh');
+  const speedKmhNum = document.getElementById('speedKmhNum');
+  const maxA = document.getElementById('maxA');
+  const maxANum = document.getElementById('maxANum');
+  const bufSec = document.getElementById('bufSec');
+  const bufSecNum = document.getElementById('bufSecNum');
+
   const gapMode = document.getElementById('gapMode');
-  const buffer = document.getElementById('buffer');
-  const bufferNum = document.getElementById('bufferNum');
   const lcDur = document.getElementById('lcDur');
   const lcDurNum = document.getElementById('lcDurNum');
   const lenNum = document.getElementById('lenNum');
   const widNum = document.getElementById('widNum');
   const laneWNum = document.getElementById('laneW');
+
   const milestones = document.getElementById('milestones');
   const milestonesBody = document.getElementById('milestonesBody');
   const stageWrap = document.getElementById('stageWrap');
+  const chartWrap = document.getElementById('chartWrap');
 
   // HiDPI & layout
   function syncStageHeight(){
-    // match birdview height to milestones table height (left)
+    // make birdview height ≈ milestones table height (left)
     const h = Math.round(milestones.getBoundingClientRect().height);
     stageWrap.style.height = Math.max(160, h) + 'px';
   }
@@ -173,14 +197,14 @@
     syncStageHeight();
 
     const pr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
-    const rect = canvas.parentElement.getBoundingClientRect();
+    const rect = stageWrap.getBoundingClientRect();
     canvas.width  = Math.max(1, Math.floor(rect.width  * pr));
     canvas.height = Math.max(1, Math.floor(rect.height * pr));
     canvas.style.width = rect.width + 'px';
     canvas.style.height = rect.height + 'px';
     ctx.setTransform(pr,0,0,pr,0,0);
 
-    const cr = chart.parentElement.getBoundingClientRect();
+    const cr = chartWrap.getBoundingClientRect();
     chart.width  = Math.max(1, Math.floor(cr.width  * pr));
     chart.height = Math.max(1, Math.floor(cr.height * pr));
     chart.style.width = cr.width + 'px';
@@ -189,28 +213,39 @@
   }
   new ResizeObserver(()=>{ syncStageHeight(); resizeCanvas(); }).observe(milestones);
   new ResizeObserver(resizeCanvas).observe(stageWrap);
+  new ResizeObserver(resizeCanvas).observe(chartWrap);
   new ResizeObserver(resizeCanvas).observe(document.body);
 
   // World
   let world;
-  function reset(){
+  function initWorldFromControls(){
+    const V0_ms   = (+speedKmh.value) / 3.6;
+    const maxAms2 = +maxA.value;
+    const bufS    = +bufSec.value;
+
     const laneW = +laneWNum.value;
     const L = +lenNum.value, W = +widNum.value;
-    world = {
+
+    return {
       t:0,
       state:'cruise', // 3s cruise → buildGap → laneChange → done
       laneW, L, W,
-      buffer: +buffer.value,
+      V0: V0_ms,     // target scenario speed (m/s)
+      maxA: maxAms2, // |a|max (m/s^2) used for decel and re-accel
+      bufferSec: bufS, // time gap (s)
       lcDur: +lcDur.value,
       mode: gapMode.value,
       indicatorOn: false,
-      ego:   { x:0, y:0, v:V0, ax:0 },
-      other: { x:0, y:laneW, v:V0, ax:0 },
+      ego:   { x:0, y:0, v:V0_ms, ax:0 },
+      other: { x:0, y:laneW, v:V0_ms, ax:0 },
       lcStartT: null, lcStartY: 0, lcEndT: null,
       trail: [],
       logT: [], logVego: [], logVoth: [],
       ms: { start: 0, indicator: null, speedAdapt: null, lateralStart: null, lateralDone: null }
     };
+  }
+  function reset(){
+    world = initWorldFromControls();
     renderMilestones();
     updateReadout();
     resizeCanvas();
@@ -219,20 +254,24 @@
   // Utils
   const kmh = ms => ms*3.6;
   const clamp = (v,a,b)=> Math.max(a, Math.min(b, v));
-  const clearanceRearMinusFront = ()=> {
+  const sign = x => (x>0)-(x<0);
+
+  function clearanceRearMinusFront(){
     const L = world.L;
     return (world.other.x - L/2) - (world.ego.x + L/2);
-  };
-  const clearanceNeeded = ()=>{
-    const base = (world.mode === 'fit') ? world.L : 0;
-    return base + world.buffer;
-  };
+  }
+  function clearanceNeeded(){
+    const base = (world.mode === 'fit') ? world.L : 0;          // add vehicle length if "fit"
+    const dyn  = world.bufferSec * world.ego.v;                 // seconds × current ego speed (m)
+    return base + dyn;
+  }
 
   // Physics
   function step(dt){
     const w = world; if(!w) return;
     w.t += dt;
 
+    // Turn indicator & transition after 3s cruise
     if(w.state === 'cruise' && w.t >= 3){
       w.indicatorOn = true;
       w.state = 'buildGap';
@@ -241,21 +280,28 @@
       renderMilestones();
     }
 
-    // Longitudinal logic
+    // --- Longitudinal control toward target speed w.V0 ---
     if (w.state === 'buildGap') {
-      w.ego.ax = -MAX_DECEL; // decel
-    } else if ((w.state === 'laneChange' || w.state === 'done') && w.ego.v < V0) {
-      w.ego.ax = +MAX_DECEL; // re-accel to 90
+      // Actively decelerate to create the gap (up to |a|max)
+      w.ego.ax = -w.maxA;
+    } else if (w.state === 'laneChange' || w.state === 'done' || w.state === 'cruise') {
+      // Track target speed in cruise, during LC, and after
+      const dv = w.V0 - w.ego.v;
+      if (Math.abs(dv) < 0.02) w.ego.ax = 0;
+      else w.ego.ax = clamp(sign(dv) * w.maxA, -w.maxA, w.maxA);
     } else {
       w.ego.ax = 0;
     }
 
-    // Integrate
-    w.ego.v = Math.max(0, Math.min(V0, w.ego.v + w.ego.ax * dt));
+    // Integrate ego; clamp to >=0
+    w.ego.v = Math.max(0, w.ego.v + w.ego.ax * dt);
     w.ego.x += w.ego.v * dt;
-    w.other.v = V0; w.other.x += w.other.v * dt;
 
-    // Gap → start LC
+    // Other car tracks scenario speed constantly
+    w.other.v = w.V0;
+    w.other.x += w.other.v * dt;
+
+    // Gap check → start LC
     if(w.state === 'buildGap' && clearanceRearMinusFront() >= clearanceNeeded()){
       w.state = 'laneChange';
       w.lcStartT = w.t; w.lcStartY = w.ego.y; w.lcEndT = w.lcStartT + w.lcDur;
@@ -315,7 +361,7 @@
       return [x,y];
     };
 
-    // Road bg + center dashed
+    // Road background + center dashed
     ctx.fillStyle = '#0c1020'; ctx.fillRect(0,0,cw,ch);
     ctx.strokeStyle = '#d6d9e6'; ctx.setLineDash([16,16]); ctx.lineWidth = 2;
     ctx.beginPath();
@@ -336,7 +382,7 @@
       ctx.stroke();
     }
 
-    // Cars (draw with a visual scale; physics still uses true L/W)
+    // Cars (visual scale only)
     function drawCar(car, color){
       const [cx,cy] = toScreen(car.x, car.y);
       const Lpx = w.L * pxPerM * CAR_VISUAL_SCALE;
@@ -354,7 +400,7 @@
     drawCar(w.other, '#ff9f43');
     drawCar(w.ego,   '#4da3ff');
 
-    // Clearance guide (still based on true geometry)
+    // Clearance guide (based on true geometry)
     const otherRearX = w.other.x - w.L/2;
     const egoFrontX  = w.ego.x   + w.L/2;
     const yLine = w.ego.y;
@@ -373,7 +419,7 @@
 
     // HUD
     ctx.fillStyle = '#9aa4b2';
-    const stateStr = (w.state==='cruise')?'Cruise (90 km/h)':(w.state==='buildGap')?'Building gap':(w.state==='laneChange')?'Lane change':'Done';
+    const stateStr = (w.state==='cruise')?'Cruise (target speed)':(w.state==='buildGap')?'Building gap':(w.state==='laneChange')?'Lane change':'Done';
     ctx.fillText(stateStr, 10, 24);
 
     // Chart
@@ -392,13 +438,13 @@
     const tmax = w.logT.length? w.logT[w.logT.length-1]:0;
     const tmin = Math.max(0, tmax - span);
 
-    const yMin = 0, yMax = 120;
+    const yMin = 0, yMax = 130; // match UI upper bound
     const xPix = t=> padL + ( (t - tmin)/(span) ) * iw;
     const yPix = v=> padT + ih - ( (v - yMin)/(yMax - yMin) ) * ih;
 
     // grid
     cctx.strokeStyle = '#1e2740'; cctx.setLineDash([4,8]);
-    for(let v=0; v<=120; v+=20){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
+    for(let v=0; v<=130; v+=10){ cctx.beginPath(); cctx.moveTo(padL, yPix(v)); cctx.lineTo(padL+iw, yPix(v)); cctx.stroke(); }
     cctx.setLineDash([]);
 
     // series
@@ -445,13 +491,20 @@
     } else if(w.state === 'done') lcProg.textContent = '100%'; else lcProg.textContent = '0%';
   }
 
-  // Controls
+  // Controls wiring
   function linkRangeNumber(rangeEl, numEl, onChange){
     const sync = v=>{ rangeEl.value = v; numEl.value = v; if (typeof onChange === 'function' && world) onChange(+v); };
     rangeEl.addEventListener('input', ()=> sync(rangeEl.value));
     numEl.addEventListener('input', ()=> sync(numEl.value));
   }
-  document.getElementById('gapMode').addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
+
+  // React to control changes live
+  linkRangeNumber(speedKmh, speedKmhNum, v => { if(world){ world.V0 = v/3.6; } });
+  linkRangeNumber(maxA, maxANum, v => { if(world){ world.maxA = Math.max(0.01, v); } });
+  linkRangeNumber(bufSec, bufSecNum, v => { if(world){ world.bufferSec = Math.max(0, v); } });
+  linkRangeNumber(lcDur, lcDurNum, v => { if(world){ world.lcDur = v; if(world.state==='laneChange'){ world.lcEndT = world.lcStartT + world.lcDur; } } });
+
+  gapMode.addEventListener('change', ()=>{ if(world) world.mode = gapMode.value; });
   lenNum.addEventListener('change', reset);
   widNum.addEventListener('change', reset);
   laneWNum.addEventListener('change', reset);
@@ -461,9 +514,10 @@
 
   // Init
   reset();
-  linkRangeNumber(buffer, bufferNum, v => { world.buffer = v; renderMilestones(); });
-  linkRangeNumber(lcDur, lcDurNum, v => { world.lcDur = v; if(world.state==='laneChange'){ world.lcEndT = world.lcStartT + world.lcDur; } });
-  buffer.dispatchEvent(new Event('input'));
+  // Ensure initial sync of paired inputs to world
+  speedKmh.dispatchEvent(new Event('input'));
+  maxA.dispatchEvent(new Event('input'));
+  bufSec.dispatchEvent(new Event('input'));
   lcDur.dispatchEvent(new Event('input'));
   gapMode.dispatchEvent(new Event('change'));
   updateReadout();
