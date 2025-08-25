@@ -3,23 +3,22 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>ACC Simulator — Stable Mode</title>
+<title>ACC Simulator — User-Controlled</title>
 
-<!-- Chart.js (stable, no animations/responsive) -->
+<!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<!-- SheetJS for Excel -->
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <style>
   :root { --bg:#0f1116; --panel:#141822; --ink:#e9eef9; --muted:#9fb0d0; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--ink); }
-  .grid { display:grid; grid-template-columns: 320px 860px 540px; gap:10px; padding:10px; }
-  .panel { background:var(--panel); border:1px solid #232a3c; border-radius:14px; padding:10px; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--ink); }
+  .grid { display:grid; grid-template-columns: 360px 860px 540px; gap:10px; padding:10px; min-height:100vh; }
+  .panel { background:var(--panel); border:1px solid #232a3c; border-radius:14px; padding:10px; overflow:auto; }
   h2,h3{ margin:.3rem 0 .6rem; }
   label{ color:var(--muted); font-size:.9rem; }
-  input{ width:100%; padding:6px 8px; border-radius:10px; border:1px solid #2a3243; background:#0d1118; color:var(--ink); }
-  .row{ display:grid; grid-template-columns: 1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
+  input, textarea { width:100%; padding:8px 10px; border-radius:10px; border:1px solid #2a3243; background:#0d1118; color:var(--ink); }
+  textarea { height:160px; resize:vertical; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .row{ display:grid; grid-template-columns: 1fr 120px; gap:8px; align-items:center; margin-bottom:8px; }
   fieldset{ border:1px solid #24304a; border-radius:12px; padding:8px 10px; margin:8px 0 10px; }
   legend{ color:var(--muted); padding:0 6px; }
   button{ background:#1b2334; border:1px solid #2f3a56; color:var(--ink); padding:7px 10px; border-radius:10px; cursor:pointer; }
@@ -29,26 +28,43 @@
   .kpi div{ background:#0b0f17; border:1px solid #24304a; border-radius:10px; padding:8px; text-align:center; }
   .tag{ font-size:.75rem; color:var(--muted); }
 
-  /* Fixed-size canvases to avoid GPU/context crashes */
+  /* Fixed-size canvases for stability */
   canvas.chart { background:#0b0f17; border:1px solid #24304a; border-radius:10px; display:block; }
   #acc, #spd, #gap, #tgap, #energy { width:840px; height:160px; }
   #bird { background:#0b0f17; border:1px solid #24304a; border-radius:12px; width:520px; height:420px; display:block; }
 
-  .diag { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0b0f17; border:1px solid #24304a; border-radius:8px; padding:6px; color:#cfe4ff; white-space:pre-wrap; height:100px; overflow:auto; }
+  .diag { font-family:ui-monospace,Menlo,Consolas,monospace; background:#0b0f17; border:1px solid #24304a; border-radius:8px; padding:6px; color:#cfe4ff; white-space:pre-wrap; height:100px; overflow:auto; }
+  .tiny{ color:var(--muted); font-size:.85rem; }
 </style>
 </head>
 <body>
 <div class="grid">
-  <!-- LEFT -->
+  <!-- LEFT: Controls -->
   <div class="panel">
     <h2>ACC Simulator</h2>
-    <div class="btnbar">
-      <input type="file" id="file" accept=".xlsx,.xls"/>
-      <button id="loadDemo">Load demo</button>
-      <button id="run">Run</button>
-      <button id="play">Play</button>
-      <button id="pause">Pause</button>
-    </div>
+
+    <fieldset>
+      <legend>Lead vehicle profile (paste here)</legend>
+      <div class="tiny" style="margin-bottom:6px;">
+        One pair per line: <code>time_seconds, speed_km/h</code> (comma, semicolon, or whitespace).<br/>
+        Example:<br/>
+        <code>0, 90</code><br/>
+        <code>1, 90</code><br/>
+        <code>2, 85</code>
+      </div>
+      <textarea id="profile" placeholder="0, 90
+1, 90
+2, 85
+3, 70
+4, 70
+5, 75
+..."></textarea>
+      <div class="btnbar">
+        <button id="run">Run</button>
+        <button id="play">Play</button>
+        <button id="pause">Pause</button>
+      </div>
+    </fieldset>
 
     <fieldset>
       <legend>Global</legend>
@@ -89,17 +105,11 @@
       <div class="row"><label>Frame pause (s)</label><input id="pauseTime" type="number" step="0.01" value="0.05"></div>
     </fieldset>
 
-    <div class="kpi">
-      <div><div class="tag">Energy Aggressive</div><div id="kAgg">–</div></div>
-      <div><div class="tag">Energy Standard</div><div id="kStd">–</div></div>
-      <div><div class="tag">Energy Eco</div><div id="kEco">–</div></div>
-    </div>
-
     <h3 style="margin-top:10px;">Diagnostics</h3>
     <div id="diag" class="diag"></div>
   </div>
 
-  <!-- MIDDLE -->
+  <!-- MIDDLE: Plots -->
   <div class="panel">
     <h3>Plots</h3>
     <canvas id="acc"  class="chart" width="840" height="160"></canvas>
@@ -109,27 +119,27 @@
     <canvas id="energy" class="chart" width="840" height="160"></canvas>
   </div>
 
-  <!-- RIGHT -->
+  <!-- RIGHT: Bird-view -->
   <div class="panel">
     <h3>Bird-view</h3>
     <canvas id="bird" width="520" height="420"></canvas>
-    <div style="color:#9fb0d0;font-size:.85rem;margin-top:6px;">Dashed rulers = headway from lead (0.5–5 s)</div>
+    <div class="tiny" style="margin-top:6px;">Dashed rulers = headway from lead (0.5–5 s)</div>
   </div>
 </div>
 
 <script>
 /* ---------- diagnostics ---------- */
 const diag = document.getElementById('diag');
-function logd(msg){ diag.textContent += msg + "\\n"; diag.scrollTop = diag.scrollHeight; }
+function logd(msg){ diag.textContent += msg + "\n"; diag.scrollTop = diag.scrollHeight; }
 window.onerror = (m,s,l,c,e)=>{ logd('Error: '+m); };
 window.addEventListener('unhandledrejection', e=>{ logd('Promise rejection: '+e.reason); });
 
-/* ---------- Chart.js global stability ---------- */
+/* ---------- Chart.js stability ---------- */
 if(window.Chart){
-  Chart.defaults.responsive = false;         // fixed size
-  Chart.defaults.animation = false;          // no animations
+  Chart.defaults.responsive = false;
+  Chart.defaults.animation = false;
   Chart.defaults.maintainAspectRatio = false;
-  Chart.defaults.devicePixelRatio = 1;       // keep it light + stable
+  Chart.defaults.devicePixelRatio = 1;
 }
 
 /* ---------- constants/util ---------- */
@@ -142,40 +152,28 @@ const colors = {
 };
 function clamp(x,lo,hi){ return Math.max(lo, Math.min(hi, x)); }
 
-/* ---------- scenario ---------- */
-let scenario = { t:[], spdLead_kmh:[] };
-
-function loadDemo(){
-  const dt=0.1, T=160, n=Math.floor(T/dt)+1;
-  const t=new Array(n), v=new Array(n);
-  for(let k=0;k<n;k++){
-    const ts = +(k*dt).toFixed(3); t[k]=ts;
-    let s;
-    if(ts<10) s=90;
-    else if(ts<45) s=90 - (ts-10)*30/35;
-    else if(ts<70) s=60 + 10*Math.sin((ts-45)/25*Math.PI*2);
-    else if(ts<100) s=60 + (ts-70)*1.2;
-    else s=90;
-    v[k]= Math.max(10,s);
-  }
-  scenario.t=t; scenario.spdLead_kmh=v;
-  logd(`Demo loaded: n=${n}, dt=${dt}s`);
-}
-
-async function loadXlsx(file){
-  const ab = await file.arrayBuffer();
-  const wb = XLSX.read(ab, {type:'array'});
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null});
+/* ---------- parse textarea ---------- */
+function parseProfile(text){
+  const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length);
   const t=[], v=[];
-  for(const r of rows){
-    if(!r || r.length<2) continue;
-    if(typeof r[0]==='number' && typeof r[1]==='number'){ t.push(r[0]); v.push(Math.max(10,r[1])); }
+  for(const line of lines){
+    // split on comma/semicolon/space
+    const parts = line.split(/[,\;\s]+/).filter(Boolean);
+    if(parts.length<2) throw new Error(`Bad line: "${line}". Expect "time speed".`);
+    const T = Number(parts[0]);
+    const S = Number(parts[1]);
+    if(!isFinite(T) || !isFinite(S)) throw new Error(`Non-numeric in line: "${line}"`);
+    t.push(T);
+    v.push(Math.max(10, S)); // clamp min 10 km/h like MATLAB
   }
-  if(t.length<3) throw new Error('Need ≥3 numeric rows with Time (s) & Speed (km/h).');
-  if(!(t[1]-t[0]>0)) throw new Error('Time must be strictly increasing.');
-  scenario.t=t; scenario.spdLead_kmh=v;
-  logd(`Excel loaded: n=${t.length}, dt=${(t[1]-t[0]).toFixed(3)}s`);
+  // sort by time if needed, and enforce unique times
+  const idx = t.map((_,i)=>i).sort((a,b)=>t[a]-t[b]);
+  const t2 = idx.map(i=>t[i]);
+  const v2 = idx.map(i=>v[i]);
+  for(let i=1;i<t2.length;i++){
+    if(t2[i] <= t2[i-1]) throw new Error('Time must be strictly increasing.');
+  }
+  return { t:t2, spdLead_kmh:v2 };
 }
 
 /* ---------- inputs -> params ---------- */
@@ -192,12 +190,18 @@ function P(){
 }
 
 /* ---------- simulation ---------- */
-function simulate(p){
-  const t = scenario.t;
-  if(!t || t.length<3) throw new Error('No scenario loaded.');
-  const dt = t[1]-t[0]; if(!(dt>0)) throw new Error('Bad dt.');
+function simulate(profile, p){
+  const t = profile.t;
+  if(!t || t.length<3) throw new Error('Need ≥3 rows in the profile.');
+  const dt = t[1]-t[0]; if(!(dt>0)) throw new Error('Bad dt. Times must be strictly increasing with constant step.');
+  // verify constant timestep (within tolerance)
+  for(let i=2;i<t.length;i++){
+    const d = t[i]-t[i-1];
+    if(Math.abs(d - dt) > Math.max(1e-6, 1e-3*dt)) throw new Error('Time step must be constant.');
+  }
+
   const N = t.length;
-  const vLead = scenario.spdLead_kmh.map(s=>s/3.6);
+  const vLead = profile.spdLead_kmh.map(s=>s/3.6);
   const aLead = new Array(N); aLead[0]=0; for(let i=1;i<N;i++) aLead[i]=(vLead[i]-vLead[i-1])/dt;
 
   const base={
@@ -251,7 +255,7 @@ function simulate(p){
   return {t, dt, vLead, aLead, vLog, aLog, gLog, tgLog, eLog, xLeadLog, xLog, energy};
 }
 
-/* ---------- charts (fixed-size, no anim) ---------- */
+/* ---------- charts ---------- */
 let charts=null;
 function makeChart(ctx, title, series){
   return new Chart(ctx, {
@@ -304,6 +308,7 @@ function ensureCharts(){
 function updateCharts(log){
   ensureCharts();
   const t=log.t;
+
   charts.acc.data.labels = t;
   charts.acc.data.datasets[0].data = log.aLead;
   charts.acc.data.datasets[1].data = log.aLog.Aggressive;
@@ -337,11 +342,11 @@ function updateCharts(log){
   kEco.textContent = eS>0? (100*eE/eS).toFixed(1)+'%':'–';
 }
 
-/* ---------- bird view (simple 2D) ---------- */
-let anim={ playing:false, k:0, timer:null };
+/* ---------- bird view ---------- */
+let anim={ playing:false, k:0, timer:null, lastLog:null };
 function drawBird(log){
   const cvs = document.getElementById('bird');
-  const ctx = cvs.getContext('2d'); // default DPR=1; canvas fixed size
+  const ctx = cvs.getContext('2d');
   const W=cvs.width, H=cvs.height;
   ctx.fillStyle='#0b0f17'; ctx.fillRect(0,0,W,H);
 
@@ -390,30 +395,25 @@ function play(log){
 }
 function pauseAnim(){ anim.playing=false; if(anim.timer){ clearTimeout(anim.timer); anim.timer=null; } }
 
-/* ---------- wire UI ---------- */
-let lastLog=null;
-
-loadDemo(); // ready to go
+/* ---------- wiring ---------- */
 ensureCharts();
-logd('Charts ready. Click "Run".');
+logd('Paste your profile and click RUN.');
 
-file.addEventListener('change', async (e)=>{
-  const f=e.target.files[0]; if(!f) return;
-  try{ await loadXlsx(f); logd('Excel ready — click Run.'); }catch(err){ logd('Excel error: '+err.message); alert(err.message); }
-});
-loadDemo.onclick = ()=>{ try{ loadDemo(); logd('Demo loaded.'); }catch(e){ logd('Demo error: '+e.message); } };
 run.onclick = ()=>{
   try{
-    lastLog = simulate(P());
-    updateCharts(lastLog);
-    anim.k=0; drawBird(lastLog);
-    logd(`Sim ok. N=${lastLog.t.length} dt=${lastLog.dt.toFixed(3)}s | E[kWh] Agg=${lastLog.energy.Aggressive.toFixed(3)} Std=${lastLog.energy.Standard.toFixed(3)} Eco=${lastLog.energy.Eco.toFixed(3)}`);
+    const prof = parseProfile(profile.value);
+    const log = simulate(prof, P());
+    anim.lastLog = log;
+    anim.k=0;
+    updateCharts(log);
+    drawBird(log);
+    logd(`Sim ok. N=${log.t.length} dt=${log.dt.toFixed(3)}s | E[kWh] Agg=${log.energy.Aggressive.toFixed(3)} Std=${log.energy.Standard.toFixed(3)} Eco=${log.energy.Eco.toFixed(3)}`);
   }catch(err){
     logd('Run error: '+err.message);
     alert('Run error: '+err.message);
   }
 };
-play.onclick = ()=>{ if(lastLog) play(lastLog); };
+play.onclick = ()=>{ if(anim.lastLog) play(anim.lastLog); };
 pause.onclick = ()=> pauseAnim();
 </script>
 </body>
