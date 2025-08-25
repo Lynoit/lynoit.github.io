@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ACC Curve Adaption & LKS — Simulator</title>
+  <title>ACC Curve Adaption & LKS — Simulator (Time-Capped Axes)</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root { --bg:#0f1116; --panel:#171a22; --muted:#9aa4b2; --accent:#3fb950; --grid:#222737; }
@@ -69,6 +69,7 @@
           <div>Curve entry @ s (m)</div><div id="kvSstart">–</div>
           <div>Curve exit @ s (m)</div><div id="kvSend">–</div>
           <div>v<sub>curve</sub> (km/h) from a<sub>lat</sub></div><div id="kvVcurve">–</div>
+          <div>Estimated sim time (s)</div><div id="kvT">–</div>
         </div>
         <p class="hint">
           ACC adapts speed so lateral acceleration ≲ a<sub>max</sub>. It starts decelerating <b>Distance Start</b> before the transition-in, and starts accelerating back towards set speed <b>Distance End</b> before the transition-out ends. Lane Centering keeps the car on the centerline.
@@ -97,61 +98,29 @@
 
 <script>
 (() => {
-  // ------------------------
-  // Helpers
-  // ------------------------
   const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-  const kPH2MS = 1000/3600;
-  const MS2kPH = 3.6;
+  const kPH2MS = 1000/3600; const MS2kPH = 3.6;
 
-  // ------------------------
-  // State
-  // ------------------------
-  let cfg = {
-    R: 150, // m
-    phiDeg: 90, // deg total central angle of the curve
-    vSet: 90 * kPH2MS, // m/s
-    aLatMax: 2.0, // m/s^2 comfort
-    aLongMag: 1.5, // m/s^2 absolute accel / decel
-    dStart: 150, // m before curve start (transition-in begins)
-    dEnd: 100, // m before curve end (transition-out ends)
-    laneW: 3.5 // m
-  };
+  let cfg = { R:150, phiDeg:90, vSet:90*kPH2MS, aLatMax:2.0, aLongMag:1.5, dStart:150, dEnd:100, laneW:3.5 };
+  let track = null;
+  let sim = { t:0, dt:0.02, running:false, s:0, v:0, tArr:[], vArr:[], aLatArr:[], RArr:[] };
 
-  // Track precomputed geometry arrays
-  let track = null; // {s:[], x:[], y:[], psi:[], kappa:[], R:[], sStart, sEnd, Ls, totalLen, bbox}
-
-  // Simulation runtime
-  let sim = {
-    t: 0, dt: 0.02, running: false, s: 0, v: 0,
-    tArr: [], vArr: [], aLatArr: [], RArr: []
-  };
-
-  // ------------------------
-  // UI Elements
-  // ------------------------
   const E = id => document.getElementById(id);
   const inpR=E('inpR'), inpPhi=E('inpPhi'), inpVset=E('inpVset'), inpAlat=E('inpAlat'), inpAlong=E('inpAlong'), inpDstart=E('inpDstart'), inpDend=E('inpDend'), inpLaneW=E('inpLaneW');
-  const kvLs=E('kvLs'), kvSstart=E('kvSstart'), kvSend=E('kvSend'), kvVcurve=E('kvVcurve');
+  const kvLs=E('kvLs'), kvSstart=E('kvSstart'), kvSend=E('kvSend'), kvVcurve=E('kvVcurve'), kvT=E('kvT');
   const btnApply=E('btnApply'), btnStart=E('btnStart'), btnPause=E('btnPause'), btnReset=E('btnReset');
   const cvBird=E('bird');
 
-  // ------------------------
-  // Charts (fixed size via canvas attributes, no CSS scaling => crisp text)
-  // ------------------------
+  // Charts with linear time axis
   const makeChart = (canvas, label, yLabel) => new Chart(canvas.getContext('2d'), {
     type: 'line',
-    data: { labels: [], datasets: [{ label, data: [], borderWidth: 2, pointRadius: 0 }] },
+    data: { datasets: [{ label, data: [], borderWidth: 2, pointRadius: 0 }] },
     options: {
-      animation: false,
-      responsive: false,
-      plugins: {
-        legend: { labels: { color:'#c8d1dc' } },
-        tooltip: { enabled:true }
-      },
+      animation: false, responsive: false, parsing:false, normalized:true,
+      plugins: { legend: { labels: { color:'#c8d1dc' } }, tooltip:{enabled:true} },
       scales: {
-        x: { title: { display: true, text: 'time (s)', color:'#9aa4b2' }, grid: { color:'#223' }, ticks:{ color:'#c8d1dc' } },
-        y: { title: { display: true, text: yLabel, color:'#9aa4b2' }, grid: { color:'#223' }, ticks:{ color:'#c8d1dc' } }
+        x: { type:'linear', min:0, max:10, title:{ display:true, text:'time (s)', color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } },
+        y: { title:{ display:true, text:yLabel, color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } }
       }
     }
   });
@@ -159,313 +128,133 @@
   const chSpeed = makeChart(E('chSpeed'), 'Speed (km/h)', 'km/h');
   const chLatA  = makeChart(E('chLatA'), 'Lateral acceleration (m/s²)', 'm/s²');
   const chRadius= new Chart(E('chRadius').getContext('2d'), {
-    type: 'line',
-    data: { labels: [], datasets: [
-      { label:'Curve radius R (m)', data: [], borderWidth:2, pointRadius:0 },
-    ]},
-    options: {
-      animation:false, responsive:false,
-      plugins:{ legend:{ labels:{ color:'#c8d1dc' }}},
-      spanGaps:true,
-      scales:{ x:{ title:{ display:true, text:'time (s)', color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } },
-               y:{ title:{ display:true, text:'m', color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } } }
+    type:'line',
+    data:{ datasets:[{ label:'Curve radius R (m)', data:[], borderWidth:2, pointRadius:0 }] },
+    options:{ animation:false, responsive:false, parsing:false, normalized:true, spanGaps:true,
+      plugins:{ legend:{ labels:{ color:'#c8d1dc' } } },
+      scales:{ x:{ type:'linear', min:0, max:10, title:{ display:true, text:'time (s)', color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } },
+              y:{ title:{ display:true, text:'m', color:'#9aa4b2' }, grid:{ color:'#223' }, ticks:{ color:'#c8d1dc' } } }
     }
   });
 
-  // ------------------------
-  // Track generation with EU-style transition (Euler spiral / clothoid)
-  // ------------------------
   function buildTrack() {
-    const R = cfg.R; // design radius in constant-radius portion
-    const phi = cfg.phiDeg * Math.PI/180; // total circular arc angle
-
-    // Choose transition length Ls ~ 0.3 R, clamped to [60, 200] m (typical practical range)
-    const Ls = clamp(0.3*R, 60, 200);
-    const A = Math.sqrt(Ls * R); // clothoid parameter (kappa = s/A^2)
-
-    // Pre/post straights to comfortably accommodate dStart/dEnd
+    const R = cfg.R; const phi = cfg.phiDeg * Math.PI/180;
+    const Ls = clamp(0.3*R, 60, 200); const A = Math.sqrt(Ls * R);
     const Lpre  = Math.max(cfg.dStart + 80, 120);
     const Lpost = Math.max(cfg.dEnd   + 80, 120);
-
-    const Larc = R * phi; // constant radius section length
+    const Larc = R * phi;
     const totalLen = Lpre + Ls + Larc + Ls + Lpost;
 
-    const sStart = Lpre;            // start of transition-in
-    const sEnterCircle = sStart + Ls;
-    const sExitCircle  = sEnterCircle + Larc;
-    const sEnd   = sExitCircle + Ls; // end of transition-out
+    const sStart = Lpre; const sEnterCircle = sStart + Ls; const sExitCircle = sEnterCircle + Larc; const sEnd = sExitCircle + Ls;
 
-    const ds = 1.0; // spatial step (m)
-    const n  = Math.ceil(totalLen/ds)+1;
-    const s = new Float64Array(n);
-    const x = new Float64Array(n);
-    const y = new Float64Array(n);
-    const psi = new Float64Array(n);
-    const kappa = new Float64Array(n);
-    const Rarr = new Float64Array(n);
+    const ds = 1.0; const n = Math.ceil(totalLen/ds)+1;
+    const s = new Float64Array(n), x=new Float64Array(n), y=new Float64Array(n), psi=new Float64Array(n), kappa=new Float64Array(n), Rarr=new Float64Array(n);
 
-    let heading = 0, X=0, Y=0;
-
+    let heading=0, X=0, Y=0;
     for (let i=0;i<n;i++) {
-      const si = i*ds;
-      s[i] = si;
-      // curvature along s
-      let k;
-      if (si < sStart) { k = 0; }
-      else if (si < sEnterCircle) { // transition-in
-        const st = si - sStart; // 0..Ls
-        k = st / (A*A);
-      }
-      else if (si < sExitCircle) { // constant radius
-        k = 1/R;
-      }
-      else if (si < sEnd) { // transition-out
-        const st = si - sExitCircle; // 0..Ls
-        k = (Ls - st) / (A*A);
-      }
-      else { // after
-        k = 0;
-      }
-      kappa[i] = k;
-      Rarr[i] = (k>1e-8) ? 1/k : Infinity;
-
-      // integrate heading & position (explicit Euler is fine at 1 m steps)
-      if (i>0) {
-        heading += kappa[i-1]*ds; // dpsi = k*ds
-        X += Math.cos(heading)*ds;
-        Y += Math.sin(heading)*ds;
-      }
-      psi[i] = heading;
-      x[i]=X; y[i]=Y;
+      const si=i*ds; s[i]=si;
+      let k; if (si < sStart) k=0; else if (si < sEnterCircle) { const st=si-sStart; k = st / (A*A); }
+      else if (si < sExitCircle) { k = 1/R; }
+      else if (si < sEnd) { const st=si - sExitCircle; k = (Ls - st)/(A*A); }
+      else k=0;
+      kappa[i]=k; Rarr[i]=(k>1e-8)? 1/k : Infinity;
+      if (i>0) { heading += kappa[i-1]*ds; X += Math.cos(heading)*ds; Y += Math.sin(heading)*ds; }
+      psi[i]=heading; x[i]=X; y[i]=Y;
     }
-
-    // normalize/translate so that straight-in runs along +X, already true; ensure min at (0,0)
-    const minX = Math.min(...x), maxX = Math.max(...x), minY = Math.min(...y), maxY = Math.max(...y);
-
-    return { s,x,y,psi,kappa,R:Rarr, sStart, sEnd, Ls, totalLen,
-             bbox:{ minX, maxX, minY, maxY } };
+    const minX=Math.min(...x), maxX=Math.max(...x), minY=Math.min(...y), maxY=Math.max(...y);
+    return { s,x,y,psi,kappa,R:Rarr,sStart,sEnd,Ls,totalLen,bbox:{minX,maxX,minY,maxY} };
   }
 
-  // ------------------------
-  // Birdview drawing
-  // ------------------------
   function drawBird() {
-    const ctx = cvBird.getContext('2d');
-    ctx.clearRect(0,0,cvBird.width,cvBird.height);
+    const ctx = cvBird.getContext('2d'); ctx.clearRect(0,0,cvBird.width,cvBird.height);
     if (!track) return;
-
-    const {minX,maxX,minY,maxY} = track.bbox;
-    const margin = 20; // px
-    const scale = Math.min((cvBird.width-2*margin)/(maxX-minX+1e-6), (cvBird.height-2*margin)/(maxY-minY+1e-6));
-
-    function worldToPix(wx, wy) {
-      const px = margin + (wx - minX)*scale;
-      const py = cvBird.height - (margin + (wy - minY)*scale); // flip Y
-      return [px, py];
-    }
-
+    const {minX,maxX,minY,maxY}=track.bbox; const margin=20; const scale=Math.min((cvBird.width-2*margin)/(maxX-minX+1e-6),(cvBird.height-2*margin)/(maxY-minY+1e-6));
     const laneW = cfg.laneW;
+    const toPix=(wx,wy)=>{const px=margin+(wx-minX)*scale; const py=cvBird.height-(margin+(wy-minY)*scale); return [px,py];};
 
-    // draw lane edges
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#44506b';
-    ctx.beginPath();
-    for (let i=0;i<track.s.length;i+=2) {
-      const nx = -Math.sin(track.psi[i]);
-      const ny =  Math.cos(track.psi[i]);
-      const wx = track.x[i] + (laneW/2)*nx;
-      const wy = track.y[i] + (laneW/2)*ny;
-      const [px,py] = worldToPix(wx,wy);
-      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
-    }
-    ctx.stroke();
+    const drawEdge = sign=>{ const nxArr=[],nyArr=[]; const ctx2=ctx; ctx2.lineWidth=2; ctx2.strokeStyle='#44506b'; ctx2.beginPath();
+      for (let i=0;i<track.s.length;i+=2){ const nx=-Math.sin(track.psi[i]); const ny=Math.cos(track.psi[i]); const wx=track.x[i]+sign*(laneW/2)*nx; const wy=track.y[i]+sign*(laneW/2)*ny; const [px,py]=toPix(wx,wy); if(i===0)ctx2.moveTo(px,py); else ctx2.lineTo(px,py);} ctx2.stroke(); };
+    drawEdge(+1); drawEdge(-1);
 
-    ctx.beginPath();
-    for (let i=0;i<track.s.length;i+=2) {
-      const nx = -Math.sin(track.psi[i]);
-      const ny =  Math.cos(track.psi[i]);
-      const wx = track.x[i] - (laneW/2)*nx;
-      const wy = track.y[i] - (laneW/2)*ny;
-      const [px,py] = worldToPix(wx,wy);
-      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
-    }
-    ctx.stroke();
+    ctx.setLineDash([10,8]); ctx.strokeStyle='#6b7280'; ctx.beginPath(); for(let i=0;i<track.s.length;i+=2){ const [px,py]=toPix(track.x[i],track.y[i]); if(i===0)ctx.moveTo(px,py); else ctx.lineTo(px,py);} ctx.stroke(); ctx.setLineDash([]);
 
-    // dashed centerline
-    ctx.setLineDash([10,8]);
-    ctx.strokeStyle = '#6b7280';
-    ctx.beginPath();
-    for (let i=0;i<track.s.length;i+=2) {
-      const [px,py] = worldToPix(track.x[i], track.y[i]);
-      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
+    const decelS=Math.max(0,track.sStart-cfg.dStart); const accelS=Math.max(0,track.sEnd-cfg.dEnd);
+    const mark=(sVal,label,color)=>{ const idx=Math.min(track.s.length-1,Math.max(0,Math.round(sVal))); const [px,py]=toPix(track.x[idx],track.y[idx]); ctx.fillStyle=color; ctx.beginPath(); ctx.arc(px,py,5,0,Math.PI*2); ctx.fill(); ctx.font='12px ui-sans-serif'; ctx.fillStyle='#cbd5e1'; ctx.textAlign='left'; ctx.fillText(label, px+8, py-8); };
+    mark(decelS,'Decel start','#22c55e'); mark(accelS,'Accel start','#f59e0b');
 
-    // draw decel/accel markers
-    const decelS = Math.max(0, track.sStart - cfg.dStart);
-    const accelS = Math.max(0, track.sEnd   - cfg.dEnd);
-    ctx.fillStyle = '#22c55e';
-    drawMarkerAtS(decelS, 'Decel start');
-    ctx.fillStyle = '#f59e0b';
-    drawMarkerAtS(accelS, 'Accel start');
-
-    function drawMarkerAtS(sVal, label) {
-      const idx = Math.min(track.s.length-1, Math.max(0, Math.round(sVal)));
-      const [px,py] = worldToPix(track.x[idx], track.y[idx]);
-      ctx.beginPath(); ctx.arc(px,py,5,0,Math.PI*2); ctx.fill();
-      ctx.font = '12px ui-sans-serif'; ctx.fillStyle='#cbd5e1'; ctx.textAlign='left';
-      ctx.fillText(label, px+8, py-8);
-    }
-
-    // draw car centered on lane (LKS)
-    const carLen = 4.6, carW = 1.9;
-    const sIdx = Math.min(track.s.length-1, Math.max(0, Math.round(sim.s)));
-    const cx = track.x[sIdx], cy = track.y[sIdx], heading = track.psi[sIdx];
-
-    // outer shadow
-    const [cpx,cpy] = worldToPix(cx,cy);
-    ctx.save();
-    ctx.translate(cpx,cpy);
-    ctx.rotate(-heading); // because canvas Y flipped earlier
-    ctx.fillStyle = '#111827aa';
-    ctx.fillRect(-carLen*scale/2+2, -carW*scale/2+2, carLen*scale, carW*scale);
-    // body
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillRect(-carLen*scale/2, -carW*scale/2, carLen*scale, carW*scale);
-    // nose marker
-    ctx.fillStyle = '#0ea5e9';
-    ctx.fillRect(carLen*scale/2 - 6, -3, 6, 6);
-    ctx.restore();
+    const carLen=4.6, carW=1.9; const sIdx=Math.min(track.s.length-1,Math.max(0,Math.round(sim.s))); const cx=track.x[sIdx], cy=track.y[sIdx], heading=track.psi[sIdx]; const [cpx,cpy]=toPix(cx,cy);
+    ctx.save(); ctx.translate(cpx,cpy); ctx.rotate(-heading); ctx.fillStyle='#111827aa'; ctx.fillRect(-carLen*scale/2+2, -carW*scale/2+2, carLen*scale, carW*scale); ctx.fillStyle='#38bdf8'; ctx.fillRect(-carLen*scale/2, -carW*scale/2, carLen*scale, carW*scale); ctx.fillStyle='#0ea5e9'; ctx.fillRect(carLen*scale/2 - 6, -3, 6, 6); ctx.restore();
   }
 
-  // ------------------------
-  // Simulation logic (ACC with curve-speed adaption)
-  // ------------------------
   function stepSim() {
     if (!sim.running || !track) return;
-
     const i = Math.min(track.s.length-1, Math.max(0, Math.round(sim.s)));
     const Rhere = track.R[i];
     const vLimitInst = (Rhere===Infinity) ? Infinity : Math.sqrt(cfg.aLatMax * Rhere);
-
-    const vSet = cfg.vSet;
-    const vCurveDesign = Math.sqrt(cfg.aLatMax * cfg.R); // based on design R
-
+    const vSet = cfg.vSet; const vCurveDesign = Math.sqrt(cfg.aLatMax * cfg.R);
     const decelStartS = Math.max(0, track.sStart - cfg.dStart);
     const accelStartS = Math.max(0, track.sEnd   - cfg.dEnd);
 
-    // Desired speed profile gate
-    let vDes;
-    if (sim.s < decelStartS) vDes = vSet;
-    else if (sim.s < accelStartS) vDes = Math.min(vSet, vCurveDesign);
-    else vDes = vSet;
-
-    // Always respect instantaneous lateral comfort
+    let vDes; if (sim.s < decelStartS) vDes = vSet; else if (sim.s < accelStartS) vDes = Math.min(vSet, vCurveDesign); else vDes = vSet;
     const vTarget = Math.min(vDes, vLimitInst);
 
-    // Simple bang-bang towards vTarget with |a| limit
-    const tol = 0.1; // m/s
-    let aCmd = 0;
-    if (sim.v > vTarget + tol) aCmd = -cfg.aLongMag;
-    else if (sim.v < vTarget - tol) aCmd = +cfg.aLongMag;
-    else aCmd = 0;
+    const tol=0.1; let aCmd=0; if (sim.v > vTarget + tol) aCmd = -cfg.aLongMag; else if (sim.v < vTarget - tol) aCmd = +cfg.aLongMag; else aCmd = 0;
 
-    // Integrate
     sim.v = Math.max(0, sim.v + aCmd * sim.dt);
     sim.s = Math.min(track.totalLen, sim.s + sim.v * sim.dt);
     sim.t += sim.dt;
 
-    // Logs for charts
     const aLat = (Rhere===Infinity) ? 0 : (sim.v*sim.v / Rhere);
-    sim.tArr.push(sim.t);
-    sim.vArr.push(sim.v * MS2kPH);
-    sim.aLatArr.push(aLat);
-    sim.RArr.push((Rhere===Infinity) ? null : Rhere);
+    sim.tArr.push(sim.t); sim.vArr.push(sim.v * MS2kPH); sim.aLatArr.push(aLat); sim.RArr.push((Rhere===Infinity)? null : Rhere);
 
-    // Update visuals
     appendChartPoints();
     drawBird();
-
-    // stop at end
     if (sim.s >= track.totalLen) { sim.running=false; btnStart.disabled=false; btnPause.disabled=true; }
   }
 
-  // ------------------------
-  // Charts update (incremental)
-  // ------------------------
   function appendChartPoints() {
-    const t = sim.tArr[sim.tArr.length-1];
-    chSpeed.data.labels.push(t.toFixed(1));
-    chLatA.data.labels.push(t.toFixed(1));
-    chRadius.data.labels.push(t.toFixed(1));
-
-    chSpeed.data.datasets[0].data.push(sim.vArr[sim.vArr.length-1]);
-    chLatA.data.datasets[0].data.push(sim.aLatArr[sim.aLatArr.length-1]);
-    chRadius.data.datasets[0].data.push(sim.RArr[sim.RArr.length-1]);
-
-    // keep last N points to bound memory
-    const Nmax = 6000; // ~2 minutes at 50 Hz labels (we add each step)
-    [chSpeed, chLatA, chRadius].forEach(ch => {
-      if (ch.data.labels.length > Nmax) {
-        ch.data.labels.shift();
-        ch.data.datasets[0].data.shift();
-      }
-      ch.update('none');
-    });
+    const t = sim.tArr[sim.tArr.length-1]; const v = sim.vArr[sim.vArr.length-1]; const a = sim.aLatArr[sim.aLatArr.length-1]; const r = sim.RArr[sim.RArr.length-1];
+    chSpeed.data.datasets[0].data.push({x:t,y:v}); chLatA.data.datasets[0].data.push({x:t,y:a}); chRadius.data.datasets[0].data.push({x:t,y:r});
+    const Nmax=6000; [chSpeed, chLatA, chRadius].forEach(ch=>{ const ds=ch.data.datasets[0].data; if(ds.length>Nmax) ds.splice(0, ds.length-Nmax); ch.update('none'); });
   }
 
-  function resetCharts() {
-    [chSpeed, chLatA, chRadius].forEach(ch => {
-      ch.data.labels.length = 0;
-      ch.data.datasets.forEach(ds=>ds.data.length=0);
-      ch.update('none');
-    });
+  function resetCharts() { [chSpeed, chLatA, chRadius].forEach(ch=>{ ch.data.datasets.forEach(ds=>ds.data.length=0); ch.update('none'); }); }
+
+  // Estimate total simulation time using coarse forward integration
+  function estimateTotalTime() {
+    if (!track) return 10;
+    let t=0, v=cfg.vSet, s=0; const dt=0.02; const vSet=cfg.vSet; const vCurveDesign=Math.sqrt(cfg.aLatMax * cfg.R);
+    const decelStartS=Math.max(0,track.sStart-cfg.dStart); const accelStartS=Math.max(0,track.sEnd-cfg.dEnd);
+    let guard=0; const guardMax=1e6;
+    while (s < track.totalLen && guard++ < guardMax) {
+      const i = Math.min(track.s.length-1, Math.max(0, Math.round(s)));
+      const Rhere=track.R[i]; const vLimitInst=(Rhere===Infinity)? Infinity : Math.sqrt(cfg.aLatMax * Rhere);
+      let vDes; if (s < decelStartS) vDes=vSet; else if (s < accelStartS) vDes=Math.min(vSet,vCurveDesign); else vDes=vSet;
+      const vTarget=Math.min(vDes, vLimitInst);
+      const tol=0.1; let aCmd=0; if (v > vTarget + tol) aCmd=-cfg.aLongMag; else if (v < vTarget - tol) aCmd=+cfg.aLongMag; else aCmd=0;
+      v=Math.max(0, v + aCmd*dt); s+=v*dt; t+=dt; if (t>1e4) break;
+    }
+    return t;
   }
 
-  // ------------------------
-  // Control handlers
-  // ------------------------
   function applyFromUI() {
-    cfg.R = Number(inpR.value);
-    cfg.phiDeg = Number(inpPhi.value);
-    cfg.vSet = Number(inpVset.value) * kPH2MS;
-    cfg.aLatMax = Number(inpAlat.value);
-    cfg.aLongMag = Number(inpAlong.value);
-    cfg.dStart = Number(inpDstart.value);
-    cfg.dEnd = Number(inpDend.value);
-    cfg.laneW = Number(inpLaneW.value);
-
+    cfg.R = Number(inpR.value); cfg.phiDeg = Number(inpPhi.value); cfg.vSet = Number(inpVset.value)*kPH2MS; cfg.aLatMax = Number(inpAlat.value); cfg.aLongMag = Number(inpAlong.value); cfg.dStart = Number(inpDstart.value); cfg.dEnd = Number(inpDend.value); cfg.laneW = Number(inpLaneW.value);
     track = buildTrack();
-    sim.s = 0; sim.v = cfg.vSet; sim.t = 0;
-    sim.tArr.length=0; sim.vArr.length=0; sim.aLatArr.length=0; sim.RArr.length=0;
-    resetCharts();
-    drawBird();
+    sim.s=0; sim.v=cfg.vSet; sim.t=0; sim.tArr.length=0; sim.vArr.length=0; sim.aLatArr.length=0; sim.RArr.length=0;
 
-    // Stats
-    kvLs.textContent = track.Ls.toFixed(1);
-    kvSstart.textContent = track.sStart.toFixed(1);
-    kvSend.textContent = track.sEnd.toFixed(1);
-    const vCurve = Math.sqrt(cfg.aLatMax * cfg.R) * MS2kPH;
-    kvVcurve.textContent = vCurve.toFixed(1);
+    const T = estimateTotalTime();
+    kvT.textContent = Math.ceil(T).toString();
+    [chSpeed, chLatA, chRadius].forEach(ch=>{ ch.options.scales.x.min=0; ch.options.scales.x.max=Math.max(5, Math.ceil(T)); ch.update('none'); });
+
+    resetCharts(); drawBird();
+    kvLs.textContent = track.Ls.toFixed(1); kvSstart.textContent = track.sStart.toFixed(1); kvSend.textContent = track.sEnd.toFixed(1);
+    const vCurve = Math.sqrt(cfg.aLatMax * cfg.R) * MS2kPH; kvVcurve.textContent = vCurve.toFixed(1);
   }
 
-  btnApply.onclick = applyFromUI;
-  btnStart.onclick = () => { sim.running = true; btnStart.disabled=true; btnPause.disabled=false; };
-  btnPause.onclick = () => { sim.running = false; btnStart.disabled=false; btnPause.disabled=true; };
-  btnReset.onclick = () => { sim.running=false; btnStart.disabled=false; btnPause.disabled=true; applyFromUI(); };
+  btnApply.onclick = applyFromUI; btnStart.onclick = ()=>{ sim.running=true; btnStart.disabled=true; btnPause.disabled=false; }; btnPause.onclick = ()=>{ sim.running=false; btnStart.disabled=false; btnPause.disabled=true; }; btnReset.onclick = ()=>{ sim.running=false; btnStart.disabled=false; btnPause.disabled=true; applyFromUI(); };
 
-  // ------------------------
-  // Main loop
-  // ------------------------
-  function loop() {
-    stepSim();
-    requestAnimationFrame(loop);
-  }
-
-  // Init
-  applyFromUI();
-  loop();
+  function loop(){ stepSim(); requestAnimationFrame(loop); }
+  applyFromUI(); loop();
 })();
 </script>
 </body>
