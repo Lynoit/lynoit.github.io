@@ -1,610 +1,529 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACC Curve Handling + Lane Centering Simulator</title>
-<link rel="preconnect" href="https://cdn.jsdelivr.net" />
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<style>
-  :root{--bg:#0f1115;--panel:#151924;--ink:#e8eef8;--muted:#9bb0c8;--accent:#78a6ff;}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,Segoe UI,Roboto,Arial}
-  h2,h3{margin:.4rem 0}
-  .grid{display:grid;grid-template-columns: 320px 1fr 520px;gap:10px;min-height:100vh;padding:10px}
-  .card{background:var(--panel);border:1px solid #1f2535;border-radius:14px;box-shadow:0 10px 24px rgba(0,0,0,.25);padding:14px}
-  label{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:8px 0}
-  input[type="number"], input[type="range"]{width:130px;background:#0c101a;color:var(--ink);border:1px solid #2a3550;border-radius:8px;padding:6px 8px}
-  .row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:10px}
-  .btns{display:flex;gap:8px;margin-top:8px}
-  button{background:#1d2a44;color:var(--ink);border:1px solid #2c3a5f;border-radius:10px;padding:8px 12px;cursor:pointer}
-  button:hover{filter:brightness(1.1)}
-  .small{color:var(--muted);font-size:12px}
-  canvas{width:100%;height:260px;background:#0c101a;border:1px solid #1f2535;border-radius:12px}
-  #bird{height:calc(100vh - 40px);background:#0c101a}
-  .stack{display:flex;flex-direction:column;gap:10px}
-  .cols{display:flex;flex-direction:column;gap:10px}
-  .kv{display:flex;justify-content:space-between;color:var(--muted);font-size:13px;margin-top:6px}
-  .inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .help{font-size:12px;color:#b6c6de}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ACC Curve Adaptation + LCS — Simulator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root{
+      --bg:#0e1116; --panel:#151a21; --ink:#e9eef7; --muted:#95a3b4; --accent:#66d9ef;
+      --good:#4ade80; --warn:#f59e0b; --bad:#ef4444;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+    h1{font-size:18px;margin:0 0 12px}
+    h2{font-size:14px;margin:16px 0 8px;color:var(--muted);font-weight:600}
+    .wrap{display:grid;grid-template-columns:360px 1fr 520px;gap:12px;height:100%;padding:12px}
+    .card{background:var(--panel);border:1px solid #212734;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.25);display:flex;flex-direction:column}
+    .card header{padding:12px 14px;border-bottom:1px solid #212734}
+    .card .body{padding:12px 14px;overflow:auto}
+    label{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0;font-size:13px}
+    input[type=number], input[type=range]{width:140px}
+    input[type=range]{accent-color:var(--accent)}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:#1f2632;border:1px solid #2a3240;color:var(--ink);padding:8px 12px;border-radius:10px;cursor:pointer}
+    button.primary{background:#1f3550;border-color:#25405f}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .pill{display:inline-block;background:#1b2230;border:1px solid #2a3240;padding:6px 8px;border-radius:999px;font-size:12px;margin:2px 4px 0 0}
+    .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;color:var(--muted)}
+    canvas{max-width:100%}
+    #charts{display:grid;grid-template-rows:1fr 1fr 1fr;gap:10px;height:calc(100% - 52px);padding:10px}
+    #bird{width:100%;height:100%;position:relative}
+    #roadCanvas{width:100%;height:100%;display:block}
+    details{border:1px dashed #2a3240;border-radius:12px;padding:6px 8px;margin-top:6px}
+    details>summary{cursor:pointer;color:var(--muted)}
+    .legend{font-size:12px;color:var(--muted)}
+  </style>
 </head>
 <body>
-<div class="grid">
-  <!-- LEFT: Controls -->
-  <div class="card cols">
-    <h2>Inputs</h2>
-    <div class="help">Curve uses EU-style transition (clothoid: linear curvature ramp). ACC adapts speed for comfort in the curve, then returns to the set speed.</div>
+  <div class="wrap">
+    <!-- Column 1: Controls -->
+    <section class="card" id="controls">
+      <header>
+        <h1>ACC Curve Adaptation + Lane Centering</h1>
+      </header>
+      <div class="body">
+        <h2>Inputs</h2>
+        <label>
+          <span>Curve radius R (m)</span>
+          <input id="inR" type="number" min="30" max="3000" step="10" value="200">
+        </label>
+        <label>
+          <span>Set speed (km/h)</span>
+          <input id="inVset" type="number" min="10" max="200" step="1" value="100">
+        </label>
+        <label>
+          <span>Longitudinal accel limit |a<sub>x</sub>| (m/s²)</span>
+          <input id="inAx" type="number" min="0.1" max="3.5" step="0.1" value="1.0">
+        </label>
+        <label>
+          <span>Distance Start (m)</span>
+          <input id="inDstart" type="number" min="10" max="1500" step="10" value="200">
+        </label>
+        <label>
+          <span>Distance End (m)</span>
+          <input id="inDend" type="number" min="10" max="1500" step="10" value="200">
+        </label>
 
-    <label>
-      <span>Curve radius R (m)</span>
-      <input id="inR" type="number" min="20" step="5" value="150" />
-    </label>
-    <label>
-      <span>Curve angle (deg)</span>
-      <input id="inTheta" type="number" min="10" max="180" step="5" value="60" />
-    </label>
-    <label>
-      <span>Set speed (km/h)</span>
-      <input id="inVset" type="number" min="10" max="200" step="1" value="90" />
-    </label>
-    <label>
-      <span>Longitudinal accel. magnitude (m/s²)</span>
-      <input id="inAlong" type="number" min="0.2" max="4" step="0.1" value="1.5" />
-    </label>
-    <label title="Where the deceleration begins before the curve entry">
-      <span>Distance Start (m)</span>
-      <input id="inDstart" type="number" min="0" step="5" value="120" />
-    </label>
-    <label title="Where acceleration to set speed begins before the curve exit">
-      <span>Distance End (m)</span>
-      <input id="inDend" type="number" min="0" step="5" value="80" />
-    </label>
-    <label title="Comfort lateral acceleration cap for the curve speed adaptation">
-      <span>Comfort lateral a<sub>y</sub> (m/s²)</span>
-      <input id="inAyMax" type="number" min="0.5" max="4" step="0.1" value="2.0" />
-    </label>
+        <details>
+          <summary>Advanced</summary>
+          <label>
+            <span>Comfort lateral a<sub>y,max</sub> (m/s²)</span>
+            <input id="inAyMax" type="number" min="0.5" max="4" step="0.1" value="1.8">
+          </label>
+          <label>
+            <span>Max lateral jerk j<sub>max</sub> (m/s³)</span>
+            <input id="inJmax" type="number" min="0.1" max="2.0" step="0.1" value="0.5">
+          </label>
+          <label>
+            <span>Circular arc length L<sub>c</sub> (m)</span>
+            <input id="inLc" type="number" min="20" max="1000" step="10" value="150">
+          </label>
+          <label>
+            <span>Lane width (m)</span>
+            <input id="inLaneW" type="number" min="2.8" max="4.2" step="0.05" value="3.75">
+          </label>
+          <label>
+            <span>Vehicle L×W (m×m)</span>
+            <input id="inVehL" type="number" min="3.0" max="6.0" step="0.1" value="4.6">
+            <input id="inVehW" type="number" min="1.5" max="2.5" step="0.05" value="1.9">
+          </label>
+        </details>
 
-    <div class="kv"><span>Computed curve speed (km/h):</span><span id="kvCurve">–</span></div>
-    <div class="kv"><span>Transition length (m):</span><span id="kvTrans">–</span></div>
+        <h2>Controls</h2>
+        <div class="row">
+          <button id="btnStart" class="primary">Start</button>
+          <button id="btnPause" disabled>Pause</button>
+          <button id="btnReset" disabled>Reset</button>
+        </div>
 
-    <div class="btns">
-      <button id="btnStart">Start</button>
-      <button id="btnPause">Pause</button>
-      <button id="btnReset">Reset</button>
-    </div>
+        <h2>Computed</h2>
+        <div class="kv" id="computedKV"></div>
+        <div class="legend">Notes:
+          <div class="pill">Transition = clothoid (Euler spiral)</div>
+          <div class="pill">j limited</div>
+          <div class="pill">ACC ramps by |a<sub>x</sub>|</div>
+        </div>
+      </div>
+    </section>
 
-    <h3>Status</h3>
-    <div class="inline small">
-      <div>t = <span id="statT">0.00</span> s</div>
-      <div>| v = <span id="statV">0.0</span> km/h</div>
-      <div>| a<sub>y</sub> = <span id="statAy">0.00</span> m/s²</div>
-    </div>
-    <div class="small">Lane width 3.75 m, wheelbase 2.7 m. Lateral controller: Stanley.</div>
+    <!-- Column 2: Charts -->
+    <section class="card">
+      <header>
+        <h1>Curvature → Radius, Speed & Lateral a<sub>y</sub> vs time</h1>
+      </header>
+      <div id="charts" class="body">
+        <canvas id="chartR"></canvas>
+        <canvas id="chartV"></canvas>
+        <canvas id="chartAy"></canvas>
+      </div>
+    </section>
+
+    <!-- Column 3: Birdview -->
+    <section class="card">
+      <header>
+        <h1>Birdview</h1>
+      </header>
+      <div id="bird" class="body">
+        <canvas id="roadCanvas"></canvas>
+      </div>
+    </section>
   </div>
-
-  <!-- MIDDLE: Plots -->
-  <div class="card stack">
-    <h2>Plots (vs distance)</h2>
-    <canvas id="chartRadius"></canvas>
-    <canvas id="chartSpeed"></canvas>
-    <canvas id="chartAy"></canvas>
-  </div>
-
-  <!-- RIGHT: Birdview -->
-  <div class="card">
-    <h2>Birdview</h2>
-    <canvas id="bird"></canvas>
-  </div>
-</div>
 
 <script>
-/* =========================
-   Utility & Parameters
-========================= */
-const cfg = {
-  laneWidth: 3.75,
-  wheelbase: 2.7,
-  dt: 0.02,
-  dsPath: 0.5, // meters for path discretization
-  jerkComfort: 0.5, // m/s^3 used to compute transition length (EU design vibe)
-  stanley_ke: 3.0,
-  stanley_kv: 1.0,
-  steerMax: 35 * Math.PI/180,
-  accelTol: 0.1, // km/h tolerance before applying accel
-};
+(() => {
+  // ------- State & helpers -------
+  const $ = sel => document.querySelector(sel);
+  const inR = $('#inR'), inVset = $('#inVset'), inAx = $('#inAx'), inDstart = $('#inDstart'), inDend = $('#inDend');
+  const inAyMax = $('#inAyMax'), inJmax = $('#inJmax'), inLc = $('#inLc'), inLaneW = $('#inLaneW'), inVehL = $('#inVehL'), inVehW = $('#inVehW');
+  const kv = $('#computedKV');
+  const btnStart = $('#btnStart'), btnPause = $('#btnPause'), btnReset = $('#btnReset');
 
-const els = {
-  inR:       document.getElementById('inR'),
-  inTheta:   document.getElementById('inTheta'),
-  inVset:    document.getElementById('inVset'),
-  inAlong:   document.getElementById('inAlong'),
-  inDstart:  document.getElementById('inDstart'),
-  inDend:    document.getElementById('inDend'),
-  inAyMax:   document.getElementById('inAyMax'),
-  kvCurve:   document.getElementById('kvCurve'),
-  kvTrans:   document.getElementById('kvTrans'),
-  btnStart:  document.getElementById('btnStart'),
-  btnPause:  document.getElementById('btnPause'),
-  btnReset:  document.getElementById('btnReset'),
-  statT:     document.getElementById('statT'),
-  statV:     document.getElementById('statV'),
-  statAy:    document.getElementById('statAy'),
-  bird:      document.getElementById('bird'),
-  chartRadius: document.getElementById('chartRadius'),
-  chartSpeed:  document.getElementById('chartSpeed'),
-  chartAy:     document.getElementById('chartAy'),
-};
-
-let charts = {};
-let world = null;     // precomputed path and curvature
-let sim = null;       // simulation state
-let running = false;
-let rafId = null;
-
-/* =========================
-   Path Generation (Clothoid)
-========================= */
-// Build a centerline path: straight-in, transition-in, constant arc, transition-out, straight-out.
-function buildPath(params){
-  const {R, thetaRad, vSet, dStart, dEnd} = params;
-
-  // Transition length from jerk comfort: Ls = v^3 / (J * R)
-  const Ls = Math.max(10, Math.pow(vSet,3) / (cfg.jerkComfort * R)); // keep sane min length
-  const Larc = R * thetaRad;
-
-  // Enough straight before/after to visualize
-  const Lpre = dStart + 60;
-  const Lpost = dEnd + 120;
-
-  const segments = [
-    {type:'straight', L: Lpre, k0:0, k1:0},
-    {type:'spiral_in', L: Ls,  k0:0, k1:  1/R},
-    {type:'arc',       L: Larc,k0:1/R,k1:  1/R},
-    {type:'spiral_out',L: Ls,  k0:1/R,k1:  0  },
-    {type:'straight',  L: Lpost,k0:0,k1:0},
-  ];
-
-  // Curvature function along s
-  function kappaAt(seg, u){ // u in [0,1] within the segment
-    if(seg.type==='straight') return 0;
-    if(seg.type==='arc') return seg.k0;
-    // linear ramp
-    return seg.k0 + (seg.k1 - seg.k0)*u;
-  }
-
-  let x=[0], y=[0], psi=[0], s=[0], kap=[0];
-  let sCursor=0;
-  let entryS= Lpre;              // start of spiral_in
-  let exitS = Lpre + Ls + Larc + Ls; // end of spiral_out
-  const ds = cfg.dsPath;
-
-  // Integrate heading and position with small steps
-  for(const seg of segments){
-    const steps = Math.max(1, Math.round(seg.L/ds));
-    for(let i=1;i<=steps;i++){
-      const u = i/steps;
-      const k = kappaAt(seg, u);
-      const dsi = seg.L/steps;
-      const psiPrev = psi[psi.length-1];
-      const psiNew  = psiPrev + k * dsi;
-      const xNew = x[x.length-1] + Math.cos(psiPrev) * dsi;
-      const yNew = y[y.length-1] + Math.sin(psiPrev) * dsi;
-      x.push(xNew); y.push(yNew); psi.push(psiNew);
-      sCursor += dsi;
-      s.push(sCursor);
-      kap.push(k);
-    }
-  }
-
-  // Find indices at entry/exit of the curve domain (start of spiral_in, end of spiral_out)
-  const idxEntry = findIndexAtS(s, entryS);
-  const idxExit  = findIndexAtS(s, exitS);
-
-  // Lane polylines: offset by ± laneWidth/2
-  const w = cfg.laneWidth/2;
-  const left = [], right = [];
-  for(let i=0;i<x.length;i++){
-    const nx = -Math.sin(psi[i]), ny = Math.cos(psi[i]);
-    left.push({x:x[i] + nx*w,  y:y[i] + ny*w});
-    right.push({x:x[i] - nx*w, y:y[i] - ny*w});
-  }
-
-  return {
-    x,y,psi,s,kap,
-    idxEntry, idxExit,
-    left,right,
-    Ls, Larc, entryS, exitS
-  };
-}
-function findIndexAtS(sArr, sVal){
-  let lo=0, hi=sArr.length-1;
-  while(lo<hi){
-    const mid=(lo+hi)>>1;
-    if(sArr[mid] < sVal) lo=mid+1; else hi=mid;
-  }
-  return lo;
-}
-
-/* =========================
-   Simulation
-========================= */
-function initSim(params){
-  world = buildPath(params);
-  const startX = world.x[2], startY = world.y[2], startPsi = world.psi[2];
-
-  sim = {
-    t:0,
-    x: startX,
-    y: startY,
-    psi: startPsi,
-    v: params.vSet,
-    sIdxNear: 0,
-    sNear: world.s[0],
-    vSet: params.vSet,
-    aMag: params.aMag,
-    dStart: params.dStart,
-    dEnd: params.dEnd,
-    ayMax: params.ayMax,
-    R: params.R,
-    sEntry: world.s[world.idxEntry],
-    sExit: world.s[world.idxExit],
-    // logs (x-axis = distance along reference centerline)
-    logS: [],
-    logR: [],
-    logV: [],
-    logAy: [],
-  };
-
-  // Prime logs with the full radius profile for plotting
-  for(let i=0;i<world.s.length;i++){
-    const k = Math.abs(world.kap[i]);
-    const Rloc = (k<1e-6) ? Infinity : 1/k;
-    sim.logS.push(world.s[i]);
-    sim.logR.push( isFinite(Rloc) ? Rloc : 2000 ); // cap for plotting
-    sim.logV.push(null); // will fill incrementally
-    sim.logAy.push(null);
-  }
+  const roadCanvas = document.getElementById('roadCanvas');
+  const rctx = roadCanvas.getContext('2d');
+  const DPR = Math.max(1, window.devicePixelRatio || 1);
 
   // Charts
-  setupCharts(sim.logS, sim.logR);
-  updateInfo(params, world);
-  drawBird(); // initial
-}
+  const chartR = new Chart(document.getElementById('chartR'), {
+    type: 'line', data: { labels: [], datasets: [{ label: 'Curve radius R (m)', data: [], borderWidth: 2 }] },
+    options: baseChartOptions('Radius (m) — gaps mean straight (R = ∞)')
+  });
+  const chartV = new Chart(document.getElementById('chartV'), {
+    type: 'line', data: { labels: [], datasets: [
+      { label: 'Speed (km/h)', data: [], borderWidth: 2 },
+      { label: 'Ref speed (km/h)', data: [], borderDash: [6,4], borderWidth: 2 }
+    ]}, options: baseChartOptions('Speed'))
+  });
+  const chartAy = new Chart(document.getElementById('chartAy'), {
+    type: 'line', data: { labels: [], datasets: [
+      { label: 'Lateral a_y (m/s²)', data: [], borderWidth: 2 },
+      { label: 'Comfort limit (m/s²)', data: [], borderDash:[4,4], borderWidth: 2 }
+    ]}, options: baseChartOptions('Lateral acceleration'))
+  });
 
-function speedPolicy(sim){
-  // Compute location along reference
-  const i = nearestPathIndex(sim.x, sim.y, sim.sIdxNear);
-  sim.sIdxNear = i;
-  sim.sNear = world.s[i];
-  const k = Math.abs(world.kap[i]);
-  const Rloc = (k<1e-6)? Infinity : 1/k;
-  const vAllow = Math.min(sim.vSet, Math.sqrt(sim.ayMax * (isFinite(Rloc)? Rloc: 1e9)));
-  const kmh = (mps)=> mps*3.6;
-
-  // Decide target regime by position relative to entry/exit and user distances
-  const decelStartS = sim.sEntry - sim.dStart;
-  const accelStartS = sim.sExit - sim.dEnd;
-
-  let target = sim.vSet;
-  if(sim.sNear >= decelStartS && sim.sNear < accelStartS){
-    // Within curve adaptation window
-    target = vAllow;
-  }else if(sim.sNear >= accelStartS){
-    target = sim.vSet;
-  }else{
-    target = sim.vSet;
-  }
-
-  // Simple bang-bang accel towards target
-  const tol = cfg.accelTol/3.6; // convert to m/s
-  let a=0;
-  if(sim.v > target + tol) a = -sim.aMag;
-  else if(sim.v < target - tol) a = +sim.aMag;
-  else a = 0;
-  return {aCmd: a, vAllow, Rloc};
-}
-
-function step(params){
-  if(!sim || !world) return;
-  const dt = cfg.dt;
-
-  // Longitudinal ACC
-  const pol = speedPolicy(sim);
-  sim.v = Math.max(0, sim.v + pol.aCmd*dt);
-
-  // Lateral (Stanley) – follow centerline
-  const i = sim.sIdxNear;
-  const xr = world.x[i], yr = world.y[i], psir = world.psi[i];
-  // cross-track error (signed) relative to reference normal
-  const nx = -Math.sin(psir), ny = Math.cos(psir);
-  const ex = sim.x - xr, ey = sim.y - yr;
-  const e_ct = nx*ex + ny*ey; // + left, - right
-  let psi_err = wrapAngle(psir - sim.psi);
-
-  const delta = clamp( psi_err + Math.atan2(cfg.stanley_ke * e_ct, cfg.stanley_kv + sim.v), -cfg.steerMax, cfg.steerMax );
-  const psiDot = sim.v / cfg.wheelbase * Math.tan(delta);
-
-  // Integrate vehicle state
-  sim.psi = wrapAngle(sim.psi + psiDot*dt);
-  sim.x   = sim.x + sim.v*Math.cos(sim.psi)*dt;
-  sim.y   = sim.y + sim.v*Math.sin(sim.psi)*dt;
-  sim.t  += dt;
-
-  // Log plots vs distance along reference
-  const k = Math.abs(world.kap[i]);
-  const Rloc = (k<1e-6)? Infinity : 1/k;
-  const ay = k * sim.v * sim.v;
-  sim.logV[i] = sim.v*3.6;
-  sim.logAy[i] = ay;
-
-  // UI status
-  els.statT.textContent = sim.t.toFixed(2);
-  els.statV.textContent = (sim.v*3.6).toFixed(1);
-  els.statAy.textContent = ay.toFixed(2);
-
-  // Charts – update sparsely for performance
-  if(i % 3 === 0) refreshChartsChunk(i);
-
-  // Draw birdview
-  drawBird();
-}
-
-function nearestPathIndex(x,y, hintIdx){
-  // Local window search around hint to speed up
-  const w = 200;
-  const start = Math.max(0, hintIdx - 50);
-  const end   = Math.min(world.x.length-1, hintIdx + w);
-  let bestIdx = start, bestD2 = 1e18;
-  for(let i=start;i<=end;i++){
-    const dx = x - world.x[i], dy = y - world.y[i];
-    const d2 = dx*dx + dy*dy;
-    if(d2 < bestD2){ bestD2 = d2; bestIdx = i; }
-  }
-  return bestIdx;
-}
-
-function wrapAngle(a){
-  while(a> Math.PI) a -= 2*Math.PI;
-  while(a<=-Math.PI) a += 2*Math.PI;
-  return a;
-}
-function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-
-/* =========================
-   Charts
-========================= */
-function setupCharts(sArr, RArr){
-  const commonOpts = {
-    type:'line',
-    data:{ labels: sArr, datasets: [] },
-    options:{
-      responsive:true,
-      animation:false,
-      interaction:{mode:'nearest', intersect:false},
-      scales:{
-        x:{ title:{text:'Distance s (m)', display:true}, ticks:{maxTicksLimit:10}},
+  function baseChartOptions(yTitle){
+    return {
+      responsive:true, maintainAspectRatio:false, animation:false,
+      scales: {
+        x: { title:{display:true, text:'Time (s)'}, ticks:{color:'#c8d2e0'} },
+        y: { title:{display:true, text:yTitle}, ticks:{color:'#c8d2e0'}, grid:{color:'rgba(200,200,200,0.08)'} }
       },
-      plugins:{
-        legend:{labels:{color:'#e8eef8'}},
-      }
+      plugins: { legend:{labels:{color:'#e9eef7'}}, tooltip:{mode:'index', intersect:false} },
+      elements: { point:{ radius:0 } }
     }
-  };
-
-  const rCfg = JSON.parse(JSON.stringify(commonOpts));
-  rCfg.data.datasets = [
-    {label:'Radius R(s) [m]', data: RArr, pointRadius:0, borderWidth:2}
-  ];
-  rCfg.options.scales.y = { title:{text:'Radius (m)', display:true}, suggestedMin:0, suggestedMax:Math.max(...RArr.filter(x=>isFinite(x)).slice(0,500))||500 };
-  charts.radius = new Chart(els.chartRadius, rCfg);
-
-  const vCfg = JSON.parse(JSON.stringify(commonOpts));
-  vCfg.data.datasets = [
-    {label:'Speed [km/h]', data: sArr.map(()=>null), pointRadius:0, borderWidth:2}
-  ];
-  vCfg.options.scales.y = { title:{text:'Speed (km/h)', display:true}, suggestedMin:0, suggestedMax:140 };
-  charts.speed = new Chart(els.chartSpeed, vCfg);
-
-  const ayCfg = JSON.parse(JSON.stringify(commonOpts));
-  ayCfg.data.datasets = [
-    {label:'Lateral accel a_y [m/s²]', data: sArr.map(()=>null), pointRadius:0, borderWidth:2}
-  ];
-  ayCfg.options.scales.y = { title:{text:'a_y (m/s²)', display:true}, suggestedMin:0, suggestedMax:3.5 };
-  charts.ay = new Chart(els.chartAy, ayCfg);
-}
-
-function refreshChartsChunk(i){
-  if(!charts.radius) return;
-  charts.speed.data.datasets[0].data[i] = sim.logV[i];
-  charts.ay.data.datasets[0].data[i] = sim.logAy[i];
-
-  // Small, fast partial updates
-  charts.speed.update('none');
-  charts.ay.update('none');
-}
-
-/* =========================
-   Birdview Rendering
-========================= */
-function drawBird(){
-  const c = els.bird;
-  const dpr = window.devicePixelRatio || 1;
-  const w = c.clientWidth, h = c.clientHeight;
-  if(c.width !== Math.round(w*dpr) || c.height !== Math.round(h*dpr)){
-    c.width = Math.round(w*dpr);
-    c.height = Math.round(h*dpr);
   }
-  const ctx = c.getContext('2d');
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,w,h);
 
-  // Fit entire path into view with margins
-  const bb = bbox(world.x, world.y);
-  const margin = 15;
-  const sx = (w - 2*margin) / (bb.maxx - bb.minx);
-  const sy = (h - 2*margin) / (bb.maxy - bb.miny);
-  const scale = Math.min(sx, sy);
-  const ox = margin - bb.minx*scale;
-  const oy = margin - bb.miny*scale;
+  // Simulation model containers
+  let sim = null; // holds current simulation state
+  let raf = null; // animation frame handle
 
-  // Helpers
-  const toScreen = (X,Y)=>({X: X*scale+ox, Y: Y*scale+oy});
+  // ------- Geometry: clothoid road with circular arc -------
+  function buildRoad(params){
+    const { R0, v_set, j_max, Lc, Dstart, Dend } = params;
+    // Use design speed ~ min(v_set, v_arc) to size the clothoid
+    const a_y_max = params.a_y_max;
+    const v_arc = Math.min(v_set, Math.sqrt(a_y_max * R0));
+    const v_design = v_arc; // during the curve
+    const A2 = Math.pow(v_design,3)/j_max; // A^2
+    const Ls = A2 / R0; // transition length from k=0 to k=1/R0
 
-  // Draw lane polygons
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#33415e';
-  ctx.beginPath();
-  for(let i=0;i<world.left.length;i++){
-    const p = toScreen(world.left[i].x, world.left[i].y);
-    if(i===0) ctx.moveTo(p.X,p.Y); else ctx.lineTo(p.X,p.Y);
+    const s_PC = 0; // start of transition-in
+    const s_POC = Ls; // start of circular arc (Point of Curvature reached)
+    const s_endCirc = Ls + Lc;
+    const s_PT = Ls + Lc + Ls; // end of transition-out
+
+    const Lpre = Math.max(Dstart + 50, 50);
+    const Lpost = Math.max(Dend + 80, 80);
+    const s_start = -Lpre;
+    const s_end = s_PT + Lpost;
+
+    const ds = 0.5; // spatial step (m)
+    const N = Math.ceil((s_end - s_start)/ds) + 1;
+    const s = new Array(N), k = new Array(N), psi = new Array(N), x = new Array(N), y = new Array(N), R = new Array(N);
+
+    let heading = 0, X = 0, Y = 0;
+    for(let i=0;i<N;i++){
+      const si = s_start + i*ds;
+      s[i] = si;
+      let ki = 0;
+      if(si < s_PC){
+        ki = 0;
+      } else if (si < s_POC){
+        ki = (si - s_PC)/A2; // linear increase
+      } else if (si < s_endCirc){
+        ki = 1/R0; // constant curvature
+      } else if (si < s_PT){
+        ki = (s_PT - si)/A2; // linear decrease
+      } else {
+        ki = 0;
+      }
+      k[i] = ki;
+      // integrate heading and position using simple forward Euler
+      heading += ki * ds;
+      heading = normalizeAngle(heading);
+      X += Math.cos(heading) * ds;
+      Y += Math.sin(heading) * ds;
+      psi[i] = heading; x[i] = X; y[i] = Y;
+      R[i] = (Math.abs(ki) > 1e-9) ? 1/ki : NaN; // radius; NaN shows as gap
+    }
+
+    // Lane boundaries (offset by +/- laneW/2)
+    const laneW = params.laneW;
+    const left = [], right = [];
+    for(let i=0;i<N;i++){
+      const nx = -Math.sin(psi[i]);
+      const ny =  Math.cos(psi[i]);
+      left.push({x: x[i] + nx*(laneW/2), y: y[i] + ny*(laneW/2)});
+      right.push({x: x[i] - nx*(laneW/2), y: y[i] - ny*(laneW/2)});
+    }
+
+    return {s, k, psi, x, y, R, Ls, A2, v_arc, s_PC, s_POC, s_endCirc, s_PT, s_start, s_end, left, right};
   }
-  ctx.stroke();
 
-  ctx.beginPath();
-  for(let i=0;i<world.right.length;i++){
-    const p = toScreen(world.right[i].x, world.right[i].y);
-    if(i===0) ctx.moveTo(p.X,p.Y); else ctx.lineTo(p.X,p.Y);
+  function normalizeAngle(a){
+    while(a> Math.PI) a-=2*Math.PI;
+    while(a<-Math.PI) a+=2*Math.PI;
+    return a;
   }
-  ctx.stroke();
 
-  // Centerline
-  ctx.strokeStyle='#3f5a8f';
-  ctx.setLineDash([6,6]);
-  ctx.beginPath();
-  for(let i=0;i<world.x.length;i++){
-    const p = toScreen(world.x[i], world.y[i]);
-    if(i===0) ctx.moveTo(p.X,p.Y); else ctx.lineTo(p.X,p.Y);
+  // ------- Speed profile (reference) along s -------
+  function buildSpeedRef(road, params){
+    const { s, k } = road;
+    const { v_set, a_y_max, Dstart, Dend } = params;
+    const s_PT = road.s_PT;
+    const v_arc = road.v_arc;
+
+    const vref = new Array(s.length);
+    for(let i=0;i<s.length;i++){
+      const si = s[i];
+      let v = v_set;
+      if(si >= -Dstart && si < 0){
+        const u = (si + Dstart)/Dstart; // 0→1
+        v = v_set + (v_arc - v_set) * u; // linear ramp to v_arc at s=0
+      } else if (si >= 0 && si < (s_PT - Dend)){
+        v = v_arc;
+      } else if (si >= (s_PT - Dend) && si < s_PT){
+        const u = (si - (s_PT - Dend))/Dend; // 0→1
+        v = v_arc + (v_set - v_arc) * u; // ramp back up
+      } else if (si >= s_PT){
+        v = v_set;
+      }
+      vref[i] = v;
+    }
+    return vref;
   }
-  ctx.stroke();
-  ctx.setLineDash([]);
 
-  // Mark decel/accel windows
-  const iDecelStart = findIndexAtS(world.s, sim.sEntry - sim.dStart);
-  const iAccelStart = findIndexAtS(world.s, sim.sExit  - sim.dEnd);
+  // ------- Simulation loop -------
+  function startSimulation(){
+    // Read inputs
+    const R0 = +inR.value;
+    const v_set = (+inVset.value) / 3.6; // m/s
+    const a_x_lim = +inAx.value; // magnitude for both accel/decel
+    const Dstart = +inDstart.value;
+    const Dend   = +inDend.value;
+    const a_y_max = +inAyMax.value;
+    const j_max = +inJmax.value;
+    const Lc = +inLc.value;
+    const laneW = +inLaneW.value;
+    const vehL = +inVehL.value, vehW = +inVehW.value;
 
-  ctx.fillStyle = 'rgba(120,166,255,0.10)';
-  fillSBand(ctx, world, toScreen, iDecelStart, world.idxEntry);
-  ctx.fillStyle = 'rgba(120,255,180,0.10)';
-  fillSBand(ctx, world, toScreen, iAccelStart, world.idxExit);
+    const params = { R0, v_set, a_x_lim, Dstart, Dend, a_y_max, j_max, Lc, laneW, vehL, vehW };
 
-  // Draw Vehicle
-  drawCar(ctx, toScreen, sim.x, sim.y, sim.psi, scale);
-}
+    const road = buildRoad(params);
+    const vref = buildSpeedRef(road, params);
 
-function bbox(xs, ys){
-  let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
-  for(let i=0;i<xs.length;i++){
-    if(xs[i]<minx)minx=xs[i];
-    if(xs[i]>maxx)maxx=xs[i];
-    if(ys[i]<miny)miny=ys[i];
-    if(ys[i]>maxy)maxy=ys[i];
+    // Display computed values
+    const theta_deg = ( (road.s_endCirc - road.s_POC) / R0 ) * 180/Math.PI; // central angle
+    kv.innerHTML = `
+      <span>v<sub>arc</sub></span><span>${(road.v_arc*3.6).toFixed(1)} km/h</span>
+      <span>Transition L<sub>s</sub></span><span>${road.Ls.toFixed(1)} m</span>
+      <span>Spiral A</span><span>${Math.sqrt(road.A2).toFixed(2)}</span>
+      <span>Arc central angle</span><span>${theta_deg.toFixed(1)}°</span>
+      <span>Path length</span><span>${(road.s_end - road.s_start).toFixed(1)} m</span>
+    `;
+
+    // Reset charts
+    [chartR, chartV, chartAy].forEach(ch => { ch.data.labels = []; ch.data.datasets.forEach(ds=>ds.data=[]); ch.update(); });
+
+    // Prepare birdview canvas sizing
+    resizeRoadCanvas();
+    const view = computeView(road);
+
+    // Initial state
+    const idxStart = 0; // corresponds to s_start
+    let i = idxStart; // spatial index
+    let sNow = road.s[i];
+    let x = road.x[i], y = road.y[i], psi = road.psi[i];
+    let v = params.v_set; // start at set speed
+    let t = 0;
+    const dt = 0.02; // 50 Hz sim
+
+    // Precompute ay comfort line for chart
+    const ayLimLine = [];
+
+    sim = { params, road, vref, i, sNow, x, y, psi, v, t, dt, view, ayLimLine, running:true };
+
+    btnStart.disabled = true; btnPause.disabled = false; btnReset.disabled = false;
+
+    // Begin anim
+    cancelAnimationFrame(raf);
+    loop();
   }
-  return {minx,miny,maxx,maxy};
-}
-function fillSBand(ctx, world, toScreen, i0, i1){
-  if(i1 <= i0) return;
-  ctx.beginPath();
-  for(let i=i0;i<=i1;i++){
-    const p = toScreen(world.left[i].x, world.left[i].y);
-    if(i===i0) ctx.moveTo(p.X,p.Y); else ctx.lineTo(p.X,p.Y);
+
+  function loop(){
+    if(!sim || !sim.running){ raf = requestAnimationFrame(loop); return; }
+    // step physics multiple substeps per frame for smoother motion if frame is slow
+    const steps = 1; // could use time-based; fixed is fine here
+    for(let n=0;n<steps;n++) stepOnce();
+
+    // draw & update charts sparsely to save cycles
+    drawBird();
+    if((sim.t*50|0) % 2 === 0){ // ~25 Hz points
+      pushChartPoints();
+    }
+
+    // stop condition
+    if(sim.i >= sim.road.s.length-2){ sim.running=false; }
+
+    raf = requestAnimationFrame(loop);
   }
-  for(let i=i1;i>=i0;i--){
-    const p = toScreen(world.right[i].x, world.right[i].y);
-    ctx.lineTo(p.X,p.Y);
+
+  function stepOnce(){
+    const { road, params, dt } = sim;
+    // Current spatial index maps to nearest s
+    const i = sim.i;
+    const s = road.s[i];
+    const k = road.k[i];
+
+    // Reference speed at this index
+    const vref = sim.vref[i];
+
+    // Longitudinal control with accel limit
+    const dv = vref - sim.v;
+    let a = 0;
+    if(Math.abs(dv) > 0.02){
+      a = Math.sign(dv) * params.a_x_lim;
+    }
+
+    // Integrate speed
+    let vNext = Math.max(0, sim.v + a*dt);
+
+    // Spatial advance by average speed in this step
+    const vMid = (sim.v + vNext)/2;
+    const ds = vMid * dt;
+
+    // Advance index by ds
+    // Convert ds to index steps (precomputed grid spacing is ~0.5 m)
+    const grid_ds = 0.5;
+    let di = Math.max(1, Math.round(ds / grid_ds));
+
+    // Guard end
+    if(sim.i + di >= road.s.length) di = road.s.length - sim.i - 1;
+
+    sim.i += di;
+    sim.v = vNext;
+    sim.sNow = road.s[sim.i];
+    sim.x = road.x[sim.i];
+    sim.y = road.y[sim.i];
+    sim.psi = road.psi[sim.i];
+    sim.t += dt;
   }
-  ctx.closePath();
-  ctx.fill();
-}
-function drawCar(ctx, toScreen, x, y, psi, scale){
-  // Vehicle body as rounded rectangle
-  const L = 4.6, W = 1.9;
-  const p = toScreen(x,y);
-  ctx.save();
-  ctx.translate(p.X,p.Y);
-  ctx.rotate(psi);
-  ctx.fillStyle = '#89a9ff';
-  const w = W*scale, l = L*scale;
-  roundRect(ctx, -l*0.4, -w/2, l*0.8, w, 8); // body
-  ctx.fill();
-  // Nose
-  ctx.fillStyle = '#cde';
-  roundRect(ctx, l*0.1, -w/2, l*0.3, w, 8);
-  ctx.fill();
-  // Heading arrow
-  ctx.beginPath();
-  ctx.moveTo(l*0.45, 0);
-  ctx.lineTo(l*0.25, -w*0.18);
-  ctx.lineTo(l*0.25,  w*0.18);
-  ctx.closePath();
-  ctx.fillStyle='#e6f2ff';
-  ctx.fill();
-  ctx.restore();
-}
-function roundRect(ctx, x, y, w, h, r){
-  if (w<2*r) r=w/2; if (h<2*r) r=h/2;
-  ctx.beginPath();
-  ctx.moveTo(x+r, y);
-  ctx.arcTo(x+w, y,   x+w, y+h, r);
-  ctx.arcTo(x+w, y+h, x,   y+h, r);
-  ctx.arcTo(x,   y+h, x,   y,   r);
-  ctx.arcTo(x,   y,   x+w, y,   r);
-  ctx.closePath();
-}
 
-/* =========================
-   UI Wiring & Runtime
-========================= */
-function readParams(){
-  const R = parseFloat(els.inR.value);
-  const thetaDeg = parseFloat(els.inTheta.value);
-  const thetaRad = thetaDeg * Math.PI/180;
-  const vSet = parseFloat(els.inVset.value)/3.6;
-  const aMag = parseFloat(els.inAlong.value);
-  const dStart = parseFloat(els.inDstart.value);
-  const dEnd = parseFloat(els.inDend.value);
-  const ayMax = parseFloat(els.inAyMax.value);
+  // ------- Charts update -------
+  function pushChartPoints(){
+    const { road, i, v, t, params } = sim;
+    const k = road.k[i];
+    const R = (Math.abs(k) > 1e-9) ? 1/k : null;
+    const ay = v*v * k; // since k >= 0, signless ay
 
-  return {R, thetaRad, vSet, aMag, dStart, dEnd, ayMax};
-}
+    chartR.data.labels.push(t.toFixed(2));
+    chartR.data.datasets[0].data.push(R);
+    chartR.update('none');
 
-function updateInfo(params, world){
-  const vCurve = Math.sqrt(params.ayMax * params.R) * 3.6;
-  els.kvCurve.textContent = isFinite(vCurve) ? vCurve.toFixed(1) : '∞';
-  els.kvTrans.textContent = world.Ls.toFixed(1);
-}
+    chartV.data.labels.push(t.toFixed(2));
+    chartV.data.datasets[0].data.push(v*3.6);
+    const vref_kmh = sim.vref[i]*3.6; chartV.data.datasets[1].data.push(vref_kmh);
+    chartV.update('none');
 
-function resetAll(){
-  const params = readParams();
-  initSim(params);
-  // Fill charts initial radius, clear others
-  charts.speed.data.datasets[0].data = sim.logV.slice();
-  charts.ay.data.datasets[0].data = sim.logAy.slice();
-  charts.radius.update('none');
-  charts.speed.update('none');
-  charts.ay.update('none');
-  running = false;
-  cancelAnimationFrame(rafId);
-}
-function loop(){
-  if(!running) return;
-  step();
-  rafId = requestAnimationFrame(loop);
-}
+    chartAy.data.labels.push(t.toFixed(2));
+    chartAy.data.datasets[0].data.push(ay);
+    chartAy.data.datasets[1].data.push(params.a_y_max);
+    chartAy.update('none');
+  }
 
-els.btnStart.onclick = ()=>{ if(!sim) resetAll(); running=true; cancelAnimationFrame(rafId); loop(); };
-els.btnPause.onclick = ()=>{ running=false; cancelAnimationFrame(rafId); };
-els.btnReset.onclick = ()=> resetAll();
+  // ------- Birdview drawing -------
+  let viewCache = null;
+  function computeView(road){
+    // Bounds from lane edges
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for(let p of road.left){ minX=Math.min(minX,p.x); minY=Math.min(minY,p.y); maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y); }
+    for(let p of road.right){ minX=Math.min(minX,p.x); minY=Math.min(minY,p.y); maxX=Math.max(maxX,p.x); maxY=Math.max(maxY,p.y); }
+    const pad = 8; // meters
+    minX-=pad; minY-=pad; maxX+=pad; maxY+=pad;
+    return {minX,minY,maxX,maxY};
+  }
 
-// Rebuild path immediately on any input change (and keep paused)
-['inR','inTheta','inVset','inAlong','inDstart','inDend','inAyMax'].forEach(id=>{
-  els[id].addEventListener('change', ()=>{ resetAll(); });
-});
+  function resizeRoadCanvas(){
+    const rect = roadCanvas.getBoundingClientRect();
+    roadCanvas.width = Math.max(300, rect.width * DPR);
+    roadCanvas.height = Math.max(300, rect.height * DPR);
+    rctx.setTransform(DPR,0,0,DPR,0,0); // draw in CSS pixels
+  }
+  window.addEventListener('resize', resizeRoadCanvas);
 
-window.addEventListener('resize', ()=> drawBird());
+  function worldToScreen(x,y, view){
+    const w = roadCanvas.width / DPR, h = roadCanvas.height / DPR;
+    const spanX = view.maxX - view.minX;
+    const spanY = view.maxY - view.minY;
+    const sx = w / spanX; const sy = h / spanY;
+    const s = Math.min(sx, sy);
+    const ox = (w - s*spanX)/2 - s*view.minX;
+    const oy = (h - s*spanY)/2 + s*view.maxY; // invert Y for screen
+    const X = ox + s*x;
+    const Y = oy - s*y;
+    return {X,Y, s};
+  }
 
-// First load
-resetAll();
+  function drawBird(){
+    const { road, params, i } = sim;
+    const view = sim.view;
 
+    // Clear
+    rctx.clearRect(0,0,roadCanvas.width/DPR, roadCanvas.height/DPR);
+
+    // Draw lane polygons
+    rctx.lineWidth = 2; rctx.lineJoin = 'round';
+
+    // Centerline
+    rctx.beginPath();
+    for(let n=0;n<road.x.length;n+=2){
+      const P = worldToScreen(road.x[n], road.y[n], view);
+      if(n===0) rctx.moveTo(P.X,P.Y); else rctx.lineTo(P.X,P.Y);
+    }
+    rctx.strokeStyle = '#374151'; rctx.stroke();
+
+    // Left/right edges
+    rctx.beginPath();
+    for(let n=0;n<road.left.length;n+=2){ const p = road.left[n]; const P = worldToScreen(p.x,p.y,view); if(n===0) rctx.moveTo(P.X,P.Y); else rctx.lineTo(P.X,P.Y); }
+    rctx.strokeStyle = '#64748b'; rctx.stroke();
+    rctx.beginPath();
+    for(let n=0;n<road.right.length;n+=2){ const p = road.right[n]; const P = worldToScreen(p.x,p.y,view); if(n===0) rctx.moveTo(P.X,P.Y); else rctx.lineTo(P.X,P.Y); }
+    rctx.strokeStyle = '#64748b'; rctx.stroke();
+
+    // Markers: PC, POC, endCirc, PT and Dstart/Dend points along centerline
+    const mark = (sVal, color, label) => {
+      // find nearest index by s value
+      const idx = Math.max(0, Math.min(road.s.length-1, Math.round((sVal - road.s[0]) / 0.5)));
+      const P = worldToScreen(road.x[idx], road.y[idx], view);
+      rctx.fillStyle = color; rctx.beginPath(); rctx.arc(P.X,P.Y,4,0,Math.PI*2); rctx.fill();
+      rctx.fillStyle = '#cbd5e1'; rctx.font = '12px Inter'; rctx.fillText(label, P.X+6, P.Y-6);
+    };
+
+    mark(road.s_PC, '#60a5fa', 'PC');
+    mark(road.s_POC, '#34d399', 'POC');
+    mark(road.s_endCirc, '#34d399', 'End circ');
+    mark(road.s_PT, '#60a5fa', 'PT');
+    mark(-params.Dstart, '#fbbf24', 'Start decel');
+    mark(road.s_PT - params.Dend, '#fbbf24', 'Start accel');
+
+    // Draw vehicle as rectangle oriented at psi at current index
+    const x = road.x[i], y = road.y[i], psi = road.psi[i];
+    const vehL = params.vehL, vehW = params.vehW;
+    const P = worldToScreen(x, y, view);
+    const s = P.s;
+    rctx.save();
+    rctx.translate(P.X, P.Y);
+    rctx.rotate(-psi); // minus because screen Y is inverted
+    rctx.fillStyle = '#22d3ee';
+    rctx.strokeStyle = '#0ea5b7';
+    rctx.lineWidth = 2;
+    rctx.beginPath();
+    rctx.rect(-vehL*s/2, -vehW*s/2, vehL*s, vehW*s);
+    rctx.fill(); rctx.stroke();
+    rctx.restore();
+  }
+
+  // ------- Buttons -------
+  btnStart.addEventListener('click', startSimulation);
+  btnPause.addEventListener('click', () => {
+    if(!sim) return;
+    sim.running = !sim.running;
+    btnPause.textContent = sim.running ? 'Pause' : 'Resume';
+  });
+  btnReset.addEventListener('click', () => {
+    if(sim){ cancelAnimationFrame(raf); }
+    sim = null; btnStart.disabled = false; btnPause.disabled = true; btnReset.disabled = true; btnPause.textContent = 'Pause';
+    [chartR, chartV, chartAy].forEach(ch => { ch.data.labels = []; ch.data.datasets.forEach(ds=>ds.data=[]); ch.update(); });
+    rctx.clearRect(0,0,roadCanvas.width,roadCanvas.height);
+  });
+
+  // ------- Kick -------
+  resizeRoadCanvas();
+})();
 </script>
 </body>
 </html>
