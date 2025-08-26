@@ -6,7 +6,9 @@
 <title>ACC Cut-In Simulator</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-  :root{ --bg:#0f1220; --panel:#161a2b; --ink:#e8ecff; --muted:#a9b0d5; --grid-gap:14px; }
+  :root{
+    --bg:#0f1220; --panel:#161a2b; --ink:#e8ecff; --muted:#a9b0d5; --grid-gap:14px;
+  }
   html,body{height:100%; margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,Segoe UI,Roboto,Inter,Arial;}
   .wrap{display:grid; grid-template-columns: 360px 660px 520px; gap:var(--grid-gap); padding:var(--grid-gap);}
   .card{background:var(--panel); border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); padding:14px 16px;}
@@ -17,7 +19,8 @@
   .btnbar{display:flex; gap:8px; margin:12px 0}
   button{background:#1e2442; color:var(--ink); border:1px solid #2a315b; border-radius:12px; padding:8px 12px; cursor:pointer}
   button:hover{filter:brightness(1.1)} button:disabled{opacity:.5; cursor:not-allowed}
-  table{width:100%; border-collapse:collapse; font-size:14px} th,td{border-bottom:1px solid #242948; padding:6px 8px; text-align:left}
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  th,td{border-bottom:1px solid #242948; padding:6px 8px; text-align:left}
   th{color:var(--muted); font-weight:600}
   #charts{display:grid; gap:10px}
   canvas{background:#0b0f1f; border:1px solid #242948; border-radius:12px}
@@ -27,13 +30,14 @@
   label.cb{display:flex; gap:6px; align-items:center; background:#101531; border:1px solid #242948; padding:6px 10px; border-radius:10px; cursor:pointer}
   .readout{display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size:13px; margin-top:8px}
   .readout div{background:#101531; border:1px solid #242948; border-radius:8px; padding:6px 8px}
-  .tag{font-size:11px; color:var(--muted)} .unit{color:var(--muted); font-size:12px}
+  .tag{font-size:11px; color:var(--muted)}
+  .unit{color:var(--muted); font-size:12px}
   .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <!-- LEFT -->
+  <!-- LEFT: Controls + Milestones -->
   <section class="card">
     <h2>Inputs &amp; Controls</h2>
 
@@ -79,7 +83,7 @@
       <button id="btnReset">Reset</button>
     </div>
 
-    <div class="readout">
+    <div class="readout" id="readout">
       <div><b class="tag">Sim time</b><div class="mono" id="ro_t">0.0 s</div></div>
       <div><b class="tag">Gap</b><div class="mono" id="ro_gap">—</div></div>
       <div><b class="tag">Desired gap</b><div class="mono" id="ro_gdes">—</div></div>
@@ -95,7 +99,7 @@
     </table>
   </section>
 
-  <!-- MIDDLE -->
+  <!-- MIDDLE: Charts -->
   <section class="card">
     <h2>Plots (fixed size)</h2>
     <div id="charts">
@@ -105,7 +109,7 @@
     <div class="hint">Time axis in seconds; historical data kept for the whole run. Speed shows ego and cut-in; acceleration is ego longitudinal.</div>
   </section>
 
-  <!-- RIGHT -->
+  <!-- RIGHT: Birdview -->
   <section class="card">
     <h2>Bird-view</h2>
     <canvas id="bird" width="500" height="480"></canvas>
@@ -118,12 +122,12 @@
   // ---------- Constants & helpers ----------
   const laneW = 3.5;
   const carLen = 4.5, carWid = 1.8;
-  const dt = 0.02;
-  const maxAccel = 1.5;
-  const maxDecel = 3.0;
-  const kCruise = 0.6;
-  const kGap = 0.25, kRel = 0.8;
-  const vyMinForM2 = 0.05;
+  const dt = 0.02;                 // 20 ms
+  const maxAccel = 1.5;            // m/s²
+  const maxDecel = 3.0;            // m/s² (applied as negative)
+  const kCruise = 0.6;             // cruise gain to set speed
+  const kGap = 0.25, kRel = 0.8;   // ACC gains
+  const vyMinForM2 = 0.05;         // m/s threshold for method 2
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   const kph2mps = v=>v/3.6;
 
@@ -150,10 +154,10 @@
     const vSet = kph2mps(+in_vSetKph.value);
     const vCut = kph2mps(+in_vCutKph.value);
     const gap0 = +in_gap.value;
-    const tStart = +in_tCut.value;                // cut-in start time
+    const tStart = +in_tCut.value;                // cut-in start time (s)
     const vLatTarget = Math.max(0.1, +in_vLat.value);
-    // derive duration from lateral peak speed (cosine profile):
-    let tCut = 0.5 * laneW * Math.PI / vLatTarget;
+    // derive duration from target lateral peak speed (cosine profile):
+    let tCut = 0.5 * laneW * Math.PI / vLatTarget;   // clamp to reasonable range
     tCut = clamp(tCut, 0.5, 12);
 
     const headway = +in_headway.value;
@@ -169,18 +173,24 @@
       gapReachedTime: null,
       usedM1: false,
       usedM2: false,
-      xE: 0, vE: vSet, aE: 0,
-      xC: gap0, vC: vCut,
-      yC: laneW,
+      xE: 0, vE: vSet, aE: 0,           // ego longitudinal
+      xC: gap0, vC: vCut,               // cut-in longitudinal
+      yC: laneW,                        // cut-in lateral (starts in left lane center)
       m2Timer: 0,
       logT: [], logVego: [], logVcut: [], logAego: [],
-      vSet, vCut, headway,
-      tStart, tCut,
+      vSet, vCut, headway, tStart, tCut
     };
     tick = 0;
+
     resetMilestones();
     addMilestone(0, 'Simulation start');
     addMilestone(sim.tStart, 'Start of lateral movement of the cut-in object');
+
+    // Seed first datapoint so charts draw immediately
+    sim.logT.push(sim.t);
+    sim.logVego.push(sim.vE);
+    sim.logVcut.push(sim.vC);
+    sim.logAego.push(sim.aE);
   }
 
   function resetMilestones(){ msTableBody.innerHTML = ''; }
@@ -198,6 +208,7 @@
 
   // ---------- Detection logic ----------
   function percentInsideEgoLane(yCenter){
+    // Ego lane spans [-laneW/2, +laneW/2]. Vehicle width bounds [y-L/2, y+L/2].
     const L = carWid;
     const y0 = yCenter - L/2, y1 = yCenter + L/2;
     const a = Math.max(y0, -laneW/2);
@@ -210,16 +221,18 @@
     if (sim.detected) return;
     let fired = false;
 
+    // Method 1: % inside ego lane
     if (cb_m1.checked){
       const pct = percentInsideEgoLane(sim.yC);
       const thr = +in_m1pct.value;
       if (pct >= thr){ sim.detected = true; sim.detectTime = sim.t; sim.usedM1 = true; fired = true; }
     }
 
+    // Method 2: consistent lateral motion toward ego lane
     if (!fired && cb_m2.checked){
       const vy = vyCut(sim.t);
       const windowSec = (+in_m2ms.value) / 1000.0;
-      if (vy < -vyMinForM2) sim.m2Timer += dt; else sim.m2Timer = 0;
+      if (vy < -vyMinForM2) sim.m2Timer += dt; else sim.m2Timer = 0; // vy<0 means moving toward y=0
       if (sim.m2Timer >= windowSec){ sim.detected = true; sim.detectTime = sim.t; sim.usedM2 = true; fired = true; }
     }
 
@@ -228,13 +241,13 @@
     }
   }
 
-  // ---------- Lateral profile ----------
+  // ---------- Lateral profile (cosine S-curve) ----------
   function yCut(t){
     if (t < sim.tStart) return laneW;
     const s = (t - sim.tStart) / sim.tCut;
     if (s >= 1) return 0;
-    const u = 0.5*(1 - Math.cos(Math.PI*s));
-    return laneW * (1 - u);
+    const u = 0.5*(1 - Math.cos(Math.PI*s)); // 0->1
+    return laneW * (1 - u); // from laneW down to 0
   }
   function vyCut(t){
     if (t <= sim.tStart || t >= sim.tStart + sim.tCut) return 0;
@@ -246,14 +259,19 @@
   function step(){
     const s = sim;
     s.t += dt;
+
+    // Update cut-in position
     s.yC = yCut(s.t);
     s.xC += s.vC * dt;
 
+    // Update detection
     updateDetection(s);
 
-    const gap = s.xC - s.xE;
+    // Gaps
+    const gap = s.xC - s.xE;                  // front-to-front
     const gDes = Math.max(0, s.headway * s.vE);
 
+    // Ego longitudinal control
     let aCmd;
     if (!s.detected){
       aCmd = clamp(kCruise * (s.vSet - s.vE), -maxDecel, maxAccel);
@@ -273,15 +291,18 @@
       }
     }
 
+    // Integrate ego kinematics
     s.aE = aCmd;
     s.vE = Math.max(0, s.vE + s.aE * dt);
     s.xE += s.vE * dt;
 
+    // Logs
     s.logT.push(s.t);
     s.logVego.push(s.vE);
     s.logVcut.push(s.vC);
     s.logAego.push(s.aE);
 
+    // Readout
     ro_t.textContent = `${s.t.toFixed(1)} s`;
     ro_gap.textContent = `${gap.toFixed(1)} m`;
     ro_gdes.textContent = `${gDes.toFixed(1)} m`;
@@ -289,37 +310,69 @@
     ro_vcut.textContent = `${(s.vC*3.6).toFixed(1)} km/h`;
     ro_aego.textContent = `${s.aE.toFixed(2)} m/s²`;
 
-    // robust chart update (no floating modulo)
-    if ((tick++ & 1) === 0) updateCharts();  // ~25 Hz
+    // Charts & birdview
+    if ((tick++ & 1) === 0) updateCharts();  // ~25 Hz updates, no floating modulo issues
     drawBird();
   }
 
   // ---------- Charts ----------
   function initCharts(){
+    const axis = {
+      ticks:  { color:'#e8ecff' },
+      grid:   { color:'rgba(168,176,213,0.15)' },
+      border: { color:'rgba(168,176,213,0.25)' }
+    };
+
     const sp = new Chart(document.getElementById('chartSpeed').getContext('2d'), {
       type:'line',
-      data:{labels:[], datasets:[
-        {label:'Ego speed (km/h)', data:[], borderWidth:2, tension:0.1},
-        {label:'Cut-in speed (km/h)', data:[], borderWidth:2, borderDash:[6,4], tension:0.1}
-      ]},
+      data:{
+        labels:[],
+        datasets:[
+          {
+            label:'Ego speed (km/h)',
+            data:[],
+            borderColor:'#7CFFB2',
+            backgroundColor:'rgba(124,255,178,0.12)',
+            borderWidth:2, pointRadius:0, tension:0.18, spanGaps:true
+          },
+          {
+            label:'Cut-in speed (km/h)',
+            data:[],
+            borderColor:'#7cc4ff',
+            backgroundColor:'rgba(124,196,255,0.12)',
+            borderWidth:2, borderDash:[6,4], pointRadius:0, tension:0.18, spanGaps:true
+          }
+        ]
+      },
       options:{
         animation:false, responsive:false, maintainAspectRatio:false, parsing:false,
-        scales:{ x:{title:{display:true, text:'Time (s)'}}, y:{title:{display:true, text:'Speed (km/h)'}} },
-        plugins:{legend:{labels:{color:'#e8ecff'}}, tooltip:{mode:'index', intersect:false}}
+        scales:{ x:axis, y:axis },
+        plugins:{ legend:{ labels:{ color:'#e8ecff' }}, tooltip:{ mode:'index', intersect:false } }
       }
     });
 
     const ac = new Chart(document.getElementById('chartAccel').getContext('2d'), {
       type:'line',
-      data:{labels:[], datasets:[ {label:'Ego accel (m/s²)', data:[], borderWidth:2, tension:0.1} ]},
+      data:{
+        labels:[],
+        datasets:[
+          {
+            label:'Ego accel (m/s²)',
+            data:[],
+            borderColor:'#ffd36b',
+            backgroundColor:'rgba(255,211,107,0.12)',
+            borderWidth:2, pointRadius:0, tension:0.18, spanGaps:true
+          }
+        ]
+      },
       options:{
         animation:false, responsive:false, maintainAspectRatio:false, parsing:false,
-        scales:{ x:{title:{display:true, text:'Time (s)'}}, y:{title:{display:true, text:'Accel (m/s²)'}} },
-        plugins:{legend:{labels:{color:'#e8ecff'}}, tooltip:{mode:'index', intersect:false}}
+        scales:{ x:axis, y:axis },
+        plugins:{ legend:{ labels:{ color:'#e8ecff' }}, tooltip:{ mode:'index', intersect:false } }
       }
     });
 
-    charts = {sp, ac};
+    charts = { sp, ac };
   }
 
   function updateCharts(){
@@ -339,6 +392,7 @@
     const W = bird.width, H = bird.height;
     ctx.clearRect(0,0,W,H);
 
+    // View window keeps ego in view
     const xMin = s.xE - 15, xMax = s.xE + 70;
     const yMin = -laneW*0.8, yMax = laneW*1.8;
 
@@ -348,72 +402,103 @@
       return [px,py];
     };
 
+    // lane edges
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#2a315b';
     for (const y of [-laneW/2, laneW*1.5]){
       ctx.beginPath();
       let [px,py] = toPix(xMin, y);
-      ctx.moveTo(px,py); [px,py] = toPix(xMax, y); ctx.lineTo(px,py); ctx.stroke();
+      ctx.moveTo(px,py);
+      [px,py] = toPix(xMax, y);
+      ctx.lineTo(px,py); ctx.stroke();
     }
+    // lane centers
     ctx.setLineDash([6,6]); ctx.strokeStyle='#3f4778';
     for (const y of [0, laneW]){
       ctx.beginPath();
       let [px,py] = toPix(xMin, y);
-      ctx.moveTo(px,py); [px,py] = toPix(xMax, y); ctx.lineTo(px,py); ctx.stroke();
+      ctx.moveTo(px,py);
+      [px,py] = toPix(xMax, y);
+      ctx.lineTo(px,py); ctx.stroke();
     }
     ctx.setLineDash([]);
 
-    // trajectory hint
+    // cut-in trajectory hint
     ctx.strokeStyle = '#7cc4ff'; ctx.globalAlpha = 0.35; ctx.lineWidth = 2;
     ctx.beginPath();
     for (let u=0; u<=1; u+=0.02){
-      const t = sim.tStart + u*sim.tCut;
-      const xc = sim.xC - (sim.t - t) * sim.vC;
+      const t = s.tStart + u*s.tCut;
+      const xc = s.xC - (s.t - t) * s.vC; // back-traced approximate x at constant vC
       const yc = yCut(t);
       const [px,py] = toPix(xc,yc);
       if (u===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
     }
-    ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
 
     function drawCar(x,y,color){
       const [px,py] = toPix(x,y);
       const scaleX = (W-30)/( (s.xE+70) - (s.xE-15) );
       const scaleY = (H-30)/( (laneW*1.8) - (-laneW*0.8) );
       const w = carLen*scaleX, h = carWid*scaleY;
-      ctx.save(); ctx.translate(px,py); ctx.fillStyle = color;
-      roundRect(ctx, -w*0.5, -h*0.5, w, h, Math.min(w,h)*0.15); ctx.fill(); ctx.restore();
+      ctx.save();
+      ctx.translate(px,py);
+      ctx.fillStyle = color;
+      roundRect(ctx, -w*0.5, -h*0.5, w, h, Math.min(w,h)*0.15);
+      ctx.fill();
+      ctx.restore();
     }
     function roundRect(ctx,x,y,w,h,r){
-      ctx.beginPath(); ctx.moveTo(x+r,y);
-      ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
-      ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+      ctx.beginPath();
+      ctx.moveTo(x+r,y);
+      ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r);
+      ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r);
+      ctx.closePath();
     }
 
+    // ego car (lane-centered)
     drawCar(s.xE, 0, '#7CFFB2');
+    // cut-in car
     drawCar(s.xC, s.yC, s.detected ? '#ffd36b' : '#a5c6ff');
 
-    ctx.fillStyle = '#a9b0d5'; ctx.font = '12px system-ui, Segoe UI';
+    // labels
+    ctx.fillStyle = '#a9b0d5';
+    ctx.font = '12px system-ui, Segoe UI';
     ctx.fillText('Ego lane', 10, 18);
     ctx.fillText('Left lane (cut-in origin)', 10, 34);
-    if (s.detected){ ctx.fillStyle = '#ffd36b'; ctx.fillText('Cut-in detected', 10, 50); }
+    if (s.detected){
+      ctx.fillStyle = '#ffd36b';
+      ctx.fillText('Cut-in detected', 10, 50);
+    }
   }
 
   // ---------- Controls ----------
   function start(){
     if (!sim) initSim();
     if (sim.running) return;
-    sim.running = true; btnStart.disabled = true; btnPause.disabled = false;
-    if (!charts) initCharts(); updateCharts();
+    sim.running = true;
+    btnStart.disabled = true;
+    btnPause.disabled = false;
+    if (!charts) initCharts();
+    updateCharts();                 // render seeded point
     timer = setInterval(step, dt*1000);
   }
+
   function pause(){
     if (!sim || !sim.running) return;
-    sim.running = false; btnStart.disabled = false; btnPause.disabled = true;
+    sim.running = false;
+    btnStart.disabled = false;
+    btnPause.disabled = true;
     clearInterval(timer);
   }
+
   function reset(){
     if (timer){ clearInterval(timer); timer = null; }
-    sim = null; btnStart.disabled = false; btnPause.disabled = true;
+    sim = null;
+    btnStart.disabled = false;
+    btnPause.disabled = true;
     if (!charts) initCharts();
     charts.sp.data.labels = []; charts.sp.data.datasets[0].data=[]; charts.sp.data.datasets[1].data=[];
     charts.ac.data.labels = []; charts.ac.data.datasets[0].data=[];
