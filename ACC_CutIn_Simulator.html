@@ -33,7 +33,7 @@
 </head>
 <body>
 <div class="wrap">
-  <!-- LEFT: Controls + Milestones -->
+  <!-- LEFT -->
   <section class="card">
     <h2>Inputs &amp; Controls</h2>
 
@@ -95,7 +95,7 @@
     </table>
   </section>
 
-  <!-- MIDDLE: Charts -->
+  <!-- MIDDLE -->
   <section class="card">
     <h2>Plots (fixed size)</h2>
     <div id="charts">
@@ -105,7 +105,7 @@
     <div class="hint">Time axis in seconds; historical data kept for the whole run. Speed shows ego and cut-in; acceleration is ego longitudinal.</div>
   </section>
 
-  <!-- RIGHT: Birdview -->
+  <!-- RIGHT -->
   <section class="card">
     <h2>Bird-view</h2>
     <canvas id="bird" width="500" height="480"></canvas>
@@ -119,7 +119,6 @@
   const laneW = 3.5;
   const carLen = 4.5, carWid = 1.8;
   const dt = 0.02;
-  const controlHz = 1/dt;
   const maxAccel = 1.5;
   const maxDecel = 3.0;
   const kCruise = 0.6;
@@ -133,7 +132,7 @@
   const in_vCutKph = el('in_vCutKph');
   const in_gap     = el('in_gap');
   const in_vLat    = el('in_vLat');
-  const in_tCut    = el('in_tCut');   // now: START TIME (s)
+  const in_tCut    = el('in_tCut');   // start time (s)
   const in_vSetKph = el('in_vSetKph');
   const in_headway = el('in_headway');
   const cb_m1 = el('cb_m1'), cb_m2 = el('cb_m2');
@@ -145,15 +144,15 @@
   const bird = el('bird'), ctx = bird.getContext('2d');
 
   // ---------- Simulation state ----------
-  let sim = null, timer = null, charts = null;
+  let sim = null, timer = null, charts = null, tick = 0;
 
   function initSim() {
     const vSet = kph2mps(+in_vSetKph.value);
     const vCut = kph2mps(+in_vCutKph.value);
     const gap0 = +in_gap.value;
-    const tStart = +in_tCut.value;          // start time (s)
+    const tStart = +in_tCut.value;                // cut-in start time
     const vLatTarget = Math.max(0.1, +in_vLat.value);
-    // Derive duration from desired lateral peak speed: tCut ≈ 0.5 * laneW * π / vLat_peak
+    // derive duration from lateral peak speed (cosine profile):
     let tCut = 0.5 * laneW * Math.PI / vLatTarget;
     tCut = clamp(tCut, 0.5, 12);
 
@@ -176,8 +175,9 @@
       m2Timer: 0,
       logT: [], logVego: [], logVcut: [], logAego: [],
       vSet, vCut, headway,
-      tStart, tCut, // <-- start time & derived duration
+      tStart, tCut,
     };
+    tick = 0;
     resetMilestones();
     addMilestone(0, 'Simulation start');
     addMilestone(sim.tStart, 'Start of lateral movement of the cut-in object');
@@ -228,7 +228,7 @@
     }
   }
 
-  // ---------- Lateral profile (cosine S-curve) ----------
+  // ---------- Lateral profile ----------
   function yCut(t){
     if (t < sim.tStart) return laneW;
     const s = (t - sim.tStart) / sim.tCut;
@@ -289,7 +289,8 @@
     ro_vcut.textContent = `${(s.vC*3.6).toFixed(1)} km/h`;
     ro_aego.textContent = `${s.aE.toFixed(2)} m/s²`;
 
-    if ((s.t * controlHz) % 2 < 1e-6) updateCharts();
+    // robust chart update (no floating modulo)
+    if ((tick++ & 1) === 0) updateCharts();  // ~25 Hz
     drawBird();
   }
 
@@ -302,7 +303,7 @@
         {label:'Cut-in speed (km/h)', data:[], borderWidth:2, borderDash:[6,4], tension:0.1}
       ]},
       options:{
-        animation:false, responsive:false, maintainAspectRatio:false,
+        animation:false, responsive:false, maintainAspectRatio:false, parsing:false,
         scales:{ x:{title:{display:true, text:'Time (s)'}}, y:{title:{display:true, text:'Speed (km/h)'}} },
         plugins:{legend:{labels:{color:'#e8ecff'}}, tooltip:{mode:'index', intersect:false}}
       }
@@ -312,7 +313,7 @@
       type:'line',
       data:{labels:[], datasets:[ {label:'Ego accel (m/s²)', data:[], borderWidth:2, tension:0.1} ]},
       options:{
-        animation:false, responsive:false, maintainAspectRatio:false,
+        animation:false, responsive:false, maintainAspectRatio:false, parsing:false,
         scales:{ x:{title:{display:true, text:'Time (s)'}}, y:{title:{display:true, text:'Accel (m/s²)'}} },
         plugins:{legend:{labels:{color:'#e8ecff'}}, tooltip:{mode:'index', intersect:false}}
       }
@@ -388,8 +389,8 @@
       ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
     }
 
-    drawCar(s.xE, 0, '#7CFFB2');                              // ego centered
-    drawCar(s.xC, s.yC, s.detected ? '#ffd36b' : '#a5c6ff');  // cut-in
+    drawCar(s.xE, 0, '#7CFFB2');
+    drawCar(s.xC, s.yC, s.detected ? '#ffd36b' : '#a5c6ff');
 
     ctx.fillStyle = '#a9b0d5'; ctx.font = '12px system-ui, Segoe UI';
     ctx.fillText('Ego lane', 10, 18);
