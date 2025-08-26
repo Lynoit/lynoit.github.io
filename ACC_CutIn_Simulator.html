@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ACC Cut-In Simulator (Two Detection Methods)</title>
+<!-- Chart.js for plots -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#0f1220; --card:#151a2e; --soft:#1b2140; --text:#e7eaf6; --muted:#9aa4c7; --ok:#5dd39e; --warn:#f0c36e; --bad:#ff6b6b; --line:#2a315a;
+    --accent:#7aa2ff;
+  }
+  *{box-sizing:border-box;font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  body{margin:0;background:var(--bg);color:var(--text)}
+  .grid{display:grid;grid-template-columns:360px minmax(520px,1fr) minmax(520px,1fr);gap:14px;padding:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 6px 24px rgba(0,0,0,.25);padding:14px}
+  h2{margin:0 0 8px 0;font-size:18px;color:#f5f7ff;letter-spacing:.2px}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .ctl{display:grid;grid-template-columns:1fr 110px;gap:8px;align-items:center;width:100%}
+  .ctl label{font-size:12px;color:var(--muted)}
+  .ctl input{width:100%;padding:8px 10px;background:var(--soft);border:1px solid var(--line);border-radius:10px;color:var(--text)}
+  .btnrow{display:flex;gap:8px;margin-top:8px}
+  button{padding:9px 12px;border:1px solid var(--line);background:var(--soft);color:var(--text);border-radius:10px;cursor:pointer}
+  button.primary{background:var(--accent);border-color:#3a5bd6;color:#fff}
+  button.warn{background:#2a2d3f;border-color:#5b3b00}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}
+  thead th{color:var(--muted);font-weight:600;text-align:left;border-bottom:1px solid var(--line);padding:6px}
+  tbody td{padding:6px;border-bottom:1px dashed var(--line)}
+  tbody tr.done td{color:var(--muted)}
+  canvas{background:#0b0f1e;border:1px solid var(--line);border-radius:12px}
+  .plots{display:grid;grid-template-rows:auto auto;gap:10px}
+  .legend{font-size:12px;color:var(--muted);margin:4px 0 0}
+  .tiny{font-size:11px;color:var(--muted)}
+  .tip{margin-top:6px;font-size:11px;color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="grid">
+    <!-- Column 1: Controls + Milestones -->
+    <div class="card">
+      <h2>Inputs &amp; Controls</h2>
+      <div class="row">
+        <div class="ctl"><label for="vLead">Cut-in vehicle speed (kph)</label><input id="vLead" type="number" min="0" max="200" step="1" value="80"></div>
+        <div class="ctl"><label for="dInit">Initial distance to cut-in vehicle (m)</label><input id="dInit" type="number" min="1" max="200" step="0.5" value="10"></div>
+        <div class="ctl"><label for="vLat">Cut-in lateral speed (m/s)</label><input id="vLat" type="number" min="0.1" max="5" step="0.1" value="1"></div>
+        <div class="ctl"><label for="tCut">Cut-in duration (s)</label><input id="tCut" type="number" min="0.5" max="8" step="0.1" value="3"></div>
+        <div class="ctl"><label for="vSet">ACC set speed (kph)</label><input id="vSet" type="number" min="0" max="200" step="1" value="90"></div>
+        <div class="ctl"><label for="tGap">ACC time gap (s)</label><input id="tGap" type="number" min="0.8" max="3" step="0.1" value="2"></div>
+        <div class="ctl"><label for="pctM1">Method 1 threshold (% inside lane)</label><input id="pctM1" type="number" min="0" max="100" step="1" value="50"></div>
+        <div class="ctl"><label for="msM2">Method 2 threshold (ms consistent lateral)</label><input id="msM2" type="number" min="100" max="2000" step="50" value="500"></div>
+      </div>
+      <div class="btnrow">
+        <button id="btnStart" class="primary">Start</button>
+        <button id="btnPause">Pause</button>
+        <button id="btnReset" class="warn">Reset</button>
+      </div>
+      <div class="tip">Detection = earliest of Method&nbsp;1 (percentage inside lane) or Method&nbsp;2 (consistent lateral movement).</div>
+      <h2 style="margin-top:14px">Milestones</h2>
+      <table>
+        <thead><tr><th style="width:120px">Time (s)</th><th>Event</th></tr></thead>
+        <tbody id="mtbody"></tbody>
+      </table>
+      <div class="tiny">Lane centering keeps the ACC vehicle centered in-lane. Curve uses a clothoid build-up to a radius derived from set speed.</div>
+    </div>
+
+    <!-- Column 2: Plots -->
+    <div class="card">
+      <h2>Plots (fixed size, with history)</h2>
+      <div class="plots">
+        <canvas id="speedChart" width="780" height="220"></canvas>
+        <canvas id="accChart"   width="780" height="180"></canvas>
+      </div>
+      <div class="legend">Speed: ACC (solid) &amp; Cut-in vehicle (dashed). Acceleration: ACC longitudinal.</div>
+    </div>
+
+    <!-- Column 3: Birdview -->
+    <div class="card">
+      <h2>Birdview (cut-in on a curve)</h2>
+      <canvas id="bird" width="820" height="420"></canvas>
+      <div class="tiny">View is ego-centric (ego centered &amp; facing up). Left lane → ACC lane cut-in.</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ---------- Config ----------
+  const LANE_W = 3.5;          // m (per-lane width)
+  const CAR_L  = 4.6;          // m (vehicle length)
+  const CAR_W  = 1.85;         // m (vehicle width)
+  const CUTIN_T0 = 1.0;        // s (start time of lateral movement)
+  const DT = 0.02;             // s (simulation integration step)
+  const A_MAX = 2.0;           // m/s^2 (accel limit)
+  const A_MIN = -3.0;          // m/s^2 (decel comfort limit)
+  const HOLD_GAIN = 0.8;       // for speed hold before detection
+  const KP = 0.20, KV = 0.90;  // simple ACC gains (gap & closing-rate)
+  const EPS = 1e-6;
+
+  // UI elements
+  const el = id => document.getElementById(id);
+  const ui = {
+    vLead: el('vLead'), dInit: el('dInit'), vLat: el('vLat'), tCut: el('tCut'),
+    vSet: el('vSet'), tGap: el('tGap'), pctM1: el('pctM1'), msM2: el('msM2'),
+    btnStart: el('btnStart'), btnPause: el('btnPause'), btnReset: el('btnReset'),
+    mtbody: el('mtbody'), speedCanvas: el('speedChart'), accCanvas: el('accChart'),
+    bird: el('bird')
+  };
+
+  // ---------- State ----------
+  let sim = null;
+  let rafId = null;
+  let lastTs = 0;
+
+  // Charts
+  let speedChart, accChart;
+
+  // Track geometry (precomputed)
+  let track = null;
+
+  // ---------- Helpers ----------
+  const kph2mps = k => k/3.6;
+  const clamp = (v,lo,hi)=> Math.min(hi, Math.max(lo, v));
+
+  // Design radius approximation (EU-ish): R = v^2 / (127*(e+f)), v in kph
+  function designRadiusFromSpeedKPH(vkph, e=0.07, f=0.10){
+    const denom = Math.max(0.05, e+f);
+    return Math.max(80, (vkph*vkph) / (127*denom)); // clamp to avoid tiny radii
+  }
+
+  function addMilestone(t, label) {
+    const tr = document.createElement('tr');
+    const tdT = document.createElement('td'); tdT.textContent = t.toFixed(2);
+    const tdE = document.createElement('td'); tdE.textContent = label;
+    tr.appendChild(tdT); tr.appendChild(tdE);
+    ui.mtbody.appendChild(tr);
+  }
+
+  function resetMilestones(){
+    ui.mtbody.innerHTML = '';
+    addMilestone(0, "Simulation start");
+  }
+
+  // Build a clothoid → arc → clothoid curve and straight before/after.
+  function buildTrack(vSetKph){
+    const R = designRadiusFromSpeedKPH(vSetKph); // meters
+    const kmax = 1/Math.max(60, R);
+    const Ls = 80;     // clothoid length (m)
+    const Larc = 250;  // arc length (m)
+    const totalLen = 2500;
+
+    const ds = 0.5;
+    const N = Math.floor(totalLen/ds)+1;
+    const sArr = new Array(N), xArr=new Array(N), yArr=new Array(N), psiArr = new Array(N), kArr=new Array(N);
+
+    // curvature law
+    function k_of_s(s){
+      if(s < 0) return 0;
+      if(s < Ls) return kmax*(s/Ls); // up
+      if(s < Ls+Larc) return kmax;   // const
+      if(s < 2*Ls+Larc) return kmax*(1 - (s-(Ls+Larc))/Ls); // down
+      return 0; // straight
+    }
+
+    let x=0, y=0, psi=0;
+    for(let i=0;i<N;i++){
+      const s = i*ds;
+      const k = k_of_s(s);
+      sArr[i]=s; xArr[i]=x; yArr[i]=y; psiArr[i]=psi; kArr[i]=k;
+      // integrate to next
+      psi += k*ds;
+      x += Math.cos(psi)*ds;
+      y += Math.sin(psi)*ds;
+    }
+    return {ds, s:sArr, x:xArr, y:yArr, psi:psiArr, k:kArr, kmax, R, Ls, Larc, totalLen};
+  }
+
+  // Get pose at longitudinal s (meters) offset + lateral offset n (meters)
+  function poseAt(s, n=0){
+    const i = clamp(Math.round(s/track.ds), 0, track.s.length-1);
+    const x = track.x[i], y=track.y[i], psi=track.psi[i];
+    const nx = -Math.sin(psi), ny = Math.cos(psi);
+    return { x: x + nx*n, y: y + ny*n, psi, nx, ny };
+  }
+
+  function initCharts(){
+    const common = {
+      type:'line',
+      options:{
+        responsive:false, animation:false,
+        scales:{
+          x:{ title:{text:'Time (s)',display:true}, grid:{color:'#1f2547'}, ticks:{color:'#bfc7e6'} },
+        },
+        plugins:{
+          legend:{ labels:{ color:'#e7eaf6' } },
+          tooltip:{ mode:'index', intersect:false }
+        },
+        elements:{ point:{ radius:0 } }
+      }
+    };
+    speedChart = new Chart(ui.speedCanvas.getContext('2d'), {
+      ...common,
+      data:{
+        labels:[],
+        datasets:[
+          {label:'ACC speed (m/s)', data:[], borderColor:'#7aa2ff', borderWidth:2},
+          {label:'Cut-in speed (m/s)', data:[], borderColor:'#7aa2ff', borderDash:[6,6], borderWidth:2}
+        ]
+      },
+      options:{...common.options, scales:{
+        ...common.options.scales,
+        y:{ title:{text:'Speed (m/s)',display:true}, grid:{color:'#1f2547'}, ticks:{color:'#bfc7e6'} }
+      }}
+    });
+
+    accChart = new Chart(ui.accCanvas.getContext('2d'), {
+      ...common,
+      data:{
+        labels:[],
+        datasets:[
+          {label:'ACC longitudinal accel (m/s²)', data:[], borderColor:'#5dd39e', borderWidth:2}
+        ]
+      },
+      options:{...common.options, scales:{
+        ...common.options.scales,
+        y:{ title:{text:'Accel (m/s²)',display:true}, grid:{color:'#1f2547'}, ticks:{color:'#bfc7e6'} }
+      }}
+    });
+  }
+
+  function clearCharts(){
+    speedChart.data.labels.length=0;
+    speedChart.data.datasets[0].data.length=0;
+    speedChart.data.datasets[1].data.length=0;
+    speedChart.update();
+
+    accChart.data.labels.length=0;
+    accChart.data.datasets[0].data.length=0;
+    accChart.update();
+  }
+
+  function logCharts(t, vE, vL, aE){
+    speedChart.data.labels.push(t);
+    speedChart.data.datasets[0].data.push(vE);
+    speedChart.data.datasets[1].data.push(vL);
+    // keep all history as requested
+    if(speedChart.data.labels.length % 5 === 0) speedChart.update('none');
+
+    accChart.data.labels.push(t);
+    accChart.data.datasets[0].data.push(aE);
+    if(accChart.data.labels.length % 5 === 0) accChart.update('none');
+  }
+
+  // ---------- Simulation Setup ----------
+  function readParams(){
+    return {
+      vLead: kph2mps(parseFloat(ui.vLead.value || '80')),
+      dInit: Math.max(1, parseFloat(ui.dInit.value || '10')),
+      vLat:  Math.max(0.01, parseFloat(ui.vLat.value || '1')),
+      tCut:  Math.max(0.1, parseFloat(ui.tCut.value || '3')),
+      vSet:  kph2mps(parseFloat(ui.vSet.value || '90')),
+      tGap:  clamp(parseFloat(ui.tGap.value || '2'), 0.8, 3.0),
+      pctM1: clamp(parseFloat(ui.pctM1.value || '50'), 0, 100),
+      msM2:  clamp(parseFloat(ui.msM2.value || '500'), 100, 2000)
+    };
+  }
+
+  function resetSim(){
+    const p = readParams();
+    track = buildTrack(parseFloat(ui.vSet.value || '90'));
+    sim = {
+      t:0, running:false,
+      // Longitudinal (center positions along road s)
+      sE: 0, vE: p.vSet, aE:0,
+      sL: p.dInit + CAR_L, vL: p.vLead, aL:0, // lead starts ahead (bumper gap approx = dInit)
+      // Lateral of lead (cut-in starts at CUTIN_T0)
+      yL: LANE_W, // starts in left lane center
+      // Params
+      p,
+      // Detection state
+      detected:false,
+      detectTime:null, detectBy:null,
+      m2Accum:0, // ms window accumulator
+      // Decel milestone
+      decelStarted:false,
+      reachedGap:false,
+      // Milestones recorded flags
+      msCutinStart:false,
+      msDetect:false,
+      msDecel:false,
+      msGap:false
+    };
+    clearCharts();
+    resetMilestones();
+    // Pre-fill "Start of lateral movement" milestone at runtime when it actually starts
+    drawBird(); // initial frame
+  }
+
+  // ---------- Detection Methods ----------
+  function method1_percentInsideLane(yCenter){
+    // ACC lane region: [-LANE_W/2, +LANE_W/2] around center 0
+    const laneLo = -LANE_W/2, laneHi = LANE_W/2;
+    const vehLo = yCenter - CAR_W/2;
+    const vehHi = yCenter + CAR_W/2;
+    const overlap = Math.max(0, Math.min(vehHi, laneHi) - Math.max(vehLo, laneLo));
+    return 100 * overlap / CAR_W;
+  }
+
+  function checkDetection(sim, dt){
+    const p = sim.p;
+
+    // Record "Start of lateral movement" once
+    if(!sim.msCutinStart && sim.t >= CUTIN_T0 - EPS){
+      sim.msCutinStart = true;
+      addMilestone(sim.t, "Start of lateral movement of the cut-in object");
+    }
+
+    // Method 1: percentage inside lane
+    const pctIn = method1_percentInsideLane(sim.yL);
+    const hitM1 = pctIn >= p.pctM1 - EPS;
+
+    // Method 2: consistent lateral movement toward ACC lane (y decreasing)
+    let hitM2 = false;
+    const movingToward = (sim.t >= CUTIN_T0 && sim.t <= CUTIN_T0 + p.tCut + 5 && sim.vLatNow < -0.05);
+    if(movingToward){
+      sim.m2Accum += dt*1000;
+      if(sim.m2Accum >= p.msM2 - EPS) hitM2 = true;
+    } else {
+      // reset accumulator if movement not consistent
+      sim.m2Accum = 0;
+    }
+
+    if(!sim.detected && (hitM1 || hitM2)){
+      sim.detected = true;
+      sim.detectTime = sim.t;
+      sim.detectBy = hitM1 && hitM2 ? "Method 1 & 2" : (hitM1 ? "Method 1" : "Method 2");
+      if(!sim.msDetect){
+        sim.msDetect = true;
+        addMilestone(sim.t, `Detection of the cut-in object (${sim.detectBy})`);
+      }
+    }
+  }
+
+  // ---------- ACC control ----------
+  function accControl(sim){
+    const p = sim.p;
+
+    if(!sim.detected){
+      // Hold set speed (simple proportional)
+      const aCmd = clamp(HOLD_GAIN*(p.vSet - sim.vE), A_MIN, A_MAX);
+      sim.aE = aCmd;
+      return;
+    }
+
+    // After detection: maintain desired time gap to lead
+    const d = (sim.sL - sim.sE) - CAR_L; // bumper-to-bumper distance
+    const dDes = Math.max(0, p.tGap * sim.vE);
+    const vRel = sim.vL - sim.vE;
+
+    const aCmd = clamp(KP*(d - dDes) + KV*(vRel), A_MIN, A_MAX);
+    sim.aE = aCmd;
+
+    if(!sim.msDecel && aCmd < -0.05){
+      sim.msDecel = true;
+      addMilestone(sim.t, "Start of deceleration");
+    }
+
+    // Reached desired time gap: distance ≥ desired and low closing speed
+    if(!sim.msGap && d >= dDes - 0.5 && Math.abs(vRel) < 0.2){
+      sim.msGap = true;
+      addMilestone(sim.t, "ACC car reaches the desired time gap");
+    }
+  }
+
+  // ---------- Draw Birdview ----------
+  function drawBird(){
+    const ctx = ui.bird.getContext('2d');
+    const W = ui.bird.width, H = ui.bird.height;
+    ctx.clearRect(0,0,W,H);
+
+    // Ego pose (centered, facing up)
+    const egoPose = poseAt(sim.sE, 0);
+    const sMin = sim.sE - 50, sMax = sim.sE + 200;
+
+    // Helper: world XY → ego-centric pixels
+    function toPix(world){
+      // Transform to ego local frame
+      const dx = world.x - egoPose.x;
+      const dy = world.y - egoPose.y;
+      const c = Math.cos(-egoPose.psi), s = Math.sin(-egoPose.psi);
+      const lx =  dx*c + dy*s;
+      const ly = -dx*s + dy*c;
+      const scale = 4.0; // px per meter
+      const px = W*0.5 + lx*scale;
+      const py = H*0.75 - ly*scale; // ego slightly below center
+      return [px,py];
+    }
+
+    // Draw lane edges for ACC lane and adjacent left lane
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#2d376a';
+
+    function drawLane(offsetCenter){
+      ctx.beginPath();
+      let first=true;
+      for(let s=sMin; s<=sMax; s+=1.0){
+        const c0 = poseAt(s, offsetCenter - LANE_W/2);
+        const [px,py]=toPix(c0);
+        if(first){ ctx.moveTo(px,py); first=false; } else ctx.lineTo(px,py);
+      }
+      ctx.stroke();
+
+      ctx.beginPath();
+      first=true;
+      for(let s=sMin; s<=sMax; s+=1.0){
+        const c1 = poseAt(s, offsetCenter + LANE_W/2);
+        const [px,py]=toPix(c1);
+        if(first){ ctx.moveTo(px,py); first=false; } else ctx.lineTo(px,py);
+      }
+      ctx.stroke();
+    }
+
+    drawLane(0);         // ACC lane
+    drawLane(LANE_W);    // left adjacent lane
+
+    // Draw vehicles (rectangles oriented with road)
+    function drawCar(s, lateral, colorFill, colorStroke){
+      const pose = poseAt(s, lateral);
+      const c = Math.cos(pose.psi - egoPose.psi), si = Math.sin(pose.psi - egoPose.psi);
+      // Car corners in car local frame (front ahead)
+      const hw = CAR_W/2, hl = CAR_L/2;
+      const pts = [
+        {x: +hl, y:-hw}, {x:+hl, y:+hw}, {x:-hl, y:+hw}, {x:-hl, y:-hw}
+      ].map(p=>{
+        // rotate within ego-centric frame
+        const lx = p.x*c - p.y*si;
+        const ly = p.x*si + p.y*c;
+        // add center (in ego-centric coordinates)
+        const center = poseAt(s, lateral);
+        const [cx,cy] = toPix(center);
+        return {x: cx + lx*4.0, y: cy - ly*4.0};
+      });
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.fillStyle = colorFill; ctx.strokeStyle=colorStroke; ctx.lineWidth=2;
+      ctx.fill(); ctx.stroke();
+    }
+
+    // Ego (ACC) in teal, Lead (cut-in) in orange/red
+    drawCar(sim.sE, 0, 'rgba(93,211,158,0.8)', '#50c89e');
+    const leadColor = sim.detected ? 'rgba(255,110,110,0.85)' : 'rgba(240,195,110,0.85)';
+    const leadStroke = sim.detected ? '#ff6b6b' : '#f0c36e';
+    drawCar(sim.sL, sim.yL, leadColor, leadStroke);
+
+    // HUD text
+    ctx.fillStyle = '#bfc7e6';
+    ctx.font = '12px system-ui';
+    ctx.fillText(`t=${sim.t.toFixed(2)}s | detected: ${sim.detected?sim.detectBy:'no'} | gap=${((sim.sL-sim.sE)-CAR_L).toFixed(1)} m`, 10, 18);
+  }
+
+  // ---------- Main Loop ----------
+  function step(){
+    if(!sim || !sim.running){ rafId = requestAnimationFrame(step); return; }
+
+    // integrate fixed steps to keep stability
+    const now = performance.now();
+    if(!lastTs) lastTs = now;
+    let acc = (now - lastTs)/1000;
+    if(acc>0.08) acc = 0.08; // avoid huge catch-up
+    lastTs = now;
+
+    while(acc >= DT - EPS){
+      integrate(DT);
+      acc -= DT;
+    }
+    drawBird();
+    rafId = requestAnimationFrame(step);
+  }
+
+  function integrate(dt){
+    const p = sim.p;
+
+    // Lateral of lead (cut-in motion)
+    sim.vLatNow = 0;
+    if(sim.t >= CUTIN_T0 && sim.t <= CUTIN_T0 + p.tCut){
+      const yPrev = sim.yL;
+      const yNext = yPrev - p.vLat*dt; // from left lane toward ACC (downward)
+      // Don't go beyond fully centered; allow partial depending on vLat & duration
+      sim.yL = Math.max(-LANE_W*0.25, yNext);
+      sim.vLatNow = (sim.yL - yPrev)/dt;
+    }
+
+    // Detection logic (earliest of two)
+    checkDetection(sim, dt);
+
+    // ACC longitudinal control
+    accControl(sim);
+
+    // Integrate longitudinal motion
+    sim.vE = Math.max(0, sim.vE + sim.aE*dt);
+    sim.sE += sim.vE*dt;
+
+    // Lead longitudinal (constant speed)
+    sim.vL = Math.max(0, sim.vL + sim.aL*dt);
+    sim.sL += sim.vL*dt;
+
+    // Log plots (fixed size canvases already set)
+    logCharts(sim.t, sim.vE, sim.vL, sim.aE);
+
+    sim.t += dt;
+  }
+
+  // ---------- Event Handlers ----------
+  ui.btnStart.addEventListener('click', ()=>{
+    if(!sim){ resetSim(); }
+    if(!sim.running){
+      sim.running = true;
+      ui.btnStart.textContent = 'Running';
+      ui.btnPause.textContent = 'Pause';
+      ui.btnPause.disabled = false;
+      // add milestones on start if not already
+      if(ui.mtbody.children.length===0) resetMilestones();
+    }
+  });
+
+  ui.btnPause.addEventListener('click', ()=>{
+    if(!sim) return;
+    sim.running = !sim.running;
+    ui.btnPause.textContent = sim.running ? 'Pause' : 'Resume';
+  });
+
+  ui.btnReset.addEventListener('click', ()=>{
+    resetSim();
+    ui.btnStart.textContent = 'Start';
+    ui.btnPause.textContent = 'Pause';
+    ui.btnPause.disabled = false;
+    lastTs = 0;
+  });
+
+  // ---------- Boot ----------
+  initCharts();
+  resetSim();
+  function kick(){ rafId = requestAnimationFrame(step); }
+  kick();
+
+})();
+</script>
+</body>
+</html>
