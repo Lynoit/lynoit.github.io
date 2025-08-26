@@ -39,11 +39,9 @@
     .kpi .v{font-size:20px;font-weight:700}
     .kpi .u{font-size:11px;color:var(--muted)}
 
-    /* Fixed plot sizes */
     .plot-wrap{padding:10px}
     canvas.chart{background:#0b1222;border:1px solid #1f2937;border-radius:12px;display:block;margin:0 auto}
 
-    /* Birdview */
     #bird{display:block;margin:10px auto;background:#0b1222;border:1px solid #1f2937;border-radius:12px}
     .legend{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
     .dot{width:10px;height:10px;border-radius:50%}
@@ -54,7 +52,6 @@
     <h1>ACC Speed‑Limit Adaption Simulator</h1>
   </header>
   <div class="container">
-    <!-- Column 1: Inputs & Controls -->
     <section class="card" id="controls">
       <h2>Parameters & Controls</h2>
       <div class="content grid">
@@ -101,7 +98,6 @@
       </div>
     </section>
 
-    <!-- Column 2: Plots -->
     <section class="card">
       <h2>Time Plots (fixed size)</h2>
       <div class="plot-wrap">
@@ -112,7 +108,6 @@
       </div>
     </section>
 
-    <!-- Column 3: Birdview -->
     <section class="card">
       <h2>Birdview</h2>
       <div class="content">
@@ -127,7 +122,7 @@
   </div>
 
   <script>
-    // ------- Utilities -------
+  'use strict';
     const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
     const kph2mps = v=> v/3.6;
     const mps2kph = v=> v*3.6;
@@ -135,12 +130,11 @@
 
     function linkRangeNumber(rangeEl, numberEl){
       const sync = v=>{ rangeEl.value=v; numberEl.value=v; };
-      rangeEl.addEventListener('input',()=>{ numberEl.value=rangeEl.value; onParamChange(); });
-      numberEl.addEventListener('input',()=>{ rangeEl.value=numberEl.value; onParamChange(); });
-      return { sync };
+      rangeEl.addEventListener('input', function(){ numberEl.value=rangeEl.value; onParamChange(); });
+      numberEl.addEventListener('input', function(){ rangeEl.value=numberEl.value; onParamChange(); });
+      return { sync: sync };
     }
 
-    // ------- Parameters (DOM) -------
     const els={
       vSet: document.getElementById('vSet'),
       vSetNum: document.getElementById('vSetNum'),
@@ -174,25 +168,15 @@
       };
     }
 
-    function onParamChange(){
-      // Nothing heavy; values will be read during the next sim tick.
-    }
+    function onParamChange(){ /* values read next tick */ }
 
-    // ------- Simulation state -------
-    const signDistAhead = 300; // m; car starts this far before the sign
+    const signDistAhead = 300; // m
     let state, logs, running=false, lastT=0, chartTick=0;
 
     function resetSim(){
       const p=getParams();
-      state={
-        t:0,
-        x:-signDistAhead, // position relative to the sign at x=0 (m)
-        v:kph2mps(p.vSetKph),
-        a:0,
-        phase:"cruise" // cruise -> adjusting -> hold
-      };
+      state={ t:0, x:-signDistAhead, v:kph2mps(p.vSetKph), a:0, phase:'cruise' };
       logs={ t:[], v:[], a:[] };
-      // Seed logs with t=0
       logs.t.push(0);
       logs.v.push(mps2kph(state.v));
       logs.a.push(state.a);
@@ -202,49 +186,43 @@
     }
 
     function startSim(){
-      if(!running){
-        running=true; lastT=performance.now();
-        requestAnimationFrame(loop);
-      }
+      if(!running){ running=true; lastT=performance.now(); requestAnimationFrame(loop); }
     }
 
     function pauseSim(){ running=false; }
 
     function loop(now){
       if(!running) return;
-      const dt=Math.min(0.05,(now-lastT)/1000); // clamp to 50ms per frame max
+      const dt=Math.min(0.05,(now-lastT)/1000);
       lastT=now;
       step(dt);
       chartTick+=dt;
-      if(chartTick>0.1){ // update plots at 10Hz
-        updateCharts(false); chartTick=0;
-      }
+      if(chartTick>0.1){ updateCharts(false); chartTick=0; }
       drawBird();
       requestAnimationFrame(loop);
     }
 
     function step(dt){
       const p=getParams();
-      // Decide acceleration based on Distance Start and target speed
-      const xStart = -p.distStart; // world x when adjustment should start
+      const xStart = -p.distStart; // start of control
       const vTarget = kph2mps(p.vLimitKph);
       let aCmd = 0;
 
       if(state.x >= xStart){
         const eps=0.05; // m/s
-        if(state.v > vTarget + eps) aCmd = -p.accMag; else if(state.v < vTarget - eps) aCmd = +p.accMag; else aCmd=0;
-        state.phase = (aCmd===0?"hold":"adjusting");
+        if(state.v > vTarget + eps){ aCmd = -p.accMag; }
+        else if(state.v < vTarget - eps){ aCmd = +p.accMag; }
+        else { aCmd=0; }
+        state.phase = (aCmd===0? 'hold' : 'adjusting');
       } else {
-        aCmd = 0; state.phase = "cruise";
+        aCmd = 0; state.phase = 'cruise';
       }
 
-      // Integrate kinematics (semi-implicit Euler)
       state.a = aCmd;
       state.v = Math.max(0, state.v + state.a * dt);
-      state.x = state.x + state.v * dt; // forward positive toward sign at x=0
+      state.x = state.x + state.v * dt;
       state.t += dt;
 
-      // Log
       logs.t.push(state.t);
       logs.v.push(mps2kph(state.v));
       logs.a.push(state.a);
@@ -252,16 +230,14 @@
       updateReadout();
     }
 
-    // ------- Readouts -------
     function updateReadout(){
-      els.rdTime.textContent = format1(state.t)+" s";
-      const distToSign = 0 - state.x; // m
-      els.rdDist.textContent = (distToSign>0? format1(distToSign)+" m" : ("+"+format1(-distToSign)+" m (after)"));
-      els.rdSpd.textContent = format1(mps2kph(state.v))+" km/h";
-      els.rdAcc.textContent = (state.a>=0?"+":"")+format1(state.a)+" m/s²";
+      els.rdTime.textContent = format1(state.t) + ' s';
+      const distToSign = 0 - state.x;
+      els.rdDist.textContent = (distToSign>0 ? format1(distToSign)+' m' : '+'+format1(-distToSign)+' m (after)');
+      els.rdSpd.textContent = format1(mps2kph(state.v)) + ' km/h';
+      els.rdAcc.textContent = (state.a>=0?'+':'') + format1(state.a) + ' m/s²';
     }
 
-    // ------- Charts (fixed size) -------
     const speedCtx = document.getElementById('speedChart').getContext('2d');
     const accCtx = document.getElementById('accChart').getContext('2d');
 
@@ -279,46 +255,57 @@
     const speedChart = new Chart(speedCtx,{
       type:'line',
       data:{ datasets:[{ label:'Speed (km/h)', data:[], borderColor:'#38bdf8', borderWidth:2, pointRadius:0 }] },
-      options:{ ...commonOpts, scales:{...commonOpts.scales, y:{ ...commonOpts.scales.y, title:{display:true,text:'Speed (km/h)',color:'#9ca3af'}, suggestedMin:0, suggestedMax:130 }}}
-    );
+      options:(function(){
+        const o = JSON.parse(JSON.stringify(commonOpts));
+        o.scales = JSON.parse(JSON.stringify(commonOpts.scales));
+        o.scales.y = JSON.parse(JSON.stringify(commonOpts.scales.y));
+        o.scales.y.title = {display:true,text:'Speed (km/h)',color:'#9ca3af'};
+        o.scales.y.suggestedMin = 0;
+        o.scales.y.suggestedMax = 130;
+        return o;
+      })()
+    });
 
     const accChart = new Chart(accCtx,{
       type:'line',
       data:{ datasets:[{ label:'Long. Accel (m/s²)', data:[], borderColor:'#22c55e', borderWidth:2, pointRadius:0 }] },
-      options:{ ...commonOpts, scales:{...commonOpts.scales, y:{ ...commonOpts.scales.y, title:{display:true,text:'Accel (m/s²)',color:'#9ca3af'}, suggestedMin:-4, suggestedMax:4 }}}
-    );
+      options:(function(){
+        const o = JSON.parse(JSON.stringify(commonOpts));
+        o.scales = JSON.parse(JSON.stringify(commonOpts.scales));
+        o.scales.y = JSON.parse(JSON.stringify(commonOpts.scales.y));
+        o.scales.y.title = {display:true,text:'Accel (m/s²)',color:'#9ca3af'};
+        o.scales.y.suggestedMin = -4;
+        o.scales.y.suggestedMax = 4;
+        return o;
+      })()
+    });
 
-    function updateCharts(force){
-      // Feed full history to charts ("include historical points")
-      const dataSpeed = logs.t.map((t,i)=>({x:t,y:logs.v[i]}));
-      const dataAcc = logs.t.map((t,i)=>({x:t,y:logs.a[i]}));
+    function updateCharts(){
+      const dataSpeed = logs.t.map(function(t,i){ return {x:t,y:logs.v[i]}; });
+      const dataAcc = logs.t.map(function(t,i){ return {x:t,y:logs.a[i]}; });
       speedChart.data.datasets[0].data = dataSpeed;
       accChart.data.datasets[0].data = dataAcc;
-      // Keep x-axis window reasonably tight but include all by default
       speedChart.options.scales.x.suggestedMax = Math.max(10, state.t);
       accChart.options.scales.x.suggestedMax = Math.max(10, state.t);
       speedChart.update('none');
       accChart.update('none');
     }
 
-    // ------- Birdview -------
     function drawBird(){
       const p=getParams();
-      const c=els.bird, ctx=c.getContext('2d');
+      const c=els.bird; const ctx=c.getContext('2d');
       const W=c.width, H=c.height;
       ctx.clearRect(0,0,W,H);
 
-      // World → screen mapping
-      const worldMin = -signDistAhead - 100; // show a bit before start position
-      const worldMax =  200;                 // and some after the sign
+      const worldMin = -signDistAhead - 100;
+      const worldMax =  200;
       const scale = W / (worldMax - worldMin);
-      const toX = wx => (wx - worldMin) * scale;
+      const toX = function(wx){ return (wx - worldMin) * scale; };
       const roadY = H*0.6, roadH=90;
 
-      // Road
       ctx.fillStyle = '#0e162a';
       ctx.fillRect(0, roadY-roadH/2, W, roadH);
-      // lane markings
+
       ctx.strokeStyle='#475569';
       ctx.lineWidth=2; ctx.setLineDash([14,12]);
       ctx.beginPath();
@@ -327,38 +314,30 @@
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Speed‑limit sign at x=0 (new legal speed)
       const sx = toX(0);
-      // post
       ctx.strokeStyle='#9ca3af'; ctx.lineWidth=3;
       ctx.beginPath(); ctx.moveTo(sx, roadY-roadH/2); ctx.lineTo(sx, roadY-roadH-25); ctx.stroke();
-      // circle
       ctx.beginPath(); ctx.fillStyle='#ef4444'; ctx.arc(sx, roadY-roadH-50, 20, 0, Math.PI*2); ctx.fill();
       ctx.beginPath(); ctx.fillStyle='#ffffff'; ctx.arc(sx, roadY-roadH-50, 16, 0, Math.PI*2); ctx.fill();
-      // text (new limit)
       ctx.fillStyle='#ef4444'; ctx.font='bold 14px system-ui, sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
       ctx.fillText(String(p.vLimitKph), sx, roadY-roadH-50);
 
-      // Start‑of‑adjustment marker at x = -DistanceStart
       const startX = toX(-p.distStart);
       ctx.strokeStyle='#94a3b8'; ctx.lineWidth=2; ctx.setLineDash([6,6]);
       ctx.beginPath(); ctx.moveTo(startX, roadY-roadH/2-20); ctx.lineTo(startX, roadY+roadH/2+20); ctx.stroke();
       ctx.setLineDash([]);
 
-      // Car (blue rounded rectangle), centered on road
       const carX = toX(state.x);
       const carW=40, carH=20;
       const carY = roadY-10;
       ctx.fillStyle='#38bdf8';
       roundRect(ctx, carX-carW/2, carY-carH/2, carW, carH, 6, true);
 
-      // Text overlays
       ctx.fillStyle='#9ca3af'; ctx.font='12px system-ui, sans-serif'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
-      ctx.fillText(`Old legal: ${Math.round(+els.vSet.value)} km/h`, 8, 16);
-      ctx.fillText(`New legal: ${Math.round(+els.vLimit.value)} km/h`, 8, 34);
-      ctx.fillText(`Distance Start: ${p.distStart} m (${p.distStart>=0?'before':'after'})`, 8, 52);
+      ctx.fillText('Old legal: ' + Math.round(+els.vSet.value) + ' km/h', 8, 16);
+      ctx.fillText('New legal: ' + Math.round(+els.vLimit.value) + ' km/h', 8, 34);
+      ctx.fillText('Distance Start: ' + p.distStart + ' m (' + (p.distStart>=0 ? 'before' : 'after') + ')', 8, 52);
 
-      // Axis baseline for reference (x=0 at sign)
       ctx.strokeStyle='rgba(148,163,184,0.35)'; ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(sx, 8); ctx.lineTo(sx, H-8); ctx.stroke();
     }
@@ -370,15 +349,13 @@
       ctx.arcTo(x+w,y+h,x,y+h,r);
       ctx.arcTo(x,y+h,x,y,r);
       ctx.arcTo(x,y,x+w,y,r);
-      if(fill) ctx.fill(); else ctx.stroke();
+      if(fill){ ctx.fill(); } else { ctx.stroke(); }
     }
 
-    // ------- Buttons -------
-    els.btnStart.addEventListener('click', ()=>{ startSim(); });
-    els.btnPause.addEventListener('click', ()=>{ pauseSim(); });
-    els.btnReset.addEventListener('click', ()=>{ pauseSim(); resetSim(); });
+    els.btnStart.addEventListener('click', function(){ startSim(); });
+    els.btnPause.addEventListener('click', function(){ pauseSim(); });
+    els.btnReset.addEventListener('click', function(){ pauseSim(); resetSim(); });
 
-    // ------- Init -------
     resetSim();
   </script>
 </body>
