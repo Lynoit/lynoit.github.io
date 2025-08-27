@@ -15,7 +15,7 @@
   /* ↓ smaller input font size */
   input[type="number"]{
     width:100%; box-sizing:border-box; background:#0f1325; color:var(--ink);
-    border:1px solid #242948; border-radius:10px; padding:8px 10px; font-size:14px;
+    border:1px solid #242948; border-radius:10px; padding:8px 10px; font-size:13px;
   }
   .mini{font-size:12px; color:var(--muted)}
   .btnbar{display:flex; gap:8px; margin:12px 0}
@@ -112,7 +112,7 @@
       <canvas id="chartSpeed" width="640" height="220"></canvas>
       <canvas id="chartAccel" width="640" height="180"></canvas>
     </div>
-    <div class="hint">Time axis in seconds; gap is front-to-front distance. “Min … so far” lines update live.</div>
+    <div class="hint">Time axis in seconds; gap is front-to-front distance. Dashed lines show the minimum encountered so far.</div>
   </section>
 
   <!-- RIGHT: Birdview -->
@@ -136,16 +136,16 @@
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   const kph2mps = v=>v/3.6;
 
-  // Birdview scale tweaks (from your last version)
+  // Birdview
   const VIEW_ZOOM = 1.2;
   const EDGE_W_VIS = 0.22;
   const MARK_W_VIS = 0.18;
   const POST_RUN_SEC = 5.0;
 
   // "Near-enough" gap acceptance
-  const REACH_FRAC = 0.10;  // within 10% of desired gap
-  const REACH_ABS  = 5.0;   // or within 5 meters (whichever is larger)
-  const REACH_DELAY = 0.3;  // begin checking 0.3 s after detection
+  const REACH_FRAC = 0.10;
+  const REACH_AB  = 5.0;
+  const REACH_DELAY = 0.3;
 
   // ---------- DOM ----------
   const el = id => document.getElementById(id);
@@ -164,7 +164,7 @@
   const msTableBody = document.querySelector('#milestones tbody');
   const bird = el('bird'), ctx = bird.getContext('2d');
 
-  // ---------- Milestone priority (for equal displayed times) ----------
+  // ---------- Milestones ----------
   function eventPriority(label){
     if (label.startsWith('Simulation start')) return 0;
     if (label.startsWith('Start of lateral movement')) return 1;
@@ -206,41 +206,27 @@
     let tCut = 0.5 * laneW * Math.PI / vLatTarget; tCut = clamp(tCut, 0.5, 12);
 
     const headway = +in_headway.value;
-    const maxDecel = Math.max(0.1, +in_maxDecel.value || 3.0); // m/s² (positive magnitude)
+    const maxDecel = Math.max(0.1, +in_maxDecel.value || 3.0);
 
     sim = {
-      t: 0,
-      running: false,
-      detected: false,
-      detectTime: null,
-      decelStarted: false,
-      decelTime: null,
-      gapReached: false,
-      gapReachedTime: null,
-      postRunActive: false,
-      postRunTimer: 0,
-      reachDelayTimer: 0,
-      usedM1: false,
-      usedM2: false,
+      t: 0, running: false,
+      detected: false, detectTime: null,
+      decelStarted: false, decelTime: null,
+      gapReached: false, gapReachedTime: null,
+      postRunActive: false, postRunTimer: 0,
+      reachDelayTimer: 0, usedM1: false, usedM2: false,
       latStarted: false,
       xE: 0, vE: vSet, aE: 0,
-      xC: gap0, vC: vCut,
-      yC: laneW,
+      xC: gap0, vC: vCut, yC: laneW,
       m2Timer: 0,
-      // logs
       logT: [], logVego: [], logVcut: [], logAego: [], logGap: [],
-      // mins (running)
-      minGap: gap0,
-      minVego: vSet,
-      minAccel: 0,        // aE starts at 0
-      // params
+      minGap: gap0, minVego: vSet, minAccel: 0,
       vSet, vCut, headway, tStart, tCut, maxDecel
     };
 
     resetMilestones();
     addMilestone(0, 'Simulation start');
 
-    // Seed first datapoint so charts draw immediately
     sim.logT.push(sim.t);
     sim.logVego.push(sim.vE);
     sim.logVcut.push(sim.vC);
@@ -248,7 +234,7 @@
     sim.logGap.push(sim.xC - sim.xE);
   }
 
-  // ---------- Detection logic ----------
+  // ---------- Detection ----------
   function percentInsideEgoLane(yCenter){
     const L = carWid;
     const y0 = yCenter - L/2, y1 = yCenter + L/2;
@@ -257,11 +243,9 @@
     const overlap = Math.max(0, b - a);
     return (overlap / L) * 100.0;
   }
-
   function updateDetection(sim){
     if (sim.detected) return;
     let fired = false;
-
     if (cb_m1.checked){
       const pct = percentInsideEgoLane(sim.yC);
       const thr = +in_m1pct.value;
@@ -279,12 +263,12 @@
     }
   }
 
-  // ---------- Lateral profile (cosine S-curve) ----------
+  // ---------- Lateral profile ----------
   function yCut(t){
     if (t < sim.tStart) return laneW;
     const s = (t - sim.tStart) / sim.tCut;
     if (s >= 1) return 0;
-    const u = 0.5*(1 - Math.cos(Math.PI*s)); // 0->1
+    const u = 0.5*(1 - Math.cos(Math.PI*s));
     return laneW * (1 - u);
   }
   function vyCut(t){
@@ -292,6 +276,53 @@
     const s = (t - sim.tStart) / sim.tCut;
     return - laneW * 0.5 * Math.sin(Math.PI*s) * (Math.PI / sim.tCut);
   }
+
+  // ---------- Chart plugin: label on min-line ----------
+  const minLineLabelPlugin = {
+    id: 'minLineLabelPlugin',
+    afterDatasetsDraw(chart, args, plgOpts){
+      const opts = chart.options?.plugins?.minLineLabel;
+      if (!opts || !opts.items || !chart.data.labels?.length) return;
+      const { ctx, chartArea, scales } = chart;
+      const xScale = scales.x, yScale = scales.y;
+      const x = chartArea.right - 6; // right edge padding
+      ctx.save();
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'right';
+      ctx.font = '12px system-ui, Segoe UI';
+      for (const item of opts.items){
+        const val = item.value();
+        if (!isFinite(val)) continue;
+        const y = yScale.getPixelForValue(val);
+        // text background capsule
+        const text = item.text();
+        const padX = 6, padY = 3;
+        const metrics = ctx.measureText(text);
+        const w = metrics.width + padX*2, h = 18;
+        const rx = x - w, ry = y - h/2;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        roundRect(ctx, rx, ry, w, h, 8); ctx.fill();
+        // border
+        ctx.strokeStyle = item.color; ctx.lineWidth = 1;
+        roundRect(ctx, rx, ry, w, h, 8); ctx.stroke();
+        // text
+        ctx.fillStyle = item.color;
+        ctx.fillText(text, x - padX, y + 0.5);
+      }
+      ctx.restore();
+
+      function roundRect(ctx,x,y,w,h,r){
+        ctx.beginPath();
+        ctx.moveTo(x+r, y);
+        ctx.arcTo(x+w, y,   x+w, y+h, r);
+        ctx.arcTo(x+w, y+h, x,   y+h, r);
+        ctx.arcTo(x,   y+h, x,   y,   r);
+        ctx.arcTo(x,   y,   x+w, y,   r);
+        ctx.closePath();
+      }
+    }
+  };
+  Chart.register(minLineLabelPlugin);
 
   // ---------- Charts ----------
   function initCharts(){
@@ -307,25 +338,31 @@
       data:{
         labels:[],
         datasets:[
-          {
-            label:'Gap (m)',
-            data:[],
-            borderColor:'#cfa8ff',
-            backgroundColor:'rgba(207,168,255,0.10)',
+          { // gap
+            data:[], label:'Gap (m)',
+            borderColor:'#cfa8ff', backgroundColor:'rgba(207,168,255,0.10)',
             borderWidth:2, pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
           },
-          {
-            label:'Min gap so far (m)',
+          { // min gap line
             data:[],
-            borderColor:'#ff8ad4',
-            backgroundColor:'rgba(255,138,212,0.06)',
+            borderColor:'#ff8ad4', backgroundColor:'rgba(255,138,212,0.06)',
             borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
-      options:{ animation:false, responsive:false, maintainAspectRatio:false,
+      options:{
+        animation:false, responsive:false, maintainAspectRatio:false,
         scales:{ x:axis, y:axis },
-        plugins:{ legend:{ labels:{ color:'#e8ecff' }}, tooltip:{ mode:'index', intersect:false } }
+        plugins:{
+          legend:{ display:false }, tooltip:{ mode:'index', intersect:false },
+          minLineLabel:{
+            items:[
+              { value: ()=> sim ? sim.minGap : NaN,
+                text:  ()=> sim ? `min ${sim.minGap.toFixed(1)} m` : '',
+                color: '#ff8ad4' }
+            ]
+          }
+        }
       }
     });
 
@@ -334,32 +371,36 @@
       data:{
         labels:[],
         datasets:[
-          {
-            label:'Ego speed (km/h)',
-            data:[],
-            borderColor:'#7CFFB2',
-            backgroundColor:'rgba(124,255,178,0.10)',
+          { // ego speed
+            data:[], label:'Ego speed (km/h)',
+            borderColor:'#7CFFB2', backgroundColor:'rgba(124,255,178,0.10)',
             borderWidth:2, pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
           },
-          {
-            label:'Cut-in speed (km/h)',
-            data:[],
-            borderColor:'#7cc4ff',
-            backgroundColor:'rgba(124,196,255,0.10)',
+          { // cut-in speed
+            data:[], label:'Cut-in speed (km/h)',
+            borderColor:'#7cc4ff', backgroundColor:'rgba(124,196,255,0.10)',
             borderWidth:2, borderDash:[6,4], pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
           },
-          {
-            label:'Min ego speed so far (km/h)',
+          { // min ego speed line
             data:[],
-            borderColor:'#ffd0a6',
-            backgroundColor:'rgba(255,208,166,0.06)',
+            borderColor:'#ffd0a6', backgroundColor:'rgba(255,208,166,0.06)',
             borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
-      options:{ animation:false, responsive:false, maintainAspectRatio:false,
+      options:{
+        animation:false, responsive:false, maintainAspectRatio:false,
         scales:{ x:axis, y:axis },
-        plugins:{ legend:{ labels:{ color:'#e8ecff' }}, tooltip:{ mode:'index', intersect:false } }
+        plugins:{
+          legend:{ display:false }, tooltip:{ mode:'index', intersect:false },
+          minLineLabel:{
+            items:[
+              { value: ()=> sim ? (sim.minVego*3.6) : NaN,
+                text:  ()=> sim ? `min ${(sim.minVego*3.6).toFixed(1)} km/h` : '',
+                color: '#ffd0a6' }
+            ]
+          }
+        }
       }
     });
 
@@ -368,25 +409,31 @@
       data:{
         labels:[],
         datasets:[
-          {
-            label:'Ego accel (m/s²)',
-            data:[],
-            borderColor:'#ffd36b',
-            backgroundColor:'rgba(255,211,107,0.10)',
+          { // ego accel
+            data:[], label:'Ego accel (m/s²)',
+            borderColor:'#ffd36b', backgroundColor:'rgba(255,211,107,0.10)',
             borderWidth:2, pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
           },
-          {
-            label:'Min accel so far (m/s²)',
+          { // min accel line
             data:[],
-            borderColor:'#a3ff9e',
-            backgroundColor:'rgba(163,255,158,0.06)',
+            borderColor:'#a3ff9e', backgroundColor:'rgba(163,255,158,0.06)',
             borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
-      options:{ animation:false, responsive:false, maintainAspectRatio:false,
+      options:{
+        animation:false, responsive:false, maintainAspectRatio:false,
         scales:{ x:axis, y:axis },
-        plugins:{ legend:{ labels:{ color:'#e8ecff' }}, tooltip:{ mode:'index', intersect:false } }
+        plugins:{
+          legend:{ display:false }, tooltip:{ mode:'index', intersect:false },
+          minLineLabel:{
+            items:[
+              { value: ()=> sim ? sim.minAccel : NaN,
+                text:  ()=> sim ? `min ${sim.minAccel.toFixed(2)} m/s²` : '',
+                color: '#a3ff9e' }
+            ]
+          }
+        }
       }
     });
 
@@ -406,14 +453,10 @@
     charts.sp.data.datasets[1].data = sim.logVcut.map(v=>v*3.6);
     charts.ac.data.datasets[0].data = sim.logAego;
 
-    // Running minima as horizontal lines
-    const minGapLine   = Array(labels.length).fill(sim.minGap);
-    const minSpeedLine = Array(labels.length).fill(sim.minVego * 3.6);
-    const minAccelLine = Array(labels.length).fill(sim.minAccel);
-
-    charts.gp.data.datasets[1].data = minGapLine;
-    charts.sp.data.datasets[2].data = minSpeedLine;
-    charts.ac.data.datasets[1].data = minAccelLine;
+    // constant min lines
+    charts.gp.data.datasets[1].data = Array(labels.length).fill(sim.minGap);
+    charts.sp.data.datasets[2].data = Array(labels.length).fill(sim.minVego * 3.6);
+    charts.ac.data.datasets[1].data = Array(labels.length).fill(sim.minAccel);
 
     charts.gp.update('none'); charts.sp.update('none'); charts.ac.update('none');
   }
@@ -424,12 +467,12 @@
     const W = bird.width, H = bird.height;
     ctx.clearRect(0,0,W,H);
 
-    // Base world window (before zoom)
+    // Base world window
     let xMin = s.xE - 15, xMax = s.xE + 70;
     let yMin = -laneW/2 - 1.0;
     let yMax =  3*laneW/2 + 1.0;
 
-    // Apply zoom
+    // Zoom
     const xC = (xMin + xMax)/2, yC = (yMin + yMax)/2;
     const halfX = (xMax - xMin)/(2*VIEW_ZOOM);
     const halfY = (yMax - yMin)/(2*VIEW_ZOOM);
@@ -485,7 +528,7 @@
     }
     ctx.stroke(); ctx.globalAlpha = 1;
 
-    // Cars (to scale)
+    // Cars
     function drawCarBox(x, y, bodyColor, outlineColor){
       const [px,py] = toPix(x,y);
       const wPx = carLen * sPx, hPx = carWid * sPx;
@@ -495,21 +538,18 @@
       const r = Math.min(wPx,hPx) * 0.12;
       roundRect(-wPx*0.5, -hPx*0.5, wPx, hPx, r); ctx.fill(); ctx.lineWidth = 1.25; ctx.stroke();
 
-      // Windshield (front, +x)
-      ctx.fillStyle = 'rgba(180,200,255,0.25)';
+      ctx.fillStyle = 'rgba(180,200,255,0.25)'; // windshield
       const wsL = wPx*0.18;
       ctx.fillRect(wPx*0.5 - wsL, -hPx*0.33, wsL*0.9, hPx*0.66);
 
-      // Wheels
-      ctx.fillStyle = '#1b1f2f';
+      ctx.fillStyle = '#1b1f2f'; // wheels
       const tireLen = 0.80 * sPx, tireWid = 0.28 * sPx, axleX = wPx*0.28, yOff = hPx*0.5 - tireWid*0.7;
       ctx.fillRect(+axleX - tireLen*0.5, -yOff - tireWid*0.5, tireLen, tireWid);
       ctx.fillRect(+axleX - tireLen*0.5, +yOff - tireWid*0.5, tireLen, tireWid);
       ctx.fillRect(-axleX - tireLen*0.5, -yOff - tireWid*0.5, tireLen, tireWid);
       ctx.fillRect(-axleX - tireLen*0.5, +yOff - tireWid*0.5, tireLen, tireWid);
 
-      // Front marker
-      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.fillStyle = 'rgba(255,255,255,0.6)'; // front marker
       ctx.fillRect(wPx*0.5 - 2, -hPx*0.1, 2, hPx*0.2);
       ctx.restore();
 
@@ -526,16 +566,9 @@
 
     drawCarBox(s.xE, 0, '#7CFFB2', 'rgba(0,0,0,0.55)');
     drawCarBox(s.xC, s.yC, s.detected ? '#ffd36b' : '#a5c6ff', '#26304f');
-
-    // Labels
-    ctx.fillStyle = '#a9b0d5';
-    ctx.font = '12px system-ui, Segoe UI';
-    ctx.fillText('Ego lane', 10, 18);
-    ctx.fillText('Left lane (cut-in origin)', 10, 34);
-    if (s.detected){ ctx.fillStyle = '#ffd36b'; ctx.fillText('Cut-in detected', 10, 50); }
   }
 
-  // ---------- Simulation step & control ----------
+  // ---------- Simulation ----------
   function step(){
     const s = sim;
     s.t += dt;
@@ -545,14 +578,14 @@
       addMilestone(s.t, 'Start of lateral movement of the cut-in object');
     }
 
-    // Update cut-in position
+    // Cut-in kinematics
     s.yC = yCut(s.t);
     s.xC += s.vC * dt;
 
-    // Update detection
+    // Detection
     updateDetection(s);
 
-    // Current gap and desired gap
+    // Gaps
     const gap = s.xC - s.xE;
     const gDes = Math.max(0, s.headway * s.vE);
 
@@ -565,7 +598,6 @@
       const eVel = s.vC - s.vE;
       aCmd = kGap * eGap + kRel * eVel;
       aCmd = clamp(aCmd, -s.maxDecel, maxAccel);
-
       if (!s.decelStarted && aCmd < -0.01){
         s.decelStarted = true; s.decelTime = s.t;
         addMilestone(s.decelTime, 'Start of deceleration');
@@ -577,18 +609,18 @@
     s.vE = Math.max(0, s.vE + s.aE * dt);
     s.xE += s.vE * dt;
 
-    // Update running minima
+    // Running minima
     s.minGap   = Math.min(s.minGap, gap);
     s.minVego  = Math.min(s.minVego, s.vE);
     s.minAccel = Math.min(s.minAccel, s.aE);
 
-    // Near-enough desired time gap milestone (+ post-run)
+    // Near-enough desired time gap milestone (+post-run)
     if (s.detected && !s.gapReached){
       s.reachDelayTimer += dt;
       if (s.reachDelayTimer >= REACH_DELAY){
         const gDesNow = Math.max(0, s.headway * s.vE);
         const err = Math.abs((s.xC - s.xE) - gDesNow);
-        const band = Math.max(REACH_ABS, REACH_FRAC * gDesNow);
+        const band = Math.max(REACH_AB, REACH_FRAC * gDesNow);
         if (err <= band){
           s.gapReached = true; s.gapReachedTime = s.t;
           addMilestone(s.gapReachedTime, 'ACC reaches desired time gap');
@@ -613,7 +645,7 @@
 
     // Readout
     ro_t.textContent = `${s.t.toFixed(1)} s`;
-    ro_gap.textContent = `${(s.xC - s.xE).toFixed(1)} m`;
+    ro_gap.textContent = `${gap.toFixed(1)} m`;
     ro_gdes.textContent = `${gDes.toFixed(1)} m`;
     ro_vego.textContent = `${(s.vE*3.6).toFixed(1)} km/h`;
     ro_vcut.textContent = `${(s.vC*3.6).toFixed(1)} km/h`;
@@ -657,7 +689,6 @@
     btnStart.disabled = false;
     btnPause.disabled = true;
     if (!chartsInit) initCharts();
-    // clear all datasets, including "min … so far" lines
     charts.gp.data.labels = []; charts.gp.data.datasets[0].data=[]; charts.gp.data.datasets[1].data=[];
     charts.sp.data.labels = []; charts.sp.data.datasets[0].data=[]; charts.sp.data.datasets[1].data=[]; charts.sp.data.datasets[2].data=[];
     charts.ac.data.labels = []; charts.ac.data.datasets[0].data=[]; charts.ac.data.datasets[1].data=[];
@@ -673,7 +704,7 @@
   btnPause.addEventListener('click', pause);
   btnReset.addEventListener('click', reset);
 
-  // Prepare charts up front so they’re ready even before first Start
+  // Prepare charts up front
   initCharts();
 })();
 </script>
