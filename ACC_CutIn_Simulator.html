@@ -131,6 +131,11 @@
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   const kph2mps = v=>v/3.6;
 
+  // "Near-enough" gap acceptance
+  const REACH_FRAC = 0.10;  // within 10% of desired gap
+  const REACH_ABS  = 5.0;   // or within 5 meters (whichever is larger)
+  const REACH_DELAY = 0.3;  // begin checking 0.3 s after detection
+
   // ---------- DOM ----------
   const el = id => document.getElementById(id);
   const in_vCutKph = el('in_vCutKph');
@@ -146,6 +151,34 @@
         ro_vcut = el('ro_vcut'), ro_aego = el('ro_aego');
   const msTableBody = document.querySelector('#milestones tbody');
   const bird = el('bird'), ctx = bird.getContext('2d');
+
+  // ---------- Milestone priority (for equal displayed times) ----------
+  function eventPriority(label){
+    if (label.startsWith('Simulation start')) return 0;
+    if (label.startsWith('Start of lateral movement')) return 1;
+    if (label.startsWith('Detection of the cut-in object')) return 2; // show before decel
+    if (label.startsWith('Start of deceleration')) return 3;
+    if (label.startsWith('ACC reaches desired time gap')) return 4;
+    return 99;
+  }
+  function addMilestone(time, label){
+    const tDisp = Math.round(time * 100) / 100; // round to table precision
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="mono">${tDisp.toFixed(2)}</td><td>${label}</td>`;
+    const newPri = eventPriority(label);
+    const rows = [...msTableBody.querySelectorAll('tr')];
+    let inserted = false;
+    for (let i = 0; i < rows.length; i++){
+      const tRow = parseFloat(rows[i].children[0].textContent);
+      const labelRow = rows[i].children[1].textContent;
+      const priRow = eventPriority(labelRow);
+      if (tDisp < tRow || (tDisp === tRow && newPri < priRow)){
+        msTableBody.insertBefore(tr, rows[i]); inserted = true; break;
+      }
+    }
+    if (!inserted) msTableBody.appendChild(tr);
+  }
+  function resetMilestones(){ msTableBody.innerHTML = ''; }
 
   // ---------- Simulation state ----------
   let sim = null, timer = null, charts = null;
@@ -175,12 +208,13 @@
       decelTime: null,
       gapReached: false,
       gapReachedTime: null,
+      reachDelayTimer: 0,      // for near-enough evaluation after detection
       usedM1: false,
       usedM2: false,
-      latStarted: false,            // <-- new flag
-      xE: 0, vE: vSet, aE: 0,       // ego longitudinal
-      xC: gap0, vC: vCut,           // cut-in longitudinal
-      yC: laneW,                    // cut-in lateral (starts in left lane center)
+      latStarted: false,
+      xE: 0, vE: vSet, aE: 0,  // ego longitudinal
+      xC: gap0, vC: vCut,      // cut-in longitudinal
+      yC: laneW,               // cut-in lateral (starts in left lane center)
       m2Timer: 0,
       logT: [], logVego: [], logVcut: [], logAego: [],
       vSet, vCut, headway, tStart, tCut
@@ -188,7 +222,6 @@
 
     resetMilestones();
     addMilestone(0, 'Simulation start');
-    // NOTE: no pre-adding of the lateral start milestone
 
     // Seed first datapoint so charts draw immediately
     sim.logT.push(sim.t);
@@ -196,47 +229,9 @@
     sim.logVcut.push(sim.vC);
     sim.logAego.push(sim.aE);
   }
-  
-// Put this above addMilestone
-function eventPriority(label){
-  if (label.startsWith('Simulation start')) return 0;
-  if (label.startsWith('Start of lateral movement')) return 1;
-  if (label.startsWith('Detection of the cut-in object')) return 2; // should come first at same time
-  if (label.startsWith('Start of deceleration')) return 3;
-  if (label.startsWith('ACC reaches desired time gap')) return 4;
-  return 99;
-}
-  
-  function resetMilestones(){ msTableBody.innerHTML = ''; }
-
-// Replace your existing addMilestone with this
-function addMilestone(time, label){
-  const tDisp = Math.round(time * 100) / 100; // round to what we display
-  const tr = document.createElement('tr');
-  tr.innerHTML = `<td class="mono">${tDisp.toFixed(2)}</td><td>${label}</td>`;
-
-  const newPri = eventPriority(label);
-  const rows = [...msTableBody.querySelectorAll('tr')];
-  let inserted = false;
-
-  for (let i = 0; i < rows.length; i++){
-    const tRow = parseFloat(rows[i].children[0].textContent); // already 2-dec
-    const labelRow = rows[i].children[1].textContent;
-    const priRow = eventPriority(labelRow);
-
-    // primary: time (rounded); tie-break: priority (lower first)
-    if (tDisp < tRow || (tDisp === tRow && newPri < priRow)) {
-      msTableBody.insertBefore(tr, rows[i]);
-      inserted = true;
-      break;
-    }
-  }
-  if (!inserted) msTableBody.appendChild(tr);
-}
 
   // ---------- Detection logic ----------
   function percentInsideEgoLane(yCenter){
-    // Ego lane spans [-laneW/2, +laneW/2]. Vehicle width bounds [y-L/2, y+L/2].
     const L = carWid;
     const y0 = yCenter - L/2, y1 = yCenter + L/2;
     const a = Math.max(y0, -laneW/2);
@@ -265,6 +260,7 @@ function addMilestone(time, label){
     }
 
     if (fired){
+      sim.reachDelayTimer = 0; // start delay before "near-enough" check
       addMilestone(sim.detectTime, `Detection of the cut-in object ${sim.usedM1 && sim.usedM2 ? '(M1+M2)' : (sim.usedM1? '(M1)':'(M2)')}`);
     }
   }
@@ -283,74 +279,10 @@ function addMilestone(time, label){
     return - laneW * 0.5 * Math.sin(Math.PI*s) * (Math.PI / sim.tCut);
   }
 
-  // ---------- Dynamics step ----------
-  function step(){
-    const s = sim;
-    s.t += dt;
-
-    // Lateral start milestone at the actual moment
-    if (!s.latStarted && s.t >= s.tStart) {
-      s.latStarted = true;
-      addMilestone(s.t, 'Start of lateral movement of the cut-in object');
-    }
-
-    // Update cut-in position
-    s.yC = yCut(s.t);
-    s.xC += s.vC * dt;
-
-    // Update detection
-    updateDetection(s);
-
-    // Gaps
-    const gap = s.xC - s.xE;                  // front-to-front
-    const gDes = Math.max(0, s.headway * s.vE);
-
-    // Ego longitudinal control
-    let aCmd;
-    if (!s.detected){
-      aCmd = clamp(kCruise * (s.vSet - s.vE), -maxDecel, maxAccel);
-    } else {
-      const eGap = gap - gDes;
-      const eVel = s.vC - s.vE;
-      aCmd = kGap * eGap + kRel * eVel;
-      aCmd = clamp(aCmd, -maxDecel, maxAccel);
-
-      if (!s.decelStarted && aCmd < -0.01){
-        s.decelStarted = true; s.decelTime = s.t;
-        addMilestone(s.decelTime, 'Start of deceleration');
-      }
-    if (!s.gapReached && s.detected && (gap >= gDes)){
-  s.gapReached = true; s.gapReachedTime = s.t;
-  addMilestone(s.gapReachedTime, 'ACC reaches desired time gap');
-}
-    }
-
-    // Integrate ego kinematics
-    s.aE = aCmd;
-    s.vE = Math.max(0, s.vE + s.aE * dt);
-    s.xE += s.vE * dt;
-
-    // Logs
-    s.logT.push(s.t);
-    s.logVego.push(s.vE);
-    s.logVcut.push(s.vC);
-    s.logAego.push(s.aE);
-
-    // Readout
-    ro_t.textContent = `${s.t.toFixed(1)} s`;
-    ro_gap.textContent = `${gap.toFixed(1)} m`;
-    ro_gdes.textContent = `${gDes.toFixed(1)} m`;
-    ro_vego.textContent = `${(s.vE*3.6).toFixed(1)} km/h`;
-    ro_vcut.textContent = `${(s.vC*3.6).toFixed(1)} km/h`;
-    ro_aego.textContent = `${s.aE.toFixed(2)} m/s²`;
-
-    // Charts & birdview
-    updateCharts();   // every tick for reliability
-    drawBird();
-  }
-
   // ---------- Charts ----------
+  let chartsInit = false;
   function initCharts(){
+    if (chartsInit) return;
     const axis = {
       ticks:  { color:'#e8ecff' },
       grid:   { color:'rgba(168,176,213,0.15)' },
@@ -407,17 +339,17 @@ function addMilestone(time, label){
     });
 
     charts = { sp, ac };
+    chartsInit = true;
   }
 
   function updateCharts(){
-    if (!charts) return;
-    const s = sim;
-    const labels = s.logT.map(t=>t.toFixed(2));
+    if (!chartsInit || !sim) return;
+    const labels = sim.logT.map(t=>t.toFixed(2));
     charts.sp.data.labels = labels;
     charts.ac.data.labels = labels;
-    charts.sp.data.datasets[0].data = s.logVego.map(v=>v*3.6);
-    charts.sp.data.datasets[1].data = s.logVcut.map(v=>v*3.6);
-    charts.ac.data.datasets[0].data = s.logAego;
+    charts.sp.data.datasets[0].data = sim.logVego.map(v=>v*3.6);
+    charts.sp.data.datasets[1].data = sim.logVcut.map(v=>v*3.6);
+    charts.ac.data.datasets[0].data = sim.logAego;
     charts.sp.update('none'); charts.ac.update('none');
   }
 
@@ -508,24 +440,110 @@ function addMilestone(time, label){
     }
   }
 
-  // ---------- Controls ----------
+  // ---------- Simulation step & control ----------
+  function step(){
+    const s = sim;
+    s.t += dt;
+
+    // Lateral start milestone at the actual moment
+    if (!s.latStarted && s.t >= s.tStart) {
+      s.latStarted = true;
+      addMilestone(s.t, 'Start of lateral movement of the cut-in object');
+    }
+
+    // Update cut-in position
+    s.yC = yCut(s.t);
+    s.xC += s.vC * dt;
+
+    // Update detection
+    updateDetection(s);
+
+    // Gaps
+    const gap = s.xC - s.xE;                  // front-to-front
+    const gDes = Math.max(0, s.headway * s.vE);
+
+    // Ego longitudinal control
+    let aCmd;
+    if (!s.detected){
+      aCmd = clamp(kCruise * (s.vSet - s.vE), -maxDecel, maxAccel);
+    } else {
+      const eGap = gap - gDes;
+      const eVel = s.vC - s.vE;
+      aCmd = kGap * eGap + kRel * eVel;
+      aCmd = clamp(aCmd, -maxDecel, maxAccel);
+
+      if (!s.decelStarted && aCmd < -0.01){
+        s.decelStarted = true; s.decelTime = s.t;
+        addMilestone(s.decelTime, 'Start of deceleration');
+      }
+    }
+
+    // Integrate ego kinematics
+    s.aE = aCmd;
+    s.vE = Math.max(0, s.vE + s.aE * dt);
+    s.xE += s.vE * dt;
+
+    // --- Near-enough desired time gap milestone (with delay) ---
+    if (s.detected && !s.gapReached){
+      s.reachDelayTimer += dt;
+      if (s.reachDelayTimer >= REACH_DELAY){
+        const gDesNow = Math.max(0, s.headway * s.vE);
+        const err = Math.abs((s.xC - s.xE) - gDesNow);
+        const band = Math.max(REACH_ABS, REACH_FRAC * gDesNow);
+        if (err <= band){
+          s.gapReached = true;
+          s.gapReachedTime = s.t;
+          addMilestone(s.gapReachedTime, 'ACC reaches desired time gap');
+          stopSim(); // <-- stop simulation when reached
+        }
+      }
+    }
+
+    // Logs
+    s.logT.push(s.t);
+    s.logVego.push(s.vE);
+    s.logVcut.push(s.vC);
+    s.logAego.push(s.aE);
+
+    // Readout
+    ro_t.textContent = `${s.t.toFixed(1)} s`;
+    ro_gap.textContent = `${gap.toFixed(1)} m`;
+    ro_gdes.textContent = `${gDes.toFixed(1)} m`;
+    ro_vego.textContent = `${(s.vE*3.6).toFixed(1)} km/h`;
+    ro_vcut.textContent = `${(s.vC*3.6).toFixed(1)} km/h`;
+    ro_aego.textContent = `${s.aE.toFixed(2)} m/s²`;
+
+    // Charts & birdview
+    updateCharts();
+    drawBird();
+  }
+
   function start(){
-    if (!charts) initCharts();     // ensure charts exist first
-    if (!sim) initSim();           // then init sim
+    if (!chartsInit) initCharts();     // ensure charts exist first
+    if (!sim) initSim();               // then init sim
     if (sim.running) return;
     sim.running = true;
     btnStart.disabled = true;
     btnPause.disabled = false;
-    updateCharts();                // draw seeded point immediately
+    updateCharts();                    // draw seeded point immediately
     timer = setInterval(step, dt*1000);
+  }
+
+  function stopSim(){
+    if (!sim || !sim.running) return;
+    clearInterval(timer); timer = null;
+    sim.running = false;
+    btnStart.disabled = false;
+    btnPause.disabled = true;
+    updateCharts(); // final refresh
   }
 
   function pause(){
     if (!sim || !sim.running) return;
+    clearInterval(timer); timer = null;
     sim.running = false;
     btnStart.disabled = false;
     btnPause.disabled = true;
-    clearInterval(timer);
   }
 
   function reset(){
@@ -533,7 +551,7 @@ function addMilestone(time, label){
     sim = null;
     btnStart.disabled = false;
     btnPause.disabled = true;
-    if (!charts) initCharts();
+    if (!chartsInit) initCharts();
     charts.sp.data.labels = []; charts.sp.data.datasets[0].data=[]; charts.sp.data.datasets[1].data=[];
     charts.ac.data.labels = []; charts.ac.data.datasets[0].data=[];
     charts.sp.update('none'); charts.ac.update('none');
