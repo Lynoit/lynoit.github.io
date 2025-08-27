@@ -360,57 +360,58 @@
 
     // World window keeps ego in view
     const xMin = s.xE - 15, xMax = s.xE + 70;
-    const yMin = -laneW*0.8, yMax = laneW*1.8;
+    const yMin = -laneW/2 - 1.0;      // a little shoulder below
+    const yMax =  3*laneW/2 + 1.0;    // a little shoulder above
 
-    const scaleX = (W-30) / (xMax - xMin);
-    const scaleY = (H-30) / (yMax - yMin);
-    const xPad = 15, yPad = 15;
+    // UNIFORM scale to preserve real proportions
+    const sPx = Math.min((W-30)/(xMax-xMin), (H-30)/(yMax-yMin));
+    const viewWpx = (xMax-xMin)*sPx;
+    const viewHpx = (yMax-yMin)*sPx;
+    const xPad = (W - viewWpx)/2;
+    const yPad = (H - viewHpx)/2;
 
     const toPix = (x,y)=>{
-      const px = (x - xMin) * scaleX + xPad;
-      const py = (1 - (y - yMin) / (yMax - yMin)) * (H-30) + yPad;
+      const px = (x - xMin) * sPx + xPad;
+      const py = (yMax - y) * sPx + yPad; // y up in world
       return [px,py];
     };
 
-    // Road/lane drawing helpers
-    const edgeWidth = 0.18;      // m (solid edge lines)
-    const markWidth = 0.15;      // m (center dashed markings)
-    const dashLen = 3.0;         // m
-    const gapLen  = 9.0;         // m
-
+    // Helpers: draw a world-aligned filled rect (x0,y0) is bottom-left in world coords
     function fillWorldRect(x0,y0,w,h,color){
-      const [px0,py0] = toPix(x0,y0);
-      const pxw = w * scaleX;
-      const pyh = h * scaleY;
+      const [px0,pyTop] = toPix(x0, y0 + h); // top-left in canvas coords
+      const pxw = w * sPx;
+      const pyh = h * sPx;
       ctx.fillStyle = color;
-      ctx.fillRect(px0, py0 - pyh, pxw, pyh); // y0 is bottom; convert to canvas top-left
+      ctx.fillRect(px0, pyTop, pxw, pyh * -1); // use negative height because pyTop is above
     }
 
-    function drawSolidLaneEdge(y){
-      fillWorldRect(xMin, y - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');
-    }
+    // Road background (optional darker strip)
+    fillWorldRect(xMin, yMin, (xMax-xMin), (yMax-yMin), '#0b0f1f');
 
-    function drawDashedLaneMarkings(y){
+    // Lane markings:
+    const edgeWidth = 0.18;      // m (solid outer edge lines)
+    const markWidth = 0.15;      // m (center dashed markings)
+    const dashLen = 3.0;         // m painted
+    const gapLen  = 9.0;         // m gap
+
+    // Solid outer edges
+    fillWorldRect(xMin, -laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');      // bottom edge
+    fillWorldRect(xMin,  3*laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');    // top edge
+
+    // Dashed divider between lanes at y = laneW/2
+    (function drawDashedDivider(){
+      const y = laneW/2;
       const period = dashLen + gapLen;
-      // start from the first segment that could be visible
       let x = Math.floor(xMin / period) * period;
       while (x < xMax){
         const segStart = Math.max(x, xMin);
         const segEnd   = Math.min(x + dashLen, xMax);
         if (segEnd > segStart){
-          fillWorldRect(segStart, y + markWidth/2, (segEnd - segStart), markWidth, '#e8ecff');
+          fillWorldRect(segStart, y - markWidth/2, (segEnd - segStart), markWidth, '#e8ecff');
         }
         x += period;
       }
-    }
-
-    // Lane edges (outer solid lines)
-    drawSolidLaneEdge(-laneW/2);      // bottom of ego lane
-    drawSolidLaneEdge(laneW*1.5);     // top of left lane
-
-    // Center lane markings (painted dashes), for ego lane and left lane
-    drawDashedLaneMarkings(0);        // center of ego lane
-    drawDashedLaneMarkings(laneW);    // center of left lane
+    })();
 
     // Cut-in desired lateral trajectory (hint)
     ctx.strokeStyle = '#7cc4ff';
@@ -427,46 +428,45 @@
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // Car drawing (scaled to real dimensions, with wheels & windshield)
+    // Car drawing (to scale, correct orientation)
     function drawCarBox(x, y, bodyColor, outlineColor){
       const [px,py] = toPix(x,y);
-      const wPx = carLen * scaleX;        // length along x
-      const hPx = carWid * scaleY;        // width across y
+      const wPx = carLen * sPx;        // along x (longitudinal)
+      const hPx = carWid * sPx;        // along y (lateral)
 
-      // Body
       ctx.save();
       ctx.translate(px,py);
+
+      // Body
       ctx.fillStyle = bodyColor;
-      ctx.strokeStyle = outlineColor || 'rgba(0,0,0,0.6)';
+      ctx.strokeStyle = outlineColor || 'rgba(0,0,0,0.55)';
       const r = Math.min(wPx,hPx) * 0.12;
       roundRect(-wPx*0.5, -hPx*0.5, wPx, hPx, r);
       ctx.fill();
       ctx.lineWidth = 1.25;
       ctx.stroke();
 
-      // Windshield (front quarter)
+      // Windshield at front (positive x side)
       ctx.fillStyle = 'rgba(180,200,255,0.25)';
       const wsL = wPx*0.18;
-      ctx.fillRect(wPx*0.5 - wsL, -hPx*0.35, wsL*0.9, hPx*0.70);
+      ctx.fillRect(wPx*0.5 - wsL, -hPx*0.33, wsL*0.9, hPx*0.66);
 
-      // Wheels (simple rectangles)
-      const tireLen = 0.80 * scaleX;     // ~0.8 m
-      const tireWid = 0.28 * scaleY;     // ~0.28 m
-      const axleX   = wPx*0.28;          // axle offset from center
-      const yOff    = hPx*0.5 - tireWid*0.7;
-
+      // Wheels
       ctx.fillStyle = '#1b1f2f';
-      // front left/right
+      const tireLen = 0.80 * sPx;     // ~0.8 m along x
+      const tireWid = 0.28 * sPx;     // ~0.28 m along y
+      const axleX   = wPx*0.28;       // axle offset
+      const yOff    = hPx*0.5 - tireWid*0.7;
+      // front L/R
       ctx.fillRect(+axleX - tireLen*0.5, -yOff - tireWid*0.5, tireLen, tireWid);
       ctx.fillRect(+axleX - tireLen*0.5, +yOff - tireWid*0.5, tireLen, tireWid);
-      // rear left/right
+      // rear L/R
       ctx.fillRect(-axleX - tireLen*0.5, -yOff - tireWid*0.5, tireLen, tireWid);
       ctx.fillRect(-axleX - tireLen*0.5, +yOff - tireWid*0.5, tireLen, tireWid);
 
-      // Front indicator notch
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      // Front marker
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
       ctx.fillRect(wPx*0.5 - 2, -hPx*0.1, 2, hPx*0.2);
-
       ctx.restore();
 
       function roundRect(x,y,w,h,rad){
