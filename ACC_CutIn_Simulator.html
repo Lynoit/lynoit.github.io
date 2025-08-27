@@ -154,7 +154,11 @@
     const vSet = kph2mps(+in_vSetKph.value);
     const vCut = kph2mps(+in_vCutKph.value);
     const gap0 = +in_gap.value;
-    const tStart = +in_tCut.value;                // cut-in start time (s)
+
+    // Robust parse of start time (defaults to 3 s)
+    let tStart = parseFloat(in_tCut.value);
+    if (!isFinite(tStart) || tStart < 0) tStart = 3;
+
     const vLatTarget = Math.max(0.1, +in_vLat.value);
     // derive duration from target lateral peak speed (cosine profile):
     let tCut = 0.5 * laneW * Math.PI / vLatTarget;   // clamp to reasonable range
@@ -173,9 +177,10 @@
       gapReachedTime: null,
       usedM1: false,
       usedM2: false,
-      xE: 0, vE: vSet, aE: 0,           // ego longitudinal
-      xC: gap0, vC: vCut,               // cut-in longitudinal
-      yC: laneW,                        // cut-in lateral (starts in left lane center)
+      latStarted: false,            // <-- new flag
+      xE: 0, vE: vSet, aE: 0,       // ego longitudinal
+      xC: gap0, vC: vCut,           // cut-in longitudinal
+      yC: laneW,                    // cut-in lateral (starts in left lane center)
       m2Timer: 0,
       logT: [], logVego: [], logVcut: [], logAego: [],
       vSet, vCut, headway, tStart, tCut
@@ -183,7 +188,7 @@
 
     resetMilestones();
     addMilestone(0, 'Simulation start');
-    addMilestone(sim.tStart, 'Start of lateral movement of the cut-in object');
+    // NOTE: no pre-adding of the lateral start milestone
 
     // Seed first datapoint so charts draw immediately
     sim.logT.push(sim.t);
@@ -259,6 +264,12 @@
     const s = sim;
     s.t += dt;
 
+    // Lateral start milestone at the actual moment
+    if (!s.latStarted && s.t >= s.tStart) {
+      s.latStarted = true;
+      addMilestone(s.t, 'Start of lateral movement of the cut-in object');
+    }
+
     // Update cut-in position
     s.yC = yCut(s.t);
     s.xC += s.vC * dt;
@@ -310,7 +321,7 @@
     ro_aego.textContent = `${s.aE.toFixed(2)} m/s²`;
 
     // Charts & birdview
-    updateCharts();   // update EVERY tick so you always see data
+    updateCharts();   // every tick for reliability
     drawBird();
   }
 
@@ -476,12 +487,12 @@
   // ---------- Controls ----------
   function start(){
     if (!charts) initCharts();     // ensure charts exist first
-    if (!sim) initSim();           // sim after charts so first render works
+    if (!sim) initSim();           // then init sim
     if (sim.running) return;
     sim.running = true;
     btnStart.disabled = true;
     btnPause.disabled = false;
-    updateCharts();                // draw the seeded point immediately
+    updateCharts();                // draw seeded point immediately
     timer = setInterval(step, dt*1000);
   }
 
