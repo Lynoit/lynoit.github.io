@@ -12,7 +12,11 @@
   .card{background:var(--panel); border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.35); padding:14px 16px;}
   h2{margin:0 0 10px 0; font-weight:600; letter-spacing:.2px}
   .row{display:grid; grid-template-columns: 1fr 110px; gap:10px; align-items:center; margin:8px 0}
-  input[type="number"]{ width:100%; box-sizing:border-box; background:#0f1325; color:var(--ink); border:1px solid #242948; border-radius:10px; padding:8px 10px;}
+  /* ↓ smaller input font size */
+  input[type="number"]{
+    width:100%; box-sizing:border-box; background:#0f1325; color:var(--ink);
+    border:1px solid #242948; border-radius:10px; padding:8px 10px; font-size:14px;
+  }
   .mini{font-size:12px; color:var(--muted)}
   .btnbar{display:flex; gap:8px; margin:12px 0}
   button{background:#1e2442; color:var(--ink); border:1px solid #2a315b; border-radius:12px; padding:8px 12px; cursor:pointer}
@@ -57,6 +61,9 @@
     <div class="row"><div>ACC time gap <span class="unit">(s)</span></div>
       <input id="in_headway" type="number" min="0.8" max="3" step="0.1" value="2">
     </div>
+    <div class="row"><div>ACC max decel limit <span class="unit">(m/s²)</span></div>
+      <input id="in_maxDecel" type="number" min="0.5" max="10" step="0.1" value="3.0">
+    </div>
 
     <div style="margin-top:8px">
       <div class="mini">Detection method(s)</div>
@@ -99,18 +106,18 @@
 
   <!-- MIDDLE: Charts -->
   <section class="card">
-    <h2>Plots</h2>
+    <h2>Plots (fixed size)</h2>
     <div id="charts">
       <canvas id="chartGap"   width="640" height="160"></canvas>
       <canvas id="chartSpeed" width="640" height="220"></canvas>
       <canvas id="chartAccel" width="640" height="180"></canvas>
     </div>
-    <div class="hint">Time axis in seconds; historical data kept for the whole run. Gap = front-to-front distance.</div>
+    <div class="hint">Time axis in seconds; gap is front-to-front distance. “Min … so far” lines update live.</div>
   </section>
 
   <!-- RIGHT: Birdview -->
   <section class="card">
-    <h2>Birdview</h2>
+    <h2>Bird-view</h2>
     <canvas id="bird" width="500" height="480"></canvas>
     <div class="hint">Straight road with two lanes. Cut-in comes from the left lane into ego lane; lane centering keeps the ego at lane center.</div>
   </section>
@@ -122,19 +129,18 @@
   const laneW = 3.5;
   const carLen = 4.5, carWid = 1.8;
   const dt = 0.02;                 // 20 ms
-  const maxAccel = 1.5;            // m/s²
-  const maxDecel = 3.0;            // m/s² (applied as negative)
+  const maxAccel = 1.5;            // m/s² (positive accel limit)
   const kCruise = 0.6;             // cruise gain to set speed
   const kGap = 0.25, kRel = 0.8;   // ACC gains
   const vyMinForM2 = 0.05;         // m/s threshold for method 2
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   const kph2mps = v=>v/3.6;
 
-  // Birdview scale tweaks
-  const VIEW_ZOOM = 1.2;          // >1 zooms in
-  const EDGE_W_VIS = 0.22;        // m (solid edges)
-  const MARK_W_VIS = 0.18;        // m (dashed divider)
-  const POST_RUN_SEC = 5.0;       // run 5 s after gap reached
+  // Birdview scale tweaks (from your last version)
+  const VIEW_ZOOM = 1.2;
+  const EDGE_W_VIS = 0.22;
+  const MARK_W_VIS = 0.18;
+  const POST_RUN_SEC = 5.0;
 
   // "Near-enough" gap acceptance
   const REACH_FRAC = 0.10;  // within 10% of desired gap
@@ -149,6 +155,7 @@
   const in_tCut    = el('in_tCut');
   const in_vSetKph = el('in_vSetKph');
   const in_headway = el('in_headway');
+  const in_maxDecel = el('in_maxDecel');
   const cb_m1 = el('cb_m1'), cb_m2 = el('cb_m2');
   const in_m1pct = el('in_m1pct'), in_m2ms = el('in_m2ms');
   const btnStart = el('btnStart'), btnPause = el('btnPause'), btnReset = el('btnReset');
@@ -164,6 +171,7 @@
     if (label.startsWith('Detection of the cut-in object')) return 2;
     if (label.startsWith('Start of deceleration')) return 3;
     if (label.startsWith('ACC reaches desired time gap')) return 4;
+    if (label.startsWith('Simulation stop')) return 5;
     return 99;
   }
   function addMilestone(time, label){
@@ -194,11 +202,11 @@
     const gap0 = +in_gap.value;
 
     let tStart = parseFloat(in_tCut.value); if (!isFinite(tStart) || tStart < 0) tStart = 3;
-
     const vLatTarget = Math.max(0.1, +in_vLat.value);
     let tCut = 0.5 * laneW * Math.PI / vLatTarget; tCut = clamp(tCut, 0.5, 12);
 
     const headway = +in_headway.value;
+    const maxDecel = Math.max(0.1, +in_maxDecel.value || 3.0); // m/s² (positive magnitude)
 
     sim = {
       t: 0,
@@ -219,8 +227,14 @@
       xC: gap0, vC: vCut,
       yC: laneW,
       m2Timer: 0,
+      // logs
       logT: [], logVego: [], logVcut: [], logAego: [], logGap: [],
-      vSet, vCut, headway, tStart, tCut
+      // mins (running)
+      minGap: gap0,
+      minVego: vSet,
+      minAccel: 0,        // aE starts at 0
+      // params
+      vSet, vCut, headway, tStart, tCut, maxDecel
     };
 
     resetMilestones();
@@ -299,6 +313,13 @@
             borderColor:'#cfa8ff',
             backgroundColor:'rgba(207,168,255,0.10)',
             borderWidth:2, pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
+          },
+          {
+            label:'Min gap so far (m)',
+            data:[],
+            borderColor:'#ff8ad4',
+            backgroundColor:'rgba(255,138,212,0.06)',
+            borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
@@ -326,6 +347,13 @@
             borderColor:'#7cc4ff',
             backgroundColor:'rgba(124,196,255,0.10)',
             borderWidth:2, borderDash:[6,4], pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
+          },
+          {
+            label:'Min ego speed so far (km/h)',
+            data:[],
+            borderColor:'#ffd0a6',
+            backgroundColor:'rgba(255,208,166,0.06)',
+            borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
@@ -346,6 +374,13 @@
             borderColor:'#ffd36b',
             backgroundColor:'rgba(255,211,107,0.10)',
             borderWidth:2, pointRadius:2, pointHoverRadius:3, tension:0.18, spanGaps:true, showLine:true
+          },
+          {
+            label:'Min accel so far (m/s²)',
+            data:[],
+            borderColor:'#a3ff9e',
+            backgroundColor:'rgba(163,255,158,0.06)',
+            borderDash:[5,5], borderWidth:2, pointRadius:0, tension:0, spanGaps:true, showLine:true
           }
         ]
       },
@@ -370,6 +405,15 @@
     charts.sp.data.datasets[0].data = sim.logVego.map(v=>v*3.6);
     charts.sp.data.datasets[1].data = sim.logVcut.map(v=>v*3.6);
     charts.ac.data.datasets[0].data = sim.logAego;
+
+    // Running minima as horizontal lines
+    const minGapLine   = Array(labels.length).fill(sim.minGap);
+    const minSpeedLine = Array(labels.length).fill(sim.minVego * 3.6);
+    const minAccelLine = Array(labels.length).fill(sim.minAccel);
+
+    charts.gp.data.datasets[1].data = minGapLine;
+    charts.sp.data.datasets[2].data = minSpeedLine;
+    charts.ac.data.datasets[1].data = minAccelLine;
 
     charts.gp.update('none'); charts.sp.update('none'); charts.ac.update('none');
   }
@@ -515,12 +559,13 @@
     // Ego longitudinal control
     let aCmd;
     if (!s.detected){
-      aCmd = clamp(kCruise * (s.vSet - s.vE), -maxDecel, maxAccel);
+      aCmd = clamp(kCruise * (s.vSet - s.vE), -s.maxDecel, maxAccel);
     } else {
       const eGap = gap - gDes;
       const eVel = s.vC - s.vE;
       aCmd = kGap * eGap + kRel * eVel;
-      aCmd = clamp(aCmd, -maxDecel, maxAccel);
+      aCmd = clamp(aCmd, -s.maxDecel, maxAccel);
+
       if (!s.decelStarted && aCmd < -0.01){
         s.decelStarted = true; s.decelTime = s.t;
         addMilestone(s.decelTime, 'Start of deceleration');
@@ -531,6 +576,11 @@
     s.aE = aCmd;
     s.vE = Math.max(0, s.vE + s.aE * dt);
     s.xE += s.vE * dt;
+
+    // Update running minima
+    s.minGap   = Math.min(s.minGap, gap);
+    s.minVego  = Math.min(s.minVego, s.vE);
+    s.minAccel = Math.min(s.minAccel, s.aE);
 
     // Near-enough desired time gap milestone (+ post-run)
     if (s.detected && !s.gapReached){
@@ -546,16 +596,15 @@
         }
       }
     }
-// Post-run countdown (continue for 5 s after gap reached)
-if (s.postRunActive){
-  s.postRunTimer += dt;
-  if (s.postRunTimer >= POST_RUN_SEC){
-    addMilestone(s.t, 'Simulation end');   // ← new milestone
-    stopSim();
-  }
-}
+    if (s.postRunActive){
+      s.postRunTimer += dt;
+      if (s.postRunTimer >= POST_RUN_SEC){
+        addMilestone(s.t, 'Simulation stop');
+        stopSim();
+      }
+    }
 
-    // Logs (use latest state)
+    // Logs
     s.logT.push(s.t);
     s.logVego.push(s.vE);
     s.logVcut.push(s.vC);
@@ -608,9 +657,10 @@ if (s.postRunActive){
     btnStart.disabled = false;
     btnPause.disabled = true;
     if (!chartsInit) initCharts();
-    charts.gp.data.labels = []; charts.gp.data.datasets[0].data=[];
-    charts.sp.data.labels = []; charts.sp.data.datasets[0].data=[]; charts.sp.data.datasets[1].data=[];
-    charts.ac.data.labels = []; charts.ac.data.datasets[0].data=[];
+    // clear all datasets, including "min … so far" lines
+    charts.gp.data.labels = []; charts.gp.data.datasets[0].data=[]; charts.gp.data.datasets[1].data=[];
+    charts.sp.data.labels = []; charts.sp.data.datasets[0].data=[]; charts.sp.data.datasets[1].data=[]; charts.sp.data.datasets[2].data=[];
+    charts.ac.data.labels = []; charts.ac.data.datasets[0].data=[]; charts.ac.data.datasets[1].data=[];
     charts.gp.update('none'); charts.sp.update('none'); charts.ac.update('none');
     const c = document.getElementById('bird').getContext('2d');
     c.clearRect(0,0,document.getElementById('bird').width, document.getElementById('bird').height);
