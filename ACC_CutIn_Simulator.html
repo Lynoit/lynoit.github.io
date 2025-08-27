@@ -131,6 +131,15 @@
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   const kph2mps = v=>v/3.6;
 
+  // Birdview: slight zoom (everything larger)
+  const VIEW_ZOOM = 1.2;          // >1 zooms in ~20%
+  // Lane paint thicker for visibility
+  const EDGE_W_VIS = 0.22;        // m (was 0.18)
+  const MARK_W_VIS = 0.18;        // m (was 0.15)
+
+  // Stop 5 s after gap reached
+  const POST_RUN_SEC = 5.0;
+
   // "Near-enough" gap acceptance
   const REACH_FRAC = 0.10;  // within 10% of desired gap
   const REACH_ABS  = 5.0;   // or within 5 meters (whichever is larger)
@@ -208,6 +217,8 @@
       decelTime: null,
       gapReached: false,
       gapReachedTime: null,
+      postRunActive: false,
+      postRunTimer: 0,
       reachDelayTimer: 0,      // for near-enough evaluation after detection
       usedM1: false,
       usedM2: false,
@@ -358,12 +369,20 @@
     const W = bird.width, H = bird.height;
     ctx.clearRect(0,0,W,H);
 
-    // World window keeps ego in view
-    const xMin = s.xE - 15, xMax = s.xE + 70;
-    const yMin = -laneW/2 - 1.0;      // a little shoulder below
-    const yMax =  3*laneW/2 + 1.0;    // a little shoulder above
+    // Base world window (before zoom)
+    let xMin = s.xE - 15, xMax = s.xE + 70;
+    let yMin = -laneW/2 - 1.0;
+    let yMax =  3*laneW/2 + 1.0;
 
-    // UNIFORM scale to preserve real proportions
+    // Apply zoom (shrink world extents around their center)
+    const xC = (xMin + xMax)/2;
+    const yC = (yMin + yMax)/2;
+    const halfX = (xMax - xMin)/(2*VIEW_ZOOM);
+    const halfY = (yMax - yMin)/(2*VIEW_ZOOM);
+    xMin = xC - halfX; xMax = xC + halfX;
+    yMin = yC - halfY; yMax = yC + halfY;
+
+    // Uniform (isotropic) scale to preserve proportions
     const sPx = Math.min((W-30)/(xMax-xMin), (H-30)/(yMax-yMin));
     const viewWpx = (xMax-xMin)*sPx;
     const viewHpx = (yMax-yMin)*sPx;
@@ -378,25 +397,25 @@
 
     // Helpers: draw a world-aligned filled rect (x0,y0) is bottom-left in world coords
     function fillWorldRect(x0,y0,w,h,color){
-      const [px0,pyTop] = toPix(x0, y0 + h); // top-left in canvas coords
+      const [px0,pyTop] = toPix(x0, y0 + h); // top-left
       const pxw = w * sPx;
       const pyh = h * sPx;
       ctx.fillStyle = color;
-      ctx.fillRect(px0, pyTop, pxw, pyh * -1); // use negative height because pyTop is above
+      ctx.fillRect(px0, pyTop, pxw, -pyh);
     }
 
-    // Road background (optional darker strip)
+    // Road background
     fillWorldRect(xMin, yMin, (xMax-xMin), (yMax-yMin), '#0b0f1f');
 
-    // Lane markings:
-    const edgeWidth = 0.18;      // m (solid outer edge lines)
-    const markWidth = 0.15;      // m (center dashed markings)
-    const dashLen = 3.0;         // m painted
-    const gapLen  = 9.0;         // m gap
+    // Lane markings (slightly thicker for visibility)
+    const edgeWidth = EDGE_W_VIS;    // solid edges
+    const markWidth = MARK_W_VIS;    // dashed center
+    const dashLen = 3.0;             // m painted
+    const gapLen  = 9.0;             // m gap
 
-    // Solid outer edges
-    fillWorldRect(xMin, -laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');      // bottom edge
-    fillWorldRect(xMin,  3*laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');    // top edge
+    // Solid outer edges at y = -laneW/2 and y = +3*laneW/2
+    fillWorldRect(xMin, -laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');
+    fillWorldRect(xMin,  3*laneW/2 - edgeWidth/2, (xMax-xMin), edgeWidth, '#e8ecff');
 
     // Dashed divider between lanes at y = laneW/2
     (function drawDashedDivider(){
@@ -549,9 +568,17 @@
           s.gapReached = true;
           s.gapReachedTime = s.t;
           addMilestone(s.gapReachedTime, 'ACC reaches desired time gap');
-          stopSim(); // stop simulation when reached
+          // start post-run
+          s.postRunActive = true;
+          s.postRunTimer = 0;
         }
       }
+    }
+
+    // Post-run countdown (continue for 5 s after gap reached)
+    if (s.postRunActive){
+      s.postRunTimer += dt;
+      if (s.postRunTimer >= POST_RUN_SEC) stopSim();
     }
 
     // Logs
