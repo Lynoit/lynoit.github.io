@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Regulatory Doc Finder — EuroNCAP • R79 • R171 • DCAS</title>
+<title>Regulatory Doc Finder — EuroNCAP • R79 • R171 • DCAS (Google CSE)</title>
 
 <!-- PapaParse for CSV -->
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
@@ -55,59 +55,51 @@
     <!-- LEFT: Controls -->
     <div class="card">
       <h1>Regulatory Doc Finder</h1>
-      <h2>EuroNCAP · UNECE R79 · UNECE R171 · DCAS</h2>
+      <h2>Euro NCAP · UNECE R79 · UNECE R171 · DCAS</h2>
 
       <label>1) Load your query CSV (one column named <span class="kbd">Query</span>)</label>
       <input id="csvFile" type="file" accept=".csv"/>
 
       <div class="row" style="margin-top:10px">
         <div>
-          <label>2) Bing Web Search API Key</label>
-          <input id="bingKey" type="password" placeholder="Paste key here"/>
-          <div class="mini">Get one from Azure > Bing Search v7.</div>
+          <label>2) Google API Key</label>
+          <input id="gKey" type="password" placeholder="Paste Custom Search API key"/>
+          <div class="mini">Enable “Custom Search API” in Google Cloud → Credentials → API key.</div>
         </div>
         <div>
-          <label>Market & Recency</label>
-          <select id="bingMarket">
-            <option value="en-US" selected>en-US</option>
-            <option value="en-GB">en-GB</option>
-            <option value="sv-SE">sv-SE</option>
-          </select>
-          <select id="freshness">
-            <option value="">No time filter</option>
-            <option value="Day">Last day</option>
-            <option value="Week">Last week</option>
-            <option value="Month" selected>Last month</option>
-            <option value="Year">Last year</option>
-          </select>
+          <label>3) CSE Search engine ID (cx)</label>
+          <input id="gCx" type="text" placeholder="Paste cx (Search engine ID)"/>
+          <div class="mini">In CSE control panel → Basics → Search engine ID.</div>
         </div>
       </div>
 
-      <label style="margin-top:12px;">3) Source filters (editable)</label>
+      <label style="margin-top:12px;">Recency filter</label>
+      <select id="dateRestrict">
+        <option value="">None</option>
+        <option value="d7">Last 7 days</option>
+        <option value="m1" selected>Last month</option>
+        <option value="y1">Last year</option>
+      </select>
+
+      <label style="margin-top:12px;">Source filters (editable)</label>
       <div class="grid2">
         <div>
-          <div class="muted">Euro NCAP (site filter)</div>
-          <input id="srcEuroncap" type="text" value="site:euroncap.com OR site:assets.euoncap.org OR site:cdn.euroncap.com"/>
+          <div class="muted">Euro NCAP</div>
+          <input id="srcEuroncap" type="text" value="site:euroncap.com OR site:cdn.euroncap.com OR site:assets.euroncap.com"/>
         </div>
         <div>
-          <div class="muted">UNECE R79 (site filter)</div>
-          <input id="srcR79" type="text" value="site:unece.org &quot;UN Regulation No. 79&quot; OR &quot;R79&quot;"/>
+          <div class="muted">UNECE R79</div>
+          <input id="srcR79" type="text" value="site:unece.org &quot;UN Regulation No. 79&quot; OR R79"/>
         </div>
         <div>
-          <div class="muted">UNECE R171 (site filter)</div>
-          <input id="srcR171" type="text" value="site:unece.org &quot;UN Regulation No. 171&quot; OR &quot;R171&quot;"/>
+          <div class="muted">UNECE R171</div>
+          <input id="srcR171" type="text" value="site:unece.org &quot;UN Regulation No. 171&quot; OR R171"/>
         </div>
         <div>
-          <div class="muted">DCAS (site filter)</div>
+          <div class="muted">DCAS</div>
           <input id="srcDCAS" type="text" value="site:unece.org DCAS OR &quot;Driver Control Assistance&quot; OR site:ec.europa.eu DCAS"/>
         </div>
       </div>
-
-      <label style="margin-top:12px;">Answer extraction mode</label>
-      <select id="answerMode">
-        <option value="snippet" selected>Use search snippets (fastest, robust)</option>
-        <option value="tryFetch">Try to fetch page text (may fail due to CORS)</option>
-      </select>
 
       <div class="row" style="margin-top:12px">
         <button id="runBtn" disabled>Run Search</button>
@@ -120,10 +112,8 @@
         <summary class="pill">CSV format & tips</summary>
         <div class="help" style="margin-top:8px">
           • CSV must include a header column named <b>Query</b>.<br/>
-          • Each row is one question you want answered.<br/>
-          • We site-restrict queries so answers come from the intended source.<br/>
-          • Confidence is computed from textual similarity between your query and the result title/snippet (0–100%).<br/>
-          • “Try to fetch page text” attempts full-page extraction, but many domains block cross-origin requests; snippets are more reliable.
+          • Confidence is a text-similarity score between your query and the top snippet/title (0–100%).<br/>
+          • Google CSE JSON API endpoint is used client-side, no server needed.
         </div>
       </details>
     </div>
@@ -151,18 +141,16 @@
 
 <script>
 const $ = sel => document.querySelector(sel);
-const $$ = sel => Array.from(document.querySelectorAll(sel));
 
 const els = {
   csvFile: $('#csvFile'),
-  bingKey: $('#bingKey'),
-  market:  $('#bingMarket'),
-  fresh:   $('#freshness'),
+  gKey:    $('#gKey'),
+  gCx:     $('#gCx'),
+  dateRestrict: $('#dateRestrict'),
   srcEuroncap: $('#srcEuroncap'),
   srcR79:      $('#srcR79'),
   srcR171:     $('#srcR171'),
   srcDCAS:     $('#srcDCAS'),
-  answerMode:  $('#answerMode'),
   runBtn: $('#runBtn'),
   exportBtn: $('#exportBtn'),
   status: $('#status'),
@@ -194,30 +182,32 @@ els.csvFile.addEventListener('change', async (e)=>{
     .map(r => (r.Query ?? '').toString().trim())
     .filter(q => q.length>0)
     .map(q => ({Query:q}));
-  els.status.textContent = `Loaded ${queries.length} queries. Paste your Bing API key and click “Run Search”.`;
-  els.runBtn.disabled = queries.length === 0 || !els.bingKey.value;
+  els.status.textContent = `Loaded ${queries.length} queries. Paste your Google API key + cx and click “Run Search”.`;
+  updateRunState();
 });
 
-els.bingKey.addEventListener('input', ()=>{
-  els.runBtn.disabled = queries.length === 0 || !els.bingKey.value;
-});
+els.gKey.addEventListener('input', updateRunState);
+els.gCx.addEventListener('input', updateRunState);
+
+function updateRunState(){
+  els.runBtn.disabled = !(queries.length > 0 && els.gKey.value && els.gCx.value);
+}
 
 els.runBtn.addEventListener('click', async ()=>{
-  if(!els.bingKey.value){ alert('Please paste your Bing Web Search API key.'); return; }
+  if(!els.gKey.value || !els.gCx.value){ alert('Paste your Google API key and cx.'); return; }
   resultsMatrix = [];
   els.tbody.innerHTML = '';
   els.exportBtn.disabled = true;
 
   let done = 0;
   const total = queries.length * SOURCES.length;
-  const concurrency = 4; // gentle default for rate limits
+  const concurrency = 4;
 
-  // Prepare tasks
   const tasks = [];
   for(const q of queries){
     for(const src of SOURCES){
       tasks.push(async ()=>{
-        const ans = await searchOne(q.Query, src.getFilter());
+        const ans = await searchOneCSE(q.Query, src.getFilter());
         addPartial(q.Query, src.key, ans);
         done++;
         els.status.textContent = `Searching… ${done}/${total} (${Math.round(100*done/total)}%)`;
@@ -225,12 +215,11 @@ els.runBtn.addEventListener('click', async ()=>{
     }
   }
 
-  // Run with simple pool
   await pooled(tasks, concurrency);
 
   renderTable();
   els.status.textContent = `Done. ${queries.length} queries × ${SOURCES.length} sources = ${total} lookups.`;
-  els.exportBtn.disabled = resultsMatrix.length>0;
+  els.exportBtn.disabled = resultsMatrix.length>0 ? false : true;
 });
 
 els.exportBtn.addEventListener('click', ()=>{
@@ -242,10 +231,10 @@ els.exportBtn.addEventListener('click', ()=>{
   for(const row of resultsMatrix){
     rows.push([
       row.query,
-      row.euroncap.ans, row.euroncap.conf, row.euroncap.url,
-      row.r79.ans,      row.r79.conf,      row.r79.url,
-      row.r171.ans,     row.r171.conf,     row.r171.url,
-      row.dcas.ans,     row.dcas.conf,     row.dcas.url
+      row.euroncap.ans, Math.round(row.euroncap.conf), row.euroncap.url,
+      row.r79.ans,      Math.round(row.r79.conf),      row.r79.url,
+      row.r171.ans,     Math.round(row.r171.conf),     row.r171.url,
+      row.dcas.ans,     Math.round(row.dcas.conf),     row.dcas.url
     ]);
   }
   const csv = Papa.unparse(rows);
@@ -256,8 +245,7 @@ els.exportBtn.addEventListener('click', ()=>{
   a.click();
 });
 
-// --- Helpers ---
-
+// ---- Rendering helpers ----
 function findRow(query){
   let row = resultsMatrix.find(r => r.query===query);
   if(!row){
@@ -273,12 +261,10 @@ function blankAns(){ return { ans:'', conf:0, url:'', title:'' }; }
 function addPartial(query, key, ans){
   const row = findRow(query);
   row[key] = ans;
-  // live-render row for responsiveness
   renderRow(row);
 }
 
 function renderRow(row){
-  // remove existing
   const existing = els.tbody.querySelector(`tr[data-q="${cssEscape(row.query)}"]`);
   if(existing){ existing.remove(); }
 
@@ -327,7 +313,6 @@ function renderTable(){
   for(const row of resultsMatrix){ renderRow(row); }
 }
 
-// Simple task pool
 async function pooled(tasks, limit=4){
   const q = tasks.slice();
   const run = async ()=>{
@@ -338,88 +323,63 @@ async function pooled(tasks, limit=4){
   };
   await Promise.all(Array.from({length:limit}, run));
 }
-
 function cssEscape(s){ return s.replace(/"/g,'&quot;'); }
 
-// --- Search & Answering ---
-
-async function searchOne(query, siteFilter){
-  // Compose search string: the user's query + site restriction
-  const fullQ = `${query} ${siteFilter}`.trim();
-
-  const bingKey = els.bingKey.value.trim();
-  const market  = els.market.value;
-  const freshness = els.fresh.value;
-
-  const params = new URLSearchParams({ q: fullQ, mkt: market, count: '5', textDecorations:'false', textFormat:'Raw' });
-  if(freshness) params.set('freshness', freshness);
-
-  let best = blankAns();
+// ---- Google CSE search ----
+async function searchOneCSE(query, siteFilter){
+  const key = els.gKey.value.trim();
+  const cx  = els.gCx.value.trim();
+  const dateRestrict = els.dateRestrict.value; // "", d7, m1, y1
+  const q = `${query} ${siteFilter}`.trim();
+  const params = new URLSearchParams({
+    key, cx, q, num:'5'
+  });
+  if(dateRestrict) params.set('dateRestrict', dateRestrict);
 
   try{
-    const resp = await fetch('https://api.bing.microsoft.com/v7.0/search?'+params.toString(), {
-      headers: { 'Ocp-Apim-Subscription-Key': bingKey }
-    });
+    const url = 'https://www.googleapis.com/customsearch/v1?' + params.toString();
+    const resp = await fetch(url);
     if(!resp.ok){
-      console.warn('Bing API error', resp.status, await resp.text());
+      console.warn('CSE API error', resp.status, await resp.text());
       return failAns(`Search error (${resp.status})`);
     }
     const data = await resp.json();
-    const web = data.webPages?.value ?? [];
-    if(web.length===0){ return failAns('No results'); }
+    const items = data.items || [];
+    if(items.length===0) return failAns('No results');
 
-    // Pick best by a quick relevance score (query-similarity × recency bonus if present)
-    let bestScore = -1, bestHit = null;
-    for(const hit of web){
-      const title = (hit.name || '').toString();
-      const snippet = (hit.snippet || '').toString();
-      const url = (hit.url || '').toString();
+    // Pick best by simple relevance to title+snippet
+    let best = null, bestScore = -1;
+    for(const it of items){
+      const title = it.title || '';
+      const snippet = it.snippet || '';
+      const link = it.link || '';
       const score = relevanceScore(query, title + ' ' + snippet);
-      const dated = hit.dateLastCrawled || hit.datePublished;
-      const rec = dated ? recencyBoost(dated) : 1.0;
-      const finalScore = score * rec;
-      if(finalScore > bestScore){
-        bestScore = finalScore; bestHit = { title, snippet, url, dated };
+      if(score > bestScore){
+        bestScore = score;
+        best = { title, snippet, url: link };
       }
     }
+    const conf = clamp01(relevanceScore(query, (best.title||'')+' '+(best.snippet||''))) * 100;
+    return { ans: best.snippet || '(no snippet)', conf, url: best.url, title: best.title };
 
-    if(!bestHit){ return failAns('No suitable result'); }
-
-    let answerText = bestHit.snippet;
-    // Optionally try to fetch page content and pull a better sentence
-    if(els.answerMode.value==='tryFetch'){
-      try{
-        const pageText = await tryFetchPageText(bestHit.url);
-        const extracted = extractBestSentence(query, pageText) || answerText;
-        answerText = extracted;
-      }catch(e){ /* keep snippet */ }
-    }
-
-    const conf = clamp01(relevanceScore(query, bestHit.title + ' ' + answerText)) * 100;
-    best = { ans: answerText, conf, url: bestHit.url, title: bestHit.title };
-    return best;
-
-  }catch(err){
-    console.error(err);
+  }catch(e){
+    console.error(e);
     return failAns('Network or API error');
   }
 }
-
 function failAns(msg){ return { ans: msg, conf: 0, url:'', title:'' }; }
 
-// Text similarity: normalized token overlap with soft TF weighting
+// ---- Text similarity scoring ----
 function relevanceScore(query, text){
   const qTokens = tokenize(query);
   const tTokens = tokenize(text);
   if(qTokens.size===0 || tTokens.size===0) return 0;
   let intersect = 0;
   qTokens.forEach(tok => { if(tTokens.has(tok)) intersect++; });
-  // Jaccard with a small tf-idfish boost using token lengths
   const jacc = intersect / (qTokens.size + tTokens.size - intersect);
   const lenBoost = Math.min(1, [...qTokens].reduce((acc,t)=>acc + (t.length>=4?0.02:0.0), 0));
   return Math.min(1, jacc*0.86 + lenBoost*0.14);
 }
-
 function tokenize(s){
   return new Set(
     (s||'').toLowerCase()
@@ -429,43 +389,7 @@ function tokenize(s){
   );
 }
 const STOP = new Set('the a an of to for in and or on with without by from as be is are was were been being about into within at this that those these it its their there here what when how which who whom whose where why vs versus incl incl.'.split(/\s+/));
-
-function recencyBoost(iso){
-  // newer -> slightly higher weight (up to 1.15)
-  const now = Date.now();
-  const t = new Date(iso).getTime();
-  if(!isFinite(t)) return 1.0;
-  const days = Math.max(0, (now - t) / (1000*60*60*24));
-  if(days < 7)   return 1.15;
-  if(days < 30)  return 1.10;
-  if(days < 180) return 1.05;
-  return 1.0;
-}
 function clamp01(x){ return Math.max(0, Math.min(1, x)); }
-
-// Try to fetch page text (many sites will block via CORS; best-effort only)
-async function tryFetchPageText(url){
-  const resp = await fetch(url, { mode:'cors' });
-  const html = await resp.text();
-  const text = html
-    .replace(/<script[\s\S]*?<\/script>/gi,' ')
-    .replace(/<style[\s\S]*?<\/style>/gi,' ')
-    .replace(/<[^>]+>/g,' ')
-    .replace(/\s+/g,' ')
-    .trim();
-  return text;
-}
-
-// Extract the most query-relevant sentence from page text
-function extractBestSentence(query, text){
-  const sentences = text.split(/(?<=[\.\?\!])\s+/);
-  let best = '', bestS = -1;
-  for(const s of sentences){
-    const sc = relevanceScore(query, s);
-    if(sc > bestS){ bestS = sc; best = s; }
-  }
-  return best;
-}
 </script>
 </body>
 </html>
