@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Annotator Reports Viewer</title>
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #fff;
+      color: #000;
+    }
+    #sidebar {
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 240px;
+      background: #f5f5f5;
+      overflow-y: auto;
+    }
+    #content {
+      margin-left: 240px;
+      padding: 20px;
+    }
+    .day-header {
+      padding: 12px 16px;
+      cursor: pointer;
+      border-bottom: 1px solid #ddd;
+    }
+    .day-header:hover {
+      background: #e0e0e0;
+    }
+    .session-list {
+      display: none;
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .session-item {
+      padding: 8px 32px;
+      cursor: pointer;
+      border-bottom: 1px solid #eee;
+    }
+    .session-item:hover {
+      background: #f0f0f0;
+    }
+    h1 {
+      margin-top: 0;
+    }
+    h2 {
+      margin-top: 1.5em;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 2em;
+    }
+    th,
+    td {
+      border: 1px solid #ccc;
+      padding: 8px;
+    }
+    th {
+      background-color: #f5f5f5 !important;
+    }
+    .error {
+      color: #d00;
+      padding: 16px;
+    }
+    /* CSS for the red badge icons */
+    .issue-badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      background: red;
+      color: white;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: bold;
+      pointer-events: none;
+    }
+    #issue-map {
+      width: 100%;
+      height: 400px;
+      margin: 20px 0;
+      border: 1px solid #aaa;
+    }
+    /* Simple styling for the download buttons */
+    .download-button {
+      display: inline-block;
+      margin-right: 12px;
+      margin-bottom: 16px;
+      padding: 8px 12px;
+      background: #007bff;
+      color: white;
+      text-decoration: none;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .download-button:hover {
+      background: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2 style="padding:16px 16px; margin:0; border-bottom:1px solid #ddd;">
+      Test sessions
+    </h2>
+  </div>
+  <div id="content"><h1>Select a session to view</h1></div>
+
+  <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
+    Ver 1.0
+  </footer>
+
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.0/jszip.min.js"></script>
+  
+  <script>
+    const ACCOUNT = 'annotationcsv';
+    const CONTAINER = 'csv';
+    const SAS_TOKEN =
+      'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
+    const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
+
+    // Two separate arrays now:
+    let issueCoords = [];
+    let samplingCoords = [];
+
+    document.addEventListener('DOMContentLoaded', listBlobs);
+
+    function listBlobs() {
+      fetch(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`)
+        .then((response) => response.text())
+        .then((xml) => {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(xml, 'application/xml');
+          const blobs = Array.from(doc.getElementsByTagName('Name'))
+            .map((el) => el.textContent)
+            .filter((name) => name.toLowerCase().endsWith('.xlsx'));
+          if (blobs.length === 0) {
+            showError('No .xlsx files found.');
+            return;
+          }
+          buildSidebar(blobs);
+        })
+        .catch((error) => showError('Failed to list blobs: ' + error));
+    }
+
+    function buildSidebar(files) {
+      const sb = document.getElementById('sidebar');
+      sb.innerHTML = '';
+      const header = document.createElement('h2');
+      header.textContent = 'Test sessions';
+      header.style.padding = '16px';
+      header.style.margin = '0';
+      header.style.borderBottom = '1px solid #ddd';
+      sb.appendChild(header);
+
+      const groups = files.reduce((acc, f) => {
+        const match = f.match(/(\d{4}-\d{2}-\d{2})/);
+        if (!match) return acc;
+        const day = match[1];
+        acc[day] = acc[day] || [];
+        acc[day].push(f);
+        return acc;
+      }, {});
+
+      Object.keys(groups)
+        .sort()
+        .reverse()
+        .forEach((day) => {
+          const hdr = document.createElement('div');
+          hdr.className = 'day-header';
+          hdr.textContent = day;
+          const lst = document.createElement('ul');
+          lst.className = 'session-list';
+          groups[day]
+            .sort()
+            .forEach((f) => {
+              const li = document.createElement('li');
+              li.className = 'session-item';
+              li.textContent = f.replace(`${day}_`, '').replace('.xlsx', '');
+              li.onclick = () => loadFile(f);
+              lst.appendChild(li);
+            });
+          hdr.onclick = () => {
+            lst.style.display =
+              lst.style.display === 'block' ? 'none' : 'block';
+          };
+          sb.appendChild(hdr);
+          sb.appendChild(lst);
+        });
+    }
+
+  function loadFile(filename) {
+  const content = document.getElementById('content');
+  content.innerHTML = '';
+  issueCoords = [];
+  samplingCoords = [];
+
+  // Will store per‐issue metadata (cols 1,2,13 + lat/lon + issueNo)
+  const issueTableInfo = {
+    sheetName: null,
+    headerNames: { col1: '', col2: '', col3: '' },
+    issueInfo: {}  // issueNo → { issueNo, col1, col2, col3, lat, lon }
+  };
+
+  // 1) XLSX download button
+  const xlsxLink = document.createElement('a');
+  xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  xlsxLink.textContent = 'Download XLSX';
+  xlsxLink.className = 'download-button';
+  xlsxLink.setAttribute('download', filename);
+  content.appendChild(xlsxLink);
+
+  // 2) PDF download button
+  const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
+  const pdfLink = document.createElement('a');
+  pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
+  pdfLink.textContent = 'Download PDF';
+  pdfLink.className = 'download-button';
+  pdfLink.setAttribute('download', pdfFilename);
+  content.appendChild(pdfLink);
+
+  // 3) Fetch & parse the XLSX
+  fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+    .then(res => res.arrayBuffer())
+    .then(buffer => {
+      const data = new Uint8Array(buffer);
+      const wb = XLSX.read(data, { type: 'array' });
+
+      // Parse “Sampling” sheet if present
+      const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+      if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
+
+      let nonSamplingCount = 0;
+      let mapInserted = false;
+
+      wb.SheetNames.forEach(sheet => {
+        if (sheet.toLowerCase() === 'sampling') return;
+
+        // Render sheet as HTML
+        const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
+        content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
+
+        // Extract issue data from the first lat/lon‐bearing sheet
+        if (!issueTableInfo.sheetName) {
+          const tbl = document.getElementById(sheet);
+          const rows = Array.from(tbl.querySelectorAll('tr'));
+          if (rows.length > 1) {
+            const hdrs = Array.from(rows[0].querySelectorAll('th,td'))
+                              .map(c => c.textContent.trim().toLowerCase());
+            const latIdx = hdrs.findIndex(h => h.includes('lat'));
+            const lonIdx = hdrs.findIndex(h => h.includes('lon'));
+            if (latIdx >= 0 && lonIdx >= 0) {
+              // Identify this as the Issue table
+              issueTableInfo.sheetName = sheet;
+              const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
+              issueTableInfo.headerNames.col1 = rawHdrs[0].textContent.trim();
+              issueTableInfo.headerNames.col2 = rawHdrs[1].textContent.trim();
+              issueTableInfo.headerNames.col3 = rawHdrs[12]?.textContent.trim() || '';
+
+              // Collect each row's info
+              rows.slice(1).forEach(row => {
+                const cells = Array.from(row.querySelectorAll('td'));
+                const issueNo = cells[0].textContent.trim();
+                const col1 = issueNo;
+                const col2 = cells[1].textContent.trim();
+                const col3 = cells[12]?.textContent.trim() || '';
+                const lat = parseFloat(cells[latIdx].textContent.trim());
+                const lon = parseFloat(cells[lonIdx].textContent.trim());
+                if (!isNaN(lat) && !isNaN(lon)) {
+                  issueCoords.push({ issueNo, lat, lon });
+                }
+                issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
+              });
+            }
+          }
+        }
+
+        nonSamplingCount++;
+        if (nonSamplingCount === 2 && !mapInserted) {
+          const mapDiv = document.createElement('div');
+          mapDiv.id = 'issue-map';
+          mapDiv.style.width = '100%';
+          mapDiv.style.height = '400px';
+          mapDiv.style.margin = '20px 0';
+          mapDiv.style.border = '1px solid #aaa';
+          content.appendChild(mapDiv);
+          mapInserted = true;
+        }
+      });
+    })
+    .then(() => {
+      // Ensure map placeholder if <2 sheets
+      if (!document.getElementById('issue-map')) {
+        const mapDiv = document.createElement('div');
+        mapDiv.id = 'issue-map';
+        mapDiv.style.width = '100%';
+        mapDiv.style.height = '400px';
+        mapDiv.style.margin = '20px 0';
+        mapDiv.style.border = '1px solid #aaa';
+        content.appendChild(mapDiv);
+      }
+      // Initialize main map
+      if (issueCoords.length || samplingCoords.length) {
+        initMap();
+      } else {
+        const ph = document.getElementById('issue-map');
+        const err = document.createElement('div');
+        err.className = 'error';
+        err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
+        ph.replaceWith(err);
+      }
+    })
+    .then(() => {
+      // 4) Fetch & unzip images & build enhanced snapshot table
+      const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
+      return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`)
+        .then(resp => {
+          if (!resp.ok) return Promise.reject('ZIP not found');
+          return resp.arrayBuffer();
+        })
+        .then(buf => JSZip.loadAsync(buf))
+        .then(zip => {
+          const mapDiv = document.getElementById('issue-map');
+          const title = document.createElement('h2');
+          title.textContent = 'Issue snapshots';
+
+          const table = document.createElement('table');
+          table.id = 'issue-snapshots';
+          table.style.width = 'auto';
+          table.style.marginBottom = '2em';
+          table.style.borderCollapse = 'collapse';
+
+          // Header: cols 1,2,13 + Location + Snapshot
+          const hdrRow = document.createElement('tr');
+          ['col1','col2','col3'].forEach(k => {
+            const th = document.createElement('th');
+            th.textContent = issueTableInfo.headerNames[k];
+            th.style.backgroundColor = '#f5f5f5';
+            th.style.padding = '8px';
+            th.style.border = '1px solid #ccc';
+            hdrRow.appendChild(th);
+          });
+          ['Location','Snapshot'].forEach(txt => {
+            const th = document.createElement('th');
+            th.textContent = txt;
+            th.style.backgroundColor = '#f5f5f5';
+            th.style.padding = '8px';
+            th.style.border = '1px solid #ccc';
+            hdrRow.appendChild(th);
+          });
+          table.appendChild(hdrRow);
+
+          zip.forEach((path, entry) => {
+            if (entry.dir || !/\.(jpe?g|png|gif)$/i.test(path)) return;
+            const issueNo = path.replace(/\.[^/.]+$/, '');
+            const info = issueTableInfo.issueInfo[issueNo];
+            if (!info) return;
+
+            const row = document.createElement('tr');
+            [info.col1, info.col2, info.col3].forEach(val => {
+              const td = document.createElement('td');
+              td.textContent = val;
+              td.style.padding = '8px';
+              td.style.border = '1px solid #ccc';
+              row.appendChild(td);
+            });
+
+            // Column 4: mini‐map with badge + 100m circle
+            const tdMap = document.createElement('td');
+            tdMap.style.padding = '8px';
+            tdMap.style.border = '1px solid #ccc';
+            const miniDiv = document.createElement('div');
+            miniDiv.id = `snapshot-map-${issueNo}`;
+            miniDiv.style.width = '150px';
+            miniDiv.style.height = '150px';
+            tdMap.appendChild(miniDiv);
+            row.appendChild(tdMap);
+
+            // Column 5: image
+            const tdImg = document.createElement('td');
+            tdImg.style.padding = '8px';
+            tdImg.style.border = '1px solid #ccc';
+            entry.async('blob').then(rawBlob => {
+  // 1) Figure out MIME type from filename
+  let mime = 'application/octet-stream';
+  if (/\.(jpe?g)$/i.test(path)) mime = 'image/jpeg';
+  else if (/\.png$/i.test(path))      mime = 'image/png';
+  else if (/\.gif$/i.test(path))      mime = 'image/gif';
+
+  // 2) Re-wrap in a Blob that *does* have a type
+  const blob = new Blob([rawBlob], { type: mime });
+  const url  = URL.createObjectURL(blob);
+
+  // 3) Make a link that opens the full-size image in a new tab
+  const link = document.createElement('a');
+  link.href   = url;
+  link.target = '_blank';
+  link.rel    = 'noopener noreferrer';
+
+  // 4) Thumbnail image
+  const img = document.createElement('img');
+  img.src         = url;
+  img.style.maxWidth  = '200px';
+  img.style.maxHeight = '200px';
+  img.style.cursor    = 'pointer';
+
+  link.appendChild(img);
+  tdImg.appendChild(link);
+
+              // Now initialize the mini‐map
+              const miniMap = L.map(miniDiv, {
+                attributionControl: false,
+                zoomControl: false
+              }).setView([info.lat, info.lon], 17);
+              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+
+              // Add a badge marker with the correct issueNo
+              const badgeIcon = L.divIcon({
+                className: 'issue-label',
+                html: `<div class="issue-badge">${issueNo}</div>`,
+                iconSize: [24,24],
+                iconAnchor: [12,12]
+              });
+              L.marker([info.lat, info.lon], { icon: badgeIcon }).addTo(miniMap);
+
+              // Add the 100m circle
+              const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
+              miniMap.fitBounds(circle.getBounds());
+              miniMap.invalidateSize();
+            });
+            row.appendChild(tdImg);
+
+            table.appendChild(row);
+          });
+
+          // Insert below the main map
+          if (mapDiv) {
+            mapDiv.insertAdjacentElement('afterend', title);
+            title.insertAdjacentElement('afterend', table);
+          } else {
+            content.appendChild(title);
+            content.appendChild(table);
+          }
+        });
+    })
+    .catch(err => {
+      console.error(err);
+      content.innerHTML += `<div class="error">Failed to load ${filename}: ${err}</div>`;
+    });
+}
+
+    /**
+     * parseIssues(sheetId)
+     *   - Finds the HTML table with id=sheetId,
+     *     looks for “lat” and “lon” columns,
+     *     and pushes into issueCoords.
+     */
+    function parseIssues(sheetId) {
+      const table = document.getElementById(sheetId);
+      if (!table) return;
+      const rows = Array.from(table.querySelectorAll('tr'));
+      if (rows.length < 2) return;
+
+      const headerCells = Array.from(rows[0].querySelectorAll('th, td'));
+      const headers = headerCells.map((cell) =>
+        cell.textContent.trim().toLowerCase()
+      );
+
+      const latIdx = headers.findIndex((h) => h.includes('lat'));
+      const lonIdx = headers.findIndex((h) => h.includes('lon'));
+      if (latIdx < 0 || lonIdx < 0) return;
+
+      rows.slice(1).forEach((row) => {
+        const cells = Array.from(row.querySelectorAll('td'));
+        const issueNo = cells[0].textContent.trim();
+        const lat = parseFloat(cells[latIdx].textContent.trim());
+        const lon = parseFloat(cells[lonIdx].textContent.trim());
+        if (!isNaN(lat) && !isNaN(lon)) {
+          issueCoords.push({ issueNo, lat, lon });
+        }
+      });
+    }
+
+    /**
+     * parseSamplingSheet(sheet)
+     *   - Uses XLSX.utils.sheet_to_json with header:1 to read the first row,
+     *     finds lat/lon columns, and pushes into samplingCoords.
+     */
+    function parseSamplingSheet(sheet) {
+      // Convert entire sheet to a 2D array: first row = headers
+      const raw = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (raw.length < 2) return; // need at least one data row
+
+      // First row = headers
+      const headers = raw[0].map((h) => String(h).trim().toLowerCase());
+      const latIdx = headers.findIndex((h) => h.includes('lat'));
+      const lonIdx = headers.findIndex((h) => h.includes('lon'));
+      if (latIdx < 0 || lonIdx < 0) return;
+
+      // For each subsequent row, pull lat/lon
+      for (let i = 1; i < raw.length; i++) {
+        const row = raw[i];
+        const lat = parseFloat(row[latIdx]);
+        const lon = parseFloat(row[lonIdx]);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          samplingCoords.push({ lat, lon });
+        }
+      }
+    }
+
+    /**
+     * initMap()
+     *   - Creates the Leaflet map,
+     *   - Plots red “issue” badges from issueCoords,
+     *   - Then plots blue circle markers from samplingCoords.
+     */
+    function initMap() {
+      const map = L.map('issue-map').setView([0, 0], 2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(map);
+
+      // Combine all coords just to compute a bounds that covers everything
+      const allPoints = [
+        ...issueCoords.map((c) => [c.lat, c.lon]),
+        ...samplingCoords.map((c) => [c.lat, c.lon]),
+      ];
+      if (allPoints.length > 0) {
+        map.fitBounds(allPoints);
+      }
+
+      // 1) draw the “issue” badges (red)
+      issueCoords.forEach((c) => {
+        const icon = L.divIcon({
+          className: 'issue-label',
+          html: `<div class="issue-badge">${c.issueNo}</div>`,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        });
+        L.marker([c.lat, c.lon], { icon }).addTo(map);
+      });
+
+      // 2) draw sampling points in blue
+samplingCoords.forEach((c) => {
+  L.circleMarker([c.lat, c.lon], {
+    radius: 3,        // smaller pixel radius
+    color: 'blue',
+    fillOpacity: 0.6,
+    weight: 1         // thinner outline if you like
+  }).addTo(map);
+});
+
+      // Fix Leaflet sizing bug if container was initially hidden
+      map.whenReady(() => map.invalidateSize());
+    }
+
+    function showError(message) {
+      document.getElementById(
+        'sidebar'
+      ).innerHTML = `<div class="error">${message}</div>`;
+    }
+  </script>
+</body>
+</html>
