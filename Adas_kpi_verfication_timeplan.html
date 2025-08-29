@@ -88,7 +88,7 @@
       <div class="controls" style="grid-template-columns:repeat(6,1fr);margin-bottom:8px">
         <div class="field"><label>Name</label><input id="ev-name" placeholder="e.g., L EU Expedition"></div>
         <div class="field"><label>Type</label>
-          <select id="ev-type"><option>XS</option><option>S</option><option>M</option><option>L</option><option>XL</option></select>
+          <select id="ev-type">$1<option>Software update</option></select>
         </div>
         <div class="field"><label>Start date</label><input type="date" id="ev-start" value="2025-12-05"></div>
         <div class="field"><label>Duration (days)</label><input type="number" id="ev-days" value="7" min="1" max="60"></div>
@@ -136,6 +136,27 @@ function toEvent(obj){ return { ...obj, end: addDays(obj.start, obj.days) }; }
 function cumulative(events, field, start, end){
   const series = [{date:start, value:0}];
   let cum = 0;
+  const sorted = events.slice().sort((a,b)=>a.start-b.start);
+  for(const e of sorted){
+    if (e.start>end || e.end<start) continue;
+    const d = new Date(Math.max(e.start, start));
+    if (series.at(-1).date.getTime() !== d.getTime()) series.push({date:d, value:cum});
+    if(field==='kpi'){
+      if(e.type==='SW'){ // software update: relative drop
+        const drop = Math.max(0, +((e.drop!=null)?e.drop:(e.kpi||0)));
+        cum = Math.max(0, cum * (1 - drop/100));
+      } else {
+        cum += (e.kpi||0);
+      }
+    } else {
+      cum += (e[field]||0);
+    }
+    series.push({date:addDays(d,1), value:cum});
+  }
+  if (series.at(-1).date < end) series.push({date:end, value:cum});
+  return series;
+}];
+  let cum = 0;
   for(const e of events.slice().sort((a,b)=>a.start-b.start)){
     if (e.start>end || e.end<start) continue;
     const d = new Date(Math.max(e.start, start));
@@ -177,14 +198,22 @@ function addWeeklyXS(){
 
 function addSingleEvent(){
   refreshTypeWeights(); refreshGlobals();
-  const name = document.getElementById('ev-name').value || 'Unnamed';
-  const type = document.getElementById('ev-type').value;
+  const name0 = document.getElementById('ev-name').value || 'Unnamed';
+  const typeSel = document.getElementById('ev-type').value;
+  const isSW = typeSel.toLowerCase().includes('software');
+  const type = isSW ? 'SW' : typeSel;
   const start = new Date(document.getElementById('ev-start').value);
-  const days  = +document.getElementById('ev-days').value || 7;
-  const km    = +document.getElementById('ev-km').value || state.types[type].km;
-  const kpi   = +document.getElementById('ev-kpi').value || state.types[type].kpi;
-  const countries = parseCountries(document.getElementById('ev-countries').value || 'Sweden');
-  state.events.push({ name, type, start, days, end:addDays(start,days), km, kpi, countries });
+  const days  = isSW ? 0 : (+document.getElementById('ev-days').value || 7);
+  const countries = isSW ? [] : parseCountries(document.getElementById('ev-countries').value || 'Sweden');
+  let km=0, kpi=0, drop=0;
+  if(isSW){
+    drop = +document.getElementById('ev-kpi').value || 10; // use Override KPI field as drop %
+  } else {
+    km  = +document.getElementById('ev-km').value || state.types[type].km;
+    kpi = +document.getElementById('ev-kpi').value || state.types[type].kpi;
+  }
+  const name = isSW ? (name0 || 'Software update') : name0;
+  state.events.push({ name, type, start, days, end:addDays(start,days), km, kpi, drop, countries });
   renderEventsTable(); renderAll();
 }
 
@@ -195,6 +224,16 @@ function deleteEvent(idx){ state.events.splice(idx,1); renderEventsTable(); rend
 function renderEventsTable(){
   const container = document.getElementById('events-table');
   if (!state.events.length){ container.innerHTML = '<div class="note">No events yet.</div>'; return; }
+  let html = '<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Start</th><th>Days</th><th>KM</th><th>KPI %</th><th>Countries</th><th></th></tr></thead><tbody>';
+  state.events.sort((a,b)=>a.start-b.start).forEach((e,i)=>{
+    const kmDisp = (e.type==='SW') ? '—' : (e.km||0);
+    const kpiDisp = (e.type==='SW') ? ('−'+(e.drop||0)+'%') : (e.kpi||0);
+    const ctyDisp = (e.countries && e.countries.length) ? e.countries.join(', ') : ((e.type==='SW') ? '—' : '');
+    html += `<tr><td>${i+1}</td><td>${e.name}</td><td>${e.type}</td><td>${fmtDate(e.start)}</td><td>${e.days}</td><td>${kmDisp}</td><td>${kpiDisp}</td><td>${ctyDisp}</td><td><button class=\"btn\" onclick=\"deleteEvent(${i})\">Delete</button></td></tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
   let html = '<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Start</th><th>Days</th><th>KM</th><th>KPI %</th><th>Countries</th><th></th></tr></thead><tbody>';
   state.events.sort((a,b)=>a.start-b.start).forEach((e,i)=>{
     html += `<tr><td>${i+1}</td><td>${e.name}</td><td>${e.type}</td><td>${fmtDate(e.start)}</td><td>${e.days}</td><td>${e.km}</td><td>${e.kpi}</td><td>${e.countries.join(', ')}</td><td><button class=\"btn\" onclick=\"deleteEvent(${i})\">Delete</button></td></tr>`;
@@ -236,16 +275,26 @@ function renderAll(){
       .append('title').text(d=>`${d.name} — ${fmtDate(d.start)} (${d.km} km)`);
     svg.append('text').attr('x', 10).attr('y', xsY+4).attr('fill', '#9aa3b2').text('XS weekly');
 
-    const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b'})[t] || '#8ad';
+    const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b', SW:'#9333ea'})[t] || '#8ad';
     const rowHeight=22, rowGap=12; let row=xsY + rowHeight + 10;
     named.forEach((e,i)=>{
       const y = row + i*(rowHeight+rowGap);
-      svg.append('rect').attr('x', x(e.start)).attr('y', y-10).attr('width', Math.max(4, x(e.end)-x(e.start))).attr('height',20)
-        .attr('rx',4).attr('fill', colorByType(e.type)).attr('stroke','#000').attr('stroke-width',.6)
-        .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})
+      if(e.type==='SW'){
+        // software update marker (vertical line) + label
+        svg.append('line')
+          .attr('x1', x(e.start)).attr('x2', x(e.start))
+          .attr('y1', y-12).attr('y2', y+12)
+          .attr('stroke', colorByType('SW')).attr('stroke-width', 2)
+          .append('title').text(`${e.name} • −${e.drop||0}% (${fmtDate(e.start)})`);
+        svg.append('text').attr('x', x(e.start)+6).attr('y', y+4).attr('fill','#111').text(`SW −${e.drop||0}%`);
+      } else {
+        svg.append('rect').attr('x', x(e.start)).attr('y', y-10).attr('width', Math.max(4, x(e.end)-x(e.start))).attr('height',20)
+          .attr('rx',4).attr('fill', colorByType(e.type)).attr('stroke','#000').attr('stroke-width',.6)
+          .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})
 Countries: ${e.countries.join(', ')}`);
-      const week = d3.utcFormat('W%V')(e.start);
-      svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#111').text(state.showWeeks?`${e.name} (${week})` : e.name);
+        const week = d3.utcFormat('W%V')(e.start);
+        svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#111').text(state.showWeeks?`${e.name} (${week})` : e.name);
+      }
     });
 
     const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
