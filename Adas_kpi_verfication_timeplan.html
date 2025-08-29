@@ -50,8 +50,7 @@
       <div class="card"><h2>1) Gantt timeline</h2><svg id="gantt" viewBox="0 0 1200 330"></svg></div>
       <div class="card"><h2>2) Cumulative mileage</h2><svg id="mileage" viewBox="0 0 1200 260"></svg></div>
       <div class="card"><h2>3) Cumulative KPI coverage</h2><svg id="kpi" viewBox="0 0 1200 260"></svg></div>
-      <div class="card"><h2>4) Distribution (whole campaign)</h2><svg id="dist" viewBox="0 0 1200 280"></svg>
-      <div id="dist-legend" class="legend" style="margin-top:8px"></div></div>
+      <div class="card"><h2>4) Distribution (whole campaign)</h2><svg id="dist" viewBox="0 0 1200 280"></svg></div>
       <div class="card"><h2>5) Campaign exposure by country (tile map)</h2><svg id="tilemap" viewBox="0 0 1200 420"></svg></div>
     </div>
 
@@ -276,9 +275,11 @@ Countries: ${e.countries.join(', ')}`);
     svg.append('g').attr('transform','translate(72,0)').attr('class','axis').call(d3.axisLeft(y).ticks(5));
   })();
 
-  // 4) Distribution
+  // 4) Distribution (with in-SVG legend so it exports)
   (function(){
-    const svg = d3.select('#dist'); svg.selectAll('*').remove(); const h = +svg.attr('viewBox').split(' ')[3];
+    const svg = d3.select('#dist'); svg.selectAll('*').remove();
+    const vb = svg.attr('viewBox').split(' '); const W = +vb[2], H = +vb[3];
+
     // country shares
     const kmByCountry = new Map();
     events.forEach(e=>{ const share=e.km/e.countries.length; e.countries.forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share)); });
@@ -289,15 +290,14 @@ Countries: ${e.countries.join(', ')}`);
     const day = +state.dayPhase.day, night = +state.dayPhase.night;
     const temps = [{label:'Cold (<5°C)',v:30,c:'#000'},{label:'Mild (5–15°C)',v:50,c:'#ff9800'},{label:'Warm (>15°C)',v:20,c:'#58c4ff'}];
 
-    const groupX = d3.scaleBand().domain(['Countries','Day phase','Temperature']).range([120, 1120]).padding(0.4);
-    const y = d3.scaleLinear().domain([0,100]).range([h-40, 30]);
+    // Make room on the right for the legend by narrowing the plot range
+    const groupX = d3.scaleBand().domain(['Countries','Day phase','Temperature']).range([120, 820]).padding(0.4);
+    const y = d3.scaleLinear().domain([0,100]).range([H-40, 30]);
 
-    // country colors
     const colorsCountry = {
       'Sweden':'#f2a900','Denmark':'#00a8a8','Norway':'#2ecc71','Germany':'#00bcd4','Netherlands':'#ffd166','Belgium':'#e74c3c','Other EU':'#c27ba0'
     };
 
-    // Build explicit arrays so we can also render legends
     const countriesData = [...top6.map(d=>({label:d.name, v:d.pct, c:colorsCountry[d.name]||'#6aa3ff'})), {label:'Other EU', v:otherPct, c:colorsCountry['Other EU']}] ;
     const dayData = [{label:'Daylight', v:day, c:'#e6b800'},{label:'Twilight/Night', v:night, c:'#0a2a6b'}];
     const tempData = temps;
@@ -319,24 +319,30 @@ Countries: ${e.countries.join(', ')}`);
       svg.append('text').attr('x', x0 + groupX.bandwidth()/2).attr('y', 20).attr('text-anchor','middle').text(group).style('font-weight',600).attr('fill','#111');
     }
 
-    // ---- HTML LEGEND just below the SVG ----
-    const legend = document.getElementById('dist-legend');
-    legend.innerHTML = '';
-    addLegendSection('Countries', countriesData.map(d=>({label:d.label, color:d.c})));
-    addLegendSection('Day phase', dayData.map(d=>({label:d.label, color:d.c})));
-    addLegendSection('Temperature', tempData.map(d=>({label:d.label, color:d.c})));
+    // ---- In-SVG Legend (right side) ----
+    const legendX = 860, legendY = 36; let ly = legendY; const lineH = 16;
+    const legendG = svg.append('g').attr('class','legend-svg');
 
-    function addLegendSection(title, items){
-      const section = document.createElement('div');
-      section.className = 'row';
-      const strong = document.createElement('strong'); strong.textContent = title + ':'; section.appendChild(strong);
+    drawSection('Countries', countriesData);
+    drawSection('Day phase', dayData);
+    drawSection('Temperature', tempData);
+
+    // background panel behind legend
+    const bbox = legendG.node().getBBox();
+    svg.insert('rect', '.legend-svg')
+      .attr('x', bbox.x - 8).attr('y', bbox.y - 8)
+      .attr('width', bbox.width + 16).attr('height', bbox.height + 16)
+      .attr('fill', '#fff').attr('stroke', '#cbd5e1').attr('rx', 8);
+
+    function drawSection(title, items){
+      legendG.append('text').attr('x', legendX).attr('y', ly).text(title).attr('fill','#111').style('font-weight',600);
+      ly += 14;
       items.forEach(it=>{
-        const k = document.createElement('span'); k.className='k';
-        const sw = document.createElement('span'); sw.className='swatch'; sw.style.background = it.color; k.appendChild(sw);
-        const label = document.createElement('span'); label.textContent = it.label; k.appendChild(label);
-        section.appendChild(k);
+        legendG.append('rect').attr('x', legendX).attr('y', ly-10).attr('width', 12).attr('height', 12).attr('rx', 2).attr('fill', it.c).attr('stroke','#000').attr('stroke-width',.6);
+        legendG.append('text').attr('x', legendX+16).attr('y', ly).text(it.label).attr('fill', '#111');
+        ly += lineH;
       });
-      legend.appendChild(section);
+      ly += 6;
     }
   })();
 
