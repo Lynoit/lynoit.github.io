@@ -5,10 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ADAS Verification Plan – Interactive Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <style>
-    :root{
-      --bg:#0b0c10; --card:#15161b; --muted:#8b93a2; --fg:#e9eef7; --accent:#5dd8ff; --gold:#e6b800; --deepblue:#0a2a6b;
-    }
+    :root{ --bg:#0b0c10; --card:#15161b; --muted:#8b93a2; --fg:#e9eef7; --accent:#5dd8ff; }
     html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
     h1{font-weight:700;letter-spacing:.2px;margin:16px 0 10px}
     h2{font-weight:600;font-size:16px;color:var(--muted);margin:0 0 8px}
@@ -19,17 +18,14 @@
     .controls{display:grid;gap:10px;grid-template-columns:repeat(6,1fr)}
     .controls .field{display:flex;flex-direction:column;gap:6px;background:#101218;border:1px solid #222634;border-radius:12px;padding:8px}
     .controls label{font-size:12px;color:var(--muted)}
-    .controls input,.controls select, .controls textarea{background:#0f1218;color:var(--fg);border:1px solid #2a2f3c;border-radius:8px;padding:6px 8px}
+    .controls input,.controls select{background:#0f1218;color:var(--fg);border:1px solid #2a2f3c;border-radius:8px;padding:6px 8px}
     .btn{cursor:pointer;background:#1e293b;border:1px solid #2f3846;color:#e9eef7;padding:8px 10px;border-radius:10px}
     .btn.accent{background:#0ea5e9;border-color:#38bdf8}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    .legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
-    .k{display:inline-flex;align-items:center;gap:6px}
-    .swatch{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid #0003}
+    .note{color:var(--muted);font-size:12px;margin-top:8px}
     svg{width:100%;height:auto;display:block}
     .axis path,.axis line{stroke:#3b4050}
     .major-grid{stroke:#3a3f4d;stroke-dasharray:4 6}
-    .note{color:var(--muted);font-size:12px;margin-top:8px}
     table{width:100%;border-collapse:separate;border-spacing:0 6px}
     th,td{padding:6px 8px;font-size:12px}
     tbody tr{background:#0f1218;border:1px solid #222634}
@@ -40,6 +36,15 @@
 <body>
 <div class="wrap">
   <h1>ADAS Verification Plan – Interactive Dashboard</h1>
+
+  <!-- Export bar -->
+  <div class="row" style="margin-bottom:12px;gap:12px">
+    <button class="btn" id="exp-svg">Export all as SVG</button>
+    <button class="btn" id="exp-png">Export all as PNG</button>
+    <button class="btn accent" id="exp-pdf">Export PDF</button>
+    <label class="note">Scale for PNG/PDF <input type="number" id="exp-scale" value="2" min="1" max="4" style="width:56px;margin-left:6px"></label>
+  </div>
+
   <div class="grid">
     <!-- LEFT: CHARTS -->
     <div>
@@ -184,7 +189,6 @@ function addSingleEvent(){
 }
 
 function clearEvents(){ state.events=[]; renderEventsTable(); renderAll(); }
-
 function deleteEvent(idx){ state.events.splice(idx,1); renderEventsTable(); renderAll(); }
 
 function renderEventsTable(){
@@ -202,7 +206,6 @@ function renderEventsTable(){
 function loadExample(){
   clearEvents(); refreshTypeWeights(); refreshGlobals();
   const add = (o)=>state.events.push(toEvent(o));
-  // Minimal example; user can add more including L via the form
   for(let d=new Date('2025-09-01'); d<=new Date('2026-06-30'); d=addDays(d,7)){
     add({ name:`XS`, type:'XS', start:new Date(d), days:1, countries:['Sweden'], km:state.types.XS.km, kpi:state.types.XS.kpi });
   }
@@ -228,7 +231,7 @@ function renderAll(){
     const xsY = 60; svg.append('g').selectAll('rect').data(xs).join('rect')
       .attr('x', d=>x(d.start)).attr('y', xsY-8).attr('width', d=>Math.max(1, x(d.end)-x(d.start)))
       .attr('height',16).attr('fill','#d2d6df').attr('stroke','#000').attr('stroke-width',.6)
-      .append('title').text(d=>`${e.name} — ${fmtDate(d.start)} (${d.km} km)`);
+      .append('title').text(d=>`${d.name} — ${fmtDate(d.start)} (${d.km} km)`);
     svg.append('text').attr('x', 10).attr('y', xsY+4).attr('fill', '#9aa3b2').text('XS weekly');
 
     const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b'})[t] || '#8ad';
@@ -237,8 +240,7 @@ function renderAll(){
       const y = row + i*(rowHeight+rowGap);
       svg.append('rect').attr('x', x(e.start)).attr('y', y-10).attr('width', Math.max(4, x(e.end)-x(e.start))).attr('height',20)
         .attr('rx',4).attr('fill', colorByType(e.type)).attr('stroke','#000').attr('stroke-width',.6)
-        .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})
-Countries: ${e.countries.join(', ')}`);
+        .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})\nCountries: ${e.countries.join(', ')}`);
       const week = d3.utcFormat('W%V')(e.start);
       svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#e6eef7').text(state.showWeeks?`${e.name} (${week})` : e.name);
     });
@@ -366,6 +368,67 @@ document.getElementById('btn-clear').addEventListener('click', clearEvents);
 document.getElementById('btn-render').addEventListener('click', renderAll);
 
 document.getElementById('btn-load-example').addEventListener('click', loadExample);
+
+// --- EXPORT HELPERS ---
+const SVG_IDS = ['gantt','mileage','kpi','dist','tilemap'];
+function getSVGClone(svg){
+  const clone = svg.cloneNode(true);
+  const style = document.createElement('style');
+  style.textContent = `.axis path,.axis line{stroke:#3b4050}.major-grid{stroke:#3a3f4d;stroke-dasharray:4 6}`;
+  clone.insertBefore(style, clone.firstChild);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  clone.setAttribute('xmlns:xlink','http://www.w3.org/1999/xlink');
+  return clone;
+}
+function svgToBlobURL(svg){
+  const clone = getSVGClone(svg);
+  const svgStr = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([svgStr], {type:'image/svg+xml;charset=utf-8'});
+  return URL.createObjectURL(blob);
+}
+function parseViewBox(svg){
+  const vb = svg.getAttribute('viewBox');
+  if(vb){ const parts = vb.trim().split(/\s+/).map(Number); return {w:parts[2], h:parts[3]}; }
+  return {w: svg.clientWidth||1200, h: svg.clientHeight||400};
+}
+async function svgToPNGDataURL(svg, scale=2){
+  const {w,h} = parseViewBox(svg);
+  const url = svgToBlobURL(svg);
+  const img = new Image(); img.crossOrigin='anonymous';
+  await new Promise(res=>{ img.onload=res; img.src=url; });
+  const canvas = document.createElement('canvas'); canvas.width=w*scale; canvas.height=h*scale;
+  const ctx = canvas.getContext('2d'); ctx.drawImage(img,0,0,canvas.width,canvas.height);
+  URL.revokeObjectURL(url);
+  return canvas.toDataURL('image/png');
+}
+function download(href, filename){ const a=document.createElement('a'); a.href=href; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); }
+
+async function exportAllSVG(){
+  for(const id of SVG_IDS){ const svg=document.getElementById(id); const url=svgToBlobURL(svg); download(url, `ADAS_${id}.svg`); setTimeout(()=>URL.revokeObjectURL(url), 1000); }
+}
+async function exportAllPNG(){
+  const scale = Math.max(1, +document.getElementById('exp-scale').value || 2);
+  for(const id of SVG_IDS){ const svg=document.getElementById(id); const dataUrl=await svgToPNGDataURL(svg, scale); download(dataUrl, `ADAS_${id}.png`); }
+}
+async function exportPDF(){
+  const scale = Math.max(1, +document.getElementById('exp-scale').value || 2);
+  const { jsPDF } = window.jspdf; const pdf = new jsPDF({ unit:'pt', format:'a4' });
+  const pageW = pdf.internal.pageSize.getWidth(); const pageH = pdf.internal.pageSize.getHeight(); const margin=36; let first=true;
+  for(const id of SVG_IDS){
+    const svg=document.getElementById(id); const dataUrl=await svgToPNGDataURL(svg, scale);
+    const {w,h} = parseViewBox(svg); let drawW = pageW-2*margin; let drawH = h*(drawW/w);
+    if(drawH>pageH-2*margin){ drawH = pageH-2*margin; drawW = w*(drawH/h); }
+    if(!first) pdf.addPage(); first=false;
+    const x = (pageW - drawW)/2; const y = (pageH - drawH)/2;
+    pdf.addImage(dataUrl, 'PNG', x, y, drawW, drawH, undefined, 'FAST');
+    pdf.text(id.toUpperCase(), margin, 24);
+  }
+  pdf.save('ADAS_verification_dashboard.pdf');
+}
+
+document.getElementById('exp-svg').addEventListener('click', exportAllSVG);
+document.getElementById('exp-png').addEventListener('click', exportAllPNG);
+document.getElementById('exp-pdf').addEventListener('click', exportPDF);
 
 // initial
 renderAll();
