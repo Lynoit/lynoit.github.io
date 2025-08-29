@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ADAS Verification Plan – Interactive Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root{
+      --bg:#0b0c10; --card:#15161b; --muted:#8b93a2; --fg:#e9eef7; --accent:#5dd8ff; --gold:#e6b800; --deepblue:#0a2a6b;
+    }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    h1{font-weight:700;letter-spacing:.2px;margin:16px 0 10px}
+    h2{font-weight:600;font-size:16px;color:var(--muted);margin:0 0 8px}
+    .wrap{max-width:1280px;margin:0 auto;padding:18px}
+    .grid{display:grid;gap:16px;grid-template-columns:1fr}
+    @media(min-width:1200px){.grid{grid-template-columns:1.2fr .8fr}}
+    .card{background:var(--card);border:1px solid #252833;border-radius:16px;padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    .controls{display:grid;gap:10px;grid-template-columns:repeat(6,1fr)}
+    .controls .field{display:flex;flex-direction:column;gap:6px;background:#101218;border:1px solid #222634;border-radius:12px;padding:8px}
+    .controls label{font-size:12px;color:var(--muted)}
+    .controls input,.controls select, .controls textarea{background:#0f1218;color:var(--fg);border:1px solid #2a2f3c;border-radius:8px;padding:6px 8px}
+    .btn{cursor:pointer;background:#1e293b;border:1px solid #2f3846;color:#e9eef7;padding:8px 10px;border-radius:10px}
+    .btn.accent{background:#0ea5e9;border-color:#38bdf8}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+    .k{display:inline-flex;align-items:center;gap:6px}
+    .swatch{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid #0003}
+    svg{width:100%;height:auto;display:block}
+    .axis path,.axis line{stroke:#3b4050}
+    .major-grid{stroke:#3a3f4d;stroke-dasharray:4 6}
+    .note{color:var(--muted);font-size:12px;margin-top:8px}
+    table{width:100%;border-collapse:separate;border-spacing:0 6px}
+    th,td{padding:6px 8px;font-size:12px}
+    tbody tr{background:#0f1218;border:1px solid #222634}
+    tbody td:first-child{border-radius:8px 0 0 8px}
+    tbody td:last-child{border-radius:0 8px 8px 0}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ADAS Verification Plan – Interactive Dashboard</h1>
+  <div class="grid">
+    <!-- LEFT: CHARTS -->
+    <div>
+      <div class="card"><h2>1) Gantt timeline</h2><svg id="gantt" viewBox="0 0 1200 330"></svg></div>
+      <div class="card"><h2>2) Cumulative mileage</h2><svg id="mileage" viewBox="0 0 1200 260"></svg></div>
+      <div class="card"><h2>3) Cumulative KPI coverage</h2><svg id="kpi" viewBox="0 0 1200 260"></svg></div>
+      <div class="card"><h2>4) Distribution (whole campaign)</h2><svg id="dist" viewBox="0 0 1200 280"></svg></div>
+      <div class="card"><h2>5) Campaign exposure by country (tile map)</h2><svg id="tilemap" viewBox="0 0 1200 420"></svg></div>
+    </div>
+
+    <!-- RIGHT: UI -->
+    <div class="card">
+      <h2>Inputs</h2>
+      <div class="controls" style="margin-bottom:12px">
+        <div class="field"><label>Campaign start</label><input type="date" id="inp-start" value="2025-09-01"></div>
+        <div class="field"><label>Campaign end</label><input type="date" id="inp-end" value="2026-06-30"></div>
+        <div class="field"><label>Show week numbers in Gantt</label><select id="inp-weeks"><option value="0">No</option><option value="1">Yes</option></select></div>
+        <div class="field"><label>Daylight %</label><input type="number" id="inp-day" min="0" max="100" step="1" value="85"></div>
+        <div class="field"><label>Twilight/Night %</label><input type="number" id="inp-night" min="0" max="100" step="1" value="15"></div>
+      </div>
+
+      <h2>Type weights (editable)</h2>
+      <div class="controls" style="margin-bottom:12px">
+        <div class="field"><label>XS km / KPI %</label><div class="row"><input type="number" id="km-XS" value="150" style="width:90px"><input type="number" id="kpi-XS" value="7.5" style="width:90px"></div></div>
+        <div class="field"><label>S km / KPI %</label><div class="row"><input type="number" id="km-S" value="1000" style="width:90px"><input type="number" id="kpi-S" value="50" style="width:90px"></div></div>
+        <div class="field"><label>M km / KPI %</label><div class="row"><input type="number" id="km-M" value="2500" style="width:90px"><input type="number" id="kpi-M" value="100" style="width:90px"></div></div>
+        <div class="field"><label>XL km / KPI %</label><div class="row"><input type="number" id="km-XL" value="10000" style="width:90px"><input type="number" id="kpi-XL" value="500" style="width:90px"></div></div>
+      </div>
+
+      <h2>Generate XS (weekly)</h2>
+      <div class="controls" style="grid-template-columns:repeat(5,1fr);margin-bottom:12px">
+        <div class="field"><label>From</label><input type="date" id="xs-from" value="2025-09-01"></div>
+        <div class="field"><label>To</label><input type="date" id="xs-to" value="2026-06-30"></div>
+        <div class="field"><label>Duration (days)</label><input type="number" id="xs-days" value="1" min="1" max="14"></div>
+        <div class="field"><label>Country</label><input id="xs-country" value="Sweden"></div>
+        <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-xs">Add weekly XS</button></div>
+      </div>
+
+      <h2>Add single event</h2>
+      <div class="controls" style="grid-template-columns:repeat(6,1fr);margin-bottom:8px">
+        <div class="field"><label>Name</label><input id="ev-name" placeholder="e.g., M Abstatt"></div>
+        <div class="field"><label>Type</label>
+          <select id="ev-type"><option>XS</option><option selected>M</option><option>S</option><option>XL</option></select>
+        </div>
+        <div class="field"><label>Start date</label><input type="date" id="ev-start" value="2025-12-05"></div>
+        <div class="field"><label>Duration (days)</label><input type="number" id="ev-days" value="7" min="1" max="60"></div>
+        <div class="field"><label>Countries (comma separated)</label><input id="ev-countries" placeholder="Sweden, Germany"></div>
+        <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-one">Add event</button></div>
+      </div>
+      <div class="controls" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">
+        <div class="field"><label>Override km</label><input type="number" id="ev-km" placeholder="(auto by type)"></div>
+        <div class="field"><label>Override KPI %</label><input type="number" id="ev-kpi" placeholder="(auto by type)"></div>
+        <div class="field"><label>&nbsp;</label><button class="btn" id="btn-clear">Clear all events</button></div>
+        <div class="field"><label>&nbsp;</label><button class="btn accent" id="btn-render">Update plots</button></div>
+      </div>
+
+      <h2>Events</h2>
+      <div id="events-table"></div>
+      <p class="note">Need a quick start? <button class="btn" id="btn-load-example">Load example from earlier spec</button></p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ======= State =======
+const state = {
+  start: new Date(document.getElementById('inp-start').value),
+  end:   new Date(document.getElementById('inp-end').value),
+  types: {
+    XS: { km: +document.getElementById('km-XS').value, kpi: +document.getElementById('kpi-XS').value },
+    S:  { km: +document.getElementById('km-S').value,  kpi: +document.getElementById('kpi-S').value  },
+    M:  { km: +document.getElementById('km-M').value,  kpi: +document.getElementById('kpi-M').value  },
+    XL: { km: +document.getElementById('km-XL').value, kpi: +document.getElementById('kpi-XL').value }
+  },
+  dayPhase: { day:+document.getElementById('inp-day').value, night:+document.getElementById('inp-night').value },
+  showWeeks: document.getElementById('inp-weeks').value === '1',
+  events: []
+};
+
+// ======= Helpers =======
+const DAY = 24*3600*1000;
+const fmtMonth = d3.timeFormat('%b-%Y');
+const fmtDate  = d3.timeFormat('%Y-%m-%d');
+function addDays(d, n){ return new Date(d.getTime()+n*DAY); }
+function parseCountries(s){ return s.split(',').map(x=>x.trim()).filter(Boolean); }
+function toEvent(obj){ return { ...obj, end: addDays(obj.start, obj.days) }; }
+function cumulative(events, field, start, end){
+  const series = [{date:start, value:0}];
+  let cum = 0;
+  for(const e of events.slice().sort((a,b)=>a.start-b.start)){
+    if (e.start>end || e.end<start) continue;
+    const d = new Date(Math.max(e.start, start));
+    if (series.at(-1).date.getTime() !== d.getTime()) series.push({date:d, value:cum});
+    cum += e[field];
+    series.push({date:addDays(d,1), value:cum});
+  }
+  if (series.at(-1).date < end) series.push({date:end, value:cum});
+  return series;
+}
+
+// ======= UI actions =======
+function refreshTypeWeights(){
+  state.types.XS.km  = +document.getElementById('km-XS').value; state.types.XS.kpi = +document.getElementById('kpi-XS').value;
+  state.types.S.km   = +document.getElementById('km-S').value;  state.types.S.kpi  = +document.getElementById('kpi-S').value;
+  state.types.M.km   = +document.getElementById('km-M').value;  state.types.M.kpi  = +document.getElementById('kpi-M').value;
+  state.types.XL.km  = +document.getElementById('km-XL').value; state.types.XL.kpi = +document.getElementById('kpi-XL').value;
+}
+function refreshGlobals(){
+  state.start = new Date(document.getElementById('inp-start').value);
+  state.end   = new Date(document.getElementById('inp-end').value);
+  state.dayPhase.day   = +document.getElementById('inp-day').value;
+  state.dayPhase.night = +document.getElementById('inp-night').value;
+  state.showWeeks = document.getElementById('inp-weeks').value==='1';
+}
+
+function addWeeklyXS(){
+  refreshTypeWeights(); refreshGlobals();
+  const from = new Date(document.getElementById('xs-from').value);
+  const to   = new Date(document.getElementById('xs-to').value);
+  const days = +document.getElementById('xs-days').value;
+  const country = document.getElementById('xs-country').value || 'Sweden';
+  for(let d=new Date(from), i=1; d<=to; d=addDays(d,7), i++){
+    state.events.push({ name:`XS ${i}`, type:'XS', start:new Date(d), days, countries:[country], km:state.types.XS.km, kpi:state.types.XS.kpi, end:addDays(d,days) });
+  }
+  renderEventsTable(); renderAll();
+}
+
+function addSingleEvent(){
+  refreshTypeWeights(); refreshGlobals();
+  const name = document.getElementById('ev-name').value || 'Unnamed';
+  const type = document.getElementById('ev-type').value;
+  const start = new Date(document.getElementById('ev-start').value);
+  const days  = +document.getElementById('ev-days').value || 7;
+  const km    = +document.getElementById('ev-km').value || state.types[type].km;
+  const kpi   = +document.getElementById('ev-kpi').value || state.types[type].kpi;
+  const countries = parseCountries(document.getElementById('ev-countries').value || 'Sweden');
+  state.events.push({ name, type, start, days, end:addDays(start,days), km, kpi, countries });
+  renderEventsTable(); renderAll();
+}
+
+function clearEvents(){ state.events=[]; renderEventsTable(); renderAll(); }
+
+function deleteEvent(idx){ state.events.splice(idx,1); renderEventsTable(); renderAll(); }
+
+function renderEventsTable(){
+  const container = document.getElementById('events-table');
+  if (!state.events.length){ container.innerHTML = '<div class="note">No events yet.</div>'; return; }
+  let html = '<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Start</th><th>Days</th><th>KM</th><th>KPI %</th><th>Countries</th><th></th></tr></thead><tbody>';
+  state.events.sort((a,b)=>a.start-b.start).forEach((e,i)=>{
+    html += `<tr><td>${i+1}</td><td>${e.name}</td><td>${e.type}</td><td>${fmtDate(e.start)}</td><td>${e.days}</td><td>${e.km}</td><td>${e.kpi}</td><td>${e.countries.join(', ')}</td><td><button class="btn" onclick="deleteEvent(${i})">Delete</button></td></tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// Load example (optional)
+function loadExample(){
+  clearEvents(); refreshTypeWeights(); refreshGlobals();
+  // example matching your last spec
+  const add = (o)=>state.events.push(toEvent(o));
+  // Weekly XS
+  for(let d=new Date('2025-09-01'); d<=new Date('2026-06-30'); d=addDays(d,7)){
+    add({ name:`XS`, type:'XS', start:new Date(d), days:1, countries:['Sweden'], km:state.types.XS.km, kpi:state.types.XS.kpi });
+  }
+  add({ name:'M Abstatt', type:'M', start:new Date('2025-09-01'), days:7, countries:['Germany','Sweden'], km:state.types.M.km, kpi:state.types.M.kpi });
+  add({ name:'S Stockholm', type:'S', start:new Date('2025-10-20'), days:7, countries:['Sweden'], km:state.types.S.km, kpi:state.types.S.kpi });
+  add({ name:'XL EU expedition 1', type:'XL', start:new Date('2025-11-03'), days:21, countries:['Sweden','Denmark','Germany','Netherlands','Belgium','Switzerland','France','Italy','Spain','Austria','Luxembourg','Greece','Romania','Bulgaria','Slovenia','Croatia','Poland'], km:state.types.XL.km, kpi:state.types.XL.kpi });
+  add({ name:'M Winter test 1', type:'M', start:new Date('2025-12-08'), days:7, countries:['Sweden','Norway'], km:state.types.M.km, kpi:state.types.M.kpi });
+  add({ name:'M Winter test 2', type:'M', start:new Date('2026-01-19'), days:7, countries:['Sweden','Norway'], km:state.types.M.km, kpi:state.types.M.kpi });
+  add({ name:'M EU expedition 2', type:'M', start:new Date('2026-02-02'), days:7, countries:['Sweden','Denmark','Germany','Netherlands','Belgium','Switzerland'], km:state.types.M.km, kpi:state.types.M.kpi });
+  add({ name:'M Winter test 3', type:'M', start:new Date('2026-02-16'), days:7, countries:['Sweden','Norway'], km:state.types.M.km, kpi:state.types.M.kpi });
+  add({ name:'M EU expedition SEE', type:'M', start:new Date('2026-03-02'), days:7, countries:['Romania','Bulgaria','Greece','Slovenia','Croatia'], km:state.types.M.km, kpi:state.types.M.kpi });
+  renderEventsTable(); renderAll();
+}
+
+// ======= Rendering =======
+function renderAll(){
+  refreshTypeWeights(); refreshGlobals();
+  const events = state.events.slice().sort((a,b)=>a.start-b.start);
+  const x = d3.scaleTime().domain([state.start, state.end]).range([80,1160]);
+
+  // 1) Gantt
+  (function(){
+    const svg = d3.select('#gantt'); svg.selectAll('*').remove(); const h = +svg.attr('viewBox').split(' ')[3];
+    const months = d3.timeMonth.range(d3.timeMonth.floor(state.start), state.end);
+    svg.append('g').selectAll('line').data(months).join('line')
+      .attr('x1', d=>x(d)).attr('x2', d=>x(d)).attr('y1', 16).attr('y2', h-36).attr('class','major-grid');
+    // XS on row 1
+    const xs = events.filter(e=>e.type==='XS'); const named = events.filter(e=>e.type!=='XS');
+    const xsY = 60; svg.append('g').selectAll('rect').data(xs).join('rect')
+      .attr('x', d=>x(d.start)).attr('y', xsY-8).attr('width', d=>Math.max(1, x(d.end)-x(d.start)))
+      .attr('height',16).attr('fill','#d2d6df').attr('stroke','#000').attr('stroke-width',.6)
+      .append('title').text(d=>`${d.name} — ${fmtDate(d.start)} (${d.km} km)`);
+    svg.append('text').attr('x', 10).attr('y', xsY+4).attr('fill', '#9aa3b2').text('XS weekly');
+
+    const colorByType = t => ({S:'#19b6ff', M:'#f4c542', XL:'#ff4b4b'})[t] || '#8ad';
+    const rowHeight=22, rowGap=12; let row=xsY + rowHeight + 10;
+    named.forEach((e,i)=>{
+      const y = row + i*(rowHeight+rowGap);
+      svg.append('rect').attr('x', x(e.start)).attr('y', y-10).attr('width', Math.max(4, x(e.end)-x(e.start))).attr('height',20)
+        .attr('rx',4).attr('fill', colorByType(e.type)).attr('stroke','#000').attr('stroke-width',.6)
+        .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})
+Countries: ${e.countries.join(', ')}`);
+      const week = d3.utcFormat('W%V')(e.start);
+      svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#e6eef7').text(state.showWeeks?`${e.name} (${week})` : e.name);
+    });
+
+    const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
+    svg.append('g').attr('transform',`translate(0,${h-30})`).attr('class','axis').call(axis)
+      .selectAll('text').attr('transform','rotate(45)').attr('text-anchor','start');
+  })();
+
+  // 2) Mileage
+  (function(){
+    const svg = d3.select('#mileage'); svg.selectAll('*').remove(); const h = +svg.attr('viewBox').split(' ')[3];
+    const y = d3.scaleLinear().domain([0, d3.max(cumulative(events,'km',state.start,state.end), d=>d.value)]).nice().range([h-36, 24]);
+    const line = d3.line().x(d=>x(d.date)).y(d=>y(d.value)).curve(d3.curveStepAfter);
+    svg.append('path').datum(cumulative(events,'km',state.start,state.end)).attr('d', line).attr('fill','none').attr('stroke','#fff').attr('stroke-width',2);
+    svg.append('g').attr('transform',`translate(0,${h-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>''));
+    svg.append('g').attr('transform','translate(72,0)').attr('class','axis').call(d3.axisLeft(y).ticks(5));
+  })();
+
+  // 3) KPI
+  (function(){
+    const svg = d3.select('#kpi'); svg.selectAll('*').remove(); const h = +svg.attr('viewBox').split(' ')[3];
+    const series = cumulative(events,'kpi',state.start,state.end);
+    const y = d3.scaleLinear().domain([0, Math.max(100, d3.max(series,d=>d.value))]).nice().range([h-36,24]);
+    const line = d3.line().x(d=>x(d.date)).y(d=>y(d.value)).curve(d3.curveStepAfter);
+    svg.append('path').datum(series).attr('d', line).attr('fill','none').attr('stroke','#5dd8ff').attr('stroke-width',2);
+    svg.append('line').attr('x1',80).attr('x2',1160).attr('y1',y(100)).attr('y2',y(100)).attr('stroke','#aaa').attr('stroke-dasharray','4 6');
+    svg.append('g').attr('transform',`translate(0,${h-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>''));
+    svg.append('g').attr('transform','translate(72,0)').attr('class','axis').call(d3.axisLeft(y).ticks(5));
+  })();
+
+  // 4) Distribution
+  (function(){
+    const svg = d3.select('#dist'); svg.selectAll('*').remove(); const h = +svg.attr('viewBox').split(' ')[3];
+    // country shares
+    const kmByCountry = new Map();
+    events.forEach(e=>{ const share=e.km/e.countries.length; e.countries.forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share)); });
+    const totalKm = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0)||1;
+    const pct = Array.from(kmByCountry, ([name,km])=>({name,pct:100*km/totalKm})).sort((a,b)=>b.pct-a.pct);
+    const top6 = pct.slice(0,6); const otherPct = Math.max(0,100-top6.reduce((s,d)=>s+d.pct,0));
+
+    const day = +state.dayPhase.day, night = +state.dayPhase.night;
+    const temps = [{label:'Cold (<5°C)',v:30,c:'#000'},{label:'Mild (5–15°C)',v:50,c:'#ff9800'},{label:'Warm (>15°C)',v:20,c:'#58c4ff'}];
+
+    const groupX = d3.scaleBand().domain(['Countries','Day phase','Temperature']).range([120, 1120]).padding(0.4);
+    const y = d3.scaleLinear().domain([0,100]).range([h-40, 30]);
+
+    stack('Countries', [...top6.map(d=>({label:d.name,v:d.pct})) , {label:'Other EU', v:otherPct}],
+      {'Sweden':'#f2a900','Denmark':'#00a8a8','Norway':'#2ecc71','Germany':'#00bcd4','Netherlands':'#ffd166','Belgium':'#e74c3c','Other EU':'#c27ba0'});
+    stack('Day phase', [{label:'Daylight',v:day,c:'#e6b800'},{label:'Twilight/Night',v:night,c:'#0a2a6b'}]);
+    stack('Temperature', temps);
+
+    svg.append('g').attr('transform','translate(95,0)').attr('class','axis').call(d3.axisLeft(y).ticks(5).tickFormat(d=>d+'%'));
+
+    function stack(group, arr, cmap){
+      const x0 = groupX(group); let bottom = 0;
+      arr.forEach(d=>{
+        svg.append('rect').attr('x',x0).attr('y',y(bottom+d.v)).attr('width',groupX.bandwidth()).attr('height', y(bottom)-y(bottom+d.v))
+          .attr('fill', d.c || (cmap?cmap[d.label]:'#6aa3ff')).attr('stroke','#000').attr('stroke-width',.6)
+          .append('title').text(`${group}: ${d.label} – ${d.v.toFixed(1)}%`);
+        bottom += d.v;
+      });
+      svg.append('text').attr('x', x0 + groupX.bandwidth()/2).attr('y', 20).attr('text-anchor','middle').text(group).style('font-weight',600);
+    }
+  })();
+
+  // 5) Tile map (centered)
+  (function(){
+    const svg = d3.select('#tilemap'); svg.selectAll('*').remove(); const width=1200, height=420;
+    const g = svg.append('g');
+    const tiles = new Map([
+      [[0,3],['NO','Norway']], [[1,3],['SE','Sweden']], [[2,3],['DK','Denmark']],
+      [[3,3],['DE','Germany']], [[4,3],['AT','Austria']], [[5,3],['SI','Slovenia']],
+      [[5,4],['HR','Croatia']], [[4,4],['HU','Hungary']], [[3,4],['CZ','Czechia']],
+      [[2,4],['NL','Netherlands']], [[2,5],['BE','Belgium']], [[3,5],['PL','Poland']],
+      [[4,5],['SK','Slovakia']], [[5,5],['RO','Romania']], [[6,5],['BG','Bulgaria']],
+      [[2,6],['LU','Luxembourg']], [[3,6],['FR','France']], [[4,6],['IT','Italy']],
+      [[5,6],['GR','Greece']], [[3,7],['CH','Switzerland']], [[3,8],['ES','Spain']], [[2,8],['PT','Portugal']],
+      [[4,7],['BA','Bosnia and Herzegovina']], [[4,8],['RS','Serbia']], [[5,7],['AL','Albania']], [[5,8],['MK','North Macedonia']],
+      [[2,2],['FI','Finland']], [[1,2],['EE','Estonia']], [[1,1],['IS','Iceland']], [[1,4],['LT','Lithuania']], [[1,5],['LV','Latvia']],
+      [[4,2],['UA','Ukraine']]
+    ]);
+
+    // compute km by country
+    const kmByCountry = new Map();
+    events.forEach(e=>{ const share=e.km/e.countries.length; e.countries.forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share)); });
+    const totalKm = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0)||1;
+
+    // build grid & crop
+    const rows=7, cols=10; const grid=Array.from({length:rows},()=>Array(cols).fill(NaN)); const labels=Array.from({length:rows},()=>Array(cols).fill(''));
+    tiles.forEach(([lab,name],[r,c])=>{ grid[r][c]=(kmByCountry.get(name)||0)/totalKm*100; labels[r][c]=lab; });
+    let rmin=rows, rmax=-1, cmin=cols, cmax=-1; for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) if(!Number.isNaN(grid[r][c])){rmin=Math.min(rmin,r);rmax=Math.max(rmax,r);cmin=Math.min(cmin,c);cmax=Math.max(cmax,c);}    
+    const crop = grid.slice(rmin,rmax+1).map(row=>row.slice(cmin,cmax+1));
+    const cropL= labels.slice(rmin,rmax+1).map(row=>row.slice(cmin,cmax+1));
+
+    const nR=crop.length, nC=crop[0].length, cell=36, pad=6; const gridW=nC*cell, gridH=nR*cell; const originX=(width-gridW)/2, originY=30;
+    const maxPct = Math.max(1, d3.max(crop.flat().filter(v=>!Number.isNaN(v)))||1); const color = d3.scaleSequential(d3.interpolateOrRd).domain([0,maxPct]);
+    const tileG = g.append('g').attr('transform',`translate(${originX},${originY})`);
+
+    for(let r=0;r<nR;r++) for(let c=0;c<nC;c++) if(!Number.isNaN(crop[r][c])){
+      const x0=c*cell, y0=r*cell, v=crop[r][c];
+      tileG.append('rect').attr('x',x0).attr('y',y0).attr('rx',6).attr('width',cell-pad).attr('height',cell-pad).attr('fill',color(v)).attr('stroke','#111');
+      tileG.append('text').attr('x',x0+(cell-pad)/2).attr('y',y0+(cell-pad)/2+4).attr('text-anchor','middle').attr('fill','#fff').attr('font-size',12).text(cropL[r][c]);
+      tileG.append('title').text(`${cropL[r][c]} – ${v.toFixed(2)}% of km`);
+    }
+
+    // centered legend below
+    const legendW=420, legendH=8; const lx=(width-legendW)/2, ly=originY+gridH+40; const legend=g.append('g').attr('transform',`translate(${lx},${ly})`);
+    legend.selectAll('rect').data(d3.range(legendW)).join('rect').attr('x',d=>d).attr('y',0).attr('width',1).attr('height',legendH).attr('fill',d=>color(d/legendW*maxPct));
+    legend.append('rect').attr('x',0).attr('y',-1).attr('width',legendW).attr('height',legendH+2).attr('fill','none').attr('stroke','#333');
+    legend.append('text').attr('x',0).attr('y',legendH+14).text('0%').attr('fill','#9aa3b2');
+    legend.append('text').attr('x',legendW).attr('y',legendH+14).attr('text-anchor','end').text(`${maxPct.toFixed(1)}%`).attr('fill','#9aa3b2');
+    legend.append('text').attr('x',legendW/2).attr('y',legendH+28).attr('text-anchor','middle').text('Share of total campaign km').attr('fill','#e9eef7');
+  })();
+}
+
+// ======= Bind UI =======
+['inp-start','inp-end','inp-day','inp-night','inp-weeks','km-XS','kpi-XS','km-S','kpi-S','km-M','kpi-M','km-XL','kpi-XL']
+  .forEach(id=>document.getElementById(id).addEventListener('change',()=>{ if(id.startsWith('km-')||id.startsWith('kpi-')) refreshTypeWeights(); refreshGlobals(); renderAll(); }));
+
+document.getElementById('btn-add-xs').addEventListener('click', addWeeklyXS);
+
+document.getElementById('btn-add-one').addEventListener('click', addSingleEvent);
+
+document.getElementById('btn-clear').addEventListener('click', clearEvents);
+
+document.getElementById('btn-render').addEventListener('click', renderAll);
+
+document.getElementById('btn-load-example').addEventListener('click', loadExample);
+
+// initial
+renderAll();
+</script>
+</body>
+</html>
