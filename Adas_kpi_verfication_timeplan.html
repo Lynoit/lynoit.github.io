@@ -13,7 +13,7 @@
     h2{font-weight:600;font-size:16px;color:var(--muted);margin:0 0 8px}
     .wrap{max-width:1680px;margin:0 auto;padding:18px}
 
-    /* Two-column layout: col 1 inputs, col 2 plots */
+    /* Two-column layout: inputs | plots */
     .grid{display:grid;gap:16px;grid-template-columns:1fr}
     @media(min-width:1100px){
       .grid{grid-template-columns:0.9fr 1.6fr; align-items:start}
@@ -29,7 +29,7 @@
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .note{color:var(--muted);font-size:12px;margin-top:8px}
 
-    /* Plots white background */
+    /* Plots: white background for clean export */
     svg{width:100%;height:auto;display:block;background:#fff}
     .axis path,.axis line{stroke:#c4c7cf}
     .major-grid{stroke:#e5e7eb;stroke-dasharray:4 6}
@@ -91,9 +91,9 @@
         <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-xs">Add weekly XS</button></div>
       </div>
 
-      <!-- NEW: Generate Software updates (weekly) -->
+      <!-- Weekly Software updates -->
       <h2>Generate Software updates (weekly)</h2>
-      <div class="controls" style="grid-template-columns:repeat(5,1fr);margin-bottom:12px">
+      <div class="controls" style="grid-template-columns:repeat(6,1fr);margin-bottom:12px">
         <div class="field date" data-target="sw-from">
           <label>From</label>
           <div class="date-wrap">
@@ -117,6 +117,10 @@
           <input id="sw-prefix" value="SW update">
         </div>
         <div class="field">
+          <label>Mileage drop per update (km)</label>
+          <input type="number" id="sw-dropkm" value="0" min="0" step="1">
+        </div>
+        <div class="field">
           <label>&nbsp;</label>
           <button class="btn" id="btn-add-sw-weekly">Add weekly SW updates</button>
         </div>
@@ -136,8 +140,8 @@
         <div class="field"><label>&nbsp;</label><button class="btn" id="btn-add-one">Add event</button></div>
       </div>
       <div class="controls" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">
-        <div class="field"><label>Override km</label><input type="number" id="ev-km" placeholder="(auto by type)"></div>
-        <div class="field"><label>Override KPI % / Drop % (for SW)</label><input type="number" id="ev-kpi" placeholder="(auto by type or drop %)"></div>
+        <div class="field"><label>Override km / Drop km (for SW)</label><input type="number" id="ev-km" placeholder="(auto by type or km drop for SW)"></div>
+        <div class="field"><label>Override KPI % / Drop % (for SW)</label><input type="number" id="ev-kpi" placeholder="(auto by type or % drop for SW)"></div>
         <div class="field"><label>&nbsp;</label><button class="btn" id="btn-clear">Clear all events</button></div>
         <div class="field"><label>&nbsp;</label><button class="btn accent" id="btn-render">Update plots</button></div>
       </div>
@@ -147,7 +151,7 @@
       <p class="note">Need a quick start? <button class="btn" id="btn-load-example">Load example from earlier spec</button></p>
     </div>
 
-    <!-- COLUMN 2: PLOTS (BIGGER) -->
+    <!-- COLUMN 2: PLOTS -->
     <div>
       <div class="card"><h2>1) Gantt timeline</h2><svg id="gantt"   viewBox="0 0 1600 440"></svg></div>
       <div class="card"><h2>2) Cumulative mileage</h2><svg id="mileage" viewBox="0 0 1600 320"></svg></div>
@@ -192,16 +196,23 @@ function cumulative(events, field, start, end){
     if (e.start>end || eEnd<start) continue;
     const d = new Date(Math.max(e.start, start));
     if (series.at(-1).date.getTime() !== d.getTime()) series.push({date:d, value:cum});
+
     if(field==='kpi'){
       if(e.type==='SW'){
         const drop = Math.max(0, +((e.drop!=null)?e.drop:(e.kpi||0)));
-        cum = Math.max(0, cum * (1 - drop/100));          // relative drop
+        cum = Math.max(0, cum * (1 - drop/100));          // relative KPI drop
       } else {
         cum += (e.kpi||0);
       }
-    } else {
-      cum += (e[field]||0);
+    } else if(field==='km'){
+      if(e.type==='SW'){
+        const dk = Math.max(0, +(e.dropKm||0));
+        cum = Math.max(0, cum - dk);                      // absolute km drop
+      } else {
+        cum += (e.km||0);
+      }
     }
+
     series.push({date:addDays(d,1), value:cum});
   }
   if (series.at(-1).date < end) series.push({date:end, value:cum});
@@ -237,13 +248,12 @@ function addWeeklyXS(){
   renderEventsTable(); renderAll();
 }
 
-// NEW: weekly SW generator
 function addWeeklySW(){
   refreshGlobals();
   const from = new Date(document.getElementById('sw-from').value);
   const to   = new Date(document.getElementById('sw-to').value);
-  let drop   = +document.getElementById('sw-drop').value;
-  drop = Math.max(0, Math.min(100, isFinite(drop) ? drop : 0));
+  let drop   = +document.getElementById('sw-drop').value;   drop   = Math.max(0, Math.min(100, isFinite(drop) ? drop : 0));
+  let dropKm = +document.getElementById('sw-dropkm').value; dropKm = Math.max(0, isFinite(dropKm) ? dropKm : 0);
   const prefix = document.getElementById('sw-prefix').value || 'SW update';
 
   let i = 1;
@@ -257,11 +267,11 @@ function addWeeklySW(){
       km: 0,
       kpi: 0,
       drop,
+      dropKm,
       countries: []
     });
   }
-  renderEventsTable();
-  renderAll();
+  renderEventsTable(); renderAll();
 }
 
 function addSingleEvent(){
@@ -273,15 +283,18 @@ function addSingleEvent(){
   const start = new Date(document.getElementById('ev-start').value);
   const days  = isSW ? 0 : (+document.getElementById('ev-days').value || 7);
   const countries = isSW ? [] : parseCountries(document.getElementById('ev-countries').value || 'Sweden');
-  let km=0, kpi=0, drop=0;
+  let km=0, kpi=0, drop=0, dropKm=0;
+
   if(isSW){
-    drop = +document.getElementById('ev-kpi').value || 10; // Override KPI field as drop %
+    drop   = +document.getElementById('ev-kpi').value || 0; // KPI drop %
+    dropKm = +document.getElementById('ev-km').value || 0;  // mileage drop km
   } else {
     km  = +document.getElementById('ev-km').value || state.types[type].km;
     kpi = +document.getElementById('ev-kpi').value || state.types[type].kpi;
   }
+
   const name = isSW ? (name0 || 'Software update') : name0;
-  state.events.push({ name, type, start, days, end:addDays(start,days), km, kpi, drop, countries });
+  state.events.push({ name, type, start, days, end:addDays(start,days), km, kpi, drop, dropKm, countries });
   renderEventsTable(); renderAll();
 }
 
@@ -293,8 +306,8 @@ function renderEventsTable(){
   if (!state.events.length){ container.innerHTML = '<div class="note">No events yet.</div>'; return; }
   let html = '<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Start</th><th>Days</th><th>KM</th><th>KPI %</th><th>Countries</th><th></th></tr></thead><tbody>';
   state.events.sort((a,b)=>a.start-b.start).forEach((e,i)=>{
-    const kmDisp = (e.type==='SW') ? '—' : (e.km||0);
-    const kpiDisp = (e.type==='SW') ? ('−'+(e.drop||0)+'%') : (e.kpi||0);
+    const kmDisp  = (e.type==='SW') ? ((e.dropKm && e.dropKm>0) ? ('−'+e.dropKm+' km') : '—') : (e.km||0);
+    const kpiDisp = (e.type==='SW') ? ((e.drop && e.drop>0) ? ('−'+e.drop+'%') : '—') : (e.kpi||0);
     const ctyDisp = (e.countries && e.countries.length) ? e.countries.join(', ') : ((e.type==='SW') ? '—' : '');
     html += `<tr><td>${i+1}</td><td>${e.name}</td><td>${e.type}</td><td>${fmtDate(e.start)}</td><td>${e.days}</td><td>${kmDisp}</td><td>${kpiDisp}</td><td>${ctyDisp}</td><td><button class="btn" onclick="deleteEvent(${i})">Delete</button></td></tr>`;
   });
@@ -312,109 +325,90 @@ function loadExample(){
   add({ name:'M Abstatt', type:'M', start:new Date('2025-09-01'), days:7, countries:['Germany','Sweden'], km:state.types.M.km, kpi:state.types.M.kpi });
   add({ name:'S Stockholm', type:'S', start:new Date('2025-10-20'), days:7, countries:['Sweden'], km:state.types.S.km, kpi:state.types.S.kpi });
   add({ name:'XL EU expedition 1', type:'XL', start:new Date('2025-11-03'), days:21, countries:['Sweden','Denmark','Germany','Netherlands','Belgium','Switzerland','France','Italy','Spain','Austria','Luxembourg','Greece','Romania','Bulgaria','Slovenia','Croatia','Poland'], km:state.types.XL.km, kpi:state.types.XL.kpi });
-  state.events.push({ name:'SW firmware v1.3', type:'SW', start:new Date('2026-02-01'), days:0, end:new Date('2026-02-01'), km:0, kpi:0, drop:20, countries:[] });
+  state.events.push({ name:'SW firmware v1.3', type:'SW', start:new Date('2026-02-01'), days:0, end:new Date('2026-02-01'), km:0, kpi:0, drop:20, dropKm:0, countries:[] });
   renderEventsTable(); renderAll();
 }
 
-// ======= Rendering (BIGGER + responsive to viewBox) =======
+// ======= Rendering (bigger & responsive) =======
 function renderAll(){
   refreshTypeWeights(); refreshGlobals();
   const events = state.events.slice().sort((a,b)=>a.start-b.start);
 
-  // Shared X scale
+  // Shared X scale from Gantt viewBox
   const ganttVB = d3.select('#gantt').attr('viewBox').split(' ');
   const W = +ganttVB[2];
   const X_L = 80, X_R = 40;
   const x = d3.scaleTime().domain([state.start, state.end]).range([X_L, W - X_R]);
 
   // 1) Gantt
-  // 1) Gantt
-(function(){
-  const svg = d3.select('#gantt'); svg.selectAll('*').remove();
-  const H = +svg.attr('viewBox').split(' ')[3];
+  (function(){
+    const svg = d3.select('#gantt'); svg.selectAll('*').remove();
+    const H = +svg.attr('viewBox').split(' ')[3];
 
-  // grid by month
-  const months = d3.timeMonth.range(d3.timeMonth.floor(state.start), state.end);
-  svg.append('g').selectAll('line').data(months).join('line')
-    .attr('x1', d=>x(d)).attr('x2', d=>x(d))
-    .attr('y1', 16).attr('y2', H-36)
-    .attr('class','major-grid');
+    // monthly grid
+    const months = d3.timeMonth.range(d3.timeMonth.floor(state.start), state.end);
+    svg.append('g').selectAll('line').data(months).join('line')
+      .attr('x1', d=>x(d)).attr('x2', d=>x(d)).attr('y1', 16).attr('y2', H-36).attr('class','major-grid');
 
-  // split events
-  const xs  = events.filter(e=>e.type==='XS');
-  const sw  = events.filter(e=>e.type==='SW');
-  const named = events.filter(e=>e.type!=='XS' && e.type!=='SW');
+    const xs = events.filter(e=>e.type==='XS');
+    const sw = events.filter(e=>e.type==='SW');
+    const named = events.filter(e=>e.type!=='XS' && e.type!=='SW');
 
-  // helper widths
-  const widthXS = d => Math.max(1, x(d.end) - x(d.start));
-  // For SW: if days=0, render as a 1-day bar
-  const widthSW = d => {
-    const end = (d.days && d.days>0) ? d.end : addDays(d.start, 1);
-    return Math.max(1, x(end) - x(d.start));
-  };
+    const widthXS = d => Math.max(1, x(d.end) - x(d.start));
+    const widthSW = d => {
+      const end = (d.days && d.days>0) ? d.end : addDays(d.start, 1);
+      return Math.max(1, x(end) - x(d.start));
+    };
 
-  // compact row drawer
-  function drawRow(arr, y0, fill, label, widthFn, titleFn){
-    svg.append('g').selectAll('rect').data(arr).join('rect')
-      .attr('x', d=>x(d.start))
-      .attr('y', y0-8)
-      .attr('width', d=>widthFn(d))
-      .attr('height', 16)
-      .attr('fill', fill)
-      .attr('stroke', '#000')
-      .attr('stroke-width', .6)
-      .append('title').text(titleFn);
-    svg.append('text')
-      .attr('x', 10).attr('y', y0+4)
-      .attr('fill', '#111').text(label);
-  }
+    function drawRow(arr, y0, fill, label, widthFn, titleFn){
+      svg.append('g').selectAll('rect').data(arr).join('rect')
+        .attr('x', d=>x(d.start))
+        .attr('y', y0-8)
+        .attr('width', d=>widthFn(d))
+        .attr('height', 16)
+        .attr('fill', fill)
+        .attr('stroke', '#000')
+        .attr('stroke-width', .6)
+        .append('title').text(titleFn);
+      svg.append('text')
+        .attr('x', 10).attr('y', y0+4)
+        .attr('fill', '#111').text(label);
+    }
 
-  // rows: XS then SW
-  const xsY = 70;
-  drawRow(xs, xsY, '#d2d6df', 'XS weekly', widthXS,
-          d=>`${d.name} — ${fmtDate(d.start)} (${d.km||0} km)`);
+    const xsY = 70;
+    drawRow(xs, xsY, '#d2d6df', 'XS weekly', widthXS,
+            d=>`${d.name} — ${fmtDate(d.start)} (${d.km||0} km)`);
 
-  const swY = xsY + 26; // small gap below XS
-  drawRow(sw, swY, '#9333ea', 'SW updates', widthSW,
-          d=>`${d.name} — ${fmtDate(d.start)} (Drop ${d.drop||0}%)`);
+    const swY = xsY + 26;
+    drawRow(sw, swY, '#9333ea', 'SW updates', widthSW,
+            d=>`${d.name} — ${fmtDate(d.start)} (KPI −${d.drop||0}%, km −${d.dropKm||0})`);
 
-  // remaining named events (S/M/L/XL) each on its own line below
-  const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b'})[t] || '#8ad';
-  const rowHeight = 24, rowGap = 14;
-  let rowStartY = swY + 26 + 8;
+    const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b'})[t] || '#8ad';
+    const rowHeight=24, rowGap=14; let rowStartY = swY + 26 + 8;
 
-  named.forEach((e,i)=>{
-    const y = rowStartY + i*(rowHeight+rowGap);
-    svg.append('rect')
-      .attr('x', x(e.start))
-      .attr('y', y-11)
-      .attr('width', Math.max(4, x(e.end)-x(e.start)))
-      .attr('height', 22)
-      .attr('rx', 4)
-      .attr('fill', colorByType(e.type))
-      .attr('stroke', '#000')
-      .attr('stroke-width', .6)
-      .append('title')
-      .text(`${e.name} • ${e.km||0} km (${fmtDate(e.start)} → ${fmtDate(e.end)})\nCountries: ${(e.countries||[]).join(', ')}`);
+    named.forEach((e,i)=>{
+      const y = rowStartY + i*(rowHeight+rowGap);
+      svg.append('rect')
+        .attr('x', x(e.start))
+        .attr('y', y-11)
+        .attr('width', Math.max(4, x(e.end)-x(e.start)))
+        .attr('height', 22)
+        .attr('rx', 4)
+        .attr('fill', colorByType(e.type))
+        .attr('stroke', '#000')
+        .attr('stroke-width', .6)
+        .append('title')
+        .text(`${e.name} • ${e.km||0} km (${fmtDate(e.start)} → ${fmtDate(e.end)})\nCountries: ${(e.countries||[]).join(', ')}`);
 
-    const week = d3.utcFormat('W%V')(e.start);
-    svg.append('text')
-      .attr('x', x(e.end)+6)
-      .attr('y', y+4)
-      .attr('fill','#111')
-      .text(state.showWeeks ? `${e.name} (${week})` : e.name);
-  });
+      const week = d3.utcFormat('W%V')(e.start);
+      svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#111')
+        .text(state.showWeeks ? `${e.name} (${week})` : e.name);
+    });
 
-  // bottom axis (months)
-  const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
-  svg.append('g')
-    .attr('transform',`translate(0,${H-30})`)
-    .attr('class','axis')
-    .call(axis)
-    .selectAll('text')
-    .attr('transform','rotate(45)')
-    .attr('text-anchor','start');
-})();
+    const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
+    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(axis)
+      .selectAll('text').attr('transform','rotate(45)').attr('text-anchor','start');
+  })();
 
   // 2) Mileage
   (function(){
@@ -424,7 +418,7 @@ function renderAll(){
     const y = d3.scaleLinear().domain([0, d3.max(series, d=>d.value)]).nice().range([H-36, 24]);
     const line = d3.line().x(d=>x(d.date)).y(d=>y(d.value)).curve(d3.curveStepAfter);
     svg.append('path').datum(series).attr('d', line).attr('fill','none').attr('stroke','#111').attr('stroke-width',2);
-    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>'')); // x shared
+    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>'')); // share x
     svg.append('g').attr('transform','translate(72,0)').attr('class','axis').call(d3.axisLeft(y).ticks(6));
     svg.append('text').attr('transform', 'translate(30,' + (H/2) + ') rotate(-90)').attr('text-anchor','middle').attr('fill','#111').text('Cumulative mileage (km)');
   })();
@@ -438,19 +432,36 @@ function renderAll(){
     const line = d3.line().x(d=>x(d.date)).y(d=>y(d.value)).curve(d3.curveStepAfter);
     svg.append('path').datum(series).attr('d', line).attr('fill','none').attr('stroke','#1d4ed8').attr('stroke-width',2);
     svg.append('line').attr('x1',X_L).attr('x2',W-X_R).attr('y1',y(100)).attr('y2',y(100)).attr('stroke','#aaa').attr('stroke-dasharray','4 6');
-    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>'')); // x shared
+    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(d3.axisBottom(x).tickFormat(()=>'')); // share x
     svg.append('g').attr('transform','translate(72,0)').attr('class','axis').call(d3.axisLeft(y).ticks(6));
     svg.append('text').attr('transform', 'translate(30,' + (H/2) + ') rotate(-90)').attr('text-anchor','middle').attr('fill','#111').text('Cumulative KPI (%)');
   })();
 
-  // 4) Distribution + legend
+  // 4) Distribution (whole campaign) with legend (adjusted for SW km drops)
   (function(){
     const svg = d3.select('#dist'); svg.selectAll('*').remove();
     const vb = svg.attr('viewBox').split(' '); const Wd = +vb[2], Hd = +vb[3];
 
+    // Sum km by country from NON-SW events
     const kmByCountry = new Map();
-    events.forEach(e=>{ const share=(e.km||0)/((e.countries&&e.countries.length)||1); (e.countries||[]).forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share)); });
-    const totalKm = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0)||1;
+    events.forEach(e=>{
+      if(e.type==='SW') return;
+      const share=(e.km||0)/((e.countries&&e.countries.length)||1);
+      (e.countries||[]).forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share));
+    });
+
+    // Apply SW mileage drop proportionally
+    const totalKmBefore = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0) || 0;
+    const totalDropKm   = events.filter(e=>e.type==='SW').reduce((s,e)=>s + (+(e.dropKm||0)), 0);
+    const totalKmAfter  = Math.max(0, totalKmBefore - totalDropKm);
+    if(totalKmBefore > 0){
+      const scale = (totalKmAfter / totalKmBefore);
+      for(const [cty,km] of kmByCountry.entries()){
+        kmByCountry.set(cty, km * scale);
+      }
+    }
+    const totalKm = Math.max(1, totalKmAfter);
+
     const pct = Array.from(kmByCountry, ([name,km])=>({name,pct:100*km/totalKm})).sort((a,b)=>b.pct-a.pct);
     const top6 = pct.slice(0,6); const otherPct = Math.max(0,100-top6.reduce((s,d)=>s+d.pct,0));
 
@@ -462,9 +473,7 @@ function renderAll(){
     const groupX = d3.scaleBand().domain(['Countries','Day phase','Temperature']).range([120, legendX - 40]).padding(0.4);
     const y = d3.scaleLinear().domain([0,100]).range([Hd-40, 30]);
 
-    const colorsCountry = {
-      'Sweden':'#f2a900','Denmark':'#00a8a8','Norway':'#2ecc71','Germany':'#00bcd4','Netherlands':'#ffd166','Belgium':'#e74c3c','Other EU':'#c27ba0'
-    };
+    const colorsCountry = {'Sweden':'#f2a900','Denmark':'#00a8a8','Norway':'#2ecc71','Germany':'#00bcd4','Netherlands':'#ffd166','Belgium':'#e74c3c','Other EU':'#c27ba0'};
     const countriesData = [...top6.map(d=>({label:d.name, v:d.pct, c:colorsCountry[d.name]||'#6aa3ff'})), {label:'Other EU', v:otherPct, c:colorsCountry['Other EU']}];
     const dayData = [{label:'Daylight', v:day, c:'#e6b800'},{label:'Twilight/Night', v:night, c:'#0a2a6b'}];
     const tempData = temps;
@@ -511,7 +520,7 @@ function renderAll(){
     }
   })();
 
-  // 5) Tile map (centered; responsive)
+  // 5) Tile map (centered; includes SW km drops proportionally)
   (function(){
     const svg = d3.select('#tilemap'); svg.selectAll('*').remove();
     const vb = svg.attr('viewBox').split(' '); const width = +vb[2], height = +vb[3];
@@ -529,20 +538,43 @@ function renderAll(){
       [[4,2],['UA','Ukraine']]
     ]);
 
+    // Sum non-SW km by country
     const kmByCountry = new Map();
-    events.forEach(e=>{ const share=(e.km||0)/((e.countries&&e.countries.length)||1); (e.countries||[]).forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share)); });
-    const totalKm = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0)||1;
+    events.forEach(e=>{
+      if(e.type==='SW') return;
+      const share=(e.km||0)/((e.countries&&e.countries.length)||1);
+      (e.countries||[]).forEach(c=>kmByCountry.set(c,(kmByCountry.get(c)||0)+share));
+    });
+    // Apply SW mileage drop proportionally
+    const totalKmBefore = Array.from(kmByCountry.values()).reduce((a,b)=>a+b,0) || 0;
+    const totalDropKm   = events.filter(e=>e.type==='SW').reduce((s,e)=>s + (+(e.dropKm||0)), 0);
+    const totalKmAfter  = Math.max(0, totalKmBefore - totalDropKm);
+    if(totalKmBefore > 0){
+      const scale = (totalKmAfter / totalKmBefore);
+      for(const [cty,km] of kmByCountry.entries()){
+        kmByCountry.set(cty, km * scale);
+      }
+    }
+    const totalKm = Math.max(1, totalKmAfter);
 
-    const rows=7, cols=10; const grid=Array.from({length:rows},()=>Array(cols).fill(NaN)); const labels=Array.from({length:rows},()=>Array(cols).fill(''));
-    tiles.forEach(([lab,name],[r,c])=>{ grid[r][c]=(kmByCountry.get(name)||0)/totalKm*100; labels[r][c]=lab; });
+    // Fill grid with percentages
+    const rows=7, cols=10;
+    const grid=Array.from({length:rows},()=>Array(cols).fill(NaN));
+    const labels=Array.from({length:rows},()=>Array(cols).fill(''));
+    tiles.forEach(([lab,name],[r,c])=>{
+      grid[r][c]= (kmByCountry.get(name)||0)/totalKm*100;
+      labels[r][c]=lab;
+    });
 
-    let rmin=rows, rmax=-1, cmin=cols, cmax=-1; for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) if(!Number.isNaN(grid[r][c])){rmin=Math.min(rmin,r);rmax=Math.max(rmax,r);cmin=Math.min(cmin,c);cmax=Math.max(cmax,c);}
+    let rmin=rows, rmax=-1, cmin=cols, cmax=-1;
+    for(let r=0;r<rows;r++)for(let c=0;c<cols;c++) if(!Number.isNaN(grid[r][c])){rmin=Math.min(rmin,r);rmax=Math.max(rmax,r);cmin=Math.min(cmin,c);cmax=Math.max(cmax,c);}
     const crop = grid.slice(rmin,rmax+1).map(row=>row.slice(cmin,cmax+1));
     const cropL= labels.slice(rmin,rmax+1).map(row=>row.slice(cmin,cmax+1));
 
     const nR=crop.length, nC=crop[0].length, cell=42, pad=6;
     const gridW=nC*cell, gridH=nR*cell; const originX=(width-gridW)/2, originY=40;
-    const maxPct = Math.max(1, d3.max(crop.flat().filter(v=>!Number.isNaN(v)))||1); const color = d3.scaleSequential(d3.interpolateOrRd).domain([0,maxPct]);
+    const maxPct = Math.max(1, d3.max(crop.flat().filter(v=>!Number.isNaN(v)))||1);
+    const color = d3.scaleSequential(d3.interpolateOrRd).domain([0,maxPct]);
     const tileG = g.append('g').attr('transform',`translate(${originX},${originY})`);
 
     for(let r=0;r<nR;r++) for(let c=0;c<nC;c++) if(!Number.isNaN(crop[r][c])){
@@ -571,12 +603,14 @@ function serializeEvent(e){
     km: e.type === 'SW' ? 0 : (e.km || 0),
     kpi: e.type === 'SW' ? 0 : (e.kpi || 0),
     drop: e.type === 'SW' ? (e.drop || 0) : 0,
+    dropKm: e.type === 'SW' ? (e.dropKm || 0) : 0,
     countries: (e.countries || []).slice()
   };
 }
+
 function eventsToCSV(events){
   const rows = [];
-  const header = ['name','type','start','days','km','kpi','drop','countries'];
+  const header = ['name','type','start','days','km','kpi','drop','dropKm','countries'];
   rows.push(header.join(','));
   const esc = v => {
     const s = String(v==null?'':v);
@@ -586,16 +620,18 @@ function eventsToCSV(events){
   for(const e of events){
     const o = serializeEvent(e);
     const cty = o.countries.join('; ');
-    rows.push([o.name,o.type,o.start,o.days,o.km,o.kpi,o.drop,cty].map(esc).join(','));
+    rows.push([o.name,o.type,o.start,o.days,o.km,o.kpi,o.drop,o.dropKm,cty].map(esc).join(','));
   }
   return rows.join('\n');
 }
+
 function downloadBlob(text, filename, mime='text/plain'){
   const blob = new Blob([text],{type:mime});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
+
 function splitCSVLine(line){
   const out=[]; let cur=''; let q=false;
   for(let i=0;i<line.length;i++){
@@ -613,6 +649,7 @@ function splitCSVLine(line){
   out.push(cur);
   return out;
 }
+
 function parseCSV(text){
   const lines = text.split(/\r?\n/).filter(l=>l.trim()!=='');
   if(!lines.length) return [];
@@ -626,14 +663,24 @@ function parseCSV(text){
     const type = /software/i.test(typeRaw) ? 'SW' : typeRaw.toUpperCase();
     const start = new Date(get('start'));
     const days  = +get('days') || 0;
-    const km    = type==='SW' ? 0 : (+get('km')||0);
-    const kpi   = type==='SW' ? 0 : (+get('kpi')||0);
-    const drop  = type==='SW' ? (+get('drop')||0) : 0;
+
+    let km    = +get('km')  || 0;
+    const kpi = +get('kpi') || 0;
+    const drop  = +get('drop')   || 0;
+    let dropKm  = (idx('dropkm')>=0) ? (+get('dropkm')||0) : 0;
+
+    // Back-compat: if SW and dropKm missing but km>0, treat km as dropKm
+    if(type==='SW'){
+      if(dropKm<=0 && km>0){ dropKm = km; }
+      km = 0;
+    }
+
     const countries = (get('countries')||'').split(';').map(s=>s.trim()).filter(Boolean);
-    recs.push({ name:get('name')||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, countries });
+    recs.push({ name:get('name')||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, dropKm, countries });
   }
   return recs;
 }
+
 function parseMaybeJSON(text){
   try{
     const data = JSON.parse(text);
@@ -643,11 +690,16 @@ function parseMaybeJSON(text){
         const type = /software/i.test(typeRaw) ? 'SW' : typeRaw.toUpperCase();
         const start = new Date(o.start||o.date||o.begin||Date.now());
         const days  = +o.days || 0;
-        const km    = type==='SW' ? 0 : (+o.km||0);
-        const kpi   = type==='SW' ? 0 : (+o.kpi||0);
-        const drop  = type==='SW' ? (+o.drop||0) : 0;
+        let km    = +o.km  || 0;
+        const kpi = +o.kpi || 0;
+        const drop   = +o.drop   || 0;
+        let dropKm   = +o.dropKm || 0;
+        if(type==='SW'){
+          if(dropKm<=0 && km>0){ dropKm = km; }
+          km = 0;
+        }
         const countries = Array.isArray(o.countries) ? o.countries : (typeof o.countries==='string' ? o.countries.split(';').map(s=>s.trim()) : []);
-        return { name:o.name||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, countries };
+        return { name:o.name||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, dropKm, countries };
       });
     }
   }catch(e){}
@@ -660,22 +712,20 @@ document.querySelectorAll('.date-btn').forEach(btn=>btn.addEventListener('click'
 document.querySelectorAll('.field.date').forEach(div=>div.addEventListener('click', (ev)=>{ if(ev.target.tagName.toLowerCase()!=='input' && !ev.target.classList.contains('date-btn')) openDate(div.dataset.target); }));
 
 document.getElementById('btn-add-xs').addEventListener('click', addWeeklyXS);
+document.getElementById('btn-add-sw-weekly').addEventListener('click', addWeeklySW);
 document.getElementById('btn-add-one').addEventListener('click', addSingleEvent);
 document.getElementById('btn-clear').addEventListener('click', clearEvents);
 document.getElementById('btn-render').addEventListener('click', renderAll);
 document.getElementById('btn-load-example').addEventListener('click', loadExample);
 
-// NEW: bind weekly SW button
-document.getElementById('btn-add-sw-weekly').addEventListener('click', addWeeklySW);
-
-// ASI-safe leading semicolon
+// Re-render on global changes
 ;['inp-start','inp-end','inp-day','inp-night','inp-weeks','km-XS','kpi-XS','km-S','kpi-S','km-M','kpi-M','km-L','kpi-L','km-XL','kpi-XL']
   .forEach(id=>document.getElementById(id).addEventListener('change',()=>{
     if(id.startsWith('km-')||id.startsWith('kpi-')) refreshTypeWeights();
     refreshGlobals(); renderAll();
   }));
 
-// ---- EXPORT plots (combined 5 subplots) ----
+// ---- Export combined PNG (5 subplots) ----
 const SVG_IDS = ['gantt','mileage','kpi','dist','tilemap'];
 function getSVGClone(svg){
   const clone = svg.cloneNode(true);
@@ -729,7 +779,7 @@ async function exportCombinedPNG(){
 }
 document.getElementById('btn-export-combo').addEventListener('click', exportCombinedPNG);
 
-// ---- EXPORT / IMPORT events ----
+// ---- Export / Import events ----
 document.getElementById('btn-export-csv').addEventListener('click', ()=>{
   const csv = eventsToCSV(state.events.slice().sort((a,b)=>a.start-b.start));
   downloadBlob(csv, 'ADAS_events.csv', 'text/csv;charset=utf-8');
@@ -751,7 +801,7 @@ document.getElementById('file-input').addEventListener('change', (ev)=>{
     let recs = [];
     if(json){ recs = json; }
     else { recs = parseCSV(text); }
-    if(!recs.length){ alert('No events found in file. Make sure it is CSV with header: name,type,start,days,km,kpi,drop,countries or a JSON array.'); return; }
+    if(!recs.length){ alert('No events found in file. Make sure it is CSV with header: name,type,start,days,km,kpi,drop,dropKm,countries or a JSON array.'); return; }
     state.events.push(...recs);
     renderEventsTable(); renderAll();
   };
