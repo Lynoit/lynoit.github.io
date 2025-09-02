@@ -328,44 +328,93 @@ function renderAll(){
   const x = d3.scaleTime().domain([state.start, state.end]).range([X_L, W - X_R]);
 
   // 1) Gantt
-  (function(){
-    const svg = d3.select('#gantt'); svg.selectAll('*').remove();
-    const H = +svg.attr('viewBox').split(' ')[3];
-    const months = d3.timeMonth.range(d3.timeMonth.floor(state.start), state.end);
-    svg.append('g').selectAll('line').data(months).join('line')
-      .attr('x1', d=>x(d)).attr('x2', d=>x(d)).attr('y1', 16).attr('y2', H-36).attr('class','major-grid');
+  // 1) Gantt
+(function(){
+  const svg = d3.select('#gantt'); svg.selectAll('*').remove();
+  const H = +svg.attr('viewBox').split(' ')[3];
 
-    const xs = events.filter(e=>e.type==='XS'); const named = events.filter(e=>e.type!=='XS');
-    const xsY = 70;
-    svg.append('g').selectAll('rect').data(xs).join('rect')
-      .attr('x', d=>x(d.start)).attr('y', xsY-8).attr('width', d=>Math.max(1, x(d.end)-x(d.start)))
-      .attr('height',16).attr('fill','#d2d6df').attr('stroke','#000').attr('stroke-width',.6)
-      .append('title').text(d=>`${d.name} — ${fmtDate(d.start)} (${d.km} km)`);
-    svg.append('text').attr('x', 10).attr('y', xsY+4).attr('fill', '#111').text('XS weekly');
+  // grid by month
+  const months = d3.timeMonth.range(d3.timeMonth.floor(state.start), state.end);
+  svg.append('g').selectAll('line').data(months).join('line')
+    .attr('x1', d=>x(d)).attr('x2', d=>x(d))
+    .attr('y1', 16).attr('y2', H-36)
+    .attr('class','major-grid');
 
-    const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b', SW:'#9333ea'})[t] || '#8ad';
-    const rowHeight=24, rowGap=14; let row=xsY + rowHeight + 14;
-    named.forEach((e,i)=>{
-      const y = row + i*(rowHeight+rowGap);
-      if(e.type==='SW'){
-        svg.append('line').attr('x1', x(e.start)).attr('x2', x(e.start))
-          .attr('y1', y-14).attr('y2', y+14)
-          .attr('stroke', colorByType('SW')).attr('stroke-width', 2)
-          .append('title').text(`${e.name} • −${e.drop||0}% (${fmtDate(e.start)})`);
-        svg.append('text').attr('x', x(e.start)+6).attr('y', y+4).attr('fill','#111').text(`SW −${e.drop||0}%`);
-      } else {
-        svg.append('rect').attr('x', x(e.start)).attr('y', y-11).attr('width', Math.max(4, x(e.end)-x(e.start))).attr('height',22)
-          .attr('rx',4).attr('fill', colorByType(e.type)).attr('stroke','#000').attr('stroke-width',.6)
-          .append('title').text(`${e.name} • ${e.km} km (${fmtDate(e.start)} → ${fmtDate(e.end)})\nCountries: ${(e.countries||[]).join(', ')}`);
-        const week = d3.utcFormat('W%V')(e.start);
-        svg.append('text').attr('x', x(e.end)+6).attr('y', y+4).attr('fill','#111').text(state.showWeeks?`${e.name} (${week})` : e.name);
-      }
-    });
+  // split events
+  const xs  = events.filter(e=>e.type==='XS');
+  const sw  = events.filter(e=>e.type==='SW');
+  const named = events.filter(e=>e.type!=='XS' && e.type!=='SW');
 
-    const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
-    svg.append('g').attr('transform',`translate(0,${H-30})`).attr('class','axis').call(axis)
-      .selectAll('text').attr('transform','rotate(45)').attr('text-anchor','start');
-  })();
+  // helper widths
+  const widthXS = d => Math.max(1, x(d.end) - x(d.start));
+  // For SW: if days=0, render as a 1-day bar
+  const widthSW = d => {
+    const end = (d.days && d.days>0) ? d.end : addDays(d.start, 1);
+    return Math.max(1, x(end) - x(d.start));
+  };
+
+  // compact row drawer
+  function drawRow(arr, y0, fill, label, widthFn, titleFn){
+    svg.append('g').selectAll('rect').data(arr).join('rect')
+      .attr('x', d=>x(d.start))
+      .attr('y', y0-8)
+      .attr('width', d=>widthFn(d))
+      .attr('height', 16)
+      .attr('fill', fill)
+      .attr('stroke', '#000')
+      .attr('stroke-width', .6)
+      .append('title').text(titleFn);
+    svg.append('text')
+      .attr('x', 10).attr('y', y0+4)
+      .attr('fill', '#111').text(label);
+  }
+
+  // rows: XS then SW
+  const xsY = 70;
+  drawRow(xs, xsY, '#d2d6df', 'XS weekly', widthXS,
+          d=>`${d.name} — ${fmtDate(d.start)} (${d.km||0} km)`);
+
+  const swY = xsY + 26; // small gap below XS
+  drawRow(sw, swY, '#9333ea', 'SW updates', widthSW,
+          d=>`${d.name} — ${fmtDate(d.start)} (Drop ${d.drop||0}%)`);
+
+  // remaining named events (S/M/L/XL) each on its own line below
+  const colorByType = t => ({S:'#19b6ff', M:'#f4c542', L:'#f59e0b', XL:'#ff4b4b'})[t] || '#8ad';
+  const rowHeight = 24, rowGap = 14;
+  let rowStartY = swY + 26 + 8;
+
+  named.forEach((e,i)=>{
+    const y = rowStartY + i*(rowHeight+rowGap);
+    svg.append('rect')
+      .attr('x', x(e.start))
+      .attr('y', y-11)
+      .attr('width', Math.max(4, x(e.end)-x(e.start)))
+      .attr('height', 22)
+      .attr('rx', 4)
+      .attr('fill', colorByType(e.type))
+      .attr('stroke', '#000')
+      .attr('stroke-width', .6)
+      .append('title')
+      .text(`${e.name} • ${e.km||0} km (${fmtDate(e.start)} → ${fmtDate(e.end)})\nCountries: ${(e.countries||[]).join(', ')}`);
+
+    const week = d3.utcFormat('W%V')(e.start);
+    svg.append('text')
+      .attr('x', x(e.end)+6)
+      .attr('y', y+4)
+      .attr('fill','#111')
+      .text(state.showWeeks ? `${e.name} (${week})` : e.name);
+  });
+
+  // bottom axis (months)
+  const axis = d3.axisBottom(x).ticks(d3.timeMonth.every(1)).tickFormat(fmtMonth);
+  svg.append('g')
+    .attr('transform',`translate(0,${H-30})`)
+    .attr('class','axis')
+    .call(axis)
+    .selectAll('text')
+    .attr('transform','rotate(45)')
+    .attr('text-anchor','start');
+})();
 
   // 2) Mileage
   (function(){
