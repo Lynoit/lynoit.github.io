@@ -47,6 +47,11 @@
   <div class="row" style="margin-bottom:12px;gap:12px">
     <button class="btn accent" id="btn-export-combo">Export combined PNG (5 subplots)</button>
     <label class="note">Scale <input type="number" id="exp-scale" value="2" min="1" max="4" style="width:56px;margin-left:6px"></label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-export-csv">Export events (CSV)</button>
+    <button class="btn" id="btn-export-json">Export events (JSON)</button>
+    <button class="btn" id="btn-import">Import events (CSV/JSON)</button>
+    <input type="file" id="file-input" accept=".csv,.json" style="display:none">
   </div>
 
   <div class="grid">
@@ -204,7 +209,7 @@ function addSingleEvent(){
   const countries = isSW ? [] : parseCountries(document.getElementById('ev-countries').value || 'Sweden');
   let km=0, kpi=0, drop=0;
   if(isSW){
-    drop = +document.getElementById('ev-kpi').value || 10; // use Override KPI field as drop %
+    drop = +document.getElementById('ev-kpi').value || 10; // Override KPI field as drop %
   } else {
     km  = +document.getElementById('ev-km').value || state.types[type].km;
     kpi = +document.getElementById('ev-kpi').value || state.types[type].kpi;
@@ -246,7 +251,7 @@ function loadExample(){
   renderEventsTable(); renderAll();
 }
 
-// ======= Rendering =======
+// ======= Rendering (plots) =======
 function renderAll(){
   refreshTypeWeights(); refreshGlobals();
   const events = state.events.slice().sort((a,b)=>a.start-b.start);
@@ -336,7 +341,6 @@ function renderAll(){
     const day = +state.dayPhase.day, night = +state.dayPhase.night;
     const temps = [{label:'Cold (<5°C)',v:30,c:'#000'},{label:'Mild (5–15°C)',v:50,c:'#ff9800'},{label:'Warm (>15°C)',v:20,c:'#58c4ff'}];
 
-    // leave room on right for legend
     const groupX = d3.scaleBand().domain(['Countries','Day phase','Temperature']).range([120, 820]).padding(0.4);
     const y = d3.scaleLinear().domain([0,100]).range([H-40, 30]);
 
@@ -345,7 +349,7 @@ function renderAll(){
     };
 
     const countriesData = [...top6.map(d=>({label:d.name, v:d.pct, c:colorsCountry[d.name]||'#6aa3ff'})), {label:'Other EU', v:otherPct, c:colorsCountry['Other EU']}];
-    const dayData = [{label:'Daylight', v:day, c:'#e6b800'},{label:'Twilight/Night', v:night, c:'#0a2a6b'}]; // gold & dark blue as requested
+    const dayData = [{label:'Daylight', v:day, c:'#e6b800'},{label:'Twilight/Night', v:night, c:'#0a2a6b'}]; // gold & dark blue
     const tempData = temps;
 
     stack('Countries', countriesData);
@@ -443,6 +447,100 @@ function renderAll(){
   })();
 }
 
+// ======= Import / Export helpers =======
+function serializeEvent(e){
+  return {
+    name: e.name || '',
+    type: e.type === 'SW' ? 'Software update' : e.type,
+    start: fmtDate(e.start),
+    days: e.days || 0,
+    km: e.type === 'SW' ? 0 : (e.km || 0),
+    kpi: e.type === 'SW' ? 0 : (e.kpi || 0),
+    drop: e.type === 'SW' ? (e.drop || 0) : 0,
+    countries: (e.countries || []).slice()
+  };
+}
+function eventsToCSV(events){
+  const rows = [];
+  const header = ['name','type','start','days','km','kpi','drop','countries'];
+  rows.push(header.join(','));
+  const esc = v => {
+    const s = String(v==null?'':v);
+    if (/[",\n]/.test(s)) return `"${s.replace(/"/g,'""')}"`;
+    return s;
+  };
+  for(const e of events){
+    const o = serializeEvent(e);
+    // countries joined by semicolon to keep commas free
+    const cty = o.countries.join('; ');
+    rows.push([o.name,o.type,o.start,o.days,o.km,o.kpi,o.drop,cty].map(esc).join(','));
+  }
+  return rows.join('\n');
+}
+function downloadBlob(text, filename, mime='text/plain'){
+  const blob = new Blob([text],{type:mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+function splitCSVLine(line){
+  const out=[]; let cur=''; let q=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(q){
+      if(ch==='"' && line[i+1]==='"'){ cur+='"'; i++; }
+      else if(ch==='"'){ q=false; }
+      else cur+=ch;
+    } else {
+      if(ch===','){ out.push(cur); cur=''; }
+      else if(ch==='"'){ q=true; }
+      else cur+=ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+function parseCSV(text){
+  const lines = text.split(/\r?\n/).filter(l=>l.trim()!=='');
+  if(!lines.length) return [];
+  const header = splitCSVLine(lines[0]).map(h=>h.trim().toLowerCase());
+  const idx = k => header.indexOf(k);
+  const recs=[];
+  for(let i=1;i<lines.length;i++){
+    const cols = splitCSVLine(lines[i]);
+    const get = k => cols[idx(k)] ?? '';
+    const typeRaw = (get('type')||'').trim();
+    const type = /software/i.test(typeRaw) ? 'SW' : typeRaw.toUpperCase();
+    const start = new Date(get('start'));
+    const days  = +get('days') || 0;
+    const km    = type==='SW' ? 0 : (+get('km')||0);
+    const kpi   = type==='SW' ? 0 : (+get('kpi')||0);
+    const drop  = type==='SW' ? (+get('drop')||0) : 0;
+    const countries = (get('countries')||'').split(';').map(s=>s.trim()).filter(Boolean);
+    recs.push({ name:get('name')||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, countries });
+  }
+  return recs;
+}
+function parseMaybeJSON(text){
+  try{
+    const data = JSON.parse(text);
+    if(Array.isArray(data)){
+      return data.map(o=>{
+        const typeRaw = (o.type||'').toString();
+        const type = /software/i.test(typeRaw) ? 'SW' : typeRaw.toUpperCase();
+        const start = new Date(o.start||o.date||o.begin||Date.now());
+        const days  = +o.days || 0;
+        const km    = type==='SW' ? 0 : (+o.km||0);
+        const kpi   = type==='SW' ? 0 : (+o.kpi||0);
+        const drop  = type==='SW' ? (+o.drop||0) : 0;
+        const countries = Array.isArray(o.countries) ? o.countries : (typeof o.countries==='string' ? o.countries.split(';').map(s=>s.trim()) : []);
+        return { name:o.name||'Imported', type, start, days, end:addDays(start,days), km, kpi, drop, countries };
+      });
+    }
+  }catch(e){}
+  return null;
+}
+
 // ======= Bind UI =======
 function openDate(id){ const el=document.getElementById(id); if(!el) return; try{ if(typeof el.showPicker==='function'){ el.showPicker(); } else { el.focus(); el.click(); } } catch(e){ el.focus(); el.click(); } }
 document.querySelectorAll('.date-btn').forEach(btn=>btn.addEventListener('click', (ev)=>{ ev.preventDefault(); ev.stopPropagation(); openDate(btn.dataset.target); }));
@@ -461,7 +559,7 @@ document.getElementById('btn-load-example').addEventListener('click', loadExampl
     refreshGlobals(); renderAll();
   }));
 
-// ---- EXPORT (combined 5 subplots) ----
+// ---- EXPORT plots (combined 5 subplots) ----
 const SVG_IDS = ['gantt','mileage','kpi','dist','tilemap'];
 function getSVGClone(svg){
   const clone = svg.cloneNode(true);
@@ -514,6 +612,36 @@ async function exportCombinedPNG(){
   download(canvas.toDataURL('image/png'), 'ADAS_combined_5_subplots.png');
 }
 document.getElementById('btn-export-combo').addEventListener('click', exportCombinedPNG);
+
+// ---- EXPORT / IMPORT events ----
+document.getElementById('btn-export-csv').addEventListener('click', ()=>{
+  const csv = eventsToCSV(state.events.slice().sort((a,b)=>a.start-b.start));
+  downloadBlob(csv, 'ADAS_events.csv', 'text/csv;charset=utf-8');
+});
+document.getElementById('btn-export-json').addEventListener('click', ()=>{
+  const json = JSON.stringify(state.events.slice().sort((a,b)=>a.start-b.start).map(serializeEvent), null, 2);
+  downloadBlob(json, 'ADAS_events.json', 'application/json;charset=utf-8');
+});
+document.getElementById('btn-import').addEventListener('click', ()=>{
+  document.getElementById('file-input').value = '';
+  document.getElementById('file-input').click();
+});
+document.getElementById('file-input').addEventListener('change', (ev)=>{
+  const file = ev.target.files && ev.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    const text = reader.result || '';
+    const json = parseMaybeJSON(text);
+    let recs = [];
+    if(json){ recs = json; }
+    else { recs = parseCSV(text); }
+    if(!recs.length){ alert('No events found in file. Make sure it is CSV with header: name,type,start,days,km,kpi,drop,countries or a JSON array.'); return; }
+    // Append to current list
+    state.events.push(...recs);
+    renderEventsTable(); renderAll();
+  };
+  reader.readAsText(file);
+});
 
 // initial render
 renderAll();
