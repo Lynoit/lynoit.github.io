@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Segmented Radar KPI — Multi‑Software</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root{
+      --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; --accent:#1f3de3;
+      --good:#0a9910; --ok:#ffd000; --nok:#d43b3b; --nofunc:#000000;
+    }
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);} 
+    h1{font-size:18px; margin:14px 0 8px;}
+    .wrap{display:grid; grid-template-columns: 380px 1fr; gap:16px; padding:16px; align-items:start;}
+    .panel{background:var(--card); border-radius:14px; padding:12px 12px; box-shadow:0 4px 16px rgba(0,0,0,.06);} 
+    textarea{width:100%; min-height:220px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;}
+    .controls{display:grid; gap:8px; grid-template-columns:minmax(0,1fr) auto auto auto; align-items:center;}
+    .controls label{font-size:12px; color:var(--muted)}
+    button{appearance:none; border:none; background:#111; color:white; padding:8px 12px; border-radius:10px; cursor:pointer}
+    button.secondary{background:#e9ecf5; color:#111}
+    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px;}
+    .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
+    .chart-title{font-weight:700; text-align:center; margin:4px 0 6px}
+    .legend{position:absolute; right:12px; top:12px; font-size:12px; background:rgba(255,255,255,.75); padding:6px 8px; border-radius:8px;}
+    .legend-item{display:flex; align-items:center; gap:6px; margin:3px 0}
+    .swatch{width:12px; height:12px; border-radius:2px}
+    .row{display:flex; gap:10px; align-items:center}
+    .small{font-size:12px; color:var(--muted)}
+    .hint{font-size:12px; color:var(--muted); margin-top:6px}
+    .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h1>Input (paste TSV/CSV)</h1>
+      <div class="controls" style="margin-bottom:8px">
+        <label>Delimiter:</label>
+        <select id="delimiter">
+          <option value="auto">Auto‑detect</option>
+          <option value=",">Comma</option>
+          <option value="\t" selected>Tab</option>
+          <option value=";">Semicolon</option>
+        </select>
+        <button id="btnLoad" class="secondary">Load example</button>
+        <button id="btnRender">Generate charts</button>
+      </div>
+      <textarea id="dataIn" spellcheck="false"></textarea>
+      <div class="hint">Format: First column = <b>Function — KPI</b>, then <b>Target</b>, <b>Max allowed</b>, then one or more <b>software columns</b> (e.g., 0824(TO), 0830(TO), ...). Empty cells allowed.</div>
+    </div>
+
+    <div class="panel">
+      <div id="charts" class="charts"></div>
+    </div>
+  </div>
+
+<script>
+// ====== Utility helpers ======
+const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
+function colorFor(v, tgt, max){
+  if(v == null || isNaN(v)) return null;
+  if(v === 1000) return BLACK; // No function
+  if(v <= tgt) return GREEN;   // Good
+  if(v < (max + 1)) return YELLOW; // OK (Target..Max)
+  return RED; // NOK
+}
+function parseNumber(x){ if(x==null) return null; const t=(""+x).trim(); if(t==='') return null; const v=Number(t.replace(',', '.')); return isNaN(v)?null:v; }
+function detectDelimiter(text){
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if(!lines.length) return '\t';
+  if(document.getElementById('delimiter').value!=='auto') return document.getElementById('delimiter').value;
+  const cand=['\t',',',';']; let best='\t', bestCnt=0;
+  for(const d of cand){ const c=lines[0].split(d).length; if(c>bestCnt){bestCnt=c; best=d;} }
+  return best;
+}
+
+function splitFuncKpi(s){
+  // Split "ACC — False brake" or "ACC - False brake"
+  if(!s) return {func:'', kpi:''};
+  const em = s.split('—');
+  if(em.length>=2) return {func:em[0].trim(), kpi:em.slice(1).join('—').trim()};
+  const dash = s.split(' - ');
+  if(dash.length>=2) return {func:dash[0].trim(), kpi:dash.slice(1).join(' - ').trim()};
+  // Fallback: first token as func
+  const sp = s.split(' ');
+  return {func: sp[0]||'', kpi: s}
+}
+
+function parseTable(text){
+  const delim = detectDelimiter(text);
+  const rows = text.split(/\r?\n/).filter(r=>r.trim().length>0).map(r=>r.split(delim));
+  if(!rows.length) return {headers:[], entries:[]};
+  const headers = rows[0].map(h=>h.trim());
+  const hIdx = {
+    main: 0,
+    target: headers.findIndex(h=>/^target$/i.test(h)),
+    max: headers.findIndex(h=>/^max\s*allowed$/i.test(h))
+  };
+  if(hIdx.target<0 || hIdx.max<0){
+    alert('Missing required columns: Target and Max allowed');
+    return {headers, entries:[]};
+  }
+  // Collect software columns (everything after Max allowed)
+  const swCols = [];
+  for(let i=hIdx.max+1;i<headers.length;i++){
+    const base = headers[i].trim();
+    // Dedup identical labels like "0830(TO)"
+    const countPrev = swCols.filter(s=>s.base===base).length;
+    const label = countPrev? `${base} — ${countPrev+1}` : base;
+    swCols.push({idx:i, base, label});
+  }
+  // Normalize labels e.g. "0824(TO)" -> "0824 (TO)"
+  swCols.forEach(s=>{ s.label = s.label.replace('(TO)', ' (TO)'); });
+
+  const entries = [];
+  for(let r=1;r<rows.length;r++){
+    const row = rows[r];
+    if(!row || row.length===0) continue;
+    const {func, kpi} = splitFuncKpi((row[0]||'').trim());
+    if(!func && !kpi) continue;
+    const target = parseNumber(row[hIdx.target]);
+    const max = parseNumber(row[hIdx.max]);
+    const values = {};
+    for(const sw of swCols){ values[sw.label] = parseNumber(row[sw.idx]); }
+    entries.push({func, kpi, target, max, values});
+  }
+  return {headers, entries, software: swCols.map(s=>s.label)};
+}
+
+// ====== Chart renderer (SVG + D3) ======
+function renderCharts(parsed){
+  const container = d3.select('#charts').html('');
+  if(!parsed || !parsed.entries || !parsed.entries.length){
+    container.append('div').attr('class','small').text('No data to render.');
+    return;
+  }
+  const functions = [];
+  parsed.entries.forEach(e=>{ if(!functions.includes(e.func)) functions.push(e.func); });
+  const rings = [1,3,10,30,100,300,1000];
+
+  const RENDERED = [];
+  (parsed.software||[]).forEach(swLabel=>{
+    // Only render if at least one value exists for this software
+    const hasAny = parsed.entries.some(e=> e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]) );
+    if(!hasAny) return;
+
+    const card = container.append('div').attr('class','chart-card');
+    card.append('div').attr('class','chart-title').text(swLabel);
+    const w=520, h=520, pad=18, rMax=Math.min(w,h)/2 - 34;
+
+    const svg = card.append('svg').attr('width', w).attr('height', h);
+    const g = svg.append('g').attr('transform', `translate(${w/2},${h/2})`);
+
+    // Download button
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg.node())],{type:'image/svg+xml'}));
+      const img=new Image();
+      img.onload=()=>{ const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h; const ctx=canvas.getContext('2d');
+        ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h); ctx.drawImage(img,0,0); const a=document.createElement('a'); a.download=`${swLabel.replaceAll(' ','_')}.png`; a.href=canvas.toDataURL('image/png'); a.click(); URL.revokeObjectURL(url); };
+      img.src=url;
+    });
+
+    // Legend
+    const legend = card.append('div').attr('class','legend');
+    const items=[['Good',GREEN],['OK',YELLOW],['NOK',RED],['No function',BLACK]];
+    items.forEach(([label,color])=>{
+      const row=document.createElement('div'); row.className='legend-item';
+      const sw=document.createElement('div'); sw.className='swatch'; sw.style.background=color; row.appendChild(sw);
+      const span=document.createElement('span'); span.textContent=label; row.appendChild(span);
+      legend.node().appendChild(row);
+    });
+
+    // Scales
+    const rScale = d3.scaleLog().domain([1,1000]).range([0, rMax]);
+    const toR = v => (v==null? null : (v<=0? 0 : rScale(Math.min(v,1000))));
+
+    const F = functions.length; const wedge = (Math.PI*2)/F; const innerFrac=0.78; const spread=wedge*innerFrac;
+
+    // Grid rings + numeric labels along theta=0
+    g.selectAll('.ring').data(rings).enter().append('circle')
+      .attr('class','ring')
+      .attr('r', d=>toR(d))
+      .attr('fill','none')
+      .attr('stroke','#999')
+      .attr('stroke-opacity',0.25);
+    g.selectAll('.rlabel').data(rings).enter().append('text')
+      .attr('class','rlabel')
+      .attr('x', 6)
+      .attr('y', d=> -toR(d))
+      .attr('dominant-baseline','middle')
+      .attr('font-size', 11)
+      .attr('fill', '#666')
+      .text(d=>d);
+
+    // Axis label (left of vertical axis, rotated 90°)
+    g.append('text')
+      .attr('x', -10).attr('y', -rMax*0.7)
+      .attr('transform', `rotate(-90)`)
+      .attr('text-anchor','middle')
+      .attr('font-size', 11)
+      .text('Number of events');
+
+    // Segment boundaries + function labels
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge; // theta=0 at top
+      // boundary line
+      const x1 = Math.cos(start)*rMax, y1 = Math.sin(start)*rMax;
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2',x1).attr('y2',y1)
+        .attr('stroke','#000').attr('stroke-opacity',0.25);
+      // function label at outer ring (horizontal)
+      const cen = start + wedge/2;
+      const lx = Math.cos(cen)*(rMax+16), ly = Math.sin(cen)*(rMax+16);
+      g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+        .attr('font-weight',700).text(f);
+    });
+
+    // Per-function KPI dots
+    functions.forEach((f, idx)=>{
+      const center = -Math.PI/2 + idx*wedge + wedge/2;
+      const items = parsed.entries.filter(e=>e.func===f);
+      const K = items.length; const offs = (K===1)?[0]:d3.range(K).map(i=> (i-(K-1)/2)/(K-1)*spread*0.5 );
+
+      items.forEach((e,i)=>{
+        const v = e.values[swLabel]; if(v==null || Number.isNaN(v)) return;
+        const r = toR(v); const ang = center + offs[i];
+        const color = colorFor(v, e.target, e.max);
+        if(!color) return;
+        const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
+        // dot
+        g.append('circle').attr('cx',cx).attr('cy',cy).attr('r',14).attr('fill',color);
+        // label above dot
+        const lx = Math.cos(ang)*(Math.min(r + 22, rMax*1.06));
+        const ly = Math.sin(ang)*(Math.min(r + 22, rMax*1.06));
+        g.append('text')
+          .attr('x', lx)
+          .attr('y', ly)
+          .attr('text-anchor','middle')
+          .attr('font-size', 11)
+          .attr('paint-order', 'stroke')
+          .attr('stroke', 'white')
+          .attr('stroke-width', 3)
+          .text(e.kpi);
+      });
+    });
+
+    RENDERED.push(swLabel);
+  });
+
+  if(RENDERED.length===0){
+    container.append('div').attr('class','small').text('No software columns with values found.');
+  }
+}
+
+// ====== Example dataset ======
+const EXAMPLE = `\tTarget\tMax allowed\t0824(TO)\t0830(TO)\t0830(TO)
+ACC — False brake\t2\t5\t486\t1000\t1359
+ACC — Longitudinal jerk\t4\t7\t220\t1000\t262
+LCC — Poor Lane Centering Performance\t4\t7\t117\t1000\t1000
+LCC — Lateral deviation\t4\t7\t104\t1000\t1000
+LCC — Cancel for no reason\t2\t5\t19\t1000\t1000
+LCC — Available outside ODD\t4\t7\t13\t1000\t1000
+LKA — ELKA false positive\t2\t5\t6\t1000\t1000
+ALCA — Not available within ODD\t2\t5\t6\t1000\t0
+DMS — Unnecessary DMS warning\t2\t5\t\t\t
+ACC — Cut-out performance\t4\t7\t\t\t
+ACC — Cut-in performance\t4\t7\t\t\t
+ACC — Target drop\t2\t5\t\t\t
+LCC — Not available within ODD\t4\t7`;
+
+// ====== Wire up UI ======
+const ta = document.getElementById('dataIn');
+const btnLoad = document.getElementById('btnLoad');
+const btnRender = document.getElementById('btnRender');
+
+btnLoad.onclick = ()=>{ ta.value = EXAMPLE; };
+btnRender.onclick = ()=>{ const parsed = parseTable(ta.value); renderCharts(parsed); };
+
+// Auto-load example initially
+btnLoad.click();
+btnRender.click();
+</script>
+</body>
+</html>
