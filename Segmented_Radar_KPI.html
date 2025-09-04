@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Segmented Radar KPI — Multi-Software</title>
+  <title>Segmented Radar KPI — Multi‑Software (with Scoring)</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
     :root{
@@ -13,7 +13,7 @@
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
     h1{font-size:18px; margin:14px 0 8px;}
     .wrap{display:grid; grid-template-columns: 380px 1fr; gap:16px; padding:16px; align-items:start;}
-    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
+    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);} 
     .controls{display:grid; gap:8px; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; margin-bottom:8px;}
     .controls label{font-size:12px; color:var(--muted)}
     textarea{width:100%; min-height:220px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;}
@@ -23,6 +23,13 @@
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
     .small{font-size:12px; color:#666}
+    /* scoring band styles (HTML fallback if ever needed) */
+    .scorewrap{margin:8px 6px 4px; padding:8px; background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(0,0,0,.06)}
+    .score-title{font-size:12px; margin-bottom:6px}
+    .score-table{display:grid; grid-template-columns:repeat(10,1fr); gap:2px}
+    .score-cell{height:40px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius:6px}
+    .score-cell strong{font-size:12px; line-height:1}
+    .score-label{font-size:10px; line-height:1}
   </style>
 </head>
 <body>
@@ -33,7 +40,7 @@
         <div>
           <label>Delimiter:</label>
           <select id="delimiter">
-            <option value="auto" selected>Auto-detect</option>
+            <option value="auto" selected>Auto‑detect</option>
             <option value=",">Comma</option>
             <option value="\t">Tab</option>
             <option value=";">Semicolon</option>
@@ -181,11 +188,11 @@ function renderCharts(parsed){
       img.src = url;
     });
 
-    /* --- Layout: reserve space for legend on the right --- */
-    const w = 600, h = 560;
+    /* --- Layout: reserve space for legend on the right, and scoring band below --- */
+    const w = 600, baseH = 560, scoreH = 110, h = baseH + scoreH;
     const legW = 160, legPad = 8, legItemH = 18, legOffset = 12;
     const centerX = (w - (legW + legOffset)) / 2;
-    const centerY = h / 2;
+    const centerY = baseH / 2;
     const rMax = Math.min(centerX, centerY) - 16;
 
     const svg = card.append('svg').attr('width', w).attr('height', h);
@@ -368,6 +375,66 @@ function renderCharts(parsed){
           .text(e.kpi);
       });
     });
+
+    // ---- Scoring band (inside SVG so it exports) ----
+    const valuesForAvg = parsed.entries
+      .map(e => e.values[swLabel])
+      .filter(v => v != null && !Number.isNaN(v) && v !== 1000);
+    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
+    function scoreFromAvg(a){
+      if (a == null || Number.isNaN(a)) return null;
+      if (a === 0) return 10;        // Exceptional
+      if (a >= 50) return 1;         // Worst
+      if (a >= 30) return 2;         // Too bad
+      if (a >= 20) return 3;         // Bad
+      if (a >= 15) return 4;         // Not good
+      if (a >= 10) return 5;         // Unacceptable
+      if (a >= 7)  return 6;         // Marginal
+      if (a >= 5)  return 7;         // Acceptable
+      if (a >= 2)  return 8;         // Good
+      if (a >= 1)  return 9;         // Impressive
+      return 10;                      // 0 < a < 1
+    }
+    const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+    const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents);
+
+    const scoreG = svg.append('g').attr('class','score-band').attr('transform', `translate(0, ${baseH})`);
+    const barMargin = 20, barH = 42; // band size
+    const barW = w - barMargin*2;
+    const boxW = barW / 10;
+
+    const caption = (avgEvents==null)
+      ? 'Average: n/a (only "No function" or missing values)'
+      : `Average: ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
+    scoreG.append('text')
+      .attr('x', barMargin)
+      .attr('y', 12)
+      .attr('font-size', 12)
+      .text(caption);
+
+    for (let i=0;i<10;i++){
+      const x = barMargin + i*boxW;
+      scoreG.append('rect')
+        .attr('x', x).attr('y', 20)
+        .attr('width', boxW).attr('height', barH)
+        .attr('fill', scoreColors[i])
+        .attr('stroke', (score === i+1) ? '#000' : '#111')
+        .attr('stroke-width', (score === i+1) ? 2 : 0.4);
+      // number
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 20 + 14)
+        .attr('text-anchor','middle')
+        .attr('font-weight',700)
+        .attr('font-size', 12)
+        .text(i+1);
+      // label
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 20 + 14 + 16)
+        .attr('text-anchor','middle')
+        .attr('font-size', 10)
+        .text(scoreText[i]);
+    }
   });
 
   if (!container.node().children.length){
