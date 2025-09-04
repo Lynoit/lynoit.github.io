@@ -3,53 +3,51 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Segmented Radar KPI — Multi‑Software (with Scoring)</title>
+  <title>Segmented Radar KPI — Multi‑Software</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
     :root{
-      --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb;
+      --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; --accent:#1f3de3;
       --good:#0a9910; --ok:#ffd000; --nok:#d43b3b; --nofunc:#000000;
     }
-    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);} 
     h1{font-size:18px; margin:14px 0 8px;}
     .wrap{display:grid; grid-template-columns: 380px 1fr; gap:16px; padding:16px; align-items:start;}
-    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);} 
-    .controls{display:grid; gap:8px; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; margin-bottom:8px;}
-    .controls label{font-size:12px; color:var(--muted)}
+    .panel{background:var(--card); border-radius:14px; padding:12px 12px; box-shadow:0 4px 16px rgba(0,0,0,.06);} 
     textarea{width:100%; min-height:220px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;}
+    .controls{display:grid; gap:8px; grid-template-columns:minmax(0,1fr) auto auto auto; align-items:center;}
+    .controls label{font-size:12px; color:var(--muted)}
     button{appearance:none; border:none; background:#111; color:white; padding:8px 12px; border-radius:10px; cursor:pointer}
     button.secondary{background:#e9ecf5; color:#111}
-    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px;}
+    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px;}
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
+    .chart-title{font-weight:700; text-align:center; margin:4px 0 6px}
+    .legend{display:none !important;}
+    .legend-item{display:flex; align-items:center; gap:6px; margin:3px 0}
+    .swatch{width:12px; height:12px; border-radius:2px}
+    .row{display:flex; gap:10px; align-items:center}
+    .small{font-size:12px; color:var(--muted)}
+    .hint{font-size:12px; color:var(--muted); margin-top:6px}
     .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
-    .small{font-size:12px; color:#666}
-    /* scoring band styles (HTML fallback if ever needed) */
-    .scorewrap{margin:8px 6px 4px; padding:8px; background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(0,0,0,.06)}
-    .score-title{font-size:12px; margin-bottom:6px}
-    .score-table{display:grid; grid-template-columns:repeat(10,1fr); gap:2px}
-    .score-cell{height:40px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius:6px}
-    .score-cell strong{font-size:12px; line-height:1}
-    .score-label{font-size:10px; line-height:1}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="panel">
       <h1>Input (paste TSV/CSV)</h1>
-      <div class="controls">
-        <div>
-          <label>Delimiter:</label>
-          <select id="delimiter">
-            <option value="auto" selected>Auto‑detect</option>
-            <option value=",">Comma</option>
-            <option value="\t">Tab</option>
-            <option value=";">Semicolon</option>
-          </select>
-        </div>
+      <div class="controls" style="margin-bottom:8px">
+        <label>Delimiter:</label>
+        <select id="delimiter">
+          <option value="auto" selected>Auto‑detect</option>
+          <option value=",">Comma</option>
+          <option value="	">Tab</option>
+          <option value=";">Semicolon</option>
+        </select>
+        <button id="btnLoad" class="secondary">Load example</button>
         <button id="btnRender">Generate charts</button>
       </div>
-      <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  0824(TO),  0830(TO), ..."></textarea>
-      <div class="small">Rules: ≤Target = <b>Green</b>, Target…(Max allowed) = <b>Yellow</b>, &gt;Max allowed = <b>Red</b>, value = 1000 = <b>Black</b>.</div>
+      <textarea id="dataIn" spellcheck="false"></textarea>
+      <div class="hint">Format: First column = <b>Function — KPI</b>, then <b>Target</b>, <b>Max allowed</b>, then one or more <b>software columns</b> (e.g., 0824(TO), 0830(TO), ...). Empty cells allowed.</div>
     </div>
 
     <div class="panel">
@@ -58,210 +56,197 @@
   </div>
 
 <script>
-/* ---------- Colors & helpers ---------- */
+// ====== Utility helpers ======
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
-
 function colorFor(v, tgt, max){
-  if (v == null || Number.isNaN(v)) return null;
-  if (v === 1000) return BLACK;         // No function
-  if (v <= tgt) return GREEN;           // Good
-  if (v < (max + 1)) return YELLOW;     // OK (Target..Max)
-  return RED;                           // NOK
+  if(v == null || isNaN(v)) return null;
+  if(v === 1000) return BLACK; // No function
+  if(v <= tgt) return GREEN;   // Good
+  if(v < (max + 1)) return YELLOW; // OK (Target..Max)
+  return RED; // NOK
 }
-function parseNumber(x){
-  if (x==null) return null;
-  const t = (""+x).trim();
-  if (!t) return null;
-  const v = Number(t.replace(',', '.'));
-  return isNaN(v) ? null : v;
-}
+function parseNumber(x){ if(x==null) return null; const t=(""+x).trim(); if(t==='') return null; const v=Number(t.replace(',', '.')); return isNaN(v)?null:v; }
 function detectDelimiter(text){
   const lines = text.split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return '\t';
-  const sel = document.getElementById('delimiter').value;
-  if (sel !== 'auto') return sel;
-  const cand = ['\t', ',', ';'];
-  let best = '\t', bestCnt = 0;
-  for (const d of cand){ const c = lines[0].split(d).length; if (c > bestCnt){ bestCnt = c; best = d; } }
+  if(!lines.length) return '\t';
+  if(document.getElementById('delimiter').value!=='auto') return document.getElementById('delimiter').value;
+  const cand=['\t',',',';']; let best='\t', bestCnt=0;
+  for(const d of cand){ const c=lines[0].split(d).length; if(c>bestCnt){bestCnt=c; best=d;} }
   return best;
 }
+
 function splitFuncKpi(s){
-  if (!s) return {func:'', kpi:''};
-  const em = s.split('—'); if (em.length>=2) return {func:em[0].trim(), kpi:em.slice(1).join('—').trim()};
-  const dash = s.split(' - '); if (dash.length>=2) return {func:dash[0].trim(), kpi:dash.slice(1).join(' - ').trim()};
+  // Split "ACC — False brake" or "ACC - False brake"
+  if(!s) return {func:'', kpi:''};
+  const em = s.split('—');
+  if(em.length>=2) return {func:em[0].trim(), kpi:em.slice(1).join('—').trim()};
+  const dash = s.split(' - ');
+  if(dash.length>=2) return {func:dash[0].trim(), kpi:dash.slice(1).join(' - ').trim()};
+  // Fallback: first token as func
   const sp = s.split(' ');
-  return {func: sp[0]||'', kpi: s};
-}
-function normalizeHeader(h){
-  if(!h) return '';
-  return h.toLowerCase()
-    .replace(/\u00a0/g,' ')      // NBSP → space
-    .replace(/\s+/g,' ')         // collapse spaces
-    .replace(/[^a-z0-9 ]/g,'')   // strip punctuation
-    .trim();
+  return {func: sp[0]||'', kpi: s}
 }
 
-/* ---------- Parse table ---------- */
 function parseTable(text){
-  const selectVal = document.getElementById('delimiter').value;
-  const tryParse = (d)=> text.split(/\r?\n/)
-      .filter(r=>r.trim().length>0)
-      .map(r=>r.split(d));
-
-  let delim = (selectVal==='auto') ? detectDelimiter(text) : selectVal;
-  let rows = tryParse(delim);
-  if (!rows.length) return {headers:[], entries:[], software:[]};
-
-  let headers = rows[0].map(h=>h.trim());
-  let norm = headers.map(normalizeHeader);
-  let idxTarget = norm.findIndex(h=> h==='target');
-  let idxMax = norm.findIndex(h=> h==='max allowed' || h==='maxallowed');
-
-  // fallback to auto if user forced wrong delimiter
-  if ((idxTarget<0 || idxMax<0) && selectVal!=='auto'){
-    const auto = detectDelimiter(text);
-    if (auto !== delim){
-      delim = auto; rows = tryParse(delim); headers = rows[0].map(h=>h.trim()); norm = headers.map(normalizeHeader);
-      idxTarget = norm.findIndex(h=> h==='target');
-      idxMax = norm.findIndex(h=> h==='max allowed' || h==='maxallowed');
-    }
+  const delim = detectDelimiter(text);
+  const rows = text.split(/\r?\n/).filter(r=>r.trim().length>0).map(r=>r.split(delim));
+  if(!rows.length) return {headers:[], entries:[]};
+  const headers = rows[0].map(h=>h.trim());
+  const hIdx = {
+    main: 0,
+    target: headers.findIndex(h=>/^target$/i.test(h)),
+    max: headers.findIndex(h=>/^max\s*allowed$/i.test(h))
+  };
+  if(hIdx.target<0 || hIdx.max<0){
+    alert('Missing required columns: Target and Max allowed');
+    return {headers, entries:[]};
   }
-  if (idxTarget<0 || idxMax<0){
-    alert("Missing required columns: 'Target' and 'Max allowed'. Try Auto-detect delimiter.\nHeaders seen: " + headers.join(', '));
-    return {headers, entries:[], software:[]};
-  }
-
-  // software columns (dedupe identical names like 0830(TO))
+  // Collect software columns (everything after Max allowed)
   const swCols = [];
-  for (let i = idxMax+1; i < headers.length; i++){
+  for(let i=hIdx.max+1;i<headers.length;i++){
     const base = headers[i].trim();
-    const countPrev = swCols.filter(s => s.base===base).length;
-    const label = countPrev ? `${base} — ${countPrev+1}` : base;
-    swCols.push({idx:i, base, label: label.replace('(TO)', ' (TO)')});
+    // Dedup identical labels like "0830(TO)"
+    const countPrev = swCols.filter(s=>s.base===base).length;
+    const label = countPrev? `${base} — ${countPrev+1}` : base;
+    swCols.push({idx:i, base, label});
   }
+  // Normalize labels e.g. "0824(TO)" -> "0824 (TO)"
+  swCols.forEach(s=>{ s.label = s.label.replace('(TO)', ' (TO)'); });
 
   const entries = [];
-  for (let r=1; r<rows.length; r++){
+  for(let r=1;r<rows.length;r++){
     const row = rows[r];
-    if (!row || row.length===0) continue;
+    if(!row || row.length===0) continue;
     const {func, kpi} = splitFuncKpi((row[0]||'').trim());
-    if (!func && !kpi) continue;
-    const target = parseNumber(row[idxTarget]);
-    const max = parseNumber(row[idxMax]);
+    if(!func && !kpi) continue;
+    const target = parseNumber(row[hIdx.target]);
+    const max = parseNumber(row[hIdx.max]);
     const values = {};
-    for (const sw of swCols){ values[sw.label] = parseNumber(row[sw.idx]); }
+    for(const sw of swCols){ values[sw.label] = parseNumber(row[sw.idx]); }
     entries.push({func, kpi, target, max, values});
   }
   return {headers, entries, software: swCols.map(s=>s.label)};
 }
 
-/* ---------- Renderer ---------- */
+// ====== Chart renderer (SVG + D3) ======
 function renderCharts(parsed){
   const container = d3.select('#charts').html('');
-  if (!parsed || !parsed.entries || !parsed.entries.length){
+  if(!parsed || !parsed.entries || !parsed.entries.length){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
+  const rings = [1,3,10,30,100,300,1000];
 
+  const RENDERED = [];
   (parsed.software||[]).forEach(swLabel=>{
-    // Only render chart if this software has at least one numeric value
-    const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
-    if (!hasAny) return;
+    // Only render if at least one value exists for this software
+    const hasAny = parsed.entries.some(e=> e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]) );
+    if(!hasAny) return;
 
     const card = container.append('div').attr('class','chart-card');
-
-    // Download button
-    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
-      const svg = card.select('svg').node();
-      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type:'image/svg+xml'}));
-      const img = new Image();
-      const w = svg.viewBox.baseVal && svg.viewBox.baseVal.width ? svg.viewBox.baseVal.width : svg.width.baseVal.value;
-      const h = svg.viewBox.baseVal && svg.viewBox.baseVal.height ? svg.viewBox.baseVal.height : svg.height.baseVal.value;
-      img.onload = ()=>{
-        const canvas = document.createElement('canvas'); canvas.width=w; canvas.height=h;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,w,h);
-        ctx.drawImage(img,0,0);
-        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
-    });
-
-    /* --- Layout: reserve space for legend on the right, and scoring band below --- */
-    const w = 600, baseH = 560, scoreH = 110, h = baseH + scoreH;
-    const legW = 160, legPad = 8, legItemH = 18, legOffset = 12;
-    const centerX = (w - (legW + legOffset)) / 2;
-    const centerY = baseH / 2;
-    const rMax = Math.min(centerX, centerY) - 16;
+    // (title drawn inside SVG for export)
+    const w=520, h=520, pad=18; // dynamic radius so legend never overlaps
+    const legW = 160, legPad = 8, legItemH = 18, legOffset = 12; // legend dims (SVG)
+    const centerX = (w - (legW + legOffset)) / 2; // shift plot left to make room for legend
+    const centerY = h / 2;
+    let rMax = Math.min(centerX, centerY) - 16;
 
     const svg = card.append('svg').attr('width', w).attr('height', h);
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
-    // Title inside SVG (exports)
+    // SVG Title (included in export)
     svg.append('text')
-      .attr('x', w/2).attr('y', 20)
-      .attr('text-anchor', 'middle').attr('font-weight', 700)
+      .attr('x', w/2)
+      .attr('y', 18)
+      .attr('text-anchor', 'middle')
+      .attr('font-weight', 700)
       .text(swLabel);
 
-    // SVG Legend (exports)
+    // SVG Legend (included in export)
+    // (legend dims defined above)
+    // legend dims defined above; using existing legW/legPad/legItemH
     const legendItems = [
       {label:'Green = Good',  color: GREEN},
       {label:'Yellow = OK',   color: YELLOW},
       {label:'Red = NOK',     color: RED},
       {label:'Black = No function', color: BLACK},
     ];
+    // using legend dims defined above: legW, legPad, legItemH
     const legendG = svg.append('g')
       .attr('class','svg-legend')
-      .attr('transform', `translate(${w - legW - 12}, 32)`);
+      .attr('transform', `translate(${w - legW - 12}, 28)`);
+
     legendG.append('rect')
       .attr('rx',8).attr('ry',8)
       .attr('width', legW)
       .attr('height', legPad*2 + legItemH*legendItems.length)
       .attr('fill', '#ffffff').attr('fill-opacity', 0.85)
       .attr('stroke', 'none');
-    legendItems.forEach((it, i)=>{
+
+    legendItems.forEach((it, i) => {
       const y = legPad + i*legItemH + 12;
-      legendG.append('rect').attr('x', legPad).attr('y', y-7)
-        .attr('width',12).attr('height',12).attr('fill', it.color);
-      legendG.append('text').attr('x', legPad+18).attr('y', y)
-        .attr('dominant-baseline','middle').attr('font-size', 12)
+      legendG.append('rect')
+        .attr('x', legPad).attr('y', y-7)
+        .attr('width',12).attr('height',12)
+        .attr('fill', it.color);
+      legendG.append('text')
+        .attr('x', legPad+18).attr('y', y)
+        .attr('dominant-baseline','middle')
+        .attr('font-size', 12)
         .text(it.label);
     });
 
-    // Functions for THIS software (skip functions with no values)
+    // Build function list for THIS software: only functions with at least one numeric KPI value
     const functions = [];
     parsed.entries.forEach(e=>{
       const v = e.values[swLabel];
-      if (v!=null && !Number.isNaN(v) && !functions.includes(e.func)) functions.push(e.func);
+      if(v!=null && !Number.isNaN(v) && !functions.includes(e.func)) functions.push(e.func);
     });
-    if (!functions.length){
+    if(functions.length===0){
       card.append('div').attr('class','small').text('No KPI values for this software.');
       return;
     }
 
-    // Piecewise radius: 0–10 linear, 10–1000 log
-    const linearPortion = 0.55;             // fraction of radius
+    // Download button
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg.node())],{type:'image/svg+xml'}));
+      const img=new Image();
+      img.onload=()=>{ const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h; const ctx=canvas.getContext('2d');
+        ctx.fillStyle='#fff'; ctx.fillRect(0,0,w,h); ctx.drawImage(img,0,0); const a=document.createElement('a'); a.download=`${swLabel.replaceAll(' ','_')}.png`; a.href=canvas.toDataURL('image/png'); a.click(); URL.revokeObjectURL(url); };
+      img.src=url;
+    });
+
+    // Legend
+    const legend = /* HTML legend removed — using SVG legend inside <svg> for export */);
+
+    // Scales
+    // Scales — piecewise radial mapping: linear 0–10, logarithmic 10–1000
+    const linearPortion = 0.55;                 // fraction of radius reserved for 0–10 (tweakable)
     const rLinear = rMax * linearPortion;
     const logMin = 10, logMax = 1000;
     const logDen = Math.log10(logMax) - Math.log10(logMin);
     function toR(v){
-      if (v==null || Number.isNaN(v)) return null;
-      if (v <= 0) return 0;
+      if(v==null || Number.isNaN(v)) return null;
+      if(v <= 0) return 0;
       const vv = Math.min(v, logMax);
-      if (vv < logMin) return (vv / logMin) * rLinear;
+      if(vv < logMin){
+        return (vv / logMin) * rLinear;
+      }
       return rLinear + ((Math.log10(vv) - Math.log10(logMin)) / logDen) * (rMax - rLinear);
     }
 
-    // Grid rings & labels (1..10 plus 30, 100, 300, 1000)
+    const F = functions.length; const wedge = (Math.PI*2)/F; const innerFrac=0.98; const spread=wedge*innerFrac;
+
+    // Grid rings: circles at 1–10 (incl. 7, 9), 30, 100, 300, 1000; label ALL rings
     const ringGrid = [1,2,3,4,5,6,7,8,9,10,30,100,300,1000];
+    const ringLabels = ringGrid.slice();
     g.selectAll('.ring').data(ringGrid).enter().append('circle')
       .attr('class','ring')
       .attr('r', d=>toR(d))
       .attr('fill','none')
       .attr('stroke','#999')
       .attr('stroke-opacity',0.22);
-    g.selectAll('.rlabel').data(ringGrid).enter().append('text')
+    g.selectAll('.rlabel').data(ringLabels).enter().append('text')
       .attr('class','rlabel')
       .attr('x', 6)
       .attr('y', d=> -toR(d))
@@ -270,184 +255,134 @@ function renderCharts(parsed){
       .attr('fill', '#666')
       .text(d=>d);
 
-    // Axis label aligned with vertical axis (left side), rotated
+    // Axis label aligned with theta=0 (vertical) axis — left side, rotated 90° and pivoted on axis
     const axisY = -rMax * 0.70;
     g.append('text')
-      .attr('x', -8)
-      .attr('y', axisY)
-      .attr('transform', `rotate(-90, 0, ${axisY})`)
-      .attr('text-anchor','end')
+      .attr('x', -8)                    // small left offset so it doesn't touch the axis line
+      .attr('y', axisY)                 // place along the same axis as the ring labels (y negative = up)
+      .attr('transform', `rotate(-90, 0, ${axisY})`)  // rotate around the axis point
+      .attr('text-anchor','end')        // align text to the left of the axis
       .attr('font-size', 11)
       .text('Number of events');
 
-    // Segment backgrounds + boundaries + function labels
-    const F = functions.length;
-    const wedge = (Math.PI*2) / F;
-    const innerFrac = 0.98;
-    const spread = wedge * innerFrac;
-
+    // Segment backgrounds, boundaries + function labels
     const arc = d3.arc();
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const end = start + wedge;
-      // subtle background
+      // background wedge to clarify segment ownership
       g.append('path')
         .attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
         .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff')
         .attr('fill-opacity', 0.06)
-        .attr('stroke', 'none');
-      // boundary
-      g.append('line')
-        .attr('x1',0).attr('y1',0)
-        .attr('x2', Math.cos(start)*rMax)
-        .attr('y2', Math.sin(start)*rMax)
+        .attr('stroke','none');
+      // boundary line
+      const x1 = Math.cos(start)*rMax, y1 = Math.sin(start)*rMax;
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2',x1).attr('y2',y1)
         .attr('stroke','#000').attr('stroke-opacity',0.25);
-      // function label (blue)
-      const cen = (start + end) / 2;
-      g.append('text')
-        .attr('x', Math.cos(cen)*(rMax+16))
-        .attr('y', Math.sin(cen)*(rMax+16))
-        .attr('text-anchor','middle')
-        .attr('font-weight',700)
-        .attr('fill','#1f3de3')
-        .text(f);
+      // function label at outer ring (horizontal)
+      const cen = (start + end)/2;
+      const lx = Math.cos(cen)*(rMax+16), ly = Math.sin(cen)*(rMax+16);
+      g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+        .attr('font-weight',700).attr('fill','#1f3de3').text(f);
     });
 
-    // Per-function KPI dots (spread + collision avoidance + black-dot avoidance)
+    // Per-function KPI dots (with wider spread, collision avoidance, and label-avoid zone for black dots)
     functions.forEach((f, idx)=>{
-      const start = -Math.PI/2 + idx*wedge;
-      const center = start + wedge/2;
-
+      const center = -Math.PI/2 + idx*wedge + wedge/2;
       const items = parsed.entries.filter(e=>e.func===f);
       const K = items.length;
-      const avail = spread * 0.96;
+      const avail = spread * 0.96;               // use ~92% of the wedge for placement
       const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
 
-      const placed = [];
-      const minSep = wedge * 0.09;
-      const radBin = rMax * 0.12;
-      const labelAvoid = wedge * 0.18;
+      const placed = [];                         // placed dots for simple collision avoidance
+      const minSep = wedge * 0.09;               // minimum angular separation between dots
+      const radBin = rMax * 0.12;                // consider dots "overlapping" if radii are within this bin
+      const labelAvoid = wedge * 0.18;           // avoid +/- this angle around center for black dots (1000)
 
-      items.forEach((e, i)=>{
-        const v = e.values[swLabel]; if (v==null || Number.isNaN(v)) return;
+      items.forEach((e,i)=>{
+        const v = e.values[swLabel]; if(v==null || Number.isNaN(v)) return;
         let r = toR(v);
         let ang = center + baseOffs[i];
         const isBlack = (v === 1000);
 
-        if (isBlack && Math.abs(ang - center) < labelAvoid){
+        // Nudge black dots away from the center axis (where function label sits)
+        if(isBlack && Math.abs(ang - center) < labelAvoid){
           const dir = (ang >= center) ? 1 : -1;
           ang = center + dir * (labelAvoid + wedge*0.02);
         }
+        // Keep within function wedge usable arc
         ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
 
-        // collision resolution scoped to avoid duplicate identifiers
+        // Simple collision resolution: push angle left/right until clear (scoped to avoid duplicate identifiers)
         {
           let tries = 0;
-          while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
+          while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120) {
             const dir = (tries % 2 === 0) ? 1 : -1;
             ang += dir * (minSep * 0.65);
             ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
             tries++;
           }
-          if (tries >= 120){
-            r = Math.min(r + 8, rMax * 0.98); // last-resort radial nudge
+          if (tries >= 120) {
+            r = Math.min(r + 8, rMax * 0.98);
           }
         }
         placed.push({ang, r});
 
+        // dot
         const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
-        const fill = colorFor(v, e.target, e.max);
-        if (!fill) return;
+        const dot = g.append('circle').attr('cx',cx).attr('cy',cy).attr('r',10).attr('fill', colorFor(v, e.target, e.max));
+        dot.append('title').text(`${f} — ${e.kpi}: ${v}`);
 
-        // dot (smaller)
-        g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 10).attr('fill', fill)
-          .append('title').text(`${f} — ${e.kpi}: ${v}`);
-
-        // label above dot
+        // label just outside the dot
         const rLabel = Math.min(r + 18, rMax * 0.98);
-        const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
+        const lx = Math.cos(ang)*rLabel;
+        const ly = Math.sin(ang)*rLabel;
         g.append('text')
-          .attr('x', lx).attr('y', ly)
+          .attr('x', lx)
+          .attr('y', ly)
           .attr('text-anchor','middle')
           .attr('font-size', 11)
           .attr('paint-order', 'stroke')
-          .attr('stroke', 'white').attr('stroke-width', 3)
+          .attr('stroke', 'white')
+          .attr('stroke-width', 3)
           .text(e.kpi);
       });
     });
 
-    // ---- Scoring band (inside SVG so it exports) ----
-    const valuesForAvg = parsed.entries
-      .map(e => e.values[swLabel])
-      .filter(v => v != null && !Number.isNaN(v) && v !== 1000);
-    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
-    function scoreFromAvg(a){
-      if (a == null || Number.isNaN(a)) return null;
-      if (a === 0) return 10;        // Exceptional
-      if (a >= 50) return 1;         // Worst
-      if (a >= 30) return 2;         // Too bad
-      if (a >= 20) return 3;         // Bad
-      if (a >= 15) return 4;         // Not good
-      if (a >= 10) return 5;         // Unacceptable
-      if (a >= 7)  return 6;         // Marginal
-      if (a >= 5)  return 7;         // Acceptable
-      if (a >= 2)  return 8;         // Good
-      if (a >= 1)  return 9;         // Impressive
-      return 10;                      // 0 < a < 1
-    }
-    const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
-    const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
-    const score = avgEvents==null ? null : scoreFromAvg(avgEvents);
-
-    const scoreG = svg.append('g').attr('class','score-band').attr('transform', `translate(0, ${baseH})`);
-    const barMargin = 20, barH = 42; // band size
-    const barW = w - barMargin*2;
-    const boxW = barW / 10;
-
-    const caption = (avgEvents==null)
-      ? 'Average: n/a (only "No function" or missing values)'
-      : `Average: ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
-    scoreG.append('text')
-      .attr('x', barMargin)
-      .attr('y', 12)
-      .attr('font-size', 12)
-      .text(caption);
-
-    for (let i=0;i<10;i++){
-      const x = barMargin + i*boxW;
-      scoreG.append('rect')
-        .attr('x', x).attr('y', 20)
-        .attr('width', boxW).attr('height', barH)
-        .attr('fill', scoreColors[i])
-        .attr('stroke', (score === i+1) ? '#000' : '#111')
-        .attr('stroke-width', (score === i+1) ? 2 : 0.4);
-      // number
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-weight',700)
-        .attr('font-size', 12)
-        .text(i+1);
-      // label
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14 + 16)
-        .attr('text-anchor','middle')
-        .attr('font-size', 10)
-        .text(scoreText[i]);
-    }
+    RENDERED.push(swLabel);
   });
 
-  if (!container.node().children.length){
+  if(RENDERED.length===0){
     container.append('div').attr('class','small').text('No software columns with values found.');
   }
 }
 
-/* ---------- Wire up UI ---------- */
+// ====== Example dataset ======
+const EXAMPLE = `\tTarget\tMax allowed\t0824(TO)\t0830(TO)\t0830(TO)
+ACC — False brake\t2\t5\t486\t1000\t1359
+ACC — Longitudinal jerk\t4\t7\t220\t1000\t262
+LCC — Poor Lane Centering Performance\t4\t7\t117\t1000\t1000
+LCC — Lateral deviation\t4\t7\t104\t1000\t1000
+LCC — Cancel for no reason\t2\t5\t19\t1000\t1000
+LCC — Available outside ODD\t4\t7\t13\t1000\t1000
+LKA — ELKA false positive\t2\t5\t6\t1000\t1000
+ALCA — Not available within ODD\t2\t5\t6\t1000\t0
+DMS — Unnecessary DMS warning\t2\t5\t\t\t
+ACC — Cut-out performance\t4\t7\t\t\t
+ACC — Cut-in performance\t4\t7\t\t\t
+ACC — Target drop\t2\t5\t\t\t
+LCC — Not available within ODD\t4\t7`;
+
+// ====== Wire up UI ======
+const ta = document.getElementById('dataIn');
+const btnLoad = document.getElementById('btnLoad');
 const btnRender = document.getElementById('btnRender');
-btnRender.onclick = ()=>{
-  const parsed = parseTable(document.getElementById('dataIn').value);
-  renderCharts(parsed);
-};
+
+btnLoad.onclick = ()=>{ ta.value = EXAMPLE; };
+btnRender.onclick = ()=>{ const parsed = parseTable(ta.value); renderCharts(parsed); };
+
+// No auto-load by default. Paste your data and click Generate charts.
 </script>
 </body>
 </html>
