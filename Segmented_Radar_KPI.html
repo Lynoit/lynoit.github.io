@@ -52,7 +52,7 @@
         <button class="secondary" id="btnReset">Reset defaults</button>
       </div>
       <div class="hint">Format: <code>50,30,20,15,10,7,5,2,1,0</code> means<br>
-        1: ≥50 (Worst), 2: ≥30, 3: ≥20, 4: ≥15, 5: ≥10, 6: ≥7, 7: ≥5, 8: ≥2, 9: ≥1, 10: &lt;1 (including 0). The value 1000 counts in the average.</div>
+        1: ≥50 (Worst), 2: ≥30, 3: ≥20, 4: ≥15, 5: ≥10, 6: ≥7, 7: ≥5, 8: ≥2, 9: ≥1, 10: &lt;1 (incl. 0). The value 1000 counts in the average.</div>
 
       <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  0824(TO),  0830(TO), ..."></textarea>
       <div class="small">Rules: ≤Target = <b>Green</b>, Target…(Max allowed) = <b>Yellow</b>, &gt;Max allowed = <b>Red</b>, value = 1000 = <b>Black</b>.</div>
@@ -123,11 +123,9 @@ function getThresholds(){
   const ui = document.getElementById('scoreThresholds').value.trim();
   let t = parseThresholds(ui);
   if (t) return t;
-  // try localStorage
   const ls = localStorage.getItem(LS_KEY);
   t = parseThresholds(ls);
   if (t) return t;
-  // defaults
   return parseThresholds(DEFAULT_THRESH_STR);
 }
 function setThresholdsToUI(arr){
@@ -147,6 +145,17 @@ function saveThresholdsFromUI(){
 function resetThresholds(){
   localStorage.setItem(LS_KEY, DEFAULT_THRESH_STR);
   setThresholdsToUI(parseThresholds(DEFAULT_THRESH_STR));
+}
+const fmtNum = n => Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(2)));
+
+/** Build per-score range labels from thresholds.
+ * Scores 1..9: "≥ T[i]" (i=0..8). Score 10: "< T[8]" (+ " (incl. 0)" if T[9] == 0).
+ */
+function scoreRangeLabels(T){
+  const lab = [];
+  for (let i=0;i<9;i++) lab.push('≥ ' + fmtNum(T[i]));
+  lab.push('< ' + fmtNum(T[8]) + (T[9] === 0 ? ' (incl. 0)' : ''));
+  return lab;
 }
 
 /* ---------- Parse table ---------- */
@@ -206,6 +215,7 @@ function parseTable(text){
 /* ---------- Renderer ---------- */
 function renderCharts(parsed){
   const T = getThresholds(); // thresholds for scoring (1..10)
+  const rangeLabels = scoreRangeLabels(T);
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length){
     container.append('div').attr('class','small').text('No data to render.');
@@ -224,8 +234,8 @@ function renderCharts(parsed){
       const svg = card.select('svg').node();
       const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type:'image/svg+xml'}));
       const img = new Image();
-      const w = svg.viewBox.baseVal && svg.viewBox.baseVal.width ? svg.viewBox.baseVal.width : svg.width.baseVal.value;
-      const h = svg.viewBox.baseVal && svg.viewBox.baseVal.height ? svg.viewBox.baseVal.height : svg.height.baseVal.value;
+      const w = svg.viewBox?.baseVal?.width || svg.width.baseVal.value;
+      const h = svg.viewBox?.baseVal?.height || svg.height.baseVal.value;
       img.onload = ()=>{
         const canvas = document.createElement('canvas'); canvas.width=w; canvas.height=h;
         const ctx = canvas.getContext('2d');
@@ -238,7 +248,7 @@ function renderCharts(parsed){
     });
 
     /* --- Layout: reserve space for legend on the right, and scoring band below --- */
-    const w = 600, baseH = 560, scoreH = 110, h = baseH + scoreH;
+    const w = 600, baseH = 560, scoreH = 118, h = baseH + scoreH;
     const legW = 160, legPad = 8, legItemH = 18;
     const centerX = (w - (legW + 12)) / 2;
     const centerY = baseH / 2;
@@ -433,11 +443,9 @@ function renderCharts(parsed){
 
     function scoreFromAvg(a, thresholds){
       if (a == null || Number.isNaN(a)) return null;
-      // thresholds = [t1, t2, ..., t10] non-increasing; score i if a >= t_i (for i=1..9); score 10 if a < t9 (or a===0)
       if (a === 0) return 10; // Explicit: 0 = Exceptional
       for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
-      // if 0 < a < thresholds[8] (typically 1), we treat as 10 to mirror your earlier intention
-      return 10;
+      return 10; // 0 < a < thresholds[8]
     }
 
     const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
@@ -460,22 +468,36 @@ function renderCharts(parsed){
 
     for (let i=0;i<10;i++){
       const x = barMargin + i*boxW;
-      scoreG.append('rect')
-        .attr('x', x).attr('y', 20)
+
+      // colored box
+      const r = scoreG.append('rect')
+        .attr('x', x).attr('y', 26)
         .attr('width', boxW).attr('height', barH)
         .attr('fill', scoreColors[i])
         .attr('stroke', (score === i+1) ? '#000' : '#111')
         .attr('stroke-width', (score === i+1) ? 2 : 0.4);
+
+      // tooltip with range + label
+      r.append('title').text(`Score ${i+1}: ${scoreText[i]} — ${rangeLabels[i]}`);
+
+      // top-edge tiny range label
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 22)
+        .attr('text-anchor','middle')
+        .attr('font-size', 10)
+        .text(rangeLabels[i]);
+
       // number
       scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14)
+        .attr('x', x + boxW/2).attr('y', 26 + 14)
         .attr('text-anchor','middle')
         .attr('font-weight',700)
         .attr('font-size', 12)
         .text(i+1);
+
       // label
       scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14 + 16)
+        .attr('x', x + boxW/2).attr('y', 26 + 14 + 16)
         .attr('text-anchor','middle')
         .attr('font-size', 10)
         .text(scoreText[i]);
@@ -505,13 +527,11 @@ document.getElementById('btnRender').onclick = ()=>{
 };
 document.getElementById('btnApply').onclick = ()=>{
   if (!saveThresholdsFromUI()) return;
-  // re-render with current data if any
   const parsed = parseTable(document.getElementById('dataIn').value);
   renderCharts(parsed);
 };
 document.getElementById('btnReset').onclick = ()=>{
   resetThresholds();
-  // re-render with current data if any
   const parsed = parseTable(document.getElementById('dataIn').value);
   renderCharts(parsed);
 };
