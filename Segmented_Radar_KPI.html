@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Segmented Radar KPI — Multi‑Software (with Scoring)</title>
+  <title>Segmented Radar KPI — Multi-Software (with Scoring)</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
     :root{
@@ -23,13 +23,9 @@
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
     .small{font-size:12px; color:#666}
-    /* scoring band styles (HTML fallback if ever needed) */
-    .scorewrap{margin:8px 6px 4px; padding:8px; background:#fff; border-radius:10px; box-shadow:0 1px 4px rgba(0,0,0,.06)}
-    .score-title{font-size:12px; margin-bottom:6px}
-    .score-table{display:grid; grid-template-columns:repeat(10,1fr); gap:2px}
-    .score-cell{height:40px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius:6px}
-    .score-cell strong{font-size:12px; line-height:1}
-    .score-label{font-size:10px; line-height:1}
+    .row{display:grid; gap:8px; grid-template-columns: 1fr auto auto;}
+    .hint{font-size:11px; color:#555; margin-top:4px}
+    input[type="text"]{width:100%; padding:8px 10px; border-radius:10px; border:1px solid #d7dcef; font-size:12px; background:#fff}
   </style>
 </head>
 <body>
@@ -40,7 +36,7 @@
         <div>
           <label>Delimiter:</label>
           <select id="delimiter">
-            <option value="auto" selected>Auto‑detect</option>
+            <option value="auto" selected>Auto-detect</option>
             <option value=",">Comma</option>
             <option value="\t">Tab</option>
             <option value=";">Semicolon</option>
@@ -48,6 +44,16 @@
         </div>
         <button id="btnRender">Generate charts</button>
       </div>
+
+      <label style="font-size:12px; color:var(--muted); display:block; margin:8px 0 4px">Scoring thresholds (comma-separated; lower bounds for scores 1→10)</label>
+      <div class="row" style="grid-template-columns: 1fr auto auto; align-items:center">
+        <input id="scoreThresholds" type="text" spellcheck="false" />
+        <button class="secondary" id="btnApply">Apply</button>
+        <button class="secondary" id="btnReset">Reset defaults</button>
+      </div>
+      <div class="hint">Format: <code>50,30,20,15,10,7,5,2,1,0</code> means<br>
+        1: ≥50 (Worst), 2: ≥30, 3: ≥20, 4: ≥15, 5: ≥10, 6: ≥7, 7: ≥5, 8: ≥2, 9: ≥1, 10: &lt;1 (including 0). The value 1000 counts in the average.</div>
+
       <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  0824(TO),  0830(TO), ..."></textarea>
       <div class="small">Rules: ≤Target = <b>Green</b>, Target…(Max allowed) = <b>Yellow</b>, &gt;Max allowed = <b>Red</b>, value = 1000 = <b>Black</b>.</div>
     </div>
@@ -60,6 +66,8 @@
 <script>
 /* ---------- Colors & helpers ---------- */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
+const DEFAULT_THRESH_STR = '50,30,20,15,10,7,5,2,1,0';
+const LS_KEY = 'segRadarKPI.thresholds';
 
 function colorFor(v, tgt, max){
   if (v == null || Number.isNaN(v)) return null;
@@ -99,6 +107,46 @@ function normalizeHeader(h){
     .replace(/\s+/g,' ')         // collapse spaces
     .replace(/[^a-z0-9 ]/g,'')   // strip punctuation
     .trim();
+}
+
+/* ---------- Thresholds ---------- */
+function parseThresholds(str){
+  const arr = (str||'').split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number);
+  if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
+  // require non-increasing order (e.g., 50 ≥ 30 ≥ ... ≥ 0)
+  for (let i=1;i<arr.length;i++){
+    if (arr[i] > arr[i-1]) return null;
+  }
+  return arr;
+}
+function getThresholds(){
+  const ui = document.getElementById('scoreThresholds').value.trim();
+  let t = parseThresholds(ui);
+  if (t) return t;
+  // try localStorage
+  const ls = localStorage.getItem(LS_KEY);
+  t = parseThresholds(ls);
+  if (t) return t;
+  // defaults
+  return parseThresholds(DEFAULT_THRESH_STR);
+}
+function setThresholdsToUI(arr){
+  const s = (arr && arr.length===10) ? arr.join(',') : DEFAULT_THRESH_STR;
+  document.getElementById('scoreThresholds').value = s;
+}
+function saveThresholdsFromUI(){
+  const ui = document.getElementById('scoreThresholds').value.trim();
+  const t = parseThresholds(ui);
+  if (!t){
+    alert('Please enter 10 comma-separated numbers in non-increasing order (e.g., '+DEFAULT_THRESH_STR+').');
+    return false;
+  }
+  localStorage.setItem(LS_KEY, t.join(','));
+  return true;
+}
+function resetThresholds(){
+  localStorage.setItem(LS_KEY, DEFAULT_THRESH_STR);
+  setThresholdsToUI(parseThresholds(DEFAULT_THRESH_STR));
 }
 
 /* ---------- Parse table ---------- */
@@ -157,6 +205,7 @@ function parseTable(text){
 
 /* ---------- Renderer ---------- */
 function renderCharts(parsed){
+  const T = getThresholds(); // thresholds for scoring (1..10)
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length){
     container.append('div').attr('class','small').text('No data to render.');
@@ -190,8 +239,8 @@ function renderCharts(parsed){
 
     /* --- Layout: reserve space for legend on the right, and scoring band below --- */
     const w = 600, baseH = 560, scoreH = 110, h = baseH + scoreH;
-    const legW = 160, legPad = 8, legItemH = 18, legOffset = 12;
-    const centerX = (w - (legW + legOffset)) / 2;
+    const legW = 160, legPad = 8, legItemH = 18;
+    const centerX = (w - (legW + 12)) / 2;
     const centerY = baseH / 2;
     const rMax = Math.min(centerX, centerY) - 16;
 
@@ -270,7 +319,7 @@ function renderCharts(parsed){
       .attr('fill', '#666')
       .text(d=>d);
 
-    // Axis label aligned with vertical axis (left side), rotated
+    // Axis label
     const axisY = -rMax * 0.70;
     g.append('text')
       .attr('x', -8)
@@ -340,7 +389,7 @@ function renderCharts(parsed){
         }
         ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
 
-        // collision resolution scoped to avoid duplicate identifiers
+        // collision resolution
         {
           let tries = 0;
           while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
@@ -377,30 +426,26 @@ function renderCharts(parsed){
     });
 
     // ---- Scoring band (inside SVG so it exports) ----
-const valuesForAvg = parsed.entries
-  .map(e => e.values[swLabel])
-  .filter(v => v != null && !Number.isNaN(v));
+    const valuesForAvg = parsed.entries
+      .map(e => e.values[swLabel])
+      .filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
-    function scoreFromAvg(a){
+
+    function scoreFromAvg(a, thresholds){
       if (a == null || Number.isNaN(a)) return null;
-      if (a === 0) return 10;        // Exceptional
-      if (a >= 50) return 1;         // Worst
-      if (a >= 30) return 2;         // Too bad
-      if (a >= 20) return 3;         // Bad
-      if (a >= 15) return 4;         // Not good
-      if (a >= 10) return 5;         // Unacceptable
-      if (a >= 7)  return 6;         // Marginal
-      if (a >= 5)  return 7;         // Acceptable
-      if (a >= 2)  return 8;         // Good
-      if (a >= 1)  return 9;         // Impressive
-      return 10;                      // 0 < a < 1
+      // thresholds = [t1, t2, ..., t10] non-increasing; score i if a >= t_i (for i=1..9); score 10 if a < t9 (or a===0)
+      if (a === 0) return 10; // Explicit: 0 = Exceptional
+      for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
+      // if 0 < a < thresholds[8] (typically 1), we treat as 10 to mirror your earlier intention
+      return 10;
     }
+
     const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
     const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
-    const score = avgEvents==null ? null : scoreFromAvg(avgEvents);
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
     const scoreG = svg.append('g').attr('class','score-band').attr('transform', `translate(0, ${baseH})`);
-    const barMargin = 20, barH = 42; // band size
+    const barMargin = 20, barH = 42;
     const barW = w - barMargin*2;
     const boxW = barW / 10;
 
@@ -435,6 +480,10 @@ const valuesForAvg = parsed.entries
         .attr('font-size', 10)
         .text(scoreText[i]);
     }
+
+    // Optional: show the current thresholds as a tiny note (not exported)
+    card.append('div').attr('class','small').style('margin-top','6px')
+      .text('Scoring thresholds (1→10): '+T.join(', '));
   });
 
   if (!container.node().children.length){
@@ -443,8 +492,26 @@ const valuesForAvg = parsed.entries
 }
 
 /* ---------- Wire up UI ---------- */
-const btnRender = document.getElementById('btnRender');
-btnRender.onclick = ()=>{
+function initialThresholds(){
+  const ls = localStorage.getItem(LS_KEY);
+  const t = parseThresholds(ls) || parseThresholds(DEFAULT_THRESH_STR);
+  setThresholdsToUI(t);
+}
+initialThresholds();
+
+document.getElementById('btnRender').onclick = ()=>{
+  const parsed = parseTable(document.getElementById('dataIn').value);
+  renderCharts(parsed);
+};
+document.getElementById('btnApply').onclick = ()=>{
+  if (!saveThresholdsFromUI()) return;
+  // re-render with current data if any
+  const parsed = parseTable(document.getElementById('dataIn').value);
+  renderCharts(parsed);
+};
+document.getElementById('btnReset').onclick = ()=>{
+  resetThresholds();
+  // re-render with current data if any
   const parsed = parseTable(document.getElementById('dataIn').value);
   renderCharts(parsed);
 };
