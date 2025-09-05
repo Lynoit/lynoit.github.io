@@ -113,7 +113,9 @@ function normalizeHeader(h){
 function parseThresholds(str){
   const arr = (str||'').split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number);
   if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
-  for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; } // non-increasing
+  for (let i=1;i<arr.length;i++){
+    if (arr[i] > arr[i-1]) return null; // must be non-increasing
+  }
   return arr;
 }
 function getThresholds(){
@@ -143,8 +145,8 @@ function resetThresholds(){
   localStorage.setItem(LS_KEY, DEFAULT_THRESH_STR);
   setThresholdsToUI(parseThresholds(DEFAULT_THRESH_STR));
 }
-const fmtNum = n => Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(2)));
 
+const fmtNum = n => Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(2)));
 /** Build per-score range labels from thresholds.
  * Scores 1..9: "≥ T[i]" (i=0..8). Score 10: "< T[8]" (+ " (incl. 0)" if T[9] == 0).
  */
@@ -245,22 +247,30 @@ function renderCharts(parsed){
     });
 
     /* --- Layout: reserve space for legend on the right, and scoring band below --- */
-    const w = 600, baseH = 560, scoreH = 150, h = baseH + scoreH; // room for triangle + below-range labels
-    const legW = 160, legPad = 8, legItemH = 18;
-    const centerX = (w - (legW + 12)) / 2;
+    const w = 600, baseH = 560, scoreH = 150, h = baseH + scoreH;
+    const legW = 160, legPad = 8, legItemH = 18, legOffset = 12;
+    const centerX = (w - (legW + legOffset)) / 2;
     const centerY = baseH / 2;
     const rMax = Math.min(centerX, centerY) - 16;
 
     const svg = card.append('svg').attr('width', w).attr('height', h);
+
+    // --- defs: stronger glow filter for selected score box ---
+    const defs = svg.append('defs');
+    const glow = defs.append('filter').attr('id','glow').attr('x','-30%').attr('y','-50%').attr('width','160%').attr('height','220%');
+    glow.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','4');
+    glow.append('feMerge')
+      .html('<feMergeNode/><feMergeNode in="SourceGraphic"/>');
+
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
-    // Title inside SVG (exports)
+    // Title (exports)
     svg.append('text')
       .attr('x', w/2).attr('y', 20)
       .attr('text-anchor', 'middle').attr('font-weight', 700)
       .text(swLabel);
 
-    // SVG Legend (exports)
+    // Legend (exports)
     const legendItems = [
       {label:'Green = Good',  color: GREEN},
       {label:'Yellow = OK',   color: YELLOW},
@@ -285,7 +295,7 @@ function renderCharts(parsed){
         .text(it.label);
     });
 
-    // Functions for THIS software
+    // Functions present for THIS software
     const functions = [];
     parsed.entries.forEach(e=>{
       const v = e.values[swLabel];
@@ -346,16 +356,19 @@ function renderCharts(parsed){
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const end = start + wedge;
+      // subtle background
       g.append('path')
         .attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
         .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff')
         .attr('fill-opacity', 0.06)
         .attr('stroke', 'none');
+      // boundary
       g.append('line')
         .attr('x1',0).attr('y1',0)
         .attr('x2', Math.cos(start)*rMax)
         .attr('y2', Math.sin(start)*rMax)
         .attr('stroke','#000').attr('stroke-opacity',0.25);
+      // function label (blue)
       const cen = (start + end) / 2;
       g.append('text')
         .attr('x', Math.cos(cen)*(rMax+16))
@@ -366,7 +379,7 @@ function renderCharts(parsed){
         .text(f);
     });
 
-    // Per-function KPI dots
+    // Per-function KPI dots (spread + collision avoidance + black-dot avoidance)
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const center = start + wedge/2;
@@ -403,7 +416,7 @@ function renderCharts(parsed){
             tries++;
           }
           if (tries >= 120){
-            r = Math.min(r + 8, rMax * 0.98);
+            r = Math.min(r + 8, rMax * 0.98); // last-resort radial nudge
           }
         }
         placed.push({ang, r});
@@ -412,9 +425,11 @@ function renderCharts(parsed){
         const fill = colorFor(v, e.target, e.max);
         if (!fill) return;
 
+        // dot
         g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 10).attr('fill', fill)
           .append('title').text(`${f} — ${e.kpi}: ${v}`);
 
+        // label above dot
         const rLabel = Math.min(r + 18, rMax * 0.98);
         const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
         g.append('text')
@@ -458,60 +473,55 @@ function renderCharts(parsed){
       .attr('font-size', 12)
       .text(caption);
 
-    // Draw boxes, plus glow/marker/bold on selected
+    const rangeLabelsUnder = rangeLabels;
+
     for (let i=0;i<10;i++){
       const x = barMargin + i*boxW;
       const isSel = (score === i+1);
 
-      // soft glow behind the selected box
+      // Stronger soft glow behind selected (blur filter)
       if (isSel){
         scoreG.append('rect')
-          .attr('x', x - 3).attr('y', 25)
-          .attr('width', boxW + 6).attr('height', boxH + 6)
-          .attr('rx', 3).attr('ry', 3)
-          .attr('fill', scoreColors[i]).attr('fill-opacity', 0.18)
-          .attr('stroke', '#000').attr('stroke-opacity', 0.25).attr('stroke-width', 1.2);
-        // triangle marker above the box
-        const cx = x + boxW/2;
-        scoreG.append('path')
-          .attr('d', `M ${cx} 22 L ${cx-8} 28 L ${cx+8} 28 Z`)
-          .attr('fill', '#000').attr('fill-opacity', 0.55)
-          .attr('stroke', '#fff').attr('stroke-width', 0.6).attr('stroke-opacity', 0.8);
+          .attr('x', x - 6).attr('y', 22)
+          .attr('width', boxW + 12).attr('height', boxH + 14)
+          .attr('rx', 6).attr('ry', 6)
+          .attr('fill', scoreColors[i]).attr('fill-opacity', 0.30)
+          .attr('filter', 'url(#glow)');
       }
 
-      // colored box
+      // Colored box
       const r = scoreG.append('rect')
         .attr('x', x).attr('y', 28)
         .attr('width', boxW).attr('height', boxH)
         .attr('fill', scoreColors[i])
         .attr('stroke', isSel ? '#000' : '#111')
-        .attr('stroke-width', isSel ? 2 : 0.4);
+        .attr('stroke-width', isSel ? 3 : 0.4);
 
-      // tooltip with range + label
-      r.append('title').text(`Score ${i+1}: ${scoreText[i]} — ${rangeLabels[i]}`);
+      // Tooltip with range + label
+      r.append('title').text(`Score ${i+1}: ${scoreText[i]} — ${rangeLabelsUnder[i]}`);
 
-      // score number (inside box)
+      // Score number (inside)
       scoreG.append('text')
         .attr('x', x + boxW/2).attr('y', 28 + 14)
         .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 800 : 700)
-        .attr('font-size', 12)
+        .attr('font-weight', isSel ? 950 : 750)  // extra bold on selected
+        .attr('font-size', 13)
         .text(i+1);
 
-      // label (inside box)
+      // Label (inside)
       scoreG.append('text')
         .attr('x', x + boxW/2).attr('y', 28 + 14 + 16)
         .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 700 : 500)
-        .attr('font-size', 10)
+        .attr('font-weight', isSel ? 850 : 550)  // bolder on selected
+        .attr('font-size', 11)
         .text(scoreText[i]);
 
-      // range label UNDER the box
+      // Range label UNDER the box
       scoreG.append('text')
         .attr('x', x + boxW/2).attr('y', 28 + boxH + 14)
         .attr('text-anchor','middle')
         .attr('font-size', 10)
-        .text(rangeLabels[i]);
+        .text(rangeLabelsUnder[i]);
     }
   });
 
