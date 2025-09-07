@@ -15,7 +15,8 @@
     .session-list{display:none;list-style:none;margin:0;padding:0;}
     .session-item{padding:8px 32px;cursor:pointer;border-bottom:1px solid #eee;}
     .session-item:hover{background:#f0f0f0;}
-    h1{margin-top:0;} h2{margin-top:1.5em;border-bottom:1px solid #ddd;padding-bottom:4px;}
+    h1{margin-top:0;} 
+    h2{margin-top:1.5em;border-bottom:1px solid #ddd;padding-bottom:4px;}
     table{width:100%;border-collapse:collapse;margin-bottom:2em;}
     th,td{border:1px solid #ccc;padding:8px;}
     th{background-color:#f5f5f5!important;}
@@ -24,7 +25,7 @@
     #issue-map{width:100%;height:400px;margin:20px 0;border:1px solid #aaa;}
     .download-button{display:inline-block;margin-right:12px;margin-bottom:16px;padding:8px 12px;background:#007bff;color:white;text-decoration:none;border-radius:4px;font-size:14px;}
     .download-button:hover{background:#0056b3;}
-    /* Optional: center the scoring band SVG a tad */
+    /* Scoring band spacing */
     #scoring-band svg{display:block;margin:6px 0 18px 0;}
   </style>
 </head>
@@ -47,7 +48,7 @@
       'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
     const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
 
-    /* ------- Scoring defaults (no UI, just defaults) ------- */
+    /* ------- Scoring defaults (no UI, fixed thresholds) ------- */
     const DEFAULT_THRESH_STR = '50,30,20,15,10,7,5,2,1,0';
     const SCORE_COLORS = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
     const SCORE_TEXT   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
@@ -76,14 +77,144 @@
     function normalizeHeader(h){
       return String(h||'').toLowerCase().replace(/\u00a0/g,' ').replace(/[^a-z0-9]/g,'');
     }
-    function looksLikeEventsPer1000km(hNorm){
-      // Accept variants like "eventsper1000km", "events1000km", "events/1000km", etc.
-      return (
-        hNorm.includes('event') && (hNorm.includes('1000km') || hNorm.includes('per1000km') || hNorm.includes('1000')) 
-      ) || /events?\/?1000/.test(hNorm);
+
+    // Look for the KPI table rendered from Excel: expects columns:
+    // KPI | Function | Target | Max allowed | Number of events
+    function findKpiResultsTable(){
+      const tables = Array.from(document.querySelectorAll('#content table'));
+      for (const t of tables){
+        const firstRow = t.querySelector('tr');
+        if (!firstRow) continue;
+        const hdrs = Array.from(firstRow.querySelectorAll('th,td'))
+          .map(c => normalizeHeader(c.textContent));
+        const hasKpi   = hdrs.some(h => h === 'kpi' || h.includes('kpi'));
+        const hasFunc  = hdrs.some(h => h.includes('function'));
+        const idxTgt   = hdrs.findIndex(h => h.includes('target'));
+        const idxMax   = hdrs.findIndex(h => h.includes('max') && h.includes('allow'));
+        const idxEv    = hdrs.findIndex(h => h === 'numberofevents' || (h.includes('event') && !h.includes('lat') && !h.includes('lon')));
+        if (hasKpi && hasFunc && idxTgt >= 0 && idxMax >= 0 && idxEv >= 0){
+          return { table: t, idxEvents: idxEv };
+        }
+      }
+      return null;
     }
 
-    // Two separate arrays now:
+    function computeAverageFromKpi(){
+      const found = findKpiResultsTable();
+      if (!found) return { avg: null, anchorEl: null };
+      const { table, idxEvents } = found;
+      const rows = Array.from(table.querySelectorAll('tr')).slice(1);
+      const vals = [];
+      for (const r of rows){
+        const cells = r.querySelectorAll('td');
+        if (!cells[idxEvents]) continue;
+        const raw = String(cells[idxEvents].textContent || '').trim().replace(',', '.');
+        const v = parseFloat(raw);
+        if (!Number.isNaN(v)) vals.push(Math.min(v, 1000));
+      }
+      const avg = vals.length ? (vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+      return { avg, anchorEl: table };
+    }
+
+    function renderScoringBand(avgEvents, anchorEl){
+      // only render if we have the KPI table anchor
+      if (!anchorEl) return;
+
+      const content = document.getElementById('content');
+      const old = document.getElementById('scoring-band');
+      if (old) old.remove();
+
+      const wrap = document.createElement('div');
+      wrap.id = 'scoring-band';
+
+      const title = document.createElement('h2');
+      title.textContent = 'KPI scoring';
+      wrap.appendChild(title);
+
+      const w = 680, barMargin = 20, boxH = 42;
+      const barW = w - barMargin*2;
+      const boxW = barW / 10;
+      const ranges = scoreRangeLabels(THRESH);
+      const score = (avgEvents==null) ? null : scoreFromAvg(avgEvents, THRESH);
+
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('width', w);
+      svg.setAttribute('height', 28 + boxH + 26 + 18);
+
+      // glow
+      const defs = document.createElementNS(svgNS, 'defs');
+      const flt  = document.createElementNS(svgNS, 'filter');
+      flt.setAttribute('id','glow');
+      flt.setAttribute('x','-30%'); flt.setAttribute('y','-50%');
+      flt.setAttribute('width','160%'); flt.setAttribute('height','220%');
+      const blur = document.createElementNS(svgNS, 'feGaussianBlur');
+      blur.setAttribute('in','SourceGraphic'); blur.setAttribute('stdDeviation','4');
+      const merge = document.createElementNS(svgNS, 'feMerge');
+      merge.innerHTML = '<feMergeNode/><feMergeNode in="SourceGraphic"/>';
+      flt.appendChild(blur); flt.appendChild(merge); defs.appendChild(flt); svg.appendChild(defs);
+
+      const caption = document.createElementNS(svgNS, 'text');
+      caption.setAttribute('x', barMargin);
+      caption.setAttribute('y', 14);
+      caption.setAttribute('font-size', '12');
+      caption.textContent = (avgEvents==null)
+        ? 'Average per 1000km:  n/a (KPI table not found)'
+        : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${SCORE_TEXT[score-1]})`;
+      svg.appendChild(caption);
+
+      for (let i=0;i<10;i++){
+        const x = barMargin + i*boxW;
+        const isSel = (score === i+1);
+
+        if (isSel){
+          const hi = document.createElementNS(svgNS, 'rect');
+          hi.setAttribute('x', x - 6); hi.setAttribute('y', 22);
+          hi.setAttribute('width', boxW + 12); hi.setAttribute('height', boxH + 14);
+          hi.setAttribute('rx', 6); hi.setAttribute('ry', 6);
+          hi.setAttribute('fill', SCORE_COLORS[i]); hi.setAttribute('fill-opacity', '0.30');
+          hi.setAttribute('filter', 'url(#glow)');
+          svg.appendChild(hi);
+        }
+
+        const r = document.createElementNS(svgNS, 'rect');
+        r.setAttribute('x', x); r.setAttribute('y', 28);
+        r.setAttribute('width', boxW); r.setAttribute('height', boxH);
+        r.setAttribute('fill', SCORE_COLORS[i]);
+        r.setAttribute('stroke', isSel ? '#000' : '#111');
+        r.setAttribute('stroke-width', isSel ? '3' : '0.4');
+        svg.appendChild(r);
+
+        const tNum = document.createElementNS(svgNS, 'text');
+        tNum.setAttribute('x', x + boxW/2); tNum.setAttribute('y', 28 + 14);
+        tNum.setAttribute('text-anchor','middle');
+        tNum.setAttribute('font-size','13');
+        tNum.setAttribute('font-weight', isSel ? '950' : '750');
+        tNum.textContent = String(i+1);
+        svg.appendChild(tNum);
+
+        const tLbl = document.createElementNS(svgNS, 'text');
+        tLbl.setAttribute('x', x + boxW/2); tLbl.setAttribute('y', 28 + 14 + 16);
+        tLbl.setAttribute('text-anchor','middle');
+        tLbl.setAttribute('font-size','11');
+        tLbl.setAttribute('font-weight', isSel ? '850' : '550');
+        tLbl.textContent = SCORE_TEXT[i];
+        svg.appendChild(tLbl);
+
+        const tRange = document.createElementNS(svgNS, 'text');
+        tRange.setAttribute('x', x + boxW/2); tRange.setAttribute('y', 28 + boxH + 14);
+        tRange.setAttribute('text-anchor','middle');
+        tRange.setAttribute('font-size','10');
+        tRange.textContent = ranges[i];
+        svg.appendChild(tRange);
+      }
+
+      // Place UNDER the KPI table
+      anchorEl.insertAdjacentElement('afterend', wrap);
+      wrap.appendChild(svg);
+    }
+
+    // Two separate arrays (for map layers)
     let issueCoords = [];
     let samplingCoords = [];
 
@@ -264,9 +395,9 @@
             ph.replaceWith(err);
           }
 
-          // ---- Compute & render scoring band (default thresholds) ----
-          const avg = computeAverageEventsPer1000(); // may be null
-          renderScoringBand(avg); // adds below the map
+          // ---- Compute from KPI table and place band UNDER that table ----
+          const { avg, anchorEl } = computeAverageFromKpi();
+          renderScoringBand(avg, anchorEl);
         })
         .then(() => {
           // 4) Fetch & unzip images & build enhanced snapshot table
@@ -295,7 +426,7 @@
                 th.textContent = issueTableInfo.headerNames[k];
                 th.style.backgroundColor = '#f5f5f5';
                 th.style.padding = '8px';
-                th.style.border = '1px solid #ccc';
+                th.style.border = '1px solid '#ccc;
                 hdrRow.appendChild(th);
               });
               ['Location','Snapshot'].forEach(txt => {
@@ -397,143 +528,6 @@
         });
     }
 
-    /* ---------- Compute average from rendered tables ---------- */
-    function computeAverageEventsPer1000(){
-      const content = document.getElementById('content');
-      const tables = Array.from(content.querySelectorAll('table'));
-      const values = [];
-      tables.forEach(tbl => {
-        const rows = Array.from(tbl.querySelectorAll('tr'));
-        if (rows.length < 2) return;
-        const hdrCells = Array.from(rows[0].querySelectorAll('th,td'));
-        const hdrNorm  = hdrCells.map(c => normalizeHeader(c.textContent));
-        const idx = hdrNorm.findIndex(h => looksLikeEventsPer1000km(h));
-        if (idx < 0) return;
-        for (let i=1;i<rows.length;i++){
-          const cells = Array.from(rows[i].querySelectorAll('td'));
-          if (!cells[idx]) continue;
-          const raw = String(cells[idx].textContent || '').trim().replace(',', '.');
-          const v = parseFloat(raw);
-          if (!Number.isNaN(v)) values.push(Math.min(v, 1000));
-        }
-      });
-      if (!values.length) return null;
-      const sum = values.reduce((a,b)=>a+b,0);
-      return sum / values.length;
-    }
-
-    /* ---------- Render scoring band (SVG, fixed width) ---------- */
-    function renderScoringBand(avgEvents){
-      const content = document.getElementById('content');
-      // remove previous
-      const old = document.getElementById('scoring-band');
-      if (old) old.remove();
-
-      const wrap = document.createElement('div');
-      wrap.id = 'scoring-band';
-      const title = document.createElement('h2');
-      title.textContent = 'Network scoring';
-      wrap.appendChild(title);
-
-      const w = 680, barMargin = 20, boxH = 42;
-      const barW = w - barMargin*2;
-      const boxW = barW / 10;
-      const ranges = scoreRangeLabels(THRESH);
-      const score = (avgEvents==null) ? null : scoreFromAvg(avgEvents, THRESH);
-
-      // SVG
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('width', w);
-      svg.setAttribute('height', 28 + boxH + 26 + 18); // caption + boxes + ranges + bottom pad
-
-      // defs: glow
-      const defs = document.createElementNS(svg.namespaceURI, 'defs');
-      const flt  = document.createElementNS(svg.namespaceURI, 'filter');
-      flt.setAttribute('id','glow');
-      flt.setAttribute('x','-30%'); flt.setAttribute('y','-50%'); flt.setAttribute('width','160%'); flt.setAttribute('height','220%');
-      const blur = document.createElementNS(svg.namespaceURI, 'feGaussianBlur');
-      blur.setAttribute('in','SourceGraphic'); blur.setAttribute('stdDeviation','4');
-      const merge = document.createElementNS(svg.namespaceURI, 'feMerge');
-      merge.innerHTML = '<feMergeNode/><feMergeNode in="SourceGraphic"/>';
-      flt.appendChild(blur); flt.appendChild(merge); defs.appendChild(flt); svg.appendChild(defs);
-
-      // caption
-      const caption = document.createElementNS(svg.namespaceURI, 'text');
-      caption.setAttribute('x', barMargin);
-      caption.setAttribute('y', 14);
-      caption.setAttribute('font-size', '12');
-      caption.textContent = (avgEvents==null)
-        ? 'Average per 1000km:  n/a (no matching column found)'
-        : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${SCORE_TEXT[score-1]})`;
-      svg.appendChild(caption);
-
-      // boxes
-      for (let i=0;i<10;i++){
-        const x = barMargin + i*boxW;
-        const isSel = (score === i+1);
-
-        if (isSel){
-          const hi = document.createElementNS(svg.namespaceURI, 'rect');
-          hi.setAttribute('x', x - 6);
-          hi.setAttribute('y', 22);
-          hi.setAttribute('width', boxW + 12);
-          hi.setAttribute('height', boxH + 14);
-          hi.setAttribute('rx', 6);
-          hi.setAttribute('ry', 6);
-          hi.setAttribute('fill', SCORE_COLORS[i]);
-          hi.setAttribute('fill-opacity', '0.30');
-          hi.setAttribute('filter', 'url(#glow)');
-          svg.appendChild(hi);
-        }
-
-        const r = document.createElementNS(svg.namespaceURI, 'rect');
-        r.setAttribute('x', x);
-        r.setAttribute('y', 28);
-        r.setAttribute('width', boxW);
-        r.setAttribute('height', boxH);
-        r.setAttribute('fill', SCORE_COLORS[i]);
-        r.setAttribute('stroke', isSel ? '#000' : '#111');
-        r.setAttribute('stroke-width', isSel ? '3' : '0.4');
-        svg.appendChild(r);
-
-        const tNum = document.createElementNS(svg.namespaceURI, 'text');
-        tNum.setAttribute('x', x + boxW/2);
-        tNum.setAttribute('y', 28 + 14);
-        tNum.setAttribute('text-anchor','middle');
-        tNum.setAttribute('font-size','13');
-        tNum.setAttribute('font-weight', isSel ? '950' : '750');
-        tNum.textContent = String(i+1);
-        svg.appendChild(tNum);
-
-        const tLbl = document.createElementNS(svg.namespaceURI, 'text');
-        tLbl.setAttribute('x', x + boxW/2);
-        tLbl.setAttribute('y', 28 + 14 + 16);
-        tLbl.setAttribute('text-anchor','middle');
-        tLbl.setAttribute('font-size','11');
-        tLbl.setAttribute('font-weight', isSel ? '850' : '550');
-        tLbl.textContent = SCORE_TEXT[i];
-        svg.appendChild(tLbl);
-
-        const tRange = document.createElementNS(svg.namespaceURI, 'text');
-        tRange.setAttribute('x', x + boxW/2);
-        tRange.setAttribute('y', 28 + boxH + 14);
-        tRange.setAttribute('text-anchor','middle');
-        tRange.setAttribute('font-size','10');
-        tRange.textContent = ranges[i];
-        svg.appendChild(tRange);
-      }
-
-      // Place band right after the main map (or at end if map missing)
-      const after = document.getElementById('issue-map') || content.lastElementChild;
-      if (after) after.insertAdjacentElement('afterend', wrap); else content.appendChild(wrap);
-      wrap.appendChild(svg);
-    }
-
-    /**
-     * parseSamplingSheet(sheet)
-     *   - Uses XLSX.utils.sheet_to_json with header:1 to read the first row,
-     *     finds lat/lon columns, and pushes into samplingCoords.
-     */
     function parseSamplingSheet(sheet) {
       const raw = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       if (raw.length < 2) return;
@@ -551,12 +545,6 @@
       }
     }
 
-    /**
-     * initMap()
-     *   - Creates the Leaflet map,
-     *   - Plots red “issue” badges from issueCoords,
-     *   - Then plots blue circle markers from samplingCoords.
-     */
     function initMap() {
       const map = L.map('issue-map').setView([0, 0], 2);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
