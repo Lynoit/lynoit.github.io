@@ -52,9 +52,14 @@
       border-bottom:1px solid #eef1fb;
     }
     .summary-table th{background:#f6f7fb; font-weight:700}
-    .summary-table th:nth-child(2), .summary-table td:nth-child(2){ text-align:right; white-space:nowrap; }   /* Avg */
-    .summary-table th:nth-child(3), .summary-table td:nth-child(3){ text-align:center; white-space:nowrap; width:1%; } /* Score */
-    .summary-table th:nth-child(4), .summary-table td:nth-child(4){ white-space:nowrap; } /* Rating */
+    /* Date column (2) */
+    .summary-table th:nth-child(2), .summary-table td:nth-child(2){ text-align:center; white-space:nowrap; }
+    /* Avg column (3) */
+    .summary-table th:nth-child(3), .summary-table td:nth-child(3){ text-align:right; white-space:nowrap; }
+    /* Score column (4) tight */
+    .summary-table th:nth-child(4), .summary-table td:nth-child(4){ text-align:center; white-space:nowrap; width:1%; }
+    /* Rating column (5) */
+    .summary-table th:nth-child(5), .summary-table td:nth-child(5){ white-space:nowrap; }
     .software-cell{
       display:inline-block;
       max-width:min(52vw, 680px);
@@ -103,9 +108,10 @@
       <div class="hint">1: ≥50 (Worst), 2: ≥30, 3: ≥20, 4: ≥15, 5: ≥10, 6: ≥7, 7: ≥5, 8: ≥2, 9: ≥1, 10: &lt;1 (incl. 0). The value 1000 counts in the average.</div>
 
       <label style="font-size:12px; color:var(--muted); display:block; margin:12px 0 4px">
-        Or paste data below (headers required: <code>Function — KPI, Target, Max allowed, …</code>)
+        Or paste data below (headers required: <code>Function — KPI, Target, Max allowed, …</code>)<br>
+        To add a test date to a software column, write it like: <code>CX OKTB EU [2025-08-26]</code>
       </label>
-      <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  CX OKTB EU,  CX OKTB UK,  0824(TO),  0830(TO),  0830(TO)"></textarea>
+      <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  CX OKTB EU [2025-08-26],  CX OKTB UK [2025-08-26],  0824(TO) [2025-08-24],  0830(TO) [2025-08-30]"></textarea>
       <div class="controls" style="grid-template-columns:auto 1fr;">
         <button id="btnRenderText">Render pasted text</button>
         <div class="hint">Tip: you can switch delimiter or thresholds and re-render.</div>
@@ -216,7 +222,7 @@ function scoreRangeLabels(T){
   return lab;
 }
 
-/* ---------- Parse table ---------- */
+/* ---------- Parse table (with date extraction) ---------- */
 function parseTable(text){
   const selectVal = document.getElementById('delimiter').value;
   const tryParse = (d)=> text.split(/\r?\n/).filter(r=>r.trim().length>0).map(r=>r.split(d));
@@ -243,12 +249,27 @@ function parseTable(text){
     return {headers, entries:[], software:[]};
   }
 
+  // Build software columns, extracting [YYYY-MM-DD] if present,
+  // and deduplicating same base names with " — 2", " — 3", ...
   const swCols = [];
   for (let i = idxMax+1; i < headers.length; i++){
-    const base = headers[i].trim();
-    const countPrev = swCols.filter(s => s.base===base).length;
-    const label = countPrev ? `${base} — ${countPrev+1}` : base;
-    swCols.push({idx:i, base, label: label.replace('(TO)', ' (TO)')});
+    const raw = headers[i].trim();
+
+    // extract trailing date in brackets
+    const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const date = m ? m[1] : null;
+
+    // base label without the date
+    const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
+
+    // pretty: normalize "(TO)" spacing
+    const basePretty = baseNoDate.replace('(TO)', ' (TO)');
+
+    // handle duplicates of same base
+    const countPrev = swCols.filter(s => s.base === basePretty).length;
+    const label = countPrev ? `${basePretty} — ${countPrev+1}` : basePretty;
+
+    swCols.push({ idx:i, base: basePretty, label, date });
   }
 
   const entries = [];
@@ -262,32 +283,37 @@ function parseTable(text){
     for (const sw of swCols){ values[sw.label] = parseNumber(row[sw.idx]); }
     entries.push({func, kpi, target, max, values});
   }
-  return {headers, entries, software: swCols.map(s=>s.label)};
+
+  // return software as objects so we can use .date later
+  return {headers, entries, software: swCols};
 }
 
-/* ---------- Summary card ---------- */
+/* ---------- Summary card (adds Date column) ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
-  const rows = parsed.software.map(swLabel => {
+  // Compute per-software averages & scores (cap 1000 in the mean)
+  const rows = parsed.software.map(sw => {
+    const swLabel = sw.label;
     const vals = parsed.entries
       .map(e => e.values[swLabel])
       .filter(v => v != null && !Number.isNaN(v));
     const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
     const score = avg == null ? null : scoreFromAvg(avg, T);
-    return { sw: swLabel, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
+    return { sw: swLabel, date: sw.date, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
   });
 
   if (rows.every(r => r.avg == null)) return;
 
   const card = container.append('div').attr('class', 'chart-card summary-card');
-  card.append('div').attr('class','summary-title').text('Summary');
+  card.append('div').attr('class','summary-title').text('Summary — Average Events / 1000 km & Score');
 
   const table = card.append('table').attr('class', 'summary-table');
 
   table.append('colgroup').html(`
     <col class="col-sw">
+    <col class="col-date">
     <col class="col-avg">
     <col class="col-score">
     <col class="col-rating">
@@ -296,7 +322,8 @@ function renderSummary(container, parsed){
   const thead = table.append('thead').append('tr');
   thead.html(`
     <th>Software</th>
-    <th>Average events per 1000 km</th>
+    <th>Test date</th>
+    <th>Avg / 1000 km</th>
     <th>Score</th>
     <th>Rating</th>
   `);
@@ -306,14 +333,20 @@ function renderSummary(container, parsed){
   rows.forEach(r => {
     const tr = tbody.append('tr');
 
+    // Software (truncate nicely; full text on hover)
     tr.append('td')
       .append('span')
       .attr('class', 'software-cell')
       .attr('title', r.sw)
       .text(r.sw);
 
+    // Date (centered via CSS)
+    tr.append('td').text(r.date || '—');
+
+    // Average (right-aligned via CSS)
     tr.append('td').text(r.avg == null ? '—' : r.avg.toFixed(1));
 
+    // Score chip + rating
     const scoreCell = tr.append('td');
     if (r.score == null){
       scoreCell.text('—');
@@ -341,7 +374,8 @@ function renderCharts(parsed){
   // Summary card first
   renderSummary(container, parsed);
 
-  (parsed.software||[]).forEach(swLabel=>{
+  (parsed.software||[]).forEach(sw=>{
+    const swLabel = sw.label;
     const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
     if (!hasAny) return;
 
@@ -372,7 +406,7 @@ function renderCharts(parsed){
     const rowH = 22, headerH = 24, tableSidePad = 12, colGap = 8;
     const legW = 160, legOffset = 12;
 
-    const centerX = (w - (legW + legOffset)) / 2;
+    const centerX = (w - (legW + legOffset)) / 2; // leaves room for legend
     const centerY = radarH / 2;
     const rMax    = Math.min(centerX, centerY) - 16;
 
@@ -412,11 +446,11 @@ function renderCharts(parsed){
     let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16));
 
     const tableWUsed = kpiW + funcW + col2W + col3W + col4W + colGap*4;
-    const x0 = tableSidePad;
-    const x1 = x0 + kpiW + colGap;
-    const x2 = x1 + funcW + colGap;
-    const x3 = x2 + col2W + colGap;
-    const x4 = x3 + col3W + colGap;
+    const x0 = tableSidePad;                 // KPI start
+    const x1 = x0 + kpiW + colGap;           // Function start
+    const x2 = x1 + funcW + colGap;          // Target start
+    const x3 = x2 + col2W + colGap;          // Max start
+    const x4 = x3 + col3W + colGap;          // Events start
 
     const svg = card.append('svg').attr('width', w);
 
@@ -555,11 +589,13 @@ function renderCharts(parsed){
     const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
     const tableH = headerH + rows.length * rowH + 8;
 
+    // compact background sized to content
     tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
       .attr('width', tableWUsed + 8).attr('height', tableH)
       .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
 
+    // header row background
     tableG.append('rect')
       .attr('x', x0).attr('y', 4)
       .attr('width', tableWUsed).attr('height', headerH)
@@ -567,6 +603,7 @@ function renderCharts(parsed){
 
     const hdrYmid = 4 + headerH/2;
 
+    // Headers
     tableG.append('text')
       .attr('x', x0+6).attr('y', hdrYmid)
       .attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700)
@@ -594,40 +631,47 @@ function renderCharts(parsed){
     hEvt.append('tspan').text('Number of').attr('x', x4 + col4W - 6).attr('dy', 0);
     hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
 
+    // rows
     rows.forEach((r, i)=>{
       const y = 4 + headerH + i*rowH;
-
+      // zebra
       tableG.append('rect')
         .attr('x', x0).attr('y', y)
         .attr('width', tableWUsed).attr('height', rowH)
         .attr('fill', i%2 ? '#fafbff' : '#ffffff');
 
+      // KPI
       tableG.append('text')
         .attr('x', x0+6).attr('y', y + rowH/2)
         .attr('dominant-baseline','middle').attr('font-size', 11)
         .text(r.kpi);
 
+      // Function
       tableG.append('text')
         .attr('x', x1+6).attr('y', y + rowH/2)
         .attr('dominant-baseline','middle').attr('font-size', 11)
         .text(r.func);
 
+      // Target
       tableG.append('text')
         .attr('x', x2 + col2W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11)
         .text(fmtCell(r.target));
 
+      // Max allowed
       tableG.append('text')
         .attr('x', x3 + col3W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11)
         .text(fmtCell(r.max));
 
+      // Number of events
       tableG.append('text')
         .attr('x', x4 + col4W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600)
         .text(fmtCell(r.events));
     });
 
+    // subtle guides at gaps
     [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
       tableG.append('line')
         .attr('x1', xx).attr('x2', xx)
@@ -696,6 +740,7 @@ function renderCharts(parsed){
         .text(ranges[i]);
     }
 
+    // finalize height
     const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
     svg.attr('height', totalHeight);
   });
