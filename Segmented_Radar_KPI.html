@@ -19,6 +19,7 @@
     textarea{width:100%; min-height:220px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px;}
     button{appearance:none; border:none; background:#111; color:white; padding:8px 12px; border-radius:10px; cursor:pointer}
     button.secondary{background:#e9ecf5; color:#111}
+    /* Keep wider cards so scoring row fully fits */
     .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
@@ -26,15 +27,6 @@
     .row{display:grid; gap:8px; grid-template-columns: 1fr auto auto;}
     .hint{font-size:11px; color:#555; margin-top:4px}
     input[type="text"]{width:100%; padding:8px 10px; border-radius:10px; border:1px solid #d7dcef; font-size:12px; background:#fff}
-
-    /* Summary table styling */
-    .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
-    .summary-table{width:100%; border-collapse:separate; border-spacing:0; font-size:12px}
-    .summary-table th, .summary-table td{padding:10px 10px; text-align:left; border-bottom:1px solid #eef1fb;}
-    .summary-table th{text-align:left; background:#f6f7fb; font-weight:700}
-    .summary-chip{
-      display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600;
-    }
   </style>
 </head>
 <body>
@@ -52,7 +44,6 @@
           </select>
         </div>
         <button id="btnRender">Generate charts</button>
-        <button class="secondary" id="btnClearSaved" title="Forget saved input and delimiter">Clear saved input</button>
       </div>
 
       <label style="font-size:12px; color:var(--muted); display:block; margin:8px 0 4px">Scoring thresholds (comma-separated; lower bounds for scores 1→10)</label>
@@ -78,22 +69,6 @@
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
 const DEFAULT_THRESH_STR = '50,30,20,15,10,7,5,2,1,0';
 const LS_KEY = 'segRadarKPI.thresholds';
-
-/* Persistence keys */
-const DATA_KEY  = 'segRadarKPI.dataIn';
-const DELIM_KEY = 'segRadarKPI.delimiter';
-
-/* Shared helpers (used by summary & cards) */
-const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
-const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
-const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
-
-function scoreFromAvg(a, thresholds){
-  if (a == null || Number.isNaN(a)) return null;
-  if (a === 0) return 10;
-  for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
-  return 10;
-}
 
 function colorFor(v, tgt, max){
   if (v == null || Number.isNaN(v)) return null;
@@ -222,55 +197,7 @@ function parseTable(text){
   return {headers, entries, software: swCols.map(s=>s.label)};
 }
 
-/* ---------- Summary card ---------- */
-function renderSummary(container, parsed){
-  const T = getThresholds();
-  if (!parsed.software || !parsed.software.length) return;
-
-  // Compute per-software averages and scores
-  const rows = parsed.software.map(swLabel=>{
-    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
-    const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
-    const score = avg==null ? null : scoreFromAvg(avg, T);
-    return { sw: swLabel, avg, score, text: score==null ? 'n/a' : scoreText[score-1] };
-  });
-
-  // If all are empty, skip
-  if (rows.every(r => r.avg==null)) return;
-
-  const card = container.append('div').attr('class','chart-card');
-  card.append('div').attr('class','summary-title').text('Summary — Average Events / 1000 km & Score');
-
-  const table = card.append('table').attr('class','summary-table');
-  const thead = table.append('thead').append('tr');
-  thead.html(`
-    <th>Software</th>
-    <th style="text-align:right">Average events per 1000 km</th>
-    <th style="text-align:center">Score</th>
-    <th>Rating</th>
-  `);
-  const tbody = table.append('tbody');
-
-  rows.forEach(r=>{
-    const tr = tbody.append('tr');
-    tr.append('td').text(r.sw);
-    tr.append('td').attr('style','text-align:right').text(r.avg==null ? '—' : r.avg.toFixed(1));
-    const scoreCell = tr.append('td').attr('style','text-align:center');
-    if (r.score==null){
-      scoreCell.text('—');
-      tr.append('td').text('n/a');
-    }else{
-      // small colored chip
-      const chip = scoreCell.append('span')
-        .attr('class','summary-chip')
-        .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`);
-      chip.text(r.score);
-      tr.append('td').text(r.text);
-    }
-  });
-}
-
-/* ---------- Renderer (cards) ---------- */
+/* ---------- Renderer (fixed width cards) ---------- */
 function renderCharts(parsed){
   const T = getThresholds();
   const rangeLabels = scoreRangeLabels(T);
@@ -280,14 +207,13 @@ function renderCharts(parsed){
     return;
   }
 
-  // NEW: Summary card first
-  renderSummary(container, parsed);
-
   (parsed.software||[]).forEach(swLabel=>{
     const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
     if (!hasAny) return;
 
     const card = container.append('div').attr('class','chart-card');
+
+    // Fixed drawing width
     const w = 680;
 
     // Download button
@@ -310,20 +236,19 @@ function renderCharts(parsed){
 
     /* --- Layout constants --- */
     const radarH = 540;
-    const scoreTopPad = 28;
+    const scoreTopPad = 28;       // gap before scoring band
     const rowH = 22, headerH = 24, tableSidePad = 12, colGap = 8;
+
     const legW = 160, legOffset = 12;
-
-    const centerX = (w - (legW + legOffset)) / 2; // leaves room for legend
+    const centerX = (w - (legW + legOffset)) / 2;
     const centerY = radarH / 2;
-    const rMax    = Math.min(centerX, centerY) - 16;
 
-    // Build table data
+    // ---- Build table data ----
     const rows = parsed.entries
       .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
       .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
 
-    // text measurement
+    // --- accurate text measurement (SVG) ---
     function measureMaxWidth(texts, fontSize=11, fontWeight=400){
       const tmp = d3.select('body').append('svg')
         .attr('width',0).attr('height',0)
@@ -340,6 +265,7 @@ function renderCharts(parsed){
       tmp.remove();
       return max;
     }
+    const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
 
     const kpiTexts  = rows.map(r=>r.kpi);
     const funcTexts = rows.map(r=>r.func);
@@ -351,9 +277,11 @@ function renderCharts(parsed){
     const funcW = Math.max(90, Math.min(180, measureMaxWidth(funcTexts, 11, 400) + 16));
     let col2W   = Math.max(50, Math.min(120, measureMaxWidth(tgtTexts , 11, 400) + 16)); // Target
     let col3W   = Math.max(60, Math.min(140, measureMaxWidth(maxTexts , 11, 400) + 16)); // Max allowed
-    let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16)); // Events
+    let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16)); // Events (bold-ish numbers)
 
     const tableWUsed = kpiW + funcW + col2W + col3W + col4W + colGap*4;
+
+    // column x positions
     const x0 = tableSidePad;                 // KPI start
     const x1 = x0 + kpiW + colGap;           // Function start
     const x2 = x1 + funcW + colGap;          // Target start
@@ -362,10 +290,9 @@ function renderCharts(parsed){
 
     const svg = card.append('svg').attr('width', w);
 
-    // defs: unique glow
+    // --- defs: glow for selected score box ---
     const defs = svg.append('defs');
-    const glowId = `glow-${Math.random().toString(36).slice(2)}`;
-    const glow = defs.append('filter').attr('id',glowId).attr('x','-30%').attr('y','-50%').attr('width','160%').attr('height','220%');
+    const glow = defs.append('filter').attr('id','glow').attr('x','-30%').attr('y','-50%').attr('width','160%').attr('height','220%');
     glow.append('feGaussianBlur').attr('in','SourceGraphic').attr('stdDeviation','4');
     glow.append('feMerge').html('<feMergeNode/><feMergeNode in="SourceGraphic"/>');
 
@@ -386,6 +313,7 @@ function renderCharts(parsed){
     });
 
     // ---- Radar chart ----
+    const rMax = Math.min(centerX, centerY) - 16;
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
     const functions = [];
@@ -427,7 +355,7 @@ function renderCharts(parsed){
     const innerFrac = 0.98;
     const spread = wedge * innerFrac;
     const arc = d3.arc();
-    const FUNC_LABEL_OFFSET = 16;
+    const FUNC_LABEL_OFFSET = 16; // used also for table placement
 
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
@@ -492,9 +420,11 @@ function renderCharts(parsed){
       });
     });
 
-    /* ---------- KPI TABLE ---------- */
+    /* ---------- KPI TABLE (now with Function column) ---------- */
+    // Place the table right after the radar circle + labels (tight but safe)
     const tableY = centerY + rMax + FUNC_LABEL_OFFSET + 2;
     const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
+
     const tableH = headerH + rows.length * rowH + 8;
 
     // compact background sized to content
@@ -548,31 +478,31 @@ function renderCharts(parsed){
         .attr('width', tableWUsed).attr('height', rowH)
         .attr('fill', i%2 ? '#fafbff' : '#ffffff');
 
-      // KPI
+      // KPI (left)
       tableG.append('text')
         .attr('x', x0+6).attr('y', y + rowH/2)
         .attr('dominant-baseline','middle').attr('font-size', 11)
         .text(r.kpi);
 
-      // Function
+      // Function (left)
       tableG.append('text')
         .attr('x', x1+6).attr('y', y + rowH/2)
         .attr('dominant-baseline','middle').attr('font-size', 11)
         .text(r.func);
 
-      // Target
+      // Target (right)
       tableG.append('text')
         .attr('x', x2 + col2W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11)
         .text(fmtCell(r.target));
 
-      // Max allowed
+      // Max allowed (right)
       tableG.append('text')
         .attr('x', x3 + col3W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11)
         .text(fmtCell(r.max));
 
-      // Number of events
+      // Number of events (right)
       tableG.append('text')
         .attr('x', x4 + col4W - 6).attr('y', y + rowH/2)
         .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600)
@@ -580,17 +510,26 @@ function renderCharts(parsed){
     });
 
     // subtle guides at gaps
-[ x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2 ].forEach(xx=>{
-  tableG.append('line')
-    .attr('x1', xx).attr('x2', xx)
-    .attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH)
-    .attr('stroke', '#eef1fb');
-});
+    [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
+      tableG.append('line')
+        .attr('x1', xx).attr('x2', xx)
+        .attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH)
+        .attr('stroke', '#eef1fb');
+    });
 
     /* ---------- Scoring band ---------- */
     const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
 
+    function scoreFromAvg(a, thresholds){
+      if (a == null || Number.isNaN(a)) return null;
+      if (a === 0) return 10;
+      for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
+      return 10;
+    }
+
+    const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+    const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
     const barMargin = 20, boxH2 = 42;
@@ -605,7 +544,7 @@ function renderCharts(parsed){
       : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
     scoreG.append('text').attr('x', barMargin).attr('y', 14).attr('font-size', 12).text(caption);
 
-    const ranges = scoreRangeLabels(T);
+    const ranges = rangeLabels;
     for (let i=0;i<10;i++){
       const x = barMargin + i*boxW;
       const isSel = (score === i+1);
@@ -616,7 +555,7 @@ function renderCharts(parsed){
           .attr('width', boxW + 12).attr('height', boxH2 + 14)
           .attr('rx', 6).attr('ry', 6)
           .attr('fill', scoreColors[i]).attr('fill-opacity', 0.30)
-          .attr('filter', `url(#${glowId})`);
+          .attr('filter', 'url(#glow)');
       }
 
       const r = scoreG.append('rect')
@@ -659,54 +598,15 @@ function renderCharts(parsed){
   }
 }
 
-/* ---------- Persistence ---------- */
-function saveInputNow(){
-  try {
-    localStorage.setItem(DATA_KEY, document.getElementById('dataIn').value);
-    localStorage.setItem(DELIM_KEY, document.getElementById('delimiter').value);
-  } catch(e) { /* ignore quota/privacy errors */ }
-}
-function loadPersisted(){
-  try {
-    const savedData = localStorage.getItem(DATA_KEY);
-    const savedDelim = localStorage.getItem(DELIM_KEY);
-    if (savedData != null) document.getElementById('dataIn').value = savedData;
-    if (savedDelim) {
-      const sel = document.getElementById('delimiter');
-      const opt = [...sel.options].some(o=>o.value===savedDelim) ? savedDelim : 'auto';
-      sel.value = opt;
-    }
-  } catch(e) { /* ignore */ }
-}
-function debounce(fn, ms){
-  let t; return (...args)=>{ clearTimeout(t); t=setTimeout(()=>fn(...args), ms); };
-}
-
 /* ---------- Wire up UI ---------- */
 function initialThresholds(){
   const ls = localStorage.getItem(LS_KEY);
   const t = parseThresholds(ls) || parseThresholds(DEFAULT_THRESH_STR);
   setThresholdsToUI(t);
 }
-
-document.addEventListener('DOMContentLoaded', ()=>{
-  initialThresholds();
-  loadPersisted();
-
-  const debouncedSave = debounce(saveInputNow, 300);
-  document.getElementById('dataIn').addEventListener('input', debouncedSave);
-  document.getElementById('delimiter').addEventListener('change', saveInputNow);
-
-  // render immediately if we have saved data
-  const hasSaved = (document.getElementById('dataIn').value || '').trim().length > 0;
-  if (hasSaved){
-    const parsed = parseTable(document.getElementById('dataIn').value);
-    renderCharts(parsed);
-  }
-});
+initialThresholds();
 
 document.getElementById('btnRender').onclick = ()=>{
-  saveInputNow();
   const parsed = parseTable(document.getElementById('dataIn').value);
   renderCharts(parsed);
 };
@@ -719,13 +619,6 @@ document.getElementById('btnReset').onclick = ()=>{
   resetThresholds();
   const parsed = parseTable(document.getElementById('dataIn').value);
   renderCharts(parsed);
-};
-document.getElementById('btnClearSaved').onclick = ()=>{
-  try{
-    localStorage.removeItem(DATA_KEY);
-    localStorage.removeItem(DELIM_KEY);
-    alert('Saved input and delimiter cleared.');
-  }catch(e){}
 };
 </script>
 </body>
