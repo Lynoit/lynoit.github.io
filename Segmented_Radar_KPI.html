@@ -26,6 +26,15 @@
     .row{display:grid; gap:8px; grid-template-columns: 1fr auto auto;}
     .hint{font-size:11px; color:#555; margin-top:4px}
     input[type="text"]{width:100%; padding:8px 10px; border-radius:10px; border:1px solid #d7dcef; font-size:12px; background:#fff}
+
+    /* Summary table styling */
+    .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
+    .summary-table{width:100%; border-collapse:separate; border-spacing:0; font-size:12px}
+    .summary-table th, .summary-table td{padding:10px 10px; text-align:left; border-bottom:1px solid #eef1fb;}
+    .summary-table th{text-align:left; background:#f6f7fb; font-weight:700}
+    .summary-chip{
+      display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600;
+    }
   </style>
 </head>
 <body>
@@ -73,6 +82,18 @@ const LS_KEY = 'segRadarKPI.thresholds';
 /* Persistence keys */
 const DATA_KEY  = 'segRadarKPI.dataIn';
 const DELIM_KEY = 'segRadarKPI.delimiter';
+
+/* Shared helpers (used by summary & cards) */
+const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
+const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+
+function scoreFromAvg(a, thresholds){
+  if (a == null || Number.isNaN(a)) return null;
+  if (a === 0) return 10;
+  for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
+  return 10;
+}
 
 function colorFor(v, tgt, max){
   if (v == null || Number.isNaN(v)) return null;
@@ -201,7 +222,55 @@ function parseTable(text){
   return {headers, entries, software: swCols.map(s=>s.label)};
 }
 
-/* ---------- Renderer (fixed declarations, no duplicates) ---------- */
+/* ---------- Summary card ---------- */
+function renderSummary(container, parsed){
+  const T = getThresholds();
+  if (!parsed.software || !parsed.software.length) return;
+
+  // Compute per-software averages and scores
+  const rows = parsed.software.map(swLabel=>{
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
+    const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
+    const score = avg==null ? null : scoreFromAvg(avg, T);
+    return { sw: swLabel, avg, score, text: score==null ? 'n/a' : scoreText[score-1] };
+  });
+
+  // If all are empty, skip
+  if (rows.every(r => r.avg==null)) return;
+
+  const card = container.append('div').attr('class','chart-card');
+  card.append('div').attr('class','summary-title').text('Summary — Average Events / 1000 km & Score');
+
+  const table = card.append('table').attr('class','summary-table');
+  const thead = table.append('thead').append('tr');
+  thead.html(`
+    <th>Software</th>
+    <th style="text-align:right">Avg events / 1000 km</th>
+    <th style="text-align:center">Score</th>
+    <th>Rating</th>
+  `);
+  const tbody = table.append('tbody');
+
+  rows.forEach(r=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(r.sw);
+    tr.append('td').attr('style','text-align:right').text(r.avg==null ? '—' : r.avg.toFixed(1));
+    const scoreCell = tr.append('td').attr('style','text-align:center');
+    if (r.score==null){
+      scoreCell.text('—');
+      tr.append('td').text('n/a');
+    }else{
+      // small colored chip
+      const chip = scoreCell.append('span')
+        .attr('class','summary-chip')
+        .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`);
+      chip.text(r.score);
+      tr.append('td').text(r.text);
+    }
+  });
+}
+
+/* ---------- Renderer (cards) ---------- */
 function renderCharts(parsed){
   const T = getThresholds();
   const rangeLabels = scoreRangeLabels(T);
@@ -210,6 +279,9 @@ function renderCharts(parsed){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
+
+  // NEW: Summary card first
+  renderSummary(container, parsed);
 
   (parsed.software||[]).forEach(swLabel=>{
     const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
@@ -236,7 +308,7 @@ function renderCharts(parsed){
       img.src = url;
     });
 
-    /* --- Layout constants (single source of truth) --- */
+    /* --- Layout constants --- */
     const radarH = 540;
     const scoreTopPad = 28;
     const rowH = 22, headerH = 24, tableSidePad = 12, colGap = 8;
@@ -244,7 +316,7 @@ function renderCharts(parsed){
 
     const centerX = (w - (legW + legOffset)) / 2; // leaves room for legend
     const centerY = radarH / 2;
-    const rMax    = Math.min(centerX, centerY) - 16; // padding from circle to edges
+    const rMax    = Math.min(centerX, centerY) - 16;
 
     // Build table data
     const rows = parsed.entries
@@ -268,7 +340,6 @@ function renderCharts(parsed){
       tmp.remove();
       return max;
     }
-    const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
 
     const kpiTexts  = rows.map(r=>r.kpi);
     const funcTexts = rows.map(r=>r.func);
@@ -512,7 +583,7 @@ function renderCharts(parsed){
     [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
       tableG.append('line')
         .attr('x1', xx).attr('x2', xx)
-        .attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH)
+        .attr='y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH)
         .attr('stroke', '#eef1fb');
     });
 
@@ -520,15 +591,6 @@ function renderCharts(parsed){
     const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
 
-    function scoreFromAvg(a, thresholds){
-      if (a == null || Number.isNaN(a)) return null;
-      if (a === 0) return 10;
-      for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
-      return 10;
-    }
-
-    const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
-    const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
     const barMargin = 20, boxH2 = 42;
@@ -543,7 +605,7 @@ function renderCharts(parsed){
       : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
     scoreG.append('text').attr('x', barMargin).attr('y', 14).attr('font-size', 12).text(caption);
 
-    const ranges = rangeLabels;
+    const ranges = scoreRangeLabels(T);
     for (let i=0;i<10;i++){
       const x = barMargin + i*boxW;
       const isSel = (score === i+1);
