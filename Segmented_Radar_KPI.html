@@ -254,12 +254,12 @@ function parseTable(text){
   return {headers, entries, software: swCols};
 }
 
-/* ---------- Summary card (Table first, Bars underneath, best-first, scoring legend) ---------- */
+/* ---------- Summary card (Table first, Caption ABOVE bars, best-first, scoring legend) ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
-  // Build rows with avg + score (cap 1000 in mean, like elsewhere)
+  // Build rows with avg + score (cap 1000 in mean)
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
     const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
@@ -268,14 +268,14 @@ function renderSummary(container, parsed){
     return { sw: swLabel, date: sw.date, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
   });
 
-  // Best first: higher score, then lower average; n/a last
+  // Best first: higher score, then lower avg; n/a last
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
     if (sa !== sb) return sb - sa;             // higher score first
     if (a.avg == null && b.avg == null) return 0;
     if (a.avg == null) return 1;               // nulls last
     if (b.avg == null) return -1;
-    return a.avg - b.avg;                       // lower avg first
+    return a.avg - b.avg;                      // lower avg first
   });
 
   const chartData = rows.filter(r => r.avg != null);
@@ -311,8 +311,13 @@ function renderSummary(container, parsed){
     }
   });
 
-  /* === BARS (under table; colored by scoring boxes) === */
+  /* === CAPTION ABOVE the bars === */
   if (chartData.length){
+    card.append('div')
+      .attr('class','small')
+      .style('margin','8px 0 4px')
+      .text('Average events per 1000 km (bar color = score)');
+
     // Helper to measure label width
     function measureTextWidth(texts, fontSize=12, fontWeight=400){
       const tmp = d3.select('body').append('svg')
@@ -334,12 +339,12 @@ function renderSummary(container, parsed){
     // Chart width fits inside the card
     const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
     const cw = Math.max(560, Math.min(1000, cardW));            // clamp to card width
-    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14)); // adapt to labels, cap at ~48%
+    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14)); // adapt to labels; cap ~48%
     const rightPad = 16, topPad = 8, barH = 22, gap = 6;
 
     const svg = card.append('svg')
       .style('display','block')
-      .style('margin','8px auto 6px')
+      .style('margin','0 auto 6px')
       .attr('width', cw)
       .attr('height', topPad + chartData.length * (barH + gap) + 34);
 
@@ -367,7 +372,7 @@ function renderSummary(container, parsed){
       .attr('x', x(0)).attr('y', d => d._y)
       .attr('width', d => x(Math.min(1000, d.avg)) - x(0))
       .attr('height', barH)
-      .attr('fill', d => scoreColors[(d.score || 10) - 1])  // ← scoring colors (1..10)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1])
       .attr('fill-opacity', 0.9)
       .append('title')
       .text(d => `Score ${d.score}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
@@ -385,26 +390,21 @@ function renderSummary(container, parsed){
     g.append('g')
       .attr('transform', `translate(0, ${axisY})`)
       .call(d3.axisBottom(x).ticks(6));
-
-    card.append('div').attr('class','small').style('margin','4px 0 6px')
-      .text('Average events per 1000 km (bar color = score)');
   }
 
   /* === Scoring Legend (matches scoring boxes 1..10) === */
-  const ranges = scoreRangeLabels(T); // e.g., "≥ 50", ..., "< 1 (incl. 0)"
+  const ranges = scoreRangeLabels(T);
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg')
     .style('display','block')
-    .style('margin','4px auto 2px')
+    .style('margin','6px auto 2px')
     .attr('width', legCw);
 
-  const bandMargin = 20, boxH = 42, top = 4;
+  const bandMargin = 20, boxH = 42;
   const barW = legCw - bandMargin*2;
   const boxW = barW / 10;
 
-  const lg = legend.append('g').attr('transform', `translate(${bandMargin}, ${top})`);
-
-  // caption
+  // caption for legend
   legend.append('text')
     .attr('x', 12)
     .attr('y', 12)
@@ -416,7 +416,6 @@ function renderSummary(container, parsed){
     const x0 = bandMargin + i*boxW;
     const gBox = legend.append('g');
 
-    // colored box
     gBox.append('rect')
       .attr('x', x0)
       .attr('y', 20)
@@ -428,7 +427,6 @@ function renderSummary(container, parsed){
       .append('title')
       .text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
 
-    // number
     gBox.append('text')
       .attr('x', x0 + boxW/2)
       .attr('y', 20 + 14)
@@ -437,7 +435,6 @@ function renderSummary(container, parsed){
       .attr('font-size', 13)
       .text(i+1);
 
-    // rating
     gBox.append('text')
       .attr('x', x0 + boxW/2)
       .attr('y', 20 + 14 + 16)
@@ -445,7 +442,6 @@ function renderSummary(container, parsed){
       .attr('font-size', 11)
       .text(scoreText[i]);
 
-    // range
     gBox.append('text')
       .attr('x', x0 + boxW/2)
       .attr('y', 20 + boxH + 14)
@@ -454,10 +450,9 @@ function renderSummary(container, parsed){
       .text(ranges[i]);
   }
 
-  // legend height = boxes + labels (approx)
+  // legend height
   legend.attr('height', 20 + boxH + 28 + 6);
 }
-
 
 /* ---------- Renderer (cards) ---------- */
 function renderCharts(parsed){
