@@ -200,58 +200,100 @@ function scoreRangeLabels(T){
 }
 
 /* ---------- Parse table (with date extraction) ---------- */
+/* ---------- Parse table (supports missing "Function — KPI" header + dates) ---------- */
 function parseTable(text){
   const selectVal = document.getElementById('delimiter').value;
-  const tryParse = (d)=> text.split(/\r?\n/).filter(r=>r.trim().length>0).map(r=>r.split(d));
+  const tryParse = (d)=> text
+    .split(/\r?\n/)
+    .filter(r => r.trim().length > 0)
+    .map(r => r.split(d));
 
-  let delim = (selectVal==='auto') ? detectDelimiter(text) : selectVal;
+  // pick delimiter
+  let delim = (selectVal === 'auto') ? detectDelimiter(text) : selectVal;
   let rows = tryParse(delim);
-  if (!rows.length) return {headers:[], entries:[], software:[]};
+  if (!rows.length) return { headers: [], entries: [], software: [] };
 
-  let headers = rows[0].map(h=>h.trim());
-  let norm = headers.map(normalizeHeader);
-  let idxTarget = norm.findIndex(h=> h==='target');
-  let idxMax = norm.findIndex(h=> h==='max allowed' || h==='maxallowed');
+  // raw header
+  let headers = rows[0].map(h => h.trim());
 
-  if ((idxTarget<0 || idxMax<0) && selectVal!=='auto'){
-    const auto = detectDelimiter(text);
-    if (auto !== delim){
-      delim = auto; rows = tryParse(delim); headers = rows[0].map(h=>h.trim()); norm = headers.map(normalizeHeader);
-      idxTarget = norm.findIndex(h=> h==='target');
-      idxMax = norm.findIndex(h=> h==='max allowed' || h==='maxallowed');
+  // --- FIX: If the first header cell is missing (your new format),
+  // and the first data row has exactly one more column than the header,
+  // auto-insert "Function — KPI" at the beginning of the header.
+  if (rows.length > 1 && rows[1].length === headers.length + 1) {
+    const firstCell = (rows[1][0] || '').trim();
+    const looksText = parseNumber(firstCell) == null; // "ACC — ..." etc.
+    const normH = headers.map(normalizeHeader);
+    const hasTarget = normH.includes('target');
+    const hasMax = normH.includes('max allowed') || normH.includes('maxallowed');
+    if (looksText && hasTarget && hasMax) {
+      headers = ['Function — KPI', ...headers];
     }
   }
-  if (idxTarget<0 || idxMax<0){
+
+  let norm = headers.map(normalizeHeader);
+  let idxTarget = norm.findIndex(h => h === 'target');
+  let idxMax    = norm.findIndex(h => h === 'max allowed' || h === 'maxallowed');
+
+  // if target/max still not found, try auto delimiter detection fallback
+  if ((idxTarget < 0 || idxMax < 0) && selectVal !== 'auto') {
+    const auto = detectDelimiter(text);
+    if (auto !== delim) {
+      delim = auto; rows = tryParse(delim);
+      headers = rows[0].map(h => h.trim());
+      // re-apply missing header fix
+      if (rows.length > 1 && rows[1].length === headers.length + 1) {
+        const firstCell = (rows[1][0] || '').trim();
+        const looksText = parseNumber(firstCell) == null;
+        const normH2 = headers.map(normalizeHeader);
+        const hasTarget2 = normH2.includes('target');
+        const hasMax2 = normH2.includes('max allowed') || normH2.includes('maxallowed');
+        if (looksText && hasTarget2 && hasMax2) {
+          headers = ['Function — KPI', ...headers];
+        }
+      }
+      norm = headers.map(normalizeHeader);
+      idxTarget = norm.findIndex(h => h === 'target');
+      idxMax    = norm.findIndex(h => h === 'max allowed' || h === 'maxallowed');
+    }
+  }
+
+  if (idxTarget < 0 || idxMax < 0) {
     alert("Missing required columns: 'Target' and 'Max allowed'. Try Auto-detect delimiter.\nHeaders seen: " + headers.join(', '));
-    return {headers, entries:[], software:[]};
+    return { headers, entries: [], software: [] };
   }
 
   // Build software columns, extract [YYYY-MM-DD] if present, dedupe base names
   const swCols = [];
-  for (let i = idxMax+1; i < headers.length; i++){
+  for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
     const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
     const date = m ? m[1] : null;
     const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
     const basePretty = baseNoDate.replace('(TO)', ' (TO)');
     const countPrev = swCols.filter(s => s.base === basePretty).length;
-    const label = countPrev ? `${basePretty} — ${countPrev+1}` : basePretty;
-    swCols.push({ idx:i, base: basePretty, label, date });
+    const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
+    swCols.push({ idx: i, base: basePretty, label, date });
   }
 
+  // Parse entries (rows after header)
   const entries = [];
-  for (let r=1; r<rows.length; r++){
+  for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
-    if (!row || row.length===0) continue;
-    const {func, kpi} = splitFuncKpi((row[0]||'').trim());
+    if (!row || row.length === 0) continue;
+
+    // Column 0 is Function — KPI text in your data
+    const { func, kpi } = splitFuncKpi((row[0] || '').trim());
+
     const target = parseNumber(row[idxTarget]);
-    const max = parseNumber(row[idxMax]);
+    const max    = parseNumber(row[idxMax]);
+
     const values = {};
-    for (const sw of swCols){ values[sw.label] = parseNumber(row[sw.idx]); }
-    entries.push({func, kpi, target, max, values});
+    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
+
+    entries.push({ func, kpi, target, max, values });
   }
 
-  return {headers, entries, software: swCols};
+  return { headers, entries, software: swCols };
 }
 
 /* ---------- Summary card (Table first, Caption ABOVE bars, best-first, scoring legend) ---------- */
