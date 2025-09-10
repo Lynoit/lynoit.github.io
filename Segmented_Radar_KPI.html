@@ -254,11 +254,12 @@ function parseTable(text){
   return {headers, entries, software: swCols};
 }
 
-/* ---------- Summary card (Date column included) ---------- */
+/* ---------- Summary card (Chart + Table) ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
+  // Build rows with avg + score (cap 1000 for averages as elsewhere)
   const rows = parsed.software.map(sw => {
     const swLabel = sw.label;
     const vals = parsed.entries
@@ -269,11 +270,80 @@ function renderSummary(container, parsed){
     return { sw: swLabel, date: sw.date, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
   });
 
-  if (rows.every(r => r.avg == null)) return;
+  const nonNull = rows.filter(r => r.avg != null);
+  if (!nonNull.length) return;
 
+  // Card spans full width (via .summary-card in CSS)
   const card = container.append('div').attr('class', 'chart-card summary-card');
   card.append('div').attr('class','summary-title').text('Summary');
 
+  /* === Mini horizontal bar chart: Average per 1000 km === */
+  // Sort for readability
+  const chartData = nonNull.slice().sort((a,b)=> b.avg - a.avg);
+
+  // Sizing (responsive to card width)
+  const svg = card.append('svg');
+  const cw = Math.max(560, Math.min(1000, card.node().getBoundingClientRect().width - 20));
+  const leftPad = 180;        // room for software + date labels
+  const rightPad = 16;
+  const topPad = 8;
+  const barH = 22;
+  const gap = 6;
+  const chartHeight = topPad + chartData.length * (barH + gap) + 34; // +axis
+  svg.attr('width', cw).attr('height', chartHeight);
+
+  const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
+
+  const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
+  const x = d3.scaleLinear()
+    .domain([0, Math.max(1, maxAvg)])
+    .range([leftPad, cw - rightPad]);
+
+  // y positions
+  chartData.forEach((d, i) => d._y = i * (barH + gap));
+
+  // software + date labels
+  g.selectAll('.ylabel').data(chartData).enter().append('text')
+    .attr('class','ylabel')
+    .attr('x', leftPad - 10)
+    .attr('y', d => d._y + barH/2)
+    .attr('text-anchor','end')
+    .attr('dominant-baseline','middle')
+    .attr('font-size', 12)
+    .text(d => d.date ? `${d.sw}  (${d.date})` : d.sw)
+    .append('title').text(d => d.sw);
+
+  // bars
+  g.selectAll('.bar').data(chartData).enter().append('rect')
+    .attr('class','bar')
+    .attr('x', x(0))
+    .attr('y', d => d._y)
+    .attr('width', d => x(Math.min(1000, d.avg)) - x(0))
+    .attr('height', barH)
+    .attr('fill', d => scoreColors[(d.score || 10) - 1])
+    .attr('fill-opacity', 0.85);
+
+  // value labels
+  g.selectAll('.val').data(chartData).enter().append('text')
+    .attr('x', d => x(Math.min(1000, d.avg)) + 6)
+    .attr('y', d => d._y + barH/2)
+    .attr('dominant-baseline', 'middle')
+    .attr('font-size', 12)
+    .text(d => d.avg.toFixed(1));
+
+  // x-axis
+  const axisY = chartData.length * (barH + gap);
+  g.append('g')
+    .attr('transform', `translate(0, ${axisY})`)
+    .call(d3.axisBottom(x).ticks(6));
+
+  // chart caption
+  card.append('div')
+    .attr('class','small')
+    .style('margin','6px 0 10px')
+    .text('Average events per 1000 km (bar color = score)');
+
+  /* === Summary table underneath (unchanged columns: Software, Date, Avg, Score, Rating) === */
   const table = card.append('table').attr('class', 'summary-table');
 
   table.append('colgroup').html(`
@@ -294,7 +364,6 @@ function renderSummary(container, parsed){
   `);
 
   const tbody = table.append('tbody');
-
   rows.forEach(r => {
     const tr = tbody.append('tr');
 
