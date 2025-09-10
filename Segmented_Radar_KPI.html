@@ -254,12 +254,11 @@ function parseTable(text){
   return {headers, entries, software: swCols};
 }
 
-/* ---------- Summary card (Table first, Bars underneath, best-first, with legend) ---------- */
+/* ---------- Summary card (Table first, Bars underneath, best-first, legend inside) ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
-  // Build rows with avg + score (cap 1000 for averages as elsewhere)
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
     const vals = parsed.entries
@@ -270,72 +269,51 @@ function renderSummary(container, parsed){
     return { sw: swLabel, date: sw.date, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
   });
 
-  // Sort: best first (higher score), then lower average; null avgs at bottom
+  // Best first: higher score, then lower avg; n/a last
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
-    if (sa !== sb) return sb - sa;              // higher score first
+    if (sa !== sb) return sb - sa;
     if (a.avg == null && b.avg == null) return 0;
-    if (a.avg == null) return 1;                // nulls last
+    if (a.avg == null) return 1;
     if (b.avg == null) return -1;
-    return a.avg - b.avg;                       // lower avg first
+    return a.avg - b.avg;
   });
 
   const nonNull = rows.filter(r => r.avg != null);
-  if (!rows.length || (!nonNull.length && rows.every(r=>r.avg==null))) return;
+  if (!rows.length) return;
 
-  // Full-width card (via .summary-card)
   const card = container.append('div').attr('class', 'chart-card summary-card');
   card.append('div').attr('class','summary-title').text('Summary');
 
-  /* === Summary table (first) === */
+  /* === TABLE (first) === */
   const table = card.append('table').attr('class', 'summary-table');
-
   table.append('colgroup').html(`
-    <col class="col-sw">
-    <col class="col-date">
-    <col class="col-avg">
-    <col class="col-score">
-    <col class="col-rating">
+    <col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating">
   `);
-
   const thead = table.append('thead').append('tr');
-  thead.html(`
-    <th>Software</th>
-    <th>Test date</th>
-    <th>Average per 1000 km</th>
-    <th>Score</th>
-    <th>Rating</th>
-  `);
+  thead.html(`<th>Software</th><th>Test date</th><th>Average per 1000 km</th><th>Score</th><th>Rating</th>`);
 
   const tbody = table.append('tbody');
-  rows.forEach(r => {
+  rows.forEach(r=>{
     const tr = tbody.append('tr');
-
-    tr.append('td').append('span')
-      .attr('class', 'software-cell')
-      .attr('title', r.sw)
-      .text(r.sw);
-
+    tr.append('td').append('span').attr('class','software-cell').attr('title', r.sw).text(r.sw);
     tr.append('td').text(r.date || '—');
     tr.append('td').text(r.avg == null ? '—' : r.avg.toFixed(1));
-
     const scoreCell = tr.append('td');
     if (r.score == null){
-      scoreCell.text('—');
-      tr.append('td').text('n/a');
+      scoreCell.text('—'); tr.append('td').text('n/a');
     } else {
       scoreCell.append('span')
-        .attr('class', 'summary-chip')
+        .attr('class','summary-chip')
         .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`)
         .text(r.score);
       tr.append('td').text(r.text);
     }
   });
 
-  /* === Bars UNDER the table (match table order) === */
-  const chartData = rows.filter(r => r.avg != null); // keep same sorted order
+  /* === BARS (under table; same order) === */
+  const chartData = rows.filter(r => r.avg != null);
 
-  // Helper: measure text width via a hidden SVG
   function measureTextWidth(texts, fontSize=12, fontWeight=400){
     const tmp = d3.select('body').append('svg')
       .attr('width',0).attr('height',0)
@@ -343,37 +321,33 @@ function renderSummary(container, parsed){
     let max = 0;
     texts.forEach(t=>{
       const node = tmp.append('text')
-        .attr('font-size', fontSize)
-        .attr('font-weight', fontWeight)
-        .text(t==null ? '' : String(t))
-        .node();
+        .attr('font-size', fontSize).attr('font-weight', fontWeight)
+        .text(t==null ? '' : String(t)).node();
       max = Math.max(max, node.getComputedTextLength());
     });
     tmp.remove();
     return max;
   }
 
-  // Label strings (software + optional date)
   const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
   const labelW = Math.ceil(measureTextWidth(yLabels, 12, 400));
-  const leftPad = Math.min(360, Math.max(160, labelW + 14)); // adaptive left padding
+
+  // Card inner width (respect padding); chart width never exceeds card width
+  const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+  const cw = Math.max(560, Math.min(1000, cardW));   // clamp to card width
+
+  // Left pad adapts to labels but capped to ~48% of chart width
+  const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14));
   const rightPad = 16;
   const topPad = 8;
   const barH = 22;
   const gap = 6;
 
-  // Use card width; ensure it's at least table width
-  const tableW = Math.ceil(table.node().getBoundingClientRect().width);
-  const cardW  = Math.ceil(card.node().getBoundingClientRect().width) - 20; // inner margin
-  const baseW  = Math.max(560, Math.min(1000, cardW));
-  const cw     = Math.max(baseW, tableW + 40);
-
   const svg = card.append('svg')
     .style('display','block')
-    .style('margin','8px auto 6px');
-
-  const chartHeight = topPad + chartData.length * (barH + gap) + 34; // + axis
-  svg.attr('width', cw).attr('height', chartHeight);
+    .style('margin','8px auto 6px')
+    .attr('width', cw)
+    .attr('height', topPad + chartData.length * (barH + gap) + 34);
 
   const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
 
@@ -382,50 +356,38 @@ function renderSummary(container, parsed){
     .domain([0, Math.max(1, maxAvg)])
     .range([leftPad, cw - rightPad]);
 
-  chartData.forEach((d, i) => d._y = i * (barH + gap));
+  chartData.forEach((d,i)=> d._y = i * (barH + gap));
 
-  // y labels (software + date)
   g.selectAll('.ylabel').data(chartData).enter().append('text')
     .attr('class','ylabel')
-    .attr('x', leftPad - 10)
-    .attr('y', d => d._y + barH/2)
-    .attr('text-anchor','end')
-    .attr('dominant-baseline','middle')
-    .attr('font-size', 12)
-    .text((d,i) => yLabels[i])
+    .attr('x', leftPad - 10).attr('y', d => d._y + barH/2)
+    .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+    .text((d,i)=> yLabels[i])
     .append('title').text(d => d.sw);
 
-  // bars (color by score)
   g.selectAll('.bar').data(chartData).enter().append('rect')
     .attr('class','bar')
-    .attr('x', x(0))
-    .attr('y', d => d._y)
+    .attr('x', x(0)).attr('y', d => d._y)
     .attr('width', d => x(Math.min(1000, d.avg)) - x(0))
     .attr('height', barH)
     .attr('fill', d => scoreColors[(d.score || 10) - 1])
     .attr('fill-opacity', 0.85);
 
-  // value labels
   g.selectAll('.val').data(chartData).enter().append('text')
     .attr('x', d => x(Math.min(1000, d.avg)) + 6)
     .attr('y', d => d._y + barH/2)
-    .attr('dominant-baseline', 'middle')
-    .attr('font-size', 12)
+    .attr('dominant-baseline','middle').attr('font-size', 12)
     .text(d => d.avg.toFixed(1));
 
-  // x-axis
   const axisY = chartData.length * (barH + gap);
   g.append('g')
     .attr('transform', `translate(0, ${axisY})`)
     .call(d3.axisBottom(x).ticks(6));
 
-  // caption under chart
-  card.append('div')
-    .attr('class','small')
-    .style('margin','4px 0 6px')
+  card.append('div').attr('class','small').style('margin','4px 0 6px')
     .text('Average events per 1000 km (bar color = score)');
 
-  /* === Legend (same as radar charts) === */
+  /* === Legend (same as radar; kept INSIDE card width) === */
   const legendItems = [
     {label:'Green = Good',  color: GREEN},
     {label:'Yellow = OK',   color: YELLOW},
@@ -433,35 +395,34 @@ function renderSummary(container, parsed){
     {label:'Black = No function', color: BLACK},
   ];
 
-  // Build legend in a tiny SVG under the caption
   const legendSvg = card.append('svg')
     .style('display','block')
     .style('margin','2px auto 2px')
-    .attr('width', cw)
-    .attr('height', 56);
+    .attr('width', cw);
 
   const lg = legendSvg.append('g');
-  // draw items first to measure
   legendItems.forEach((it, i)=>{
     const y = 8 + i*18 + 12;
     lg.append('rect').attr('x',8).attr('y',y-7).attr('width',12).attr('height',12).attr('fill',it.color);
     lg.append('text').attr('x',26).attr('y',y).attr('dominant-baseline','middle').attr('font-size',12).text(it.label);
   });
-  // measure + background
+
   const pad = 8;
   const lb = lg.node().getBBox();
   const boxW = Math.ceil(lb.width) + pad*2;
   const boxH = Math.ceil(lb.height) + pad*2;
+
   lg.insert('rect',':first-child')
     .attr('x', lb.x - pad).attr('y', lb.y - pad)
     .attr('rx',8).attr('ry',8)
     .attr('width', boxW).attr('height', boxH)
     .attr('fill','#ffffff').attr('stroke','#e4e7f3');
 
-  // move legend box to the right side
-  lg.attr('transform', `translate(${cw - boxW - 12}, 4)`);
+  // Keep the legend box inside the card horizontally
+  const legendX = Math.max(12, cw - boxW - 12);
+  lg.attr('transform', `translate(${legendX}, 4)`);
+  legendSvg.attr('height', boxH + 8);
 }
-
 
 /* ---------- Renderer (cards) ---------- */
 function renderCharts(parsed){
