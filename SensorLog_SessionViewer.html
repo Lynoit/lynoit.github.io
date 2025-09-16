@@ -144,8 +144,8 @@
     .dot-orange { background: var(--speedlimit) }
 
     .leaflet-tooltip.feature-tag {
-      background: rgba(0,0,0,0.75);
-      color: #000;
+      background: rgba(0,0,0,0.85);
+      color: #fff; /* high contrast base; speed-limit bubbles recolored via JS */
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 2px 6px;
@@ -177,6 +177,13 @@
         <input id="filesInput" type="file" multiple accept=".zip"/>
         Open ZIP files
       </label>
+
+      <!-- NEW: Reverse geocode toggle (default OFF) -->
+      <label class="btn" title="Append nearby street name to feature tooltips">
+        <input id="chkRevGeo" type="checkbox" style="margin-right:8px" />
+        Reverse-geocode road names
+      </label>
+
       <span class="hint">Each ZIP like your sample (Location.csv, Accelerometer.csv, TotalAcceleration.csv, Camera/*.jpg).</span>
       <span class="tiny">OSM features via Overpass; gentle throttling applied 🕊️</span>
     </div>
@@ -405,7 +412,43 @@ function colorizeTooltip(marker, color) {
   }, 0);
 }
 
-/* ------------------- OSM features on map ------------------- */
+/* ------------------- Reverse geocode (Nominatim) ------------------- */
+let reverseGeoEnabled = false;
+const revGeoCache = new Map();        // key: "lat,lon" rounded
+let revGeoQueue = Promise.resolve();  // simple throttle chain
+const revGeoListeners = [];           // sessions register here to react to toggle
+
+function reverseGeocode(lat, lon) {
+  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  if (revGeoCache.has(key)) return revGeoCache.get(key);
+
+  const run = async () => {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = await res.json();
+    return j?.address?.road || j?.name || j?.display_name || '';
+  };
+
+  const p = revGeoQueue
+    .then(() => new Promise(r => setTimeout(r, 300))) // ~3 req/s
+    .then(run)
+    .catch(() => ''); // swallow errors -> empty string
+  revGeoCache.set(key, p);
+  return p;
+}
+
+// wire the checkbox (default OFF)
+const chkRevGeo = document.getElementById('chkRevGeo');
+if (chkRevGeo) {
+  chkRevGeo.checked = false;
+  chkRevGeo.addEventListener('change', () => {
+    reverseGeoEnabled = chkRevGeo.checked;
+    revGeoListeners.forEach(fn => { try { fn(reverseGeoEnabled); } catch {} });
+  });
+}
+
+/* ------------------- OSM features on map (returns marker meta) ------------------- */
 function bboxForTrack(track, padMeters = 80) {
   let minLat=  90, minLon= 180, maxLat= -90, maxLon= -180;
   for (const p of track) {
@@ -440,11 +483,12 @@ const MarkerPlugin = {
   afterDatasetsDraw(chart) {
     const markers = chart.$markers;
     if (!markers) return;
+    const speedDataset = chart.data.datasets?.[0];
+    if (!speedDataset || !Array.isArray(speedDataset.data) || !speedDataset.data.length) return;
 
     const { ctx, chartArea, scales } = chart;
     const xScale = scales.x, yScale = scales.y;
     const labels = chart.data.labels;
-    const speedDataset = chart.data.datasets[0]; // dataset[0] = vehicle speed
 
     function drawOne(i, color, tag) {
       if (i == null || i < 0 || i >= labels.length) return;
@@ -585,7 +629,6 @@ function makeLineChart(canvas, {labels, values, label, yTitle, min, max, suggest
 function computeAccelXYZSeries(accelRows) {
   if (!accelRows?.length) return null;
 
-  // mm:ss or "Xs"
   function formatRelative(ms) {
     const totalSec = Math.floor(ms / 1000);
     const mm = Math.floor(totalSec / 60);
@@ -691,10 +734,10 @@ function computeLinearAccMagnitude(accelRows) {
       }
     }
 
-    if (tms != null) raw.push({ t: tms, v: mag });
+    if (tms != null) raw.push({ t: tms, v: mag - 9.81 }); // sign-preserving gravity removal
     else {
       fallbackLabels.push(String(fallbackLabels.length));
-      fallbackValues.push(mag);
+      fallbackValues.push(mag - 9.81);
     }
   }
 
@@ -791,11 +834,12 @@ function computeSpeedSeriesFromLocation(locationRows) {
   };
 }
 
-/* ------------------- Map + OSM features ------------------- */
+/* ------------------- Map + OSM features (returns markers) ------------------- */
 function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
   const els = geojson?.elements || [];
   const others = [];
   const speedWays = [];
+  const markerMeta = []; // collect markers + base label
 
   for (const el of els) {
     let lat=null, lon=null;
@@ -814,16 +858,15 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
       else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
       else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
       else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
-      if (label) others.push({ lat, lon, label, color });
+      if (label) {
+        const m = L.circleMarker([lat, lon], {
+          radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+        }).addTo(groupLayer);
+        m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+        colorizeTooltip(m, color);
+        markerMeta.push({ marker: m, base: label, lat, lon, color });
+      }
     }
-  }
-
-  for (const f of others) {
-    const m = L.circleMarker([f.lat, f.lon], {
-      radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
-    }).addTo(groupLayer);
-    m.bindTooltip(f.label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-    colorizeTooltip(m, f.color);
   }
 
   if (speedWays.length && latlngs?.length >= 2) {
@@ -841,11 +884,11 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
         radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
       }).addTo(groupLayer);
       const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
-      if (changed) {
-        m.bindTooltip(`Speed limit: ${f.v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-        colorizeTooltip(m, f.color);
-        prev = f.v;
-      }
+      const label = changed && f.v != null ? `Speed limit: ${f.v}` : 'Speed limit';
+      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+      colorizeTooltip(m, f.color);
+      markerMeta.push({ marker: m, base: label, lat: f.lat, lon: f.lon, color: f.color });
+      if (changed && f.v != null) prev = f.v;
     }
   } else {
     for (const sw of speedWays) {
@@ -854,12 +897,14 @@ function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
       const m = L.circleMarker([sw.lat, sw.lon], {
         radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
       }).addTo(groupLayer);
-      if (v != null) {
-        m.bindTooltip(`Speed limit: ${v}`, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-        colorizeTooltip(m, color);
-      }
+      const label = v != null ? `Speed limit: ${v}` : 'Speed limit';
+      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+      colorizeTooltip(m, color);
+      markerMeta.push({ marker: m, base: label, lat: sw.lat, lon: sw.lon, color });
     }
   }
+
+  return markerMeta;
 }
 
 /* ------------------- Session UI ------------------- */
@@ -884,12 +929,12 @@ function createSessionCard(sessionName) {
   const row = document.createElement('div'); row.className='row';
   const legend = document.createElement('div'); legend.className='legend';
   legend.innerHTML = `
-    <span><span class="dot dot-blue"></span> Trace</span>
-    <span><span class="dot dot-yellow"></span> Traffic light</span>
-    <span><span class="dot dot-red"></span> Stop sign</span>
-    <span><span class="dot dot-green"></span> Roundabout</span>
+    <span><span class="dot" style="background:var(--blue)"></span> Trace</span>
+    <span><span class="dot" style="background:var(--yellow)"></span> Traffic light</span>
+    <span><span class="dot" style="background:var(--red)"></span> Stop sign</span>
+    <span><span class="dot" style="background:var(--green)"></span> Roundabout</span>
     <span><span class="dot" style="background:#4da3ff"></span> Junction</span>
-    <span><span class="dot dot-orange"></span> Speed limit</span>
+    <span><span class="dot" style="background:var(--speedlimit)"></span> Speed limit</span>
   `;
   const status = document.createElement('div'); status.className='status'; status.textContent = 'Loading…';
   row.append(legend, status);
@@ -900,17 +945,18 @@ function createSessionCard(sessionName) {
 
   const markerControls = document.createElement('div');
   markerControls.style.display = 'flex'; markerControls.style.gap = '8px'; markerControls.style.alignItems = 'center';
+  const btnExport = document.createElement('button'); btnExport.className='btn'; btnExport.textContent='Export Speed CSV';
   const btnSetA = document.createElement('button'); btnSetA.className='btn'; btnSetA.textContent='Set A';
   const btnSetB = document.createElement('button'); btnSetB.className='btn'; btnSetB.textContent='Set B';
   const btnClear = document.createElement('button'); btnClear.className='btn'; btnClear.textContent='Clear';
   const tip = document.createElement('span'); tip.className='tiny'; tip.textContent='Click the speed plot after choosing A/B.';
-  markerControls.append(btnSetA, btnSetB, btnClear, tip);
+  markerControls.append(btnExport, btnSetA, btnSetB, btnClear, tip);
 
   charts.append(speedCanvas, markerControls, accCanvas);
 
   body.append(gallery, map, row, charts);
   wrap.append(head, body);
-  return { wrap, gallery, map, status, speedCanvas, accCanvas, btnSetA, btnSetB, btnClear };
+  return { wrap, gallery, map, status, speedCanvas, accCanvas, btnSetA, btnSetB, btnClear, btnExport };
 }
 
 /* ------------------- Lightbox ------------------- */
@@ -921,10 +967,14 @@ function openLightbox(src) {
   lightbox.classList.add('show');
   lightbox.focus();
 }
-lightbox.addEventListener('click', () => lightbox.classList.remove('show'));
-lightbox.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') lightbox.classList.remove('show');
-});
+function closeLightbox(){
+  const src = lightboxImg.src;
+  lightbox.classList.remove('show');
+  lightboxImg.src = '';
+  if (src.startsWith('blob:')) URL.revokeObjectURL(src);
+}
+lightbox.addEventListener('click', closeLightbox);
+lightbox.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
 
 /* ------------------- Main processing ------------------- */
 async function processZipFile(file) {
@@ -954,6 +1004,7 @@ async function processZipFile(file) {
       for (const img of images) {
         const t = document.createElement('img');
         t.className = 'thumb';
+        t.loading = 'lazy';
         t.src = img.url; t.alt = img.name;
         t.addEventListener('click', () => openLightbox(img.url));
         ui.gallery.appendChild(t);
@@ -1005,8 +1056,27 @@ async function processZipFile(file) {
       try {
         const osm = await overpassFetch(query);
         const layer = L.layerGroup().addTo(map);
-        addOsmFeaturesToMap(map, osm, layer, latlngs);
+        const markers = addOsmFeaturesToMap(map, osm, layer, latlngs);  // get marker meta
         maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
+
+        // function to (re)apply tooltip content based on reverse-geo toggle
+        const applyReverseGeo = (enabled) => {
+          for (const m of markers) {
+            const tt = m.marker.getTooltip?.();
+            const set = (txt) => { if (tt) tt.setContent(txt); colorizeTooltip(m.marker, m.color); };
+            if (!enabled) {
+              set(m.base);
+            } else {
+              reverseGeocode(m.lat, m.lon).then(street => {
+                set(street ? `${m.base} — ${street}` : m.base);
+              }).catch(() => set(m.base));
+            }
+          }
+        };
+        // apply current state + subscribe to future changes
+        applyReverseGeo(reverseGeoEnabled);
+        revGeoListeners.push(applyReverseGeo);
+
         ui.status.textContent = 'Map ready.';
       } catch (e) {
         console.warn('Overpass failed:', e);
@@ -1044,9 +1114,15 @@ async function processZipFile(file) {
       min: yMin, max: yMax,
       datasets: [
         { label: 'Speed',    data: speedValues,    borderColor: cssVar('--blue', '#3a86ff'), pointRadius: 0, borderWidth: 1.6, tension: 0.12 },
-        { label: 'Maxspeed', data: maxspeedValues, borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3] }
+        { label: 'Maxspeed', data: maxspeedValues, borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3], stepped: true, spanGaps: true }
       ]
     });
+
+    // Tooltip readout
+    speedChart.options.plugins.tooltip = { enabled: true, callbacks:{
+      label: ctx => ` ${ctx.dataset.label}: ${Number.isFinite(ctx.parsed.y) ? ctx.parsed.y.toFixed(1) : '–'} km/h`
+    }};
+    speedChart.update();
 
     // Provide marker + series data for the plugin
     speedChart.$markers = { A: null, B: null, active: 'A', colorA:'#00e5ff', colorB:'#ff5ec4' };
@@ -1065,6 +1141,24 @@ async function processZipFile(file) {
       const which = speedChart.$markers.active || 'A';
       speedChart.$markers[which] = i;
       speedChart.update(); // plugin redraws A, B, and A↔B bubble
+    });
+
+    // Export CSV (Speed vs Maxspeed)
+    ui.btnExport.addEventListener('click', () => {
+      const rows = [['t','speed_kmh','maxspeed_kmh']];
+      for (let i=0;i<speedLabels.length;i++){
+        const t  = speedLabels[i] ?? '';
+        const v  = Number.isFinite(speedValues[i]) ? speedValues[i] : '';
+        const vm = Number.isFinite(maxspeedValues[i]) ? maxspeedValues[i] : '';
+        rows.push([t, v, vm]);
+      }
+      const csv = rows.map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], {type:'text/csv'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${sessionName}_speed_vs_maxspeed.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
     });
 
     // -------- Acceleration chart --------
@@ -1111,7 +1205,7 @@ async function processZipFile(file) {
             }
           }
           const a = Number(r[ak]);
-          if (tms != null && Number.isFinite(a)) raw.push({ t: tms, v: Math.max(0, a - 9.81) });
+          if (tms != null && Number.isFinite(a)) raw.push({ t: tms, v: a - 9.81 });
         }
         if (raw.length) {
           const t0 = raw[0].t;
