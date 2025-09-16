@@ -5,19 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Sensor Sessions Viewer (ZIP → Map + Plots)</title>
 
-  <!-- Leaflet -->
+  <!-- Leaflet core -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <!-- PolylineDecorator for direction arrow -->
+
+  <!-- Leaflet PolylineDecorator (for direction arrow on the route) -->
   <script src="https://unpkg.com/leaflet-polylinedecorator@1.7.0/dist/leaflet.polylineDecorator.min.js"></script>
 
-  <!-- JSZip -->
+  <!-- JSZip (read local .zip files) -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-  <!-- Papa Parse -->
+  <!-- Papa Parse (CSV parsing) -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
-  <!-- Chart.js -->
+  <!-- Chart.js (charts) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 
   <style>
@@ -62,7 +63,7 @@
     .hint { color: var(--muted); font-size: 12px }
     .tiny { font-size: 11px; color: var(--muted) }
 
-    /* Stack sessions vertically */
+    /* Sessions stacked vertically */
     .grid {
       display: flex;
       flex-direction: column;
@@ -109,6 +110,7 @@
       box-shadow: 0 10px 32px rgba(0,0,0,0.5);
     }
 
+    /* Map + charts */
     .map {
       width: 100%; height: 320px;
       border-radius: 12px; border: 1px solid var(--border); overflow: hidden;
@@ -143,9 +145,10 @@
     .dot-green  { background: var(--green) }
     .dot-orange { background: var(--speedlimit) }
 
+    /* Base tooltip styling (we recolor for speed-limit bubbles in JS) */
     .leaflet-tooltip.feature-tag {
       background: rgba(0,0,0,0.85);
-      color: #fff; /* high contrast base; speed-limit bubbles recolored via JS */
+      color: #fff; /* high contrast; overridden to black text when we paint speed-limit color */
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 2px 6px;
@@ -169,6 +172,7 @@
   <header>
     <h1>Sensor Sessions Viewer</h1>
     <div id="controls">
+      <!-- File pickers -->
       <label class="btn" id="openFolderLabel" title="Pick a folder with multiple ZIPs">
         <input id="folderInput" type="file" webkitdirectory directory multiple accept=".zip"/>
         Open folder of ZIPs
@@ -178,20 +182,23 @@
         Open ZIP files
       </label>
 
-      <!-- NEW: Reverse geocode toggle (default OFF) -->
-      <label class="btn" title="Append nearby street name to feature tooltips">
-        <input id="chkRevGeo" type="checkbox" style="margin-right:8px" />
-        Reverse-geocode road names
+      <!-- ONE master toggle (default OFF) that controls ALL OSM-related lookups:
+           - Overpass features (traffic lights, stops, roundabouts, speed limits)
+           - Maxspeed profile alignment for the speed chart
+           - Reverse geocoding of road names (Nominatim) -->
+      <label class="btn" title="Enable/disable ALL OSM lookups (features, speed limits, road names)">
+        <input id="chkOSMLookups" type="checkbox" style="margin-right:8px" />
+        OSM lookups (features & road names)
       </label>
 
       <span class="hint">Each ZIP like your sample (Location.csv, Accelerometer.csv, TotalAcceleration.csv, Camera/*.jpg).</span>
-      <span class="tiny">OSM features via Overpass; gentle throttling applied 🕊️</span>
+      <span class="tiny">Master toggle controls Overpass (features + maxspeed) and Nominatim (street names). Default OFF.</span>
     </div>
   </header>
 
   <main class="grid" id="sessions"></main>
 
-  <!-- One global lightbox for all sessions -->
+  <!-- Global lightbox used by all sessions -->
   <div id="lightbox" class="lightbox" tabindex="0" aria-label="Image viewer">
     <img id="lightboxImg" alt="Full size"/>
   </div>
@@ -199,7 +206,23 @@
   <footer>© Zeekr Tech EU 2025</footer>
 
 <script>
-/* ------------------- Overpass setup (mirrors + throttling) ------------------- */
+/* ===========================================================================
+   MASTER TOGGLE (DEFAULT OFF)
+   - Applies to all sessions, including those already rendered
+   - OFF  -> no Overpass or Nominatim requests, no maxspeed series
+   - ON   -> fetch features & maxspeed, append road names, and fill the maxspeed line
+   ========================================================================== */
+let osmlEnabled = false;
+const chkOSM = document.getElementById('chkOSMLookups');
+chkOSM.checked = false;
+
+/* For affecting already-rendered sessions, we store per-session controllers:
+   each controller exposes { enable(), disable() } */
+const sessionControllers = [];
+
+/* ===========================================================================
+   Overpass (features) setup (rotating mirrors + soft throttling)
+   ========================================================================== */
 const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass-api.de/api/interpreter',
@@ -207,7 +230,9 @@ const OVERPASS_ENDPOINTS = [
 ];
 let overpassQueue = Promise.resolve();
 
-/* ------------------- Chart.js defaults ------------------- */
+/* ===========================================================================
+   Chart.js defaults
+   ========================================================================== */
 Chart.defaults.color = '#b9c0cc';
 Chart.defaults.font = {
   family: 'system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif',
@@ -215,34 +240,19 @@ Chart.defaults.font = {
   weight: '400',
 };
 
-/* ------------------- Utilities ------------------- */
+/* ===========================================================================
+   Utilities
+   ========================================================================== */
 function cssVar(name, fallback) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return v || fallback;
 }
-
-function overpassFetch(query) {
-  const run = async () => {
-    for (const url of OVERPASS_ENDPOINTS) {
-      try {
-        const res = await fetch(url, { method: 'POST', body: query, headers: { 'Content-Type': 'text/plain' } });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.json();
-      } catch (e) { console.warn('Overpass failed on', url, e); }
-    }
-    throw new Error('All Overpass endpoints failed');
-  };
-  overpassQueue = overpassQueue.then(() => new Promise(r => setTimeout(r, 500))).then(run);
-  return overpassQueue;
-}
-
 function formatRelativeTime(ms) {
   const totalSec = Math.floor(ms / 1000);
   const mm = Math.floor(totalSec / 60);
   const ss = totalSec % 60;
   return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
 }
-
 function slugWithoutExt(fileName) {
   const base = fileName.split('/').pop();
   return base.replace(/\.zip$/i, '');
@@ -261,10 +271,6 @@ function parseTime(v) {
   const d = new Date(v);
   return isNaN(d) ? null : d;
 }
-function formatHHMMSS(d) {
-  const pad = n => String(n).padStart(2, '0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
 function pick(keys, obj) {
   for (const k of keys) {
     const found = Object.keys(obj).find(x => x.toLowerCase() === k.toLowerCase());
@@ -280,7 +286,9 @@ function decimate(xs, max=2000) {
   return out;
 }
 
-/* small vector helpers for route projection (meters) */
+/* ===========================================================================
+   Lightweight geometry helpers (local XY projection in meters)
+   ========================================================================== */
 function toXY(lat, lon, lat0) {
   const R = 6371008.8;
   const x = (lon * Math.PI/180) * R * Math.cos(lat0 * Math.PI/180);
@@ -292,7 +300,66 @@ function distMeters(a, b) {
   return Math.hypot(dx, dy);
 }
 
-/* Build a speed-limit profile along the route (chainage s in meters). */
+/* Project a polyline to XY + cumulative distances (chainage) */
+function toXYChain(latlngs) {
+  const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
+  const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
+  const cum = [0];
+  for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
+  return { xy, cum, lat0 };
+}
+/* Project an arbitrary point to the polyline and get chainage s */
+function projectChainage({xy, cum}, lat0, lat, lon) {
+  const p = toXY(lat, lon, lat0);
+  let best = { d: Infinity, s: 0 };
+  for (let i=0; i<xy.length-1; i++) {
+    const a = xy[i], b = xy[i+1];
+    const abx = b[0]-a[0], aby = b[1]-a[1];
+    const apx = p[0]-a[0], apy = p[1]-a[1];
+    const ab2 = abx*abx + aby*aby;
+    let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const proj = [a[0] + abx*t, a[1] + aby*t];
+    const d = distMeters(p, proj);
+    if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])) };
+  }
+  return best.s;
+}
+
+/* ===========================================================================
+   OSM maxspeed parsing + coloring
+   ========================================================================== */
+function parseMaxspeedToKmh(tag) {
+  if (!tag) return null;
+  const s = String(tag).toLowerCase().trim();
+  if (s === 'signals' || s === 'variable' || s === 'none') return null;
+  const mph = s.match(/(\d+(?:\.\d+)?)\s*mph/);
+  if (mph) return Math.round(parseFloat(mph[1]) * 1.60934);
+  const kmh = s.match(/(\d+(?:\.\d+)?)/);
+  return kmh ? Math.round(parseFloat(kmh[1])) : null;
+}
+function getSpeedColor(maxspeedTagOrNumber) {
+  let num;
+  if (typeof maxspeedTagOrNumber === 'number') num = maxspeedTagOrNumber;
+  else {
+    const str = String(maxspeedTagOrNumber || '').toLowerCase();
+    const mph = str.match(/(\d+(?:\.\d+)?)\s*mph/);
+    if (mph) num = parseFloat(mph[1]) * 1.60934;
+    else {
+      const kmh = str.match(/(\d+(?:\.\d+)?)/);
+      num = kmh ? parseFloat(kmh[1]) : NaN;
+    }
+  }
+  if (!isFinite(num)) return '#ff8800';
+  if (num <= 30) return '#ff8800';
+  if (num <= 50) return '#ffaa33';
+  if (num <= 70) return '#ffcc00';
+  if (num <= 90) return '#c8d400';
+  if (num <= 110) return '#89dd00';
+  return '#38c172';
+}
+
+/* Build a speed-limit profile along the route (change points along chainage) */
 function extractMaxspeedProfile(geojson, latlngs) {
   const els = geojson?.elements || [];
   if (!latlngs || latlngs.length < 2) return [];
@@ -313,15 +380,16 @@ function extractMaxspeedProfile(geojson, latlngs) {
     pts.push({ s, v });
   }
   pts.sort((a,b)=>a.s-b.s);
+  // Squash repeats (we just need change points)
   const profile = [];
   let lastV = null;
   for (const p of pts) {
     if (p.v !== lastV) { profile.push(p); lastV = p.v; }
   }
-  return profile; // [{s, v}] at change points
+  return profile; // [{s, v}]
 }
 
-/* For each location sample, map chainage -> speed limit (km/h). */
+/* Align per-sample maxspeed values to a location series index */
 function computeMaxspeedSeriesAligned(latlngs, profile) {
   if (!latlngs?.length || !profile?.length) return new Array(latlngs.length).fill(null);
   const chain = toXYChain(latlngs);
@@ -343,112 +411,9 @@ function computeMaxspeedSeriesAligned(latlngs, profile) {
   return out;
 }
 
-/* project a point to polyline to get chainage (meters from start) */
-function toXYChain(latlngs) {
-  const lat0 = (latlngs[0][0] + latlngs[latlngs.length-1][0]) / 2;
-  const xy = latlngs.map(([lat,lon]) => toXY(lat, lon, lat0));
-  const cum = [0];
-  for (let i=1;i<xy.length;i++) cum[i] = cum[i-1] + distMeters(xy[i], xy[i-1]);
-  return { xy, cum, lat0 };
-}
-function projectChainage({xy, cum}, lat0, lat, lon) {
-  const p = toXY(lat, lon, lat0);
-  let best = { d: Infinity, s: 0 };
-  for (let i=0; i<xy.length-1; i++) {
-    const a = xy[i], b = xy[i+1];
-    const abx = b[0]-a[0], aby = b[1]-a[1];
-    const apx = p[0]-a[0], apy = p[1]-a[1];
-    const ab2 = abx*abx + aby*aby;
-    let t = ab2 ? (abx*apx + aby*apy) / ab2 : 0;
-    t = Math.max(0, Math.min(1, t));
-    const proj = [a[0] + abx*t, a[1] + aby*t];
-    const d = distMeters(p, proj);
-    if (d < best.d) best = { d, s: cum[i] + Math.hypot((proj[0]-a[0]), (proj[1]-a[1])) };
-  }
-  return best.s;
-}
-
-function getSpeedColor(maxspeedTagOrNumber) {
-  let num;
-  if (typeof maxspeedTagOrNumber === 'number') num = maxspeedTagOrNumber;
-  else {
-    const str = String(maxspeedTagOrNumber || '').toLowerCase();
-    const mph = str.match(/(\d+(?:\.\d+)?)\s*mph/);
-    if (mph) num = parseFloat(mph[1]) * 1.60934;
-    else {
-      const kmh = str.match(/(\d+(?:\.\d+)?)/);
-      num = kmh ? parseFloat(kmh[1]) : NaN;
-    }
-  }
-  if (!isFinite(num)) return '#ff8800';
-  if (num <= 30) return '#ff8800';
-  if (num <= 50) return '#ffaa33';
-  if (num <= 70) return '#ffcc00';
-  if (num <= 90) return '#c8d400';
-  if (num <= 110) return '#89dd00';
-  return '#38c172';
-}
-function parseMaxspeedToKmh(tag) {
-  if (!tag) return null;
-  const s = String(tag).toLowerCase().trim();
-  if (s === 'signals' || s === 'variable' || s === 'none') return null;
-  const mph = s.match(/(\d+(?:\.\d+)?)\s*mph/);
-  if (mph) return Math.round(parseFloat(mph[1]) * 1.60934);
-  const kmh = s.match(/(\d+(?:\.\d+)?)/);
-  return kmh ? Math.round(parseFloat(kmh[1])) : null;
-}
-
-/* Tooltip color sync */
-function colorizeTooltip(marker, color) {
-  setTimeout(() => {
-    const el = marker.getTooltip && marker.getTooltip() && marker.getTooltip().getElement
-      ? marker.getTooltip().getElement()
-      : null;
-    if (el) {
-      el.style.background = color;
-      el.style.borderColor = color;
-      el.style.color = '#000';
-    }
-  }, 0);
-}
-
-/* ------------------- Reverse geocode (Nominatim) ------------------- */
-let reverseGeoEnabled = false;
-const revGeoCache = new Map();        // key: "lat,lon" rounded
-let revGeoQueue = Promise.resolve();  // simple throttle chain
-const revGeoListeners = [];           // sessions register here to react to toggle
-
-function reverseGeocode(lat, lon) {
-  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
-  if (revGeoCache.has(key)) return revGeoCache.get(key);
-
-  const run = async () => {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1`;
-    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const j = await res.json();
-    return j?.address?.road || j?.name || j?.display_name || '';
-  };
-
-  const p = revGeoQueue
-    .then(() => new Promise(r => setTimeout(r, 300))) // ~3 req/s
-    .then(run)
-    .catch(() => ''); // swallow errors -> empty string
-  revGeoCache.set(key, p);
-  return p;
-}
-
-// wire the checkbox (default OFF)
-const chkRevGeo = document.getElementById('chkRevGeo');
-if (chkRevGeo) {
-  chkRevGeo.checked = false;
-  chkRevGeo.addEventListener('change', () => {
-    reverseGeoEnabled = chkRevGeo.checked;
-    revGeoListeners.forEach(fn => { try { fn(reverseGeoEnabled); } catch {} });
-  });
-}
-
-/* ------------------- OSM features on map (returns marker meta) ------------------- */
+/* ===========================================================================
+   Overpass helpers (bbox + query + fetch)
+   ========================================================================== */
 function bboxForTrack(track, padMeters = 80) {
   let minLat=  90, minLon= 180, maxLat= -90, maxLon= -180;
   for (const p of track) {
@@ -476,13 +441,159 @@ function overpassQueryForBBox(bbox) {
 );
 out center tags;`.trim();
 }
+function overpassFetch(query) {
+  // Respect master toggle: if OFF, don't even enqueue
+  if (!osmlEnabled) return Promise.reject(new Error('OSM lookups disabled'));
+  const run = async () => {
+    for (const url of OVERPASS_ENDPOINTS) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: query, headers: { 'Content-Type': 'text/plain' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (e) { console.warn('Overpass failed on', url, e); }
+    }
+    throw new Error('All Overpass endpoints failed');
+  };
+  // Soft throttle chain
+  overpassQueue = overpassQueue.then(() => new Promise(r => setTimeout(r, 500))).then(run);
+  return overpassQueue;
+}
 
-/* ------------------- Marker plugin (A, B, and A↔B bubble) ------------------- */
+/* ===========================================================================
+   Tooltip recoloring to match speed-limit dots
+   ========================================================================== */
+function colorizeTooltip(marker, color) {
+  setTimeout(() => {
+    const el = marker.getTooltip && marker.getTooltip() && marker.getTooltip().getElement
+      ? marker.getTooltip().getElement()
+      : null;
+    if (el) {
+      el.style.background = color;
+      el.style.borderColor = color;
+      el.style.color = '#000';
+    }
+  }, 0);
+}
+
+/* ===========================================================================
+   Reverse geocoding (Nominatim) — throttled + cached
+   (obeys master toggle; no requests when OFF)
+   ========================================================================== */
+const revGeoCache = new Map();        // key: "lat,lon" rounded
+let revGeoQueue = Promise.resolve();  // simple throttle chain
+
+function reverseGeocode(lat, lon) {
+  if (!osmlEnabled) return Promise.resolve(''); // master OFF => noop
+  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  if (revGeoCache.has(key)) return revGeoCache.get(key);
+
+  const run = async () => {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = await res.json();
+    // Prefer specific road name, then name, then display_name as fallback
+    return j?.address?.road || j?.name || j?.display_name || '';
+  };
+
+  const p = revGeoQueue
+    .then(() => new Promise(r => setTimeout(r, 300))) // ~3 req/s
+    .then(run)
+    .catch(() => ''); // swallow errors -> empty string
+  revGeoCache.set(key, p);
+  return p;
+}
+
+/* ===========================================================================
+   Render OSM features to a Leaflet LayerGroup and collect marker metadata
+   ========================================================================== */
+function addOsmFeaturesToMap(geojson, groupLayer, latlngs) {
+  const els = geojson?.elements || [];
+  const others = [];      // signals, stops, junctions, roundabouts (no maxspeed)
+  const speedWays = [];   // features with maxspeed tag
+  const markerMeta = [];  // collected metadata for tooltips / reverse-geo
+
+  // Split nodes/ways into two buckets
+  for (const el of els) {
+    let lat=null, lon=null;
+    if (el.type === 'node') { lat = el.lat; lon = el.lon; }
+    else if ((el.type === 'way' || el.type === 'relation') && el.center) {
+      lat = el.center.lat; lon = el.center.lon;
+    }
+    if (lat==null || lon==null) continue;
+
+    const tags = el.tags || {};
+    if (tags.maxspeed) {
+      speedWays.push({ lat, lon, tags });
+    } else {
+      let label='', color='#4da3ff';
+      if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
+      else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
+      else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
+      else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
+      if (label) others.push({ lat, lon, label, color });
+    }
+  }
+
+  // Render non-maxspeed features
+  for (const f of others) {
+    const m = L.circleMarker([f.lat, f.lon], {
+      radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
+    }).addTo(groupLayer);
+    m.bindTooltip(f.label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+    colorizeTooltip(m, f.color);
+    markerMeta.push({ marker: m, base: f.label, lat: f.lat, lon: f.lon, color: f.color });
+  }
+
+  // Render maxspeed features — try to order along the route to show changes
+  if (speedWays.length && latlngs?.length >= 2) {
+    const chain = toXYChain(latlngs);
+    const pts = speedWays.map(sw => {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      const s = projectChainage(chain, chain.lat0, sw.lat, sw.lon);
+      return { lat: sw.lat, lon: sw.lon, v, color, s };
+    }).sort((a,b)=>a.s-b.s);
+
+    let prev = null;
+    for (const f of pts) {
+      const m = L.circleMarker([f.lat, f.lon], {
+        radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
+      const label = changed && f.v != null ? `Speed limit: ${f.v}` : 'Speed limit';
+      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+      colorizeTooltip(m, f.color);
+      markerMeta.push({ marker: m, base: label, lat: f.lat, lon: f.lon, color: f.color });
+      if (changed && f.v != null) prev = f.v;
+    }
+  } else {
+    // No route to order by → just dump markers as-is
+    for (const sw of speedWays) {
+      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
+      const color = getSpeedColor(v ?? sw.tags.maxspeed);
+      const m = L.circleMarker([sw.lat, sw.lon], {
+        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
+      }).addTo(groupLayer);
+      const label = v != null ? `Speed limit: ${v}` : 'Speed limit';
+      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
+      colorizeTooltip(m, color);
+      markerMeta.push({ marker: m, base: label, lat: sw.lat, lon: sw.lon, color });
+    }
+  }
+
+  return markerMeta;
+}
+
+/* ===========================================================================
+   Marker plugin for speed chart (A/B + acceleration bubble)
+   ========================================================================== */
 const MarkerPlugin = {
   id: 'twoMarkers',
   afterDatasetsDraw(chart) {
     const markers = chart.$markers;
     if (!markers) return;
+
     const speedDataset = chart.data.datasets?.[0];
     if (!speedDataset || !Array.isArray(speedDataset.data) || !speedDataset.data.length) return;
 
@@ -494,14 +605,16 @@ const MarkerPlugin = {
       if (i == null || i < 0 || i >= labels.length) return;
       const yVal = speedDataset.data[i];
       if (!Number.isFinite(yVal)) return;
+
       const x = xScale.getPixelForValue(i);
       const y = yScale.getPixelForValue(yVal);
 
       ctx.save();
-      // hairline
+      // vertical hairline
       ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
       ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
       ctx.setLineDash([]);
+
       // dot
       ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
 
@@ -520,7 +633,7 @@ const MarkerPlugin = {
       ctx.lineTo(bx+r,by+bh); ctx.quadraticCurveTo(bx,by+bh,bx,by+bh-r);
       ctx.lineTo(bx,by+r); ctx.quadraticCurveTo(bx,by,bx+r,by); ctx.closePath(); ctx.fill(); ctx.stroke();
 
-      // tag
+      // tag circle (A/B)
       const tagR = 7, tagCx = bx + pad + tagR, tagCy = by + bh/2;
       ctx.fillStyle = color; ctx.beginPath(); ctx.arc(tagCx, tagCy, tagR, 0, Math.PI*2); ctx.fill();
       ctx.fillStyle = '#000'; ctx.font = 'bold 10px system-ui, -apple-system, Segoe UI, Roboto, Arial';
@@ -533,11 +646,11 @@ const MarkerPlugin = {
       ctx.restore();
     }
 
-    // draw A and B
+    // Draw A and B markers
     drawOne(markers.A, markers.colorA || '#00e5ff', 'A');
     drawOne(markers.B, markers.colorB || '#ff5ec4', 'B');
 
-    // draw A↔B acceleration bubble at midpoint
+    // Acceleration bubble between A and B
     if (markers.A != null && markers.B != null && markers.A !== markers.B) {
       const iA = markers.A, iB = markers.B;
       const vAkph = speedDataset.data[iA], vBkph = speedDataset.data[iB];
@@ -571,7 +684,9 @@ const MarkerPlugin = {
 };
 Chart.register(MarkerPlugin);
 
-/* ------------------- Chart helpers ------------------- */
+/* ===========================================================================
+   Chart helpers
+   ========================================================================== */
 function makeMultiLineChart(canvas, { labels, datasets, yTitle, min, max }) {
   const ctx = canvas.getContext('2d');
   return new Chart(ctx, {
@@ -625,16 +740,11 @@ function makeLineChart(canvas, {labels, values, label, yTitle, min, max, suggest
   });
 }
 
-  /* ------------------- Acceleration helpers ------------------- */
+/* ===========================================================================
+   Accelerometer helpers
+   ========================================================================== */
 function computeAccelXYZSeries(accelRows) {
   if (!accelRows?.length) return null;
-
-  function formatRelative(ms) {
-    const totalSec = Math.floor(ms / 1000);
-    const mm = Math.floor(totalSec / 60);
-    const ss = totalSec % 60;
-    return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
-  }
 
   const sample = accelRows[0];
   const xK = pick(['x','ax'], sample);
@@ -668,7 +778,7 @@ function computeAccelXYZSeries(accelRows) {
   if (raw.length) {
     const t0 = raw[0].t;
     const zipped = raw.map(p => ({
-      l: formatRelative(p.t - t0),
+      l: formatRelativeTime(p.t - t0),
       ax: p.ax, ay: p.ay, az: p.az
     }));
     const slim = decimate(zipped, 2000);
@@ -694,16 +804,9 @@ function computeAccelXYZSeries(accelRows) {
   return null;
 }
 
-/* Linear acceleration magnitude (fallback) */
+/* Linear acceleration magnitude (fallback when XYZ not suitable) */
 function computeLinearAccMagnitude(accelRows) {
   if (!accelRows?.length) return { labels: [], values: [] };
-
-  function formatRelative(ms) {
-    const totalSec = Math.floor(ms / 1000);
-    const mm = Math.floor(totalSec / 60);
-    const ss = totalSec % 60;
-    return mm > 0 ? `${mm}:${String(ss).padStart(2, '0')}` : `${ss}s`;
-  }
 
   const sample = accelRows[0];
   const xK = pick(['x','ax'], sample);
@@ -734,7 +837,7 @@ function computeLinearAccMagnitude(accelRows) {
       }
     }
 
-    if (tms != null) raw.push({ t: tms, v: mag - 9.81 }); // sign-preserving gravity removal
+    if (tms != null) raw.push({ t: tms, v: mag - 9.81 }); // preserve sign around gravity
     else {
       fallbackLabels.push(String(fallbackLabels.length));
       fallbackValues.push(mag - 9.81);
@@ -743,7 +846,7 @@ function computeLinearAccMagnitude(accelRows) {
 
   if (raw.length) {
     const t0 = raw[0].t;
-    const zipped = raw.map(p => ({ l: formatRelative(p.t - t0), v: p.v }));
+    const zipped = raw.map(p => ({ l: formatRelativeTime(p.t - t0), v: p.v }));
     const slim = decimate(zipped, 2000);
     return { labels: slim.map(x => x.l), values: slim.map(x => x.v) };
   }
@@ -753,7 +856,9 @@ function computeLinearAccMagnitude(accelRows) {
   return { labels: slim.map(x => x.l), values: slim.map(x => x.v) };
 }
 
-/* ------------------- ZIP helpers ------------------- */
+/* ===========================================================================
+   ZIP helpers
+   ========================================================================== */
 async function loadCsvFromZip(zip, namePattern) {
   const entries = Object.values(zip.files);
   const entry = entries.find(e => !e.dir && namePattern.test(e.name));
@@ -776,7 +881,9 @@ async function loadAllCameraImagesFromZip(zip) {
   return out;
 }
 
-/* ------------------- Extraction / Computations ------------------- */
+/* ===========================================================================
+   Location & speed extraction
+   ========================================================================== */
 function extractTrack(locationRows) {
   if (!locationRows?.length) return null;
   const sample = locationRows[0];
@@ -834,80 +941,9 @@ function computeSpeedSeriesFromLocation(locationRows) {
   };
 }
 
-/* ------------------- Map + OSM features (returns markers) ------------------- */
-function addOsmFeaturesToMap(map, geojson, groupLayer, latlngs) {
-  const els = geojson?.elements || [];
-  const others = [];
-  const speedWays = [];
-  const markerMeta = []; // collect markers + base label
-
-  for (const el of els) {
-    let lat=null, lon=null;
-    if (el.type === 'node') { lat = el.lat; lon = el.lon; }
-    else if ((el.type === 'way' || el.type === 'relation') && el.center) {
-      lat = el.center.lat; lon = el.center.lon;
-    }
-    if (lat==null || lon==null) continue;
-
-    const tags = el.tags || {};
-    if (tags.maxspeed) {
-      speedWays.push({ lat, lon, tags });
-    } else {
-      let label='', color='#4da3ff';
-      if (tags.highway === 'traffic_signals') { label = 'Traffic light'; color = '#ffcc00'; }
-      else if (tags.highway === 'stop')       { label = 'Stop sign';     color = '#ff4d4d'; }
-      else if (tags.highway === 'motorway_junction' || tags.junction === 'yes') { label = 'Junction'; }
-      else if (tags.junction === 'roundabout') { label = 'Roundabout'; color = '#38c172'; }
-      if (label) {
-        const m = L.circleMarker([lat, lon], {
-          radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
-        }).addTo(groupLayer);
-        m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-        colorizeTooltip(m, color);
-        markerMeta.push({ marker: m, base: label, lat, lon, color });
-      }
-    }
-  }
-
-  if (speedWays.length && latlngs?.length >= 2) {
-    const chain = toXYChain(latlngs);
-    const pts = speedWays.map(sw => {
-      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
-      const color = getSpeedColor(v ?? sw.tags.maxspeed);
-      const s = projectChainage(chain, chain.lat0, sw.lat, sw.lon);
-      return { lat: sw.lat, lon: sw.lon, v, color, s };
-    }).sort((a,b)=>a.s-b.s);
-
-    let prev = null;
-    for (const f of pts) {
-      const m = L.circleMarker([f.lat, f.lon], {
-        radius: 6, color: f.color, weight: 2, fillColor: f.color, fillOpacity: 0.25
-      }).addTo(groupLayer);
-      const changed = (f.v != null) ? (prev === null || f.v !== prev) : false;
-      const label = changed && f.v != null ? `Speed limit: ${f.v}` : 'Speed limit';
-      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-      colorizeTooltip(m, f.color);
-      markerMeta.push({ marker: m, base: label, lat: f.lat, lon: f.lon, color: f.color });
-      if (changed && f.v != null) prev = f.v;
-    }
-  } else {
-    for (const sw of speedWays) {
-      const v = parseMaxspeedToKmh(sw.tags.maxspeed);
-      const color = getSpeedColor(v ?? sw.tags.maxspeed);
-      const m = L.circleMarker([sw.lat, sw.lon], {
-        radius: 6, color, weight: 2, fillColor: color, fillOpacity: 0.25
-      }).addTo(groupLayer);
-      const label = v != null ? `Speed limit: ${v}` : 'Speed limit';
-      m.bindTooltip(label, { permanent: true, direction:'right', offset:[8,0], className:'feature-tag' });
-      colorizeTooltip(m, color);
-      markerMeta.push({ marker: m, base: label, lat: sw.lat, lon: sw.lon, color });
-    }
-  }
-
-  return markerMeta;
-}
-
-/* ------------------- Session UI ------------------- */
+/* ===========================================================================
+   Session UI builder
+   ========================================================================== */
 function createSessionCard(sessionName) {
   const wrap = document.createElement('section');
   wrap.className = 'session';
@@ -959,7 +995,9 @@ function createSessionCard(sessionName) {
   return { wrap, gallery, map, status, speedCanvas, accCanvas, btnSetA, btnSetB, btnClear, btnExport };
 }
 
-/* ------------------- Lightbox ------------------- */
+/* ===========================================================================
+   Lightbox
+   ========================================================================== */
 const lightbox = document.getElementById('lightbox');
 const lightboxImg = document.getElementById('lightboxImg');
 function openLightbox(src) {
@@ -971,18 +1009,20 @@ function closeLightbox(){
   const src = lightboxImg.src;
   lightbox.classList.remove('show');
   lightboxImg.src = '';
-  if (src.startsWith('blob:')) URL.revokeObjectURL(src);
+  if (src.startsWith('blob:')) URL.revokeObjectURL(src);  // free memory
 }
 lightbox.addEventListener('click', closeLightbox);
 lightbox.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
 
-/* ------------------- Main processing ------------------- */
+/* ===========================================================================
+   MAIN: Per-ZIP processing
+   ========================================================================== */
 async function processZipFile(file) {
   const sessionName = slugWithoutExt(file.name);
   const ui = createSessionCard(sessionName);
   document.getElementById('sessions').appendChild(ui.wrap);
 
-  // helper
+  // tiny helper for mm:ss format
   function fmtRel(ms) {
     const totalSec = Math.floor(ms / 1000);
     const mm = Math.floor(totalSec / 60);
@@ -990,10 +1030,14 @@ async function processZipFile(file) {
     return mm > 0 ? `${mm}:${String(ss).padStart(2,'0')}` : `${ss}s`;
   }
 
-  let latlngs = null;
-  let maxspeedProfile = [];
+  let latlngs = null;              // polyline for current session
+  let maxspeedProfile = [];        // change points along route
+  let featureLayer = null;         // Leaflet LayerGroup for features
+  let markersMeta = [];            // list of all markers (for reverse-geo tooltips)
+  let speedChartRef = null;        // Chart instance reference for maxspeed updates
 
   try {
+    /* ---------- ZIP parse ---------- */
     ui.status.textContent = 'Reading ZIP…';
     const zip = await JSZip.loadAsync(file);
 
@@ -1004,14 +1048,14 @@ async function processZipFile(file) {
       for (const img of images) {
         const t = document.createElement('img');
         t.className = 'thumb';
-        t.loading = 'lazy';
+        t.loading = 'lazy';               // lazy load
         t.src = img.url; t.alt = img.name;
         t.addEventListener('click', () => openLightbox(img.url));
         ui.gallery.appendChild(t);
       }
     }
 
-    // CSVs
+    /* CSVs */
     ui.status.textContent = 'Parsing CSVs…';
     const [locationRows, totalAccRows, accelRows] = await Promise.all([
       loadCsvFromZip(zip, /(^|\/)Location\.csv$/i),
@@ -1019,7 +1063,7 @@ async function processZipFile(file) {
       loadCsvFromZip(zip, /(^|\/)Accelerometer\.csv$/i)
     ]);
 
-    // Map
+    /* ---------- Map ---------- */
     ui.status.textContent = 'Rendering map…';
     const map = L.map(ui.map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
@@ -1027,19 +1071,20 @@ async function processZipFile(file) {
     const track = extractTrack(locationRows);
     if (track?.length) {
       latlngs = track.map(p => [p.lat, p.lon]);
+
+      // trace
       const poly = L.polyline(latlngs, { color: '#3a86ff', weight: 3 }).addTo(map);
       map.fitBounds(poly.getBounds(), { padding: [16,16] });
 
-      /* Start marker */
+      // start marker
       const startColor = '#00e676';
-      const startLatLng = latlngs[0];
-      const start = L.circleMarker(startLatLng, {
+      const start = L.circleMarker(latlngs[0], {
         radius: 6, color: startColor, weight: 2, fillColor: startColor, fillOpacity: 0.6
       }).addTo(map);
       start.bindTooltip('Start', { permanent: true, direction: 'right', offset: [8,0], className: 'feature-tag' });
       colorizeTooltip(start, startColor);
 
-      /* Direction arrow */
+      // direction arrow
       try {
         L.polylineDecorator(poly, {
           patterns: [{
@@ -1049,58 +1094,87 @@ async function processZipFile(file) {
         }).addTo(map);
       } catch (e) { console.warn('PolylineDecorator unavailable; skipping arrow.', e); }
 
-      // OSM features
-      ui.status.textContent = 'Fetching OSM features…';
-      const bbox = bboxForTrack(track, 80);
-      const query = overpassQueryForBBox(bbox);
-      try {
-        const osm = await overpassFetch(query);
-        const layer = L.layerGroup().addTo(map);
-        const markers = addOsmFeaturesToMap(map, osm, layer, latlngs);  // get marker meta
-        maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
+      /* ---------- Session controller to react to master OSM toggle ---------- */
+      async function enableOSM() {
+        // Reset + mount a fresh layer for features
+        if (featureLayer) { try { featureLayer.clearLayers(); } catch {} }
+        featureLayer = L.layerGroup().addTo(map);
 
-        // function to (re)apply tooltip content based on reverse-geo toggle
-        const applyReverseGeo = (enabled) => {
-          for (const m of markers) {
+        ui.status.textContent = 'Fetching OSM features…';
+        try {
+          const bbox = bboxForTrack(track, 80);
+          const query = overpassQueryForBBox(bbox);
+          const osm = await overpassFetch(query);
+
+          // Draw features and collect their metadata for reverse-geo
+          markersMeta = addOsmFeaturesToMap(osm, featureLayer, latlngs);
+          // Compute maxspeed change profile for the route
+          maxspeedProfile = extractMaxspeedProfile(osm, latlngs);
+
+          // Apply reverse-geo labels onto feature tooltips (street appended)
+          for (const m of markersMeta) {
             const tt = m.marker.getTooltip?.();
             const set = (txt) => { if (tt) tt.setContent(txt); colorizeTooltip(m.marker, m.color); };
-            if (!enabled) {
-              set(m.base);
-            } else {
-              reverseGeocode(m.lat, m.lon).then(street => {
-                set(street ? `${m.base} — ${street}` : m.base);
-              }).catch(() => set(m.base));
-            }
+            reverseGeocode(m.lat, m.lon).then(street => {
+              set(street ? `${m.base} — ${street}` : m.base);
+            }).catch(() => set(m.base));
           }
-        };
-        // apply current state + subscribe to future changes
-        applyReverseGeo(reverseGeoEnabled);
-        revGeoListeners.push(applyReverseGeo);
 
-        ui.status.textContent = 'Map ready.';
-      } catch (e) {
-        console.warn('Overpass failed:', e);
-        ui.status.textContent = 'Trace rendered. Features unavailable (Overpass error).';
+          ui.status.textContent = 'Map ready.';
+
+          // If the speed chart exists, inject/refresh the Maxspeed line
+          if (speedChartRef) {
+            const perSampleMax = computeMaxspeedSeriesAligned(latlngs, maxspeedProfile);
+            speedChartRef.$maxspeedValues = speedChartRef.$speedIdx.map(i => perSampleMax[i] ?? null);
+            speedChartRef.data.datasets[1].data = speedChartRef.$maxspeedValues;
+            speedChartRef.update();
+          }
+        } catch (e) {
+          console.warn('Overpass error:', e);
+          ui.status.textContent = 'Trace rendered. Features unavailable.';
+        }
       }
+      function disableOSM() {
+        // Clear features + profile
+        if (featureLayer) { try { featureLayer.clearLayers(); } catch {} }
+        markersMeta = [];
+        maxspeedProfile = [];
+        ui.status.textContent = 'Trace rendered (OSM lookups off).';
+
+        // Clear Maxspeed dataset on the chart if present
+        if (speedChartRef) {
+          const len = speedChartRef.data.labels.length;
+          speedChartRef.$maxspeedValues = new Array(len).fill(null);
+          speedChartRef.data.datasets[1].data = speedChartRef.$maxspeedValues;
+          speedChartRef.update();
+        }
+      }
+
+      // Register this session's controller for global toggle changes
+      sessionControllers.push({ enable: enableOSM, disable: disableOSM });
+
+      // Honor current master state for newly loaded session
+      if (osmlEnabled) enableOSM(); else disableOSM();
+
     } else {
       map.setView([59.3293, 18.0686], 10);
       ui.status.textContent = 'No coordinates found.';
     }
 
-    // -------- Speed chart (+ maxspeed) --------
-    ui.status.textContent = 'Preparing speed…';
+    /* ---------- Speed chart (+ optional Maxspeed from OSM) ---------- */
+    ui.status.textContent = osmlEnabled ? 'Preparing speed…' : 'Preparing speed (no OSM)…';
     const speedSeries = computeSpeedSeriesFromLocation(locationRows || []);
     const speedLabels = speedSeries.labels;
     const speedValues = speedSeries.values;
 
-    let maxspeedValues = [];
-    if (latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length) {
+    // Initialize maxspeed vector; filled later if OSM is enabled and profile computed
+    let maxspeedValues = new Array(speedLabels.length).fill(null);
+    if (osmlEnabled && latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length) {
       const perSampleMax = computeMaxspeedSeriesAligned(latlngs, maxspeedProfile);
       maxspeedValues = speedSeries.idx.map(i => perSampleMax[i] ?? null);
-    } else {
-      maxspeedValues = new Array(speedLabels.length).fill(null);
     }
 
+    // y-range padding
     const finiteSpeeds = [...speedValues, ...maxspeedValues].filter(Number.isFinite);
     let yMin, yMax;
     if (finiteSpeeds.length) {
@@ -1108,6 +1182,7 @@ async function processZipFile(file) {
       yMax = Math.max(...finiteSpeeds) + 5;
     }
 
+    // Build chart (with Maxspeed as dashed, stepped line)
     const speedChart = makeMultiLineChart(ui.speedCanvas, {
       labels: speedLabels,
       yTitle: 'km/h',
@@ -1117,18 +1192,22 @@ async function processZipFile(file) {
         { label: 'Maxspeed', data: maxspeedValues, borderColor: cssVar('--speedlimit', '#ff8800'), pointRadius: 0, borderWidth: 1.6, tension: 0, borderDash: [6,3], stepped: true, spanGaps: true }
       ]
     });
-
     // Tooltip readout
     speedChart.options.plugins.tooltip = { enabled: true, callbacks:{
       label: ctx => ` ${ctx.dataset.label}: ${Number.isFinite(ctx.parsed.y) ? ctx.parsed.y.toFixed(1) : '–'} km/h`
     }};
     speedChart.update();
 
-    // Provide marker + series data for the plugin
+    // Provide plugin state + series info (for A/B markers + acceleration bubble)
     speedChart.$markers = { A: null, B: null, active: 'A', colorA:'#00e5ff', colorB:'#ff5ec4' };
     speedChart.$series  = { relMs: speedSeries.relMs, speedKmH: speedValues };
 
-    // --- Marker controls (per-session) ---
+    // Keep references to re-compute Maxspeed when OSM gets enabled later
+    speedChart.$speedIdx = speedSeries.idx || speedLabels.map((_,i)=>i);
+    speedChart.$maxspeedValues = maxspeedValues;
+    speedChartRef = speedChart;
+
+    // Marker controls
     ui.btnSetA.addEventListener('click', () => { speedChart.$markers.active = 'A'; });
     ui.btnSetB.addEventListener('click', () => { speedChart.$markers.active = 'B'; });
     ui.btnClear.addEventListener('click', () => {
@@ -1140,16 +1219,17 @@ async function processZipFile(file) {
       const i = nearestIndexFromEvent(speedChart, evt);
       const which = speedChart.$markers.active || 'A';
       speedChart.$markers[which] = i;
-      speedChart.update(); // plugin redraws A, B, and A↔B bubble
+      speedChart.update();
     });
 
-    // Export CSV (Speed vs Maxspeed)
+    // CSV export (Speed vs Maxspeed)
     ui.btnExport.addEventListener('click', () => {
       const rows = [['t','speed_kmh','maxspeed_kmh']];
+      const ms = speedChartRef.$maxspeedValues || [];
       for (let i=0;i<speedLabels.length;i++){
         const t  = speedLabels[i] ?? '';
         const v  = Number.isFinite(speedValues[i]) ? speedValues[i] : '';
-        const vm = Number.isFinite(maxspeedValues[i]) ? maxspeedValues[i] : '';
+        const vm = Number.isFinite(ms[i]) ? ms[i] : '';
         rows.push([t, v, vm]);
       }
       const csv = rows.map(r => r.join(',')).join('\n');
@@ -1161,7 +1241,7 @@ async function processZipFile(file) {
       setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
     });
 
-    // -------- Acceleration chart --------
+    /* ---------- Acceleration chart ---------- */
     ui.status.textContent = 'Preparing acceleration…';
     const accelXYZ = computeAccelXYZSeries(accelRows);
     if (accelXYZ && accelXYZ.labels.length) {
@@ -1188,6 +1268,7 @@ async function processZipFile(file) {
         ]
       });
     } else {
+      // Fallback to total magnitude if no XYZ
       let { labels: accLabels, values: accValues } = computeLinearAccMagnitude(accelRows);
       if ((!accValues || !accValues.length) && totalAccRows?.length) {
         const tk = pick(['time','timestamp','datetime','seconds_elapsed','elapsed','elapsed_seconds'], totalAccRows[0]);
@@ -1225,14 +1306,16 @@ async function processZipFile(file) {
       });
     }
 
-    ui.status.textContent = 'Ready.';
+    ui.status.textContent = osmlEnabled ? 'Ready.' : 'Ready (OSM lookups off).';
   } catch (err) {
     console.error(err);
     ui.status.textContent = 'Failed: ' + (err?.message || err);
   }
 }
 
-/* ---- interaction helper to map click → nearest label index ---- */
+/* ===========================================================================
+   Chart interaction helper: map click → nearest X index
+   ========================================================================== */
 function nearestIndexFromEvent(chart, evt) {
   const rect = chart.canvas.getBoundingClientRect();
   const xPix = evt.clientX - rect.left;
@@ -1246,7 +1329,9 @@ function nearestIndexFromEvent(chart, evt) {
   return bestI;
 }
 
-/* ------------------- Inputs ------------------- */
+/* ===========================================================================
+   Inputs (folder/files) + deduping
+   ========================================================================== */
 const folderInput = document.getElementById('folderInput');
 const filesInput  = document.getElementById('filesInput');
 
@@ -1275,6 +1360,19 @@ filesInput.addEventListener('change', async (e) => {
   document.getElementById('sessions').innerHTML = '';
   for (const f of files) await processZipFile(f);
   filesInput.value = '';
+});
+
+/* ===========================================================================
+   MASTER TOGGLE: apply to existing sessions immediately
+   ========================================================================== */
+chkOSM.addEventListener('change', async () => {
+  osmlEnabled = chkOSM.checked;
+  // Call each session controller to enable/disable OSM features on the fly
+  for (const ctl of sessionControllers) {
+    try { osmlEnabled ? await ctl.enable() : ctl.disable(); } catch (e) {
+      console.warn('Toggle failed for a session:', e);
+    }
+  }
 });
 </script>
 </body>
