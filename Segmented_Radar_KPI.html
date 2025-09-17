@@ -28,9 +28,7 @@
     .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .summary-card { grid-column: 1 / -1; display:grid; justify-content:center; }
-    .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
     .small{font-size:12px; color:#666}
-    .hint{font-size:11px; color:#555; margin-top:4px}
 
     /* Summary table */
     .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
@@ -98,12 +96,12 @@
       <div class="hint">1: ≥100 (Worst), 2: ≥60, 3: ≥40, 4: ≥30, 5: ≥20, 6: ≥15, 7: ≥10, 8: ≥5, 9: ≥3, 10: &lt;2 (incl. 0). The value 1000 counts in the average.</div>
 
       <label style="font-size:12px; color:var(--muted); display:block; margin:12px 0 4px">
-        Or paste data below (headers required: <code>Function — KPI, Target, Max allowed, …</code>)<br>
-        To add a test date to a software column, write it like: <code>CX OKTB EU [2025-08-26]</code><br>
-        Inline notes (optional): add a row where first cell is <code>Release note</code> and put notes in each software column, bullets separated by <code>\n</code>.<br>
-        File-based notes (optional): place a CSV named exactly like the software base name (no date), e.g. <code>CC 0830(TO).csv</code>, one bullet per line.
+        Paste data with headers: <code>Function — KPI, Target, Max allowed, …</code><br>
+        Add test dates like: <code>CC 0830(TO) [2025-09-04]</code><br>
+        Optional inline notes: add a row with first cell <code>Release note</code>, put notes under each software column, bullets separated by literal <code>\n</code>.<br>
+        Optional file notes: create <code>&lt;software base&gt;.csv</code> (no date) with one bullet per line, e.g. <code>CC 0830(TO).csv</code>.
       </label>
-      <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  CX OKTB EU [2025-08-26],  CC 0830(TO) [2025-09-04],  ..."></textarea>
+      <textarea id="dataIn" spellcheck="false" placeholder="Function — KPI, Target, Max allowed, Audi Q6 e-tron [2025-09-10], CC 0830(TO) [2025-09-04], ..."></textarea>
       <div class="controls" style="grid-template-columns:auto 1fr;">
         <button id="btnRenderText">Render pasted text</button>
         <div class="hint">Tip: switch delimiter or thresholds and re-render.</div>
@@ -136,7 +134,6 @@ let LAST_RAW = '';
 
 const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
 const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
-
 const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
 
 /* ---------- Scoring ---------- */
@@ -356,7 +353,9 @@ function closeReleaseNoteModal(){
   backdrop.setAttribute('aria-hidden', 'true');
 }
 
-/* ---------- File-based release notes ---------- */
+/* ---------- Optional manifest + file-based notes (avoid 404s) ---------- */
+const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+
 async function readTextOrNull(path){
   try{
     const res = await fetch(encodeURI(path) + '?t=' + Date.now(), {cache:'no-store'});
@@ -364,23 +363,34 @@ async function readTextOrNull(path){
     return await res.text();
   }catch{ return null; }
 }
+async function loadReleaseNotesManifest(){
+  try{
+    const res = await fetch(RN_MANIFEST_FILE + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    const list = await res.json();
+    if (!Array.isArray(list)) return null;
+    return new Set(list.map(s => String(s).toLowerCase()));
+  }catch{ return null; }
+}
 // Loads "<base>.csv" for each software (base = header without date). One bullet per line.
-async function loadReleaseNotesFromFiles(swCols){
+// If a manifest is present, only fetch files that are listed (prevents 404s).
+async function loadReleaseNotesFromFiles(swCols, manifestSet){
   const out = {};
   for (const sw of (swCols||[])){
     const file = `${sw.base}.csv`;
+    if (manifestSet && !manifestSet.has(file.toLowerCase())) continue; // skip unknown files
     const txt = await readTextOrNull(file);
     if (!txt) continue;
     const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
     if (lines.length){
-      const joined = lines.join('\n'); // real newlines; modal code handles \n or \\n
+      const joined = lines.join('\n'); // real newlines; modal code splits on \n
       out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
   }
   return out;
 }
 
-/* ---------- Summary card ---------- */
+/* ---------- Summary card (hides column when no notes) ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
@@ -396,9 +406,11 @@ function renderSummary(container, parsed){
       avg,
       score,
       text: score == null ? 'n/a' : scoreText[score - 1],
-      note: parsed.releaseNotes?.[swLabel] || ''
+      note: (parsed.releaseNotes?.[swLabel] || '').trim()
     };
   });
+
+  const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
@@ -415,18 +427,27 @@ function renderSummary(container, parsed){
   const card = container.append('div').attr('class', 'chart-card summary-card');
   card.append('div').attr('class','summary-title').text('Summary Weekly KPI');
 
-  // TABLE
+  // Build table
   const table = card.append('table').attr('class', 'summary-table');
-  table.append('colgroup').html(`<col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating"><col class="col-note">`);
-  const thead = table.append('thead').append('tr');
-  thead.html(`<th>Software</th><th>Test date</th><th>Average events per 1000 km</th><th>Score</th><th>Rating</th><th>Release Note</th>`);
-  const tbody = table.append('tbody');
+  const colgroup = hasAnyNotes
+    ? `<col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating"><col class="col-note">`
+    : `<col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating">`;
+  table.append('colgroup').html(colgroup);
 
+  const thead = table.append('thead').append('tr');
+  thead.html(
+    hasAnyNotes
+      ? `<th>Software</th><th>Test date</th><th>Average events per 1000 km</th><th>Score</th><th>Rating</th><th>Release Note</th>`
+      : `<th>Software</th><th>Test date</th><th>Average events per 1000 km</th><th>Score</th><th>Rating</th>`
+  );
+
+  const tbody = table.append('tbody');
   rows.forEach(r=>{
     const tr = tbody.append('tr');
     tr.append('td').append('span').attr('class','software-cell').attr('title', r.sw).text(r.sw);
     tr.append('td').text(r.date || '—');
     tr.append('td').text(r.avg == null ? '—' : r.avg.toFixed(1));
+
     const scoreCell = tr.append('td');
     if (r.score == null){
       scoreCell.text('—'); tr.append('td').text('n/a');
@@ -437,28 +458,33 @@ function renderSummary(container, parsed){
         .text(r.score);
       tr.append('td').text(r.text);
     }
-    const tdNote = tr.append('td');
-    if (r.note && r.note.trim().length){
-      const a = tdNote.append('span').attr('class','link').text('Release Note');
-      a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
-    } else {
-      tdNote.text('—');
+
+    if (hasAnyNotes){
+      const tdNote = tr.append('td');
+      if (r.note){
+        const a = tdNote.append('span').attr('class','link').text('Release Note');
+        a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
+      } else {
+        tdNote.text(''); // empty when other rows have notes but this one doesn't
+      }
     }
   });
 
-  // Caption + bars
+  // Caption + bars (compact)
   if (chartData.length){
     card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
 
-    function measureTextWidth(texts, fontSize=12, fontWeight=400){
+    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
       const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px');
       let max = 0;
-      texts.forEach(t=>{ const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node(); max = Math.max(max, node.getComputedTextLength()); });
-      tmp.remove();
-      return max;
-    }
+      texts.forEach(t=>{
+        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
+        max = Math.max(max, node.getComputedTextLength());
+      });
+      tmp.remove(); return max;
+    };
 
-    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const labelW = Math.ceil(measureTextWidth(yLabels, 12, 400));
     const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
     const cw = Math.max(560, Math.min(1000, cardW));
@@ -510,10 +536,7 @@ function renderSummary(container, parsed){
   legend.attr('height', 20 + boxH + 28 + 6);
 }
 
-/* ---------- Renderer (per-software radars etc.) ---------- */
-// (unchanged from your previous version; omitted here to keep this file focused)
-// NOTE: The per-software cards don’t need to change for release-note files,
-// the Summary table already shows the Release Note link.
+/* ---------- Main renderer ---------- */
 function renderCharts(parsed){
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length){
@@ -521,10 +544,9 @@ function renderCharts(parsed){
     return;
   }
   renderSummary(container, parsed);
-  // You can keep your existing per-software radar/table rendering here if needed.
 }
 
-/* ---------- Loader (now merges file-based notes) ---------- */
+/* ---------- Loader (uses optional manifest, hides links when missing) ---------- */
 async function loadCsvAndRender(){
   const file = (document.getElementById('csvFile').value || '').trim() || 'weekly_kpi_data.csv';
   try{
@@ -534,7 +556,8 @@ async function loadCsvAndRender(){
     LAST_RAW = text;
 
     let parsed = parseTable(text);
-    const fileNotes = await loadReleaseNotesFromFiles(parsed.software);
+    const manifestSet = await loadReleaseNotesManifest(); // may be null
+    const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
     parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
 
     renderCharts(parsed);
@@ -544,14 +567,15 @@ async function loadCsvAndRender(){
   }
 }
 
-/* ---------- Re-render helper (re-parse + reload file notes) ---------- */
+/* ---------- Re-render helper ---------- */
 async function rerenderAll(){
   if (!LAST_RAW.trim()){
     d3.select('#charts').html('');
     return;
   }
   let parsed = parseTable(LAST_RAW);
-  const fileNotes = await loadReleaseNotesFromFiles(parsed.software);
+  const manifestSet = await loadReleaseNotesManifest();
+  const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
   parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
   renderCharts(parsed);
 }
@@ -563,6 +587,7 @@ function initialThresholds(){
   setThresholdsToUI(t);
 }
 document.addEventListener('DOMContentLoaded', ()=>{
+  console.log('Initialized driver at:', new Date().toString());
   initialThresholds();
   loadCsvAndRender();
 
