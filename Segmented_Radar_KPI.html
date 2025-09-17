@@ -230,6 +230,7 @@ function scoreRangeLabels(T){
 }
 
 /* ---------- Parse table (supports dates + Release note row) ---------- */
+/* ---------- Parse table (supports dates + Release note rows: column-mapped OR sequential) ---------- */
 function parseTable(text){
   const selectVal = document.getElementById('delimiter').value;
   const tryParse = (d)=> text
@@ -245,7 +246,7 @@ function parseTable(text){
   // header
   let headers = rows[0].map(h => h.trim());
 
-  // Fix possibly missing first header
+  // Optional fix if first header cell missing
   if (rows.length > 1 && rows[1].length === headers.length + 1) {
     const firstCell = (rows[1][0] || '').trim();
     const looksText = parseNumber(firstCell) == null;
@@ -259,12 +260,13 @@ function parseTable(text){
   let idxTarget = norm.findIndex(h => h === 'target');
   let idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
 
-  // auto-fallback delimiter
+  // auto-fallback delimiter if needed
   if ((idxTarget < 0 || idxMax < 0) && selectVal !== 'auto') {
     const auto = detectDelimiter(text);
     if (auto !== delim) {
       delim = auto; rows = tryParse(delim);
       headers = rows[0].map(h => h.trim());
+      // re-apply missing header fix
       if (rows.length > 1 && rows[1].length === headers.length + 1) {
         const firstCell = (rows[1][0] || '').trim();
         const looksText = parseNumber(firstCell) == null;
@@ -284,7 +286,7 @@ function parseTable(text){
     return { headers, entries: [], software: [], releaseNotes: {} };
   }
 
-  // Software columns (extract optional [YYYY-MM-DD])
+  // Software columns (+ optional [YYYY-MM-DD] at the end)
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
@@ -297,10 +299,10 @@ function parseTable(text){
     swCols.push({ idx: i, base: basePretty, label, date });
   }
 
-  const releaseNotes = {}; // swLabel -> text
-
-  // Parse entries and catch Release note row(s)
   const entries = [];
+  const rnRows = []; // collect raw "Release note" rows for post-processing
+
+  // Walk data rows
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length === 0) continue;
@@ -309,17 +311,11 @@ function parseTable(text){
     const firstNorm = normalizeHeader(firstCellRaw);
 
     if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
-      // Collect notes per software column. Accept both literal \n and actual newlines.
-      for (const sw of swCols) {
-        const raw = (row[sw.idx] ?? '').trim();
-        if (raw) {
-          // If multiple Release note rows exist for the same SW, concatenate with an extra break
-          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
-        }
-      }
+      rnRows.push(row);
       continue;
     }
 
+    // normal KPI row
     const { func, kpi } = splitFuncKpi(firstCellRaw);
     const target = parseNumber(row[idxTarget]);
     const max    = parseNumber(row[idxMax]);
@@ -328,6 +324,39 @@ function parseTable(text){
     for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
 
     entries.push({ func, kpi, target, max, values });
+  }
+
+  // Build releaseNotes map
+  const releaseNotes = {}; // swLabel -> string
+  if (rnRows.length) {
+    // Decide mapping mode:
+    // - COLUMN-MAPPED mode if any rnRow has content in any software column cell.
+    // - Otherwise, SEQUENTIAL mode: each non-empty rnRow (after col0) maps to swCols[seqIndex++].
+    const haveAnyCellMapped = rnRows.some(row => {
+      return swCols.some(sw => (row[sw.idx] ?? '').trim().length > 0);
+    });
+
+    if (haveAnyCellMapped) {
+      // COLUMN-MAPPED: read each row’s cells under each software column
+      rnRows.forEach(row => {
+        swCols.forEach(sw => {
+          const raw = (row[sw.idx] ?? '').trim();
+          if (raw) releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
+        });
+      });
+    } else {
+      // SEQUENTIAL: for each rnRow, take the first (and only) cell AFTER col0 (if present) as the note
+      // Map in left-to-right header order
+      let seq = 0;
+      rnRows.forEach(row => {
+        // If the row only has 1 cell, it's blank; if it has >=2, the note is in cell[1]
+        const note = (row.length >= 2 ? (row[1] || '').trim() : '');
+        if (seq < swCols.length) {
+          if (note) releaseNotes[swCols[seq].label] = (releaseNotes[swCols[seq].label] ? (releaseNotes[swCols[seq].label] + '\\n' + note) : note);
+          seq++;
+        }
+      });
+    }
   }
 
   return { headers, entries, software: swCols, releaseNotes };
