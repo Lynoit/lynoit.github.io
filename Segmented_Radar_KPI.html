@@ -13,9 +13,7 @@
     /* Top tabs */
     .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
     .tabs{ display:flex; gap:8px; padding:10px 16px; }
-    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; }
-    .tab[data-mode="internal"]{ background:#e9ecf5; }
-    .tab[data-mode="external"]{ background:#e9ecf5; }
+    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; background:#e9ecf5; }
     .tab.active{ background:#111; color:#fff; }
 
     .container{padding:16px;}
@@ -80,14 +78,14 @@
 
 <script>
 /* ==================== CONFIG ==================== */
-// Main KPI CSV (Excel export) — file must sit next to this HTML
+// Main KPI CSV (Excel export)
 const DATA_CSV = 'weekly_kpi_data.csv';
 
 /*
   Release-note CSV fetching:
   'auto'     → try <software base>.csv for every software (one bullet per line). Missing files are ignored.
   'manifest' → only fetch files listed in release_notes_manifest.json (avoids 404 noise).
-  'off'      → never fetch file-based notes. (Inline "Release note" row in DATA_CSV still works.)
+  'off'      → never fetch file-based notes. (Inline "Release note" rows in DATA_CSV still work.)
 */
 const RN_FETCH_MODE = 'auto';
 const RN_MANIFEST_FILE = 'release_notes_manifest.json'; // used only if RN_FETCH_MODE === 'manifest'
@@ -104,16 +102,25 @@ const LS_KEY = 'segRadarKPI.thresholds';
 const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
 let CURRENT_MODE = MODES.INTERNAL;
 
-/* ====== HARD-CODED KPI WHITELIST for the External view ======
-   Match the exact "Function — KPI" strings (em dash). Edit to your needs. */
+/* ====== HARD-CODED KPI WHITELIST for the External view ====== */
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
+  'ACC — Cut-in performance',
+  'ACC — Cut-out performance',
+  'ACC — Target drop',
+  'LCC — Poor Lane Centering Performance',
+  'LCC — Lateral deviation',
+  'LCC — Cancel for no reason',
   'TSI — Wrong speed detected',
-  'ELKA — False positive',
-  'LDP — False positive',
-  'LDW — False positive'
-
+  'ALCA — No function'
 ];
+
+/* ====== Unified font sizes for score-boxes (legend + software cards) ====== */
+const SCORE_FONTS = {
+  number: 13, // the big 1..10
+  label: 11,  // "Unacceptable", "Good", ...
+  range: 10   // "≥ 60", "< 3 (incl. 0)", ...
+};
 
 /* ==================== Helpers & Scoring ==================== */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
@@ -474,7 +481,7 @@ function renderSummary(container, parsed){
     g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
   }
 
-  // Scoring legend
+  // Scoring legend (uses SCORE_FONTS)
   const ranges = scoreRangeLabels(T);
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
@@ -485,9 +492,9 @@ function renderSummary(container, parsed){
     const x0 = bandMargin + i*boxW; const gBox = legend.append('g');
     gBox.append('rect').attr('x', x0).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[i]).attr('stroke', '#111').attr('stroke-width', 0.4)
       .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', 13).text(i+1);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', 11).text(scoreText[i]);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', 10).text(ranges[i]);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i+1);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
 }
@@ -765,7 +772,7 @@ function renderSoftwareCards(container, parsed){
       tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH).attr('stroke', '#eef1fb');
     });
 
-    // Scoring band (use filtered entries for avg)
+    // Scoring band (uses SCORE_FONTS)
     const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
@@ -793,9 +800,25 @@ function renderSoftwareCards(container, parsed){
         .attr('stroke-width', isSel ? 3 : 0.4)
         .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
 
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14).attr('text-anchor','middle').attr('font-weight', isSel ? 950 : 750).attr('font-size', 13).text(i+1);
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14 + 16).attr('text-anchor','middle').attr('font-weight', isSel ? 850 : 550).text(scoreText[i]);
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14).attr('text-anchor','middle').attr('font-size', 10).text(ranges[i]);
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + 14)
+        .attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750)
+        .attr('font-size', SCORE_FONTS.number)
+        .text(i+1);
+
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + 14 + 16)
+        .attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550)
+        .attr('font-size', SCORE_FONTS.label)
+        .text(scoreText[i]);
+
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14)
+        .attr('text-anchor','middle')
+        .attr('font-size', SCORE_FONTS.range)
+        .text(ranges[i]);
     }
 
     const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
