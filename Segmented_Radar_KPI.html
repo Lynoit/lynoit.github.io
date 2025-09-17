@@ -32,17 +32,19 @@
     .small{font-size:12px; color:#666}
     .hint{font-size:11px; color:#555; margin-top:4px}
 
-    /* Summary table (content-fit) */
+    /* Summary table */
     .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
     .summary-table{ display:inline-table; margin:6px 0 10px; table-layout:auto; border-collapse:separate; border-spacing:0; font-size:12px; }
-    .summary-table th, .summary-table td{ padding:8px 10px; text-align:left; border-bottom:1px solid #eef1fb; }
+    .summary-table th, .summary-table td{ padding:8px 10px; text-align:left; border-bottom:1px solid #eef1fb; vertical-align:middle; }
     .summary-table th{ background:#f6f7fb; font-weight:700; }
     .summary-table th:nth-child(2), .summary-table td:nth-child(2){ text-align:center; white-space:nowrap; } /* Test date */
     .summary-table th:nth-child(3), .summary-table td:nth-child(3){ text-align:right; white-space:nowrap; }  /* Avg */
     .summary-table th:nth-child(4), .summary-table td:nth-child(4){ text-align:center; white-space:nowrap; width:1%; } /* Score */
     .summary-table th:nth-child(5), .summary-table td:nth-child(5){ white-space:nowrap; } /* Rating */
+    .summary-table th:nth-child(6), .summary-table td:nth-child(6){ text-align:center; white-space:nowrap; } /* Release Note */
     .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
     .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
+    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
 
     /* Floating toggle */
     .toggle{
@@ -50,6 +52,22 @@
       background:#111; color:#fff; border-radius:999px; padding:8px 12px; box-shadow:0 4px 16px rgba(0,0,0,.16);
     }
     .toggle:focus{outline:2px solid #6ea8ff; outline-offset:2px;}
+
+    /* Modal */
+    .modal-backdrop{
+      position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:1000;
+    }
+    .modal{
+      background:#fff; color:#111; border-radius:12px; box-shadow:0 20px 70px rgba(0,0,0,.35);
+      width:min(760px, 92vw); max-height:80vh; overflow:auto; padding:16px 16px 8px;
+    }
+    .modal header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .modal h2{ margin:0; font-size:16px; }
+    .modal .close{ background:#e9ecf5; color:#111; border:none; border-radius:10px; padding:6px 10px; cursor:pointer; }
+    .modal .content{ margin:12px 2px 8px; }
+    .modal .content ul{ margin:0; padding-left:18px; }
+    .modal .content li{ margin:6px 0; line-height:1.35; }
+    .modal .empty{ color:#666; font-style:italic; }
   </style>
 </head>
 <body>
@@ -82,11 +100,12 @@
         <button class="secondary" id="btnApply">Apply</button>
         <button class="secondary" id="btnReset">Reset defaults</button>
       </div>
-      <div class="hint">1: ≥50 (Worst), 2: ≥30, 3: ≥20, 4: ≥15, 5: ≥10, 6: ≥7, 7: ≥5, 8: ≥2, 9: ≥1, 10: &lt;1 (incl. 0). The value 1000 counts in the average.</div>
+      <div class="hint">1: ≥100 (Worst), 2: ≥60, 3: ≥40, 4: ≥30, 5: ≥20, 6: ≥15, 7: ≥10, 8: ≥5, 9: ≥3, 10: &lt;2 (incl. 0). The value 1000 counts in the average.</div>
 
       <label style="font-size:12px; color:var(--muted); display:block; margin:12px 0 4px">
         Or paste data below (headers required: <code>Function — KPI, Target, Max allowed, …</code>)<br>
-        To add a test date to a software column, write it like: <code>CX OKTB EU [2025-08-26]</code>
+        To add a test date to a software column, write it like: <code>CX OKTB EU [2025-08-26]</code><br>
+        To add release notes, add a row with first cell <code>Release note</code> and put notes in each software column, bullets separated by <code>\n</code>.
       </label>
       <textarea id="dataIn" spellcheck="false" placeholder="Paste data with headers:  Function — KPI,  Target,  Max allowed,  CX OKTB EU [2025-08-26],  CX OKTB UK [2025-08-26],  0824(TO) [2025-08-24],  0830(TO) [2025-08-30]"></textarea>
       <div class="controls" style="grid-template-columns:auto 1fr;">
@@ -101,10 +120,21 @@
     </div>
   </div>
 
+  <!-- Modal -->
+  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header>
+        <h2 id="modalTitle">Release Note</h2>
+        <button class="close" id="modalClose" aria-label="Close">Close</button>
+      </header>
+      <div class="content" id="modalContent"></div>
+    </div>
+  </div>
+
 <script>
 /* ---------- Colors & helpers ---------- */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
-const DEFAULT_THRESH_STR = '50,30,20,15,10,7,5,2,1,0';
+const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
 const LS_KEY = 'segRadarKPI.thresholds'; // only thresholds persist
 
 let LAST_RAW = ''; // holds last loaded/pasted table text
@@ -199,8 +229,7 @@ function scoreRangeLabels(T){
   return lab;
 }
 
-/* ---------- Parse table (with date extraction) ---------- */
-/* ---------- Parse table (supports missing "Function — KPI" header + dates) ---------- */
+/* ---------- Parse table (supports dates + Release note row) ---------- */
 function parseTable(text){
   const selectVal = document.getElementById('delimiter').value;
   const tryParse = (d)=> text
@@ -211,58 +240,51 @@ function parseTable(text){
   // pick delimiter
   let delim = (selectVal === 'auto') ? detectDelimiter(text) : selectVal;
   let rows = tryParse(delim);
-  if (!rows.length) return { headers: [], entries: [], software: [] };
+  if (!rows.length) return { headers: [], entries: [], software: [], releaseNotes: {} };
 
-  // raw header
+  // header
   let headers = rows[0].map(h => h.trim());
 
-  // --- FIX: If the first header cell is missing (your new format),
-  // and the first data row has exactly one more column than the header,
-  // auto-insert "Function — KPI" at the beginning of the header.
+  // Fix possibly missing first header
   if (rows.length > 1 && rows[1].length === headers.length + 1) {
     const firstCell = (rows[1][0] || '').trim();
-    const looksText = parseNumber(firstCell) == null; // "ACC — ..." etc.
+    const looksText = parseNumber(firstCell) == null;
     const normH = headers.map(normalizeHeader);
     const hasTarget = normH.includes('target');
     const hasMax = normH.includes('max allowed') || normH.includes('maxallowed');
-    if (looksText && hasTarget && hasMax) {
-      headers = ['Function — KPI', ...headers];
-    }
+    if (looksText && hasTarget && hasMax) headers = ['Function — KPI', ...headers];
   }
 
   let norm = headers.map(normalizeHeader);
   let idxTarget = norm.findIndex(h => h === 'target');
-  let idxMax    = norm.findIndex(h => h === 'max allowed' || h === 'maxallowed');
+  let idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
 
-  // if target/max still not found, try auto delimiter detection fallback
+  // auto-fallback delimiter
   if ((idxTarget < 0 || idxMax < 0) && selectVal !== 'auto') {
     const auto = detectDelimiter(text);
     if (auto !== delim) {
       delim = auto; rows = tryParse(delim);
       headers = rows[0].map(h => h.trim());
-      // re-apply missing header fix
       if (rows.length > 1 && rows[1].length === headers.length + 1) {
         const firstCell = (rows[1][0] || '').trim();
         const looksText = parseNumber(firstCell) == null;
         const normH2 = headers.map(normalizeHeader);
         const hasTarget2 = normH2.includes('target');
         const hasMax2 = normH2.includes('max allowed') || normH2.includes('maxallowed');
-        if (looksText && hasTarget2 && hasMax2) {
-          headers = ['Function — KPI', ...headers];
-        }
+        if (looksText && hasTarget2 && hasMax2) headers = ['Function — KPI', ...headers];
       }
       norm = headers.map(normalizeHeader);
       idxTarget = norm.findIndex(h => h === 'target');
-      idxMax    = norm.findIndex(h => h === 'max allowed' || h === 'maxallowed');
+      idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
     }
   }
 
   if (idxTarget < 0 || idxMax < 0) {
     alert("Missing required columns: 'Target' and 'Max allowed'. Try Auto-detect delimiter.\nHeaders seen: " + headers.join(', '));
-    return { headers, entries: [], software: [] };
+    return { headers, entries: [], software: [], releaseNotes: {} };
   }
 
-  // Build software columns, extract [YYYY-MM-DD] if present, dedupe base names
+  // Software columns (extract optional [YYYY-MM-DD])
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
@@ -275,15 +297,30 @@ function parseTable(text){
     swCols.push({ idx: i, base: basePretty, label, date });
   }
 
-  // Parse entries (rows after header)
+  const releaseNotes = {}; // swLabel -> text
+
+  // Parse entries and catch Release note row(s)
   const entries = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length === 0) continue;
 
-    // Column 0 is Function — KPI text in your data
-    const { func, kpi } = splitFuncKpi((row[0] || '').trim());
+    const firstCellRaw = (row[0] || '').trim();
+    const firstNorm = normalizeHeader(firstCellRaw);
 
+    if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
+      // Collect notes per software column. Accept both literal \n and actual newlines.
+      for (const sw of swCols) {
+        const raw = (row[sw.idx] ?? '').trim();
+        if (raw) {
+          // If multiple Release note rows exist for the same SW, concatenate with an extra break
+          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
+        }
+      }
+      continue;
+    }
+
+    const { func, kpi } = splitFuncKpi(firstCellRaw);
     const target = parseNumber(row[idxTarget]);
     const max    = parseNumber(row[idxMax]);
 
@@ -293,47 +330,89 @@ function parseTable(text){
     entries.push({ func, kpi, target, max, values });
   }
 
-  return { headers, entries, software: swCols };
+  return { headers, entries, software: swCols, releaseNotes };
 }
 
-/* ---------- Summary card (Table first, Caption ABOVE bars, best-first, scoring legend) ---------- */
+/* ---------- Modal helpers ---------- */
+function openReleaseNoteModal(title, noteText){
+  const backdrop = document.getElementById('modalBackdrop');
+  const titleEl  = document.getElementById('modalTitle');
+  const content  = document.getElementById('modalContent');
+
+  titleEl.textContent = title || 'Release Note';
+
+  // Convert literal \n or real newlines into <li> items
+  const parts = String(noteText || '')
+    .replace(/\r/g,'')
+    .split(/\\n|\n/g)
+    .map(s => s.trim())
+    .filter(s => s.length);
+
+  content.innerHTML = '';
+  if (parts.length === 0){
+    const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'No release note provided.'; content.appendChild(p);
+  } else {
+    const ul = document.createElement('ul');
+    parts.forEach(t => {
+      const li = document.createElement('li');
+      li.textContent = t;
+      ul.appendChild(li);
+    });
+    content.appendChild(ul);
+  }
+
+  backdrop.style.display = 'flex';
+  backdrop.setAttribute('aria-hidden', 'false');
+}
+
+function closeReleaseNoteModal(){
+  const backdrop = document.getElementById('modalBackdrop');
+  backdrop.style.display = 'none';
+  backdrop.setAttribute('aria-hidden', 'true');
+}
+
+/* ---------- Summary card ---------- */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
-  // Build rows with avg + score (cap 1000 in mean)
+  // Build rows with avg + score
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
     const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
     const score = avg == null ? null : scoreFromAvg(avg, T);
-    return { sw: swLabel, date: sw.date, avg, score, text: score == null ? 'n/a' : scoreText[score - 1] };
+    return {
+      sw: swLabel,
+      date: sw.date,
+      avg,
+      score,
+      text: score == null ? 'n/a' : scoreText[score - 1],
+      note: parsed.releaseNotes[swLabel] || ''
+    };
   });
 
-  // Best first: higher score, then lower avg; n/a last
+  // Sort (best first)
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
-    if (sa !== sb) return sb - sa;             // higher score first
+    if (sa !== sb) return sb - sa;
     if (a.avg == null && b.avg == null) return 0;
-    if (a.avg == null) return 1;               // nulls last
+    if (a.avg == null) return 1;
     if (b.avg == null) return -1;
-    return a.avg - b.avg;                      // lower avg first
+    return a.avg - b.avg;
   });
 
   const chartData = rows.filter(r => r.avg != null);
   if (!rows.length) return;
 
-  // Full-width summary card
   const card = container.append('div').attr('class', 'chart-card summary-card');
   card.append('div').attr('class','summary-title').text('Summary Weekly KPI');
 
-  /* === TABLE (first) === */
+  // TABLE
   const table = card.append('table').attr('class', 'summary-table');
-  table.append('colgroup').html(`
-    <col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating">
-  `);
+  table.append('colgroup').html(`<col class="col-sw"><col class="col-date"><col class="col-avg"><col class="col-score"><col class="col-rating"><col class="col-note">`);
   const thead = table.append('thead').append('tr');
-  thead.html(`<th>Software</th><th>Test date</th><th>Average events per 1000 km</th><th>Score</th><th>Rating</th>`);
+  thead.html(`<th>Software</th><th>Test date</th><th>Average events per 1000 km</th><th>Score</th><th>Rating</th><th>Release Note</th>`);
   const tbody = table.append('tbody');
 
   rows.forEach(r=>{
@@ -351,16 +430,24 @@ function renderSummary(container, parsed){
         .text(r.score);
       tr.append('td').text(r.text);
     }
+
+    // Release Note link (opens modal)
+    const tdNote = tr.append('td');
+    if (r.note && r.note.trim().length){
+      const a = tdNote.append('span').attr('class','link').text('Release Note');
+      a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
+    } else {
+      tdNote.text('—');
+    }
   });
 
-  /* === CAPTION ABOVE the bars === */
+  // (Keep your bar viz + scoring legend below the table)
   if (chartData.length){
     card.append('div')
       .attr('class','small')
       .style('margin','8px 0 4px')
       .text('Average events per 1000 km (bar color = score)');
 
-    // Helper to measure label width
     function measureTextWidth(texts, fontSize=12, fontWeight=400){
       const tmp = d3.select('body').append('svg')
         .attr('width',0).attr('height',0)
@@ -378,10 +465,9 @@ function renderSummary(container, parsed){
     const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const labelW = Math.ceil(measureTextWidth(yLabels, 12, 400));
 
-    // Chart width fits inside the card
     const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
-    const cw = Math.max(560, Math.min(1000, cardW));            // clamp to card width
-    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14)); // adapt to labels; cap ~48%
+    const cw = Math.max(560, Math.min(1000, cardW));
+    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14));
     const rightPad = 16, topPad = 8, barH = 22, gap = 6;
 
     const svg = card.append('svg')
@@ -397,7 +483,6 @@ function renderSummary(container, parsed){
 
     chartData.forEach((d,i)=> d._y = i * (barH + gap));
 
-    // y labels (software + date)
     g.selectAll('.ylabel').data(chartData).enter().append('text')
       .attr('class','ylabel')
       .attr('x', leftPad - 10)
@@ -408,7 +493,6 @@ function renderSummary(container, parsed){
       .text((d,i)=> yLabels[i])
       .append('title').text(d => d.sw);
 
-    // bars — color by scoring box color
     g.selectAll('.bar').data(chartData).enter().append('rect')
       .attr('class','bar')
       .attr('x', x(0)).attr('y', d => d._y)
@@ -419,7 +503,6 @@ function renderSummary(container, parsed){
       .append('title')
       .text(d => `Score ${d.score}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
 
-    // value labels
     g.selectAll('.val').data(chartData).enter().append('text')
       .attr('x', d => x(Math.min(1000, d.avg)) + 6)
       .attr('y', d => d._y + barH/2)
@@ -427,14 +510,12 @@ function renderSummary(container, parsed){
       .attr('font-size', 12)
       .text(d => d.avg.toFixed(1));
 
-    // x-axis
     const axisY = chartData.length * (barH + gap);
     g.append('g')
       .attr('transform', `translate(0, ${axisY})`)
       .call(d3.axisBottom(x).ticks(6));
   }
 
-  /* === Scoring Legend (matches scoring boxes 1..10) === */
   const ranges = scoreRangeLabels(T);
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg')
@@ -446,7 +527,6 @@ function renderSummary(container, parsed){
   const barW = legCw - bandMargin*2;
   const boxW = barW / 10;
 
-  // caption for legend
   legend.append('text')
     .attr('x', 12)
     .attr('y', 12)
@@ -491,24 +571,22 @@ function renderSummary(container, parsed){
       .attr('font-size', 10)
       .text(ranges[i]);
   }
-
-  // legend height
   legend.attr('height', 20 + boxH + 28 + 6);
 }
 
 /* ---------- Renderer (cards) ---------- */
 function renderCharts(parsed){
   const T = getThresholds();
-  const rangeLabels = scoreRangeLabels(T);
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
 
-  // Summary card first
+  // Summary card first (now includes Release Note column)
   renderSummary(container, parsed);
 
+  // Per-software radar + tables (unchanged from your previous version)
   (parsed.software||[]).forEach(sw=>{
     const swLabel = sw.label;
     const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
@@ -535,30 +613,28 @@ function renderCharts(parsed){
       img.src = url;
     });
 
-    /* --- Layout constants & title/radar placement (legend-aware) --- */
     const radarH = 540;
     const scoreTopPad = 28;
     const rowH = 22, headerH = 24, tableSidePad = 12, colGap = 8;
 
-    // NEW knobs to fix spacing & centering
-    const TITLE_Y = 26;                 // title baseline
-    const TITLE_TO_RADAR_GAP = 50;      // space under title
-    const RADAR_PAD_LEFT = 30;          // left breathing room
-    const MIN_SIDE_MARGIN = 8;          // keep small right gap before legend
-    const FUNC_LABEL_OFFSET = 16;       // clearance for outer function labels
+    const TITLE_Y = 26;
+    const TITLE_TO_RADAR_GAP = 50;
+    const RADAR_PAD_LEFT = 30;
+    const MIN_SIDE_MARGIN = 8;
+    const FUNC_LABEL_OFFSET = 16;
 
     const svg = card.append('svg').attr('width', w);
 
-// Title (include test date when available)
-const titleText = sw.date ? `${swLabel}. ${sw.date}` : swLabel;
-svg.append('text')
-  .attr('x', w/2)
-  .attr('y', TITLE_Y)             // you already have TITLE_Y defined above
-  .attr('text-anchor','middle')
-  .attr('font-weight',700)
-  .text(titleText);
+    // Title (include test date when available)
+    const titleText = sw.date ? `${swLabel}. ${sw.date}` : swLabel;
+    svg.append('text')
+      .attr('x', w/2)
+      .attr('y', TITLE_Y)
+      .attr('text-anchor','middle')
+      .attr('font-weight',700)
+      .text(titleText);
 
-    // ---- Legend (build first, measure, then position) ----
+    // Legend
     const legendPadRight = 12;
     const legendItems = [
       {label:'Green = Good',  color: GREEN},
@@ -573,7 +649,6 @@ svg.append('text')
       legendG.append('rect').attr('x',8).attr('y',y-7).attr('width',12).attr('height',12).attr('fill',it.color);
       legendG.append('text').attr('x',26).attr('y',y).attr('dominant-baseline','middle').attr('font-size',12).text(it.label);
     });
-    // Measure legend and add background
     const pad = 8;
     const lb = legendG.node().getBBox();
     const legW = Math.ceil(lb.width) + pad*2;
@@ -583,10 +658,9 @@ svg.append('text')
       .attr('rx',8).attr('ry',8)
       .attr('width', legW).attr('height', legH)
       .attr('fill','#ffffff').attr('fill-opacity',0.85);
-    // Move legend to top-right
     legendG.attr('transform', `translate(${w - legW - legendPadRight}, 32)`);
 
-    // ---- Radar geometry: center in remaining width (left of legend), with padding & label clearance
+    // Radar geometry
     const leftAreaWidth = w - legW - legendPadRight;
     const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
     const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
@@ -594,10 +668,9 @@ svg.append('text')
 
     const rMaxCandidateW = Math.max(10, availableW/2 - FUNC_LABEL_OFFSET);
     const rMaxCandidateH = (radarH - radarTop) - 16;
-    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH)); // keep sensible size
+    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH));
     const centerY = radarTop + rMax;
 
-    // ---- Radar chart ----
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
     const functions = [];
@@ -648,7 +721,7 @@ svg.append('text')
         .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
       g.append('line')
         .attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
-        .attr('stroke','#000').attr('stroke-opacity',0.25);
+        .attr('stroke','#000').attr('stroke-opacity', 0.25);
       const cen = (start + end) / 2;
       g.append('text')
         .attr('x', Math.cos(cen)*(rMax+FUNC_LABEL_OFFSET)).attr('y', Math.sin(cen)*(rMax+FUNC_LABEL_OFFSET))
@@ -703,27 +776,24 @@ svg.append('text')
       });
     });
 
-    /* ---------- KPI TABLE (caption + explicit gap) ---------- */
-    const RADAR_TO_TABLE_GAP = 50; // space under the radar
+    const RADAR_TO_TABLE_GAP = 50;
 
     const tableCaptionY = centerY + rMax + RADAR_TO_TABLE_GAP;
     svg.append('text')
       .attr('x', tableSidePad)
       .attr('y', tableCaptionY)
       .attr('font-size', 12)
-      .attr('fill', '#555')              // unbold + softer
+      .attr('fill', '#555')
       .text('KPI summary per 1000 km');
 
     const TABLE_CAPTION_GAP = 8;
     const tableY = tableCaptionY + TABLE_CAPTION_GAP;
     const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
 
-    // Build table rows
     const rows = parsed.entries
       .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
       .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
 
-    // Measure text widths
     function measureMaxWidth(texts, fontSize=11, fontWeight=400){
       const tmp = d3.select('body').append('svg')
         .attr('width',0).attr('height',0)
@@ -762,13 +832,11 @@ svg.append('text')
 
     const tableH = headerH + rows.length * rowH + 8;
 
-    // compact background sized to content
     tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
       .attr('width', tableWUsed + 8).attr('height', tableH)
       .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
 
-    // header row background
     tableG.append('rect')
       .attr('x', x0).attr('y', 4)
       .attr('width', tableWUsed).attr('height', headerH)
@@ -803,7 +871,6 @@ svg.append('text')
     hEvt.append('tspan').text('Number of').attr('x', x4 + col4W - 6).attr('dy', 0);
     hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
 
-    // rows
     rows.forEach((r, i)=>{
       const y = 4 + headerH + i*rowH;
       tableG.append('rect')
@@ -837,7 +904,6 @@ svg.append('text')
         .text(fmtCell(r.events));
     });
 
-    // vertical guide lines
     [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
       tableG.append('line')
         .attr('x1', xx).attr('x2', xx)
@@ -845,7 +911,6 @@ svg.append('text')
         .attr('stroke', '#eef1fb');
     });
 
-    /* ---------- Scoring band ---------- */
     const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
@@ -868,7 +933,6 @@ svg.append('text')
       const isSel = (score === i+1);
 
       if (isSel){
-        // unique glow per card
         const defs = svg.select('defs').empty() ? svg.append('defs') : svg.select('defs');
         const glowId = `glow-${Math.random().toString(36).slice(2)}`;
         const glow = defs.append('filter').attr('id',glowId).attr('x','-30%').attr('y','-50%').attr('width','160%').attr('height','220%');
@@ -962,6 +1026,15 @@ document.addEventListener('DOMContentLoaded', ()=>{
     if (e.key.toLowerCase() === 'i' && !e.altKey && !e.ctrlKey && !e.metaKey){
       btn.click();
     }
+  });
+
+  // Modal close interactions
+  document.getElementById('modalClose').addEventListener('click', closeReleaseNoteModal);
+  document.getElementById('modalBackdrop').addEventListener('click', (e)=>{
+    if (e.target.id === 'modalBackdrop') closeReleaseNoteModal();
+  });
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape') closeReleaseNoteModal();
   });
 });
 
