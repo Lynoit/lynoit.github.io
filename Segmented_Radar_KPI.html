@@ -50,9 +50,9 @@
     .modal .content li{ margin:6px 0; line-height:1.35; }
     .modal .empty{ color:#666; font-style:italic; }
 
-    /* KPI × Software matrix (CC-only) */
+    /* KPI × Software matrix tables */
     .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
-    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 8px; }
+    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 6px; }
     .matrix-sub{ font-weight:600; font-size:12px; color:#555; margin:0 0 10px; text-align:center; }
     .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; margin:0 auto; }
     .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
@@ -473,7 +473,7 @@ function renderSummary(container, parsed){
   }
 
   // Scoring legend (uses SCORE_FONTS)
-  const ranges = scoreRangeLabels(T);
+  const ranges = scoreRangeLabels(getThresholds());
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
   const bandMargin = 20, boxH = 42;
@@ -490,7 +490,7 @@ function renderSummary(container, parsed){
   legend.attr('height', 20 + boxH + 28 + 6);
 }
 
-/* ==================== KPI × Software matrix (own card) ==================== */
+/* ==================== KPI × Software matrix (CC-only) ==================== */
 function renderCCMatrix(container, parsed){
   const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
   if (!ccSoftwares.length) return;
@@ -524,6 +524,68 @@ function renderCCMatrix(container, parsed){
     tr.append('td').text(name);
     const e = entryByName.get(name);
     ccSoftwares.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      tr.append('td').attr('class','num').text(fmtCell(v));
+    });
+  });
+}
+
+/* ==================== KPI × Software matrix (Non-CC + latest CC) ==================== */
+function renderNonCCPlusLatestCCMatrix(container, parsed){
+  const allSoft = parsed.software || [];
+  const ccList = allSoft.filter(sw => /^CC\b/i.test(sw.base));
+  const nonCC  = allSoft.filter(sw => !/^CC\b/i.test(sw.base));
+
+  if (!nonCC.length && !ccList.length) return;
+
+  // Pick latest CC by date (YYYY-MM-DD). If none have a date, fallback to last CC in list.
+  let latestCC = null;
+  if (ccList.length){
+     const withDate = ccList.filter(sw => !!sw.date);
+     if (withDate.length){
+       latestCC = withDate.reduce((best, cur)=> (best==null || cur.date > best.date) ? cur : best, null);
+     } else {
+       latestCC = ccList[ccList.length - 1];
+     }
+  }
+
+  // Build column set: all non-CC + (latest CC if exists)
+  const cols = nonCC.slice();
+  if (latestCC) cols.push({...latestCC, _latest:true});
+
+  if (!cols.length) return;
+
+  // Unique KPI names (current view), preserving order
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
+
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix (Non-CC + latest CC)');
+  card.append('div').attr('class','matrix-sub').text('Rows = KPI, Columns = non-CC softwares and only the latest CC, Cells = number of events');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  cols.forEach(sw => {
+    const th = thead.append('th').attr('class','software');
+    th.text(sw._latest ? `${sw.label} (latest CC)` : sw.label);
+  });
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(name);
+    const e = entryByName.get(name);
+    cols.forEach(sw=>{
       const v = e ? e.values[sw.label] : null;
       tr.append('td').attr('class','num').text(fmtCell(v));
     });
@@ -713,7 +775,7 @@ function renderSoftwareCards(container, parsed){
     // Table caption
     const RADAR_TO_TABLE_GAP = 50;
     const tableCaptionY = centerY + rMax + RADAR_TO_TABLE_GAP;
-    svg.append('text').attr('x', tableSidePad).attr('y', tableCaptionY).attr('font-size', 12).attr('fill', '#555').text('KPI summary per 1000 km');
+    svg.append('text').attr('x', 12).attr('y', tableCaptionY).attr('font-size', 12).attr('fill', '#555').text('KPI summary per 1000 km');
 
     const TABLE_CAPTION_GAP = 8;
     const tableY = tableCaptionY + TABLE_CAPTION_GAP;
@@ -751,14 +813,15 @@ function renderSoftwareCards(container, parsed){
     let col2W   = Math.max(50, Math.min(120, measureMaxWidth(tgtTexts , 11, 400) + 16));
     let col3W   = Math.max(60, Math.min(140, measureMaxWidth(maxTexts , 11, 400) + 16));
     let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16));
-    const x0 = tableSidePad;
-    const x1 = x0 + kpiW + colGap;
-    const x2 = x1 + funcW + colGap;
-    const x3 = x2 + col2W + colGap;
-    const x4 = x3 + col3W + colGap;
+    const x0 = 12;
+    const x1 = x0 + kpiW + 8;
+    const x2 = x1 + funcW + 8;
+    const x3 = x2 + col2W + 8;
+    const x4 = x3 + col3W + 8;
     const tableWUsed = x4 - x0 + col4W;
 
-    const tableH = headerH + rows.length * rowH + 8;
+    const headerH = 24, rowH2 = 22;
+    const tableH = headerH + rows.length * rowH2 + 8;
     tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
       .attr('width', tableWUsed + 8).attr('height', tableH)
@@ -783,71 +846,15 @@ function renderSoftwareCards(container, parsed){
     hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
 
     rows.forEach((r, i)=>{
-      const y = 4 + headerH + i*rowH;
-      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH).attr('fill', i%2 ? '#fafbff' : '#ffffff');
+      const y = 4 + headerH + i*rowH2;
+      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH2).attr('fill', i%2 ? '#fafbff' : '#ffffff');
 
-      tableG.append('text').attr('x', x0+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
-      tableG.append('text').attr('x', x1+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
-      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
-      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
-      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
+      tableG.append('text').attr('x', x0+6).attr('y', y + rowH2/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
+      tableG.append('text').attr('x', x1+6).attr('y', y + rowH2/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
+      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
+      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
+      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
     });
-
-    [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
-      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH).attr('stroke', '#eef1fb');
-    });
-
-    // Scoring band (uses SCORE_FONTS)
-    const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
-    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
-    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
-
-    const barMargin = 20, boxH2 = 42;
-    const barW = w - barMargin*2;
-    const boxW = barW / 10;
-    const scoreBandY = tableY + (headerH + rows.length * rowH + 8) + scoreTopPad;
-    const scoreG = svg.append('g').attr('transform', `translate(0, ${scoreBandY})`);
-
-    const caption = (avgEvents==null)
-      ? 'Average per 1000km:  n/a (only "No function" or missing values)'
-      : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
-    scoreG.append('text').attr('x', barMargin).attr('y', 14).attr('font-size', 12).text(caption);
-
-    const ranges = scoreRangeLabels(T);
-    for (let i=0;i<10;i++){
-      const x = barMargin + i*boxW;
-      const isSel = (score === i+1);
-      scoreG.append('rect')
-        .attr('x', x).attr('y', 28)
-        .attr('width', boxW).attr('height', boxH2)
-        .attr('fill', scoreColors[i])
-        .attr('stroke', isSel ? '#000' : '#111')
-        .attr('stroke-width', isSel ? 3 : 0.4)
-        .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
-
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 950 : 750)
-        .attr('font-size', SCORE_FONTS.number)
-        .text(i+1);
-
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + 14 + 16)
-        .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 850 : 550)
-        .attr('font-size', SCORE_FONTS.label)
-        .text(scoreText[i]);
-
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-size', SCORE_FONTS.range)
-        .text(ranges[i]);
-    }
-
-    const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
-    svg.attr('height', totalHeight);
   });
 }
 
@@ -859,9 +866,10 @@ function renderCharts(parsedFull){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
-  renderSummary(container, parsed);     // 1) Summary card
-  renderCCMatrix(container, parsed);    // 2) CC-only matrix card (new, separate)
-  renderSoftwareCards(container, parsed); // 3) Per-software cards
+  renderSummary(container, parsed);                 // 1) Summary card
+  renderCCMatrix(container, parsed);               // 2) CC-only matrix card
+  renderNonCCPlusLatestCCMatrix(container, parsed);// 3) Non-CC + latest CC matrix card (NEW)
+  renderSoftwareCards(container, parsed);          // 4) Per-software cards
 }
 
 /* ==================== Loader (CSV + release notes) ==================== */
