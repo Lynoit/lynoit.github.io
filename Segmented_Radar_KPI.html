@@ -4,14 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KPI Scoring Visualizer</title>
-  <!-- Prevent favicon 404 -->
   <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
-    :root{
-      --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb;
-    }
+    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
+
+    /* Top tabs */
+    .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
+    .tabs{ display:flex; gap:8px; padding:10px 16px; }
+    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; }
+    .tab[data-mode="internal"]{ background:#e9ecf5; }
+    .tab[data-mode="external"]{ background:#e9ecf5; }
+    .tab.active{ background:#111; color:#fff; }
+
     .container{padding:16px;}
     .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
     .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
@@ -48,6 +54,13 @@
   </style>
 </head>
 <body>
+  <div class="topbar">
+    <div class="tabs">
+      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
+      <button class="tab" data-mode="external" aria-pressed="false">External</button>
+    </div>
+  </div>
+
   <div class="container">
     <div class="panel">
       <div id="charts" class="charts"></div>
@@ -72,7 +85,7 @@ const DATA_CSV = 'weekly_kpi_data.csv';
 
 /*
   Release-note CSV fetching:
-  'auto'     → try <software base>.csv for every software (one bullet per line). Missing files just get ignored.
+  'auto'     → try <software base>.csv for every software (one bullet per line). Missing files are ignored.
   'manifest' → only fetch files listed in release_notes_manifest.json (avoids 404 noise).
   'off'      → never fetch file-based notes. (Inline "Release note" row in DATA_CSV still works.)
 */
@@ -80,18 +93,37 @@ const RN_FETCH_MODE = 'auto';
 const RN_MANIFEST_FILE = 'release_notes_manifest.json'; // used only if RN_FETCH_MODE === 'manifest'
 
 /*
-  Scoring thresholds — lower bounds for scores 1→10. If you want to hard-wire your own, set SCORE_THRESHOLDS to a 10-number array.
-  By default we read from localStorage (key below) or fall back to DEFAULT_THRESH_STR.
+  Scoring thresholds — lower bounds for scores 1→10.
+  If you want fixed thresholds, set SCORE_THRESHOLDS to a 10-number array. Otherwise defaults to DEFAULT_THRESH_STR.
 */
 const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
 const SCORE_THRESHOLDS = null; // e.g., [100,60,40,30,20,15,10,5,3,2]
 const LS_KEY = 'segRadarKPI.thresholds';
+
+/* View modes */
+const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
+let CURRENT_MODE = MODES.INTERNAL;
+
+/* ====== HARD-CODED KPI WHITELIST for the External view ======
+   Match the exact "Function — KPI" strings (em dash). Edit to your needs. */
+const EXTERNAL_WHITELIST = [
+  'ACC — False brake',
+  'ACC — Cut-in performance',
+  'ACC — Cut-out performance',
+  'ACC — Target drop',
+  'LCC — Poor Lane Centering Performance',
+  'LCC — Lateral deviation',
+  'LCC — Cancel for no reason',
+  'TSI — Wrong speed detected',
+  'ALCA — No function'
+];
 
 /* ==================== Helpers & Scoring ==================== */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
 const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
 const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
 let LAST_RAW = '';
+let LAST_PARSED = null; // parsed + merged release notes
 
 const fmtCell = v =>
   (v==null || Number.isNaN(v)) ? '—'
@@ -301,11 +333,19 @@ async function loadReleaseNotesFromFiles(swCols, manifestSet){
     if (!txt) continue;
     const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
     if (lines.length){
-      const joined = lines.join('\n'); // real newlines; modal handles both \n and \\n inputs
+      const joined = lines.join('\n'); // real newlines; modal handles \n or \\n
       out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
   }
   return out;
+}
+
+/* ==================== Filtering for External view ==================== */
+function filterEntriesForMode(parsed){
+  if (CURRENT_MODE === MODES.INTERNAL) return parsed;
+  const wl = new Set(EXTERNAL_WHITELIST.map(s => s.trim().toLowerCase()));
+  const filteredEntries = parsed.entries.filter(e => wl.has(`${e.func} — ${e.kpi}`.toLowerCase()));
+  return { ...parsed, entries: filteredEntries };
 }
 
 /* ==================== Summary ==================== */
@@ -343,7 +383,8 @@ function renderSummary(container, parsed){
   if (!rows.length) return;
 
   const card = container.append('div').attr('class', 'chart-card summary-card');
-  card.append('div').attr('class','summary-title').text('Summary Weekly KPI');
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
+  card.append('div').attr('class','summary-title').text(modeLabel);
 
   // Table
   const table = card.append('table').attr('class', 'summary-table');
@@ -492,7 +533,7 @@ function renderSoftwareCards(container, parsed){
     const svg = card.append('svg').attr('width', w);
 
     // Title (include test date when available)
-    const titleText = sw.date ? `${swLabel}. ${sw.date}` : swLabel;
+    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
     svg.append('text')
       .attr('x', w/2)
       .attr('y', TITLE_Y)
@@ -536,6 +577,7 @@ function renderSoftwareCards(container, parsed){
 
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
+    // Functions present in filtered entries
     const functions = [];
     parsed.entries.forEach(e=>{
       const v = e.values[swLabel];
@@ -648,7 +690,7 @@ function renderSoftwareCards(container, parsed){
     const tableY = tableCaptionY + TABLE_CAPTION_GAP;
     const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
 
-    // Build table rows
+    // Build table rows from filtered entries
     const rows = parsed.entries
       .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
       .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
@@ -686,9 +728,8 @@ function renderSoftwareCards(container, parsed){
     const x3 = x2 + col2W + colGap;
     const x4 = x3 + col3W + colGap;
     const tableWUsed = x4 - x0 + col4W;
-    const rowH2 = rowH;
 
-    const tableH = headerH + rows.length * rowH2 + 8;
+    const tableH = headerH + rows.length * rowH + 8;
     tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
       .attr('width', tableWUsed + 8).attr('height', tableH)
@@ -713,21 +754,21 @@ function renderSoftwareCards(container, parsed){
     hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
 
     rows.forEach((r, i)=>{
-      const y = 4 + headerH + i*rowH2;
-      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH2).attr('fill', i%2 ? '#fafbff' : '#ffffff');
+      const y = 4 + headerH + i*rowH;
+      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH).attr('fill', i%2 ? '#fafbff' : '#ffffff');
 
-      tableG.append('text').attr('x', x0+6).attr('y', y + rowH2/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
-      tableG.append('text').attr('x', x1+6).attr('y', y + rowH2/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
-      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
-      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
-      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH2/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
+      tableG.append('text').attr('x', x0+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
+      tableG.append('text').attr('x', x1+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
+      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
+      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
+      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
     });
 
     [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
-      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH2).attr('stroke', '#eef1fb');
+      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + headerH).attr('y2', 4 + headerH + rows.length*rowH).attr('stroke', '#eef1fb');
     });
 
-    // Scoring band
+    // Scoring band (use filtered entries for avg)
     const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
@@ -735,7 +776,7 @@ function renderSoftwareCards(container, parsed){
     const barMargin = 20, boxH2 = 42;
     const barW = w - barMargin*2;
     const boxW = barW / 10;
-    const scoreBandY = tableY + (headerH + rows.length * rowH2 + 8) + scoreTopPad;
+    const scoreBandY = tableY + (headerH + rows.length * rowH + 8) + scoreTopPad;
     const scoreG = svg.append('g').attr('transform', `translate(0, ${scoreBandY})`);
 
     const caption = (avgEvents==null)
@@ -756,7 +797,7 @@ function renderSoftwareCards(container, parsed){
         .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
 
       scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14).attr('text-anchor','middle').attr('font-weight', isSel ? 950 : 750).attr('font-size', 13).text(i+1);
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14 + 16).attr('text-anchor','middle').attr('font-weight', isSel ? 850 : 550).attr('font-size', 11).text(scoreText[i]);
+      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14 + 16).attr('text-anchor','middle').attr('font-weight', isSel ? 850 : 550).text(scoreText[i]);
       scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14).attr('text-anchor','middle').attr('font-size', 10).text(ranges[i]);
     }
 
@@ -766,7 +807,8 @@ function renderSoftwareCards(container, parsed){
 }
 
 /* ==================== Main renderer ==================== */
-function renderCharts(parsed){
+function renderCharts(parsedFull){
+  const parsed = filterEntriesForMode(parsedFull);
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length){
     container.append('div').attr('class','small').text('No data to render.');
@@ -789,15 +831,36 @@ async function loadCsvAndRender(){
     const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
     parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
 
-    renderCharts(parsed);
+    LAST_PARSED = parsed;
+    renderCharts(LAST_PARSED);
   }catch(err){
     d3.select('#charts').html('');
     alert(`Could not load "${DATA_CSV}". Make sure it sits next to this HTML and that you're serving over http(s).\n\nError: ${err.message}`);
   }
 }
 
+/* ==================== Tabs wiring ==================== */
+function updateTabsUI(){
+  document.querySelectorAll('.tab').forEach(btn=>{
+    const on = (btn.dataset.mode === CURRENT_MODE);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const mode = btn.dataset.mode;
+    if (!mode || mode === CURRENT_MODE) return;
+    CURRENT_MODE = mode;
+    updateTabsUI();
+    if (LAST_PARSED) renderCharts(LAST_PARSED);
+  });
+});
+
 /* ==================== Boot ==================== */
 document.addEventListener('DOMContentLoaded', ()=>{
+  updateTabsUI();
   loadCsvAndRender();
 });
 </script>
