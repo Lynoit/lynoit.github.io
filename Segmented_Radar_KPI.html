@@ -51,9 +51,10 @@
     .modal .empty{ color:#666; font-style:italic; }
 
     /* KPI × Software matrix (CC-only) */
-    .matrix-wrap{ margin:10px 0 6px; overflow:auto; max-width:100%; }
-    .matrix-title{ font-weight:600; font-size:12px; color:#555; margin:6px 0 6px; }
-    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; }
+    .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
+    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 8px; }
+    .matrix-sub{ font-weight:600; font-size:12px; color:#555; margin:0 0 10px; text-align:center; }
+    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; margin:0 auto; }
     .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
     .matrix-table th{ background:#f6f7fb; position:sticky; top:0; z-index:1; }
     .matrix-table th.software{ text-align:center; white-space:nowrap; }
@@ -99,11 +100,14 @@ let CURRENT_MODE = MODES.INTERNAL;
 
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
-  'LCC — False brake',
+  'ACC — Cut-in performance',
+  'ACC — Cut-out performance',
+  'ACC — Target drop',
+  'LCC — Poor Lane Centering Performance',
+  'LCC — Lateral deviation',
+  'LCC — Cancel for no reason',
   'TSI — Wrong speed detected',
-  'LDW — False positive',
-  'LDP — False positive',
-  'ELKA — False positive'
+  'ALCA — No function'
 ];
 
 /* Unified font sizes for score-boxes */
@@ -217,19 +221,13 @@ function parseTable(text){
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
-    const m = raw.match(/\[(\d{4}-\d{2}-\d2)\]\s*$/); // typo safe? fix pattern
-  }
-  // Corrected date extract pattern:
-  const swCols2 = [];
-  for (let i = idxMax + 1; i < headers.length; i++) {
-    const raw = headers[i].trim();
     const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
     const date = m ? m[1] : null;
     const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
     const basePretty = baseNoDate.replace('(TO)', ' (TO)');
-    const countPrev = swCols2.filter(s => s.base === basePretty).length;
+    const countPrev = swCols.filter(s => s.base === basePretty).length;
     const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
-    swCols2.push({ idx: i, base: basePretty, label, date });
+    swCols.push({ idx: i, base: basePretty, label, date });
   }
 
   const releaseNotes = {};
@@ -243,7 +241,8 @@ function parseTable(text){
     const firstNorm = normalizeHeader(firstCellRaw);
 
     if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
-      for (const sw of swCols2) {
+      // Inline style: collect notes in matching software columns (bullets separated by literal \n)
+      for (const sw of swCols) {
         const raw = (row[sw.idx] ?? '').trim();
         if (raw) {
           releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
@@ -257,12 +256,12 @@ function parseTable(text){
     const max    = parseNumber(row[idxMax]);
 
     const values = {};
-    for (const sw of swCols2) values[sw.label] = parseNumber(row[sw.idx]);
+    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
 
     entries.push({ func, kpi, target, max, values });
   }
 
-  return { headers, entries, software: swCols2, releaseNotes };
+  return { headers, entries, software: swCols, releaseNotes };
 }
 
 /* ==================== Modal ==================== */
@@ -318,6 +317,7 @@ async function loadReleaseNotesManifest(){
     return new Set(list.map(s => String(s).toLowerCase()));
   }catch{ return null; }
 }
+// Loads "<base>.csv" for each software (base = header without date). One bullet per line.
 async function loadReleaseNotesFromFiles(swCols, manifestSet){
   if (RN_FETCH_MODE === 'off') return {};
   const out = {};
@@ -328,7 +328,7 @@ async function loadReleaseNotesFromFiles(swCols, manifestSet){
     if (!txt) continue;
     const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
     if (lines.length){
-      const joined = lines.join('\n');
+      const joined = lines.join('\n'); // real newlines; modal handles \n or \\n
       out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
   }
@@ -343,7 +343,7 @@ function filterEntriesForMode(parsed){
   return { ...parsed, entries: filteredEntries };
 }
 
-/* ==================== Summary ==================== */
+/* ==================== Summary (no matrix here) ==================== */
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
@@ -488,40 +488,46 @@ function renderSummary(container, parsed){
     gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
+}
 
-  /* === KPI × Software matrix (CC-only) === */
+/* ==================== KPI × Software matrix (own card) ==================== */
+function renderCCMatrix(container, parsed){
   const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
-  if (ccSoftwares.length){
-    // Unique KPI names in the (possibly mode-filtered) entries, preserving order
-    const kpiNames = [];
-    parsed.entries.forEach(e=>{
-      const name = `${e.func} — ${e.kpi}`;
-      if (!kpiNames.includes(name)) kpiNames.push(name);
+  if (!ccSoftwares.length) return;
+
+  // Unique KPI names (current mode), preserving order
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
+
+  // For quick lookups
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix (CC-only)');
+  card.append('div').attr('class','matrix-sub').text('Rows = KPI, Columns = CC* softwares, Cells = number of events');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  ccSoftwares.forEach(sw => thead.append('th').attr('class','software').text(sw.label));
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(name);
+    const e = entryByName.get(name);
+    ccSoftwares.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      tr.append('td').attr('class','num').text(fmtCell(v));
     });
-
-    // Index for fast lookup: KPI name -> entry
-    const entryByName = new Map();
-    parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
-
-    const wrap = card.append('div').attr('class','matrix-wrap');
-    wrap.append('div').attr('class','matrix-title').text('KPI × Software matrix (CC-only)');
-
-    const mtable = wrap.append('table').attr('class','matrix-table');
-    const thead2 = mtable.append('thead').append('tr');
-    thead2.append('th').text('KPI');
-    ccSoftwares.forEach(sw => thead2.append('th').attr('class','software').text(sw.label));
-
-    const tbody2 = mtable.append('tbody');
-    kpiNames.forEach(name=>{
-      const tr = tbody2.append('tr');
-      tr.append('td').text(name);
-      const e = entryByName.get(name);
-      ccSoftwares.forEach(sw=>{
-        const v = e ? e.values[sw.label] : null;
-        tr.append('td').attr('class','num').text(fmtCell(v));
-      });
-    });
-  }
+  });
 }
 
 /* ==================== Per-software cards ==================== */
@@ -853,8 +859,9 @@ function renderCharts(parsedFull){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
-  renderSummary(container, parsed);
-  renderSoftwareCards(container, parsed);
+  renderSummary(container, parsed);     // 1) Summary card
+  renderCCMatrix(container, parsed);    // 2) CC-only matrix card (new, separate)
+  renderSoftwareCards(container, parsed); // 3) Per-software cards
 }
 
 /* ==================== Loader (CSV + release notes) ==================== */
