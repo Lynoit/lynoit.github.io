@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Lateral / ACC State-Machine Simulator</title>
+<style>
+  :root{
+    --bg:#0f1220; --panel:#161a2b; --ink:#e8ecff; --muted:#a9b0d5; --accent:#66c1ff;
+    --ok:#1cc286; --warn:#ffca2b; --bad:#ff5454; --line:#2b3558; --edge:#7aa0ff;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+  .wrap{display:grid;grid-template-columns: 360px 1fr 380px;gap:14px;padding:14px;box-sizing:border-box}
+  .card{background:var(--panel);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:14px}
+  h1{font-size:18px;margin:6px 0 10px}
+  h2{font-size:14px;margin:12px 0 8px;color:var(--muted);font-weight:600}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .trig{flex:0 0 calc(33.33% - 6px);padding:8px 6px;border:1px solid #2a3355;border-radius:10px;background:#101427;color:var(--ink);cursor:pointer;font-size:12px;line-height:1.1}
+  .trig.valid{outline:2px solid var(--ok)}
+  .trig.invalid{animation:shake .3s}
+  @keyframes shake{10%{transform:translateX(-2px)} 30%{transform:translateX(3px)} 50%{transform:translateX(-2px)} 70%{transform:translateX(2px)} 100%{transform:none}}
+  .small{font-size:11px;color:var(--muted)}
+  .statepill{display:inline-flex;align-items:center;gap:6px;background:#101427;border:1px solid #2a3355;border-radius:999px;padding:6px 10px;margin:2px 4px 2px 0}
+  .statepill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+  .statepill.active .dot{background:var(--ok)}
+  .log{height:340px;overflow:auto;border:1px dashed #2a3355;border-radius:10px;padding:10px;background:#0d1122}
+  .log p{margin:0 0 6px 0;font-size:12px;color:#d9e2ff}
+  .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
+  .cfg{width:100%;height:160px;background:#0d1122;border:1px solid #2a3355;border-radius:10px;color:#cfe1ff;padding:8px;font-size:12px}
+  .btn{padding:8px 10px;border-radius:10px;border:1px solid #2a3355;background:#0d1122;color:var(--ink);cursor:pointer}
+  .btn.primary{background:#142346;border-color:#2b4fa8}
+  .legend{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:#cfe1ff}
+  .legend div{background:#101427;border:1px solid #2a3355;border-radius:10px;padding:8px}
+  svg{width:100%;height:720px;display:block;border-radius:14px;background:linear-gradient(180deg,#0c1122,#0b0f1c)}
+  .box{fill:#121a33;stroke:#3a4a88;stroke-width:1.1}
+  .boxTitle{font-size:14px;fill:#e8ecff;font-weight:600}
+  .subTitle{font-size:13px;fill:#cfe1ff}
+  .arrow{stroke:var(--edge);stroke-width:1.6;fill:none;marker-end:url(#arrow)}
+  .arrowLabel{fill:#cfe1ff;font-size:12px}
+  .activeBox{stroke:#1cc286;stroke-width:2.4}
+  .subbox{fill:#0e1530;stroke:#3a4a88;stroke-dasharray:4 3}
+  .pulse{filter: drop-shadow(0 0 6px rgba(102,193,255,.8))}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- LEFT: Controls -->
+  <div class="card">
+    <h1>Controls</h1>
+    <div class="row" id="triggers"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="autoplayBtn">Auto-play: OFF</button>
+      <button class="btn" id="resetBtn">Reset to “Cruising Standby”</button>
+    </div>
+
+    <h2>Active States</h2>
+    <div id="statePills"></div>
+
+    <h2>Legend (Conditions)</h2>
+    <div class="legend" id="legend"></div>
+
+    <h2>Transition Table (editable JSON)</h2>
+    <textarea id="cfg" class="cfg" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn primary" id="applyCfg">Apply changes</button>
+      <span class="small">Tip: You can add/edit transitions and labels here, then Apply.</span>
+    </div>
+  </div>
+
+  <!-- MIDDLE: Diagram -->
+  <div class="card">
+    <h1>State Diagram</h1>
+    <svg id="svg" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+
+  <!-- RIGHT: Log -->
+  <div class="card">
+    <h1>Event Log</h1>
+    <div class="log" id="log"></div>
+    <h2>About</h2>
+    <p class="small">
+      This simulator models the Lateral / ACC modes shown in your diagram: <b>Cruising Standby</b>, <b>ACC</b>,
+      <b>ALCA</b>, <b>LCC</b>, and the sub-state <b>LCC Pause</b>. Use the T-buttons to fire transitions.
+      Only transitions valid from the current state will execute.
+    </p>
+    <p class="small">
+      The exact wiring can differ by program—so the JSON table is editable. The default wiring follows the
+      diagram you provided (reasonable interpretation) and can be adapted in one place.
+    </p>
+    <p class="small kbd">Everything runs client-side—no network needed.</p>
+  </div>
+</div>
+
+<script>
+/* ---------- Model (you can edit below or via the JSON editor) ---------- */
+const defaultModel = {
+  states: [
+    // id, label, x, y, w, h, kind
+    {id:"cruise", label:"Cruising Standby", x:720, y:40,  w:360, h:80,  kind:"box"},
+    {id:"acc",    label:"ACC",               x:860, y:240, w:300, h:360, kind:"box"},
+    {id:"lateral",label:"Lateral",           x:80,  y:420, w:520, h:300, kind:"box"},
+    {id:"alca",   label:"ALCA",              x:120, y:510, w:160, h:180, kind:"sub"},
+    {id:"lcc",    label:"LCC",               x:380, y:510, w:160, h:180, kind:"sub"},
+    {id:"lccp",   label:"LCC Pause\nmode",   x:940, y:420, w:160, h:180, kind:"subacc"}
+  ],
+  // dictionary of trigger -> label shown in legend
+  triggerLabels: {
+    "T01":"Stalk single/double click down & activation conditions ACC OK",
+    "T02":"Stalk double click down & activation conditions LCC OK",
+    "T1":"Highway → Not highway, gap is closed etc (Out of ODD)",
+    "T2":"Lateral acceleration > maximal allowed for ALCA",
+    "T3":"Driver blinks in opposite direction, steering override",
+    "T4":"Driver short/long blink & activation conditions ALCA OK",
+    "T5":"Lane markings disappear (Out of ODD LCC)",
+    "T6":"Lateral acceleration > maximal allowed for LCC",
+    "T7":"Harsh steering override, stalk one click up",
+    "T8":"Stalk single/double click down & activation conditions LCC OK",
+    "T9":"Conditions for LCC activation OK (Auto resume)",
+    "T10":"Driver override (not harsh), turn indicator",
+    "T11":"Driver deactivation",
+    "T12":"Driver deactivation",
+    "T13":"Timeout seconds exceeded in pause mode"
+  },
+  // transitions: from -> to on trigger
+  transitions: [
+    // Activations from Standby
+    {from:"cruise", to:"acc",  trig:"T01", label:"Driver trig (T01)"},
+    {from:"cruise", to:"lcc",  trig:"T02", label:"Driver trig (T02)"},
+    // Lateral switching between ALCA and LCC
+    {from:"alca",   to:"lcc",  trig:"T1",  label:"Out of ODD (T1)"},
+    {from:"alca",   to:"lcc",  trig:"T2",  label:"Too high lateral acc (T2)"},
+    {from:"alca",   to:"lcc",  trig:"T3",  label:"Driver cancellation (T3)"},
+    {from:"lcc",    to:"alca", trig:"T4",  label:"Driver trig (T4)"},
+    // LCC -> Pause and back (inside ACC domain)
+    {from:"lcc",    to:"lccp", trig:"T5",  label:"Out of ODD (T5)"},
+    {from:"lcc",    to:"lccp", trig:"T6",  label:"Too high lateral acc (T6)"},
+    {from:"lcc",    to:"lccp", trig:"T7",  label:"Driver cancellation (T7)"},
+    {from:"lcc",    to:"lccp", trig:"T8",  label:"Driver trig (T8)"},
+    {from:"lcc",    to:"lccp", trig:"T10", label:"Driver override (T10)"},
+    {from:"lccp",   to:"lcc",  trig:"T9",  label:"Auto resume (T9)"},
+    {from:"lccp",   to:"cruise", trig:"T13", label:"Time out (T13)"},
+    // Driver deactivations
+    {from:"alca",   to:"cruise", trig:"T11", label:"Driver deactivation (T11)"},
+    {from:"lcc",    to:"cruise", trig:"T11", label:"Driver deactivation (T11)"},
+    {from:"acc",    to:"cruise", trig:"T12", label:"Driver deactivation (T12)"},
+  ],
+  // initial set of active states (we keep it simple: one “current” state at a time)
+  initial:"cruise"
+};
+
+/* ---------- Simulator Core ---------- */
+let model = JSON.parse(JSON.stringify(defaultModel));
+let current = model.initial;
+let autoplayTimer = null;
+
+const elSVG = document.getElementById('svg');
+const logEl = document.getElementById('log');
+const pillsEl = document.getElementById('statePills');
+const triggersEl = document.getElementById('triggers');
+const legendEl = document.getElementById('legend');
+const cfgEl = document.getElementById('cfg');
+cfgEl.value = JSON.stringify(model, null, 2);
+
+function log(msg){
+  const p = document.createElement('p');
+  const t = new Date().toLocaleTimeString();
+  p.innerHTML = `<span class="small" style="color:#8ca8ff">${t}</span> &nbsp; ${msg}`;
+  logEl.prepend(p);
+}
+
+function redraw(){
+  // clear svg
+  elSVG.innerHTML = '';
+  const svgNS = 'http://www.w3.org/2000/svg';
+
+  // defs: arrow head
+  const defs = document.createElementNS(svgNS,'defs');
+  const marker = document.createElementNS(svgNS,'marker');
+  marker.setAttribute('id','arrow');
+  marker.setAttribute('viewBox','0 0 10 10');
+  marker.setAttribute('refX','8'); marker.setAttribute('refY','5');
+  marker.setAttribute('markerWidth','7'); marker.setAttribute('markerHeight','7');
+  marker.setAttribute('orient','auto-start-reverse');
+  const path = document.createElementNS(svgNS,'path');
+  path.setAttribute('d','M 0 0 L 10 5 L 0 10 z');
+  path.setAttribute('fill','var(--edge)');
+  marker.appendChild(path); defs.appendChild(marker); elSVG.appendChild(defs);
+
+  // helper to draw a box
+  const boxes = {};
+  model.states.forEach(s=>{
+    boxes[s.id] = s;
+    const g = document.createElementNS(svgNS,'g');
+    const r = document.createElementNS(svgNS,'rect');
+    r.setAttribute('x', s.x); r.setAttribute('y', s.y);
+    r.setAttribute('rx', 12); r.setAttribute('ry', 12);
+    r.setAttribute('width', s.w); r.setAttribute('height', s.h);
+    r.setAttribute('class', s.kind==='box' ? 'box' : (s.kind==='subacc' ? 'subbox' : 'subbox'));
+    if(s.id===current) r.classList.add('activeBox','pulse');
+    g.appendChild(r);
+
+    // title
+    const t = document.createElementNS(svgNS,'text');
+    t.setAttribute('x', s.x + 12);
+    t.setAttribute('y', s.y + 24);
+    t.setAttribute('class', s.kind==='box' ? 'boxTitle' : 'subTitle');
+    t.textContent = s.label;
+    g.appendChild(t);
+
+    elSVG.appendChild(g);
+  });
+
+  // draw transitions as straight or elbowed lines
+  model.transitions.forEach(tr=>{
+    const from = boxes[tr.from], to = boxes[tr.to];
+    if(!from || !to) return;
+
+    // start / end points (edge mid)
+    const sx = from.x + from.w/2, sy = from.y + from.h/2;
+    const tx = to.x   + to.w/2,   ty = to.y   + to.h/2;
+
+    // elbow route (simple dogleg)
+    const mx = (sx + tx)/2;
+    const d = `M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${ty}, ${tx} ${ty}`;
+
+    const p = document.createElementNS(svgNS,'path');
+    p.setAttribute('d', d);
+    p.setAttribute('class','arrow');
+    if(from.id===current) p.classList.add('pulse');
+    elSVG.appendChild(p);
+
+    // label near middle
+    const lbl = document.createElementNS(svgNS,'text');
+    lbl.setAttribute('x', mx+6);
+    lbl.setAttribute('y', (sy+ty)/2 - 6);
+    lbl.setAttribute('class','arrowLabel');
+    lbl.textContent = tr.label || tr.trig;
+    elSVG.appendChild(lbl);
+  });
+
+  // pills
+  pillsEl.innerHTML = '';
+  model.states.forEach(s=>{
+    const pill = document.createElement('span'); pill.className='statepill'+(s.id===current?' active':'');
+    const dot = document.createElement('span'); dot.className='dot';
+    const txt = document.createElement('span'); txt.textContent = s.label;
+    pill.appendChild(dot); pill.appendChild(txt); pillsEl.appendChild(pill);
+  });
+
+  // triggers
+  const valid = validTriggers();
+  triggersEl.innerHTML = '';
+  allTriggers().forEach(t=>{
+    const btn = document.createElement('button');
+    btn.className='trig kbd';
+    btn.textContent = t;
+    if(valid.has(t)) btn.classList.add('valid');
+    btn.onclick = ()=> fire(t);
+    triggersEl.appendChild(btn);
+  });
+
+  // legend
+  legendEl.innerHTML = '';
+  const entries = Object.entries(model.triggerLabels);
+  entries.forEach(([k,v])=>{
+    const d = document.createElement('div');
+    d.innerHTML = `<b>${k}</b><br><span class="small">${v}</span>`;
+    legendEl.appendChild(d);
+  });
+}
+
+function allTriggers(){
+  const s = new Set(model.transitions.map(x=>x.trig));
+  return Array.from(s).sort((a,b)=> {
+    // order T01, T02, T1..T13
+    const na = parseInt(a.replace('T','')); const nb = parseInt(b.replace('T',''));
+    return na-nb;
+  });
+}
+
+function validTriggers(){
+  const set = new Set();
+  model.transitions.forEach(tr=>{ if(tr.from===current) set.add(tr.trig); });
+  return set;
+}
+
+function fire(trig){
+  const cand = model.transitions.filter(tr => tr.from===current && tr.trig===trig);
+  if(cand.length===0){
+    // shake the button
+    const btn = Array.from(triggersEl.children).find(b=>b.textContent===trig);
+    if(btn){ btn.classList.remove('invalid'); void btn.offsetWidth; btn.classList.add('invalid'); }
+    return;
+  }
+  // choose first (or random if multiple)
+  const tr = cand[Math.floor(Math.random()*cand.length)];
+  const fromLabel = model.states.find(s=>s.id===tr.from)?.label || tr.from;
+  const toLabel   = model.states.find(s=>s.id===tr.to)?.label   || tr.to;
+
+  current = tr.to;
+  log(`<b>${tr.trig}</b> — ${tr.label || ''} <span class="small">(${fromLabel} → ${toLabel})</span>`);
+  redraw();
+}
+
+function reset(){
+  current = model.initial;
+  log(`<b>Reset</b> to ${model.states.find(s=>s.id===current).label}`);
+  redraw();
+}
+
+/* ---------- UI wiring ---------- */
+document.getElementById('resetBtn').onclick = reset;
+
+document.getElementById('applyCfg').onclick = ()=>{
+  try{
+    const m = JSON.parse(cfgEl.value);
+    // light validation
+    if(!m.states || !m.transitions) throw new Error('Missing states or transitions');
+    model = m;
+    if(!model.initial || !model.states.some(s=>s.id===model.initial)){
+      model.initial = m.states[0].id;
+    }
+    current = model.initial;
+    log('<b>Applied</b> new transition table.');
+    redraw();
+  }catch(e){
+    log(`<span style="color:var(--bad)"><b>CFG error:</b> ${e.message}</span>`);
+  }
+};
+
+document.getElementById('autoplayBtn').onclick = (e)=>{
+  if(autoplayTimer){
+    clearInterval(autoplayTimer); autoplayTimer=null;
+    e.target.textContent = 'Auto-play: OFF';
+    e.target.classList.remove('primary');
+    return;
+  }
+  e.target.textContent = 'Auto-play: ON';
+  e.target.classList.add('primary');
+  autoplayTimer = setInterval(()=>{
+    const v = Array.from(validTriggers());
+    if(v.length===0) return;
+    const pick = v[Math.floor(Math.random()*v.length)];
+    fire(pick);
+  }, 1200);
+};
+
+/* ---------- Boot ---------- */
+reset();
+</script>
+</body>
+</html>
