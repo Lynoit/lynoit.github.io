@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KPI Scoring Visualizer</title>
+  <!-- Prevent favicon 404 -->
+  <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
     :root{
@@ -29,6 +31,7 @@
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .summary-card { grid-column: 1 / -1; display:grid; justify-content:center; }
     .small{font-size:12px; color:#666}
+    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
 
     /* Summary table */
     .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
@@ -42,7 +45,6 @@
     .summary-table th:nth-child(6), .summary-table td:nth-child(6){ text-align:center; white-space:nowrap; }
     .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
     .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
-    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
 
     /* Floating toggle */
     .toggle{
@@ -134,7 +136,7 @@ let LAST_RAW = '';
 
 const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
 const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
-const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
+const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)).replace(/\.00$/,')));
 
 /* ---------- Scoring ---------- */
 function scoreFromAvg(a, thresholds){
@@ -353,8 +355,14 @@ function closeReleaseNoteModal(){
   backdrop.setAttribute('aria-hidden', 'true');
 }
 
-/* ---------- Optional manifest + file-based notes (avoid 404s) ---------- */
-const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+/* ---------- OPTIONAL manifest + file-based notes ---------- */
+/*
+  To DISABLE file-note fetching (no 404s): keep RN_MANIFEST_FILE = ''.
+  To ENABLE file-note fetching: add "release_notes_manifest.json" next to this HTML,
+  list the filenames (e.g., ["CC 0830(TO).csv","Audi Q6 e-tron.csv"]), then set
+    const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+*/
+const RN_MANIFEST_FILE = ''; // '' = disabled (recommended until you add the manifest)
 
 async function readTextOrNull(path){
   try{
@@ -364,6 +372,7 @@ async function readTextOrNull(path){
   }catch{ return null; }
 }
 async function loadReleaseNotesManifest(){
+  if (!RN_MANIFEST_FILE) return null;   // skip fetch entirely if not configured
   try{
     const res = await fetch(RN_MANIFEST_FILE + '?t=' + Date.now(), {cache:'no-store'});
     if (!res.ok) return null;
@@ -372,18 +381,17 @@ async function loadReleaseNotesManifest(){
     return new Set(list.map(s => String(s).toLowerCase()));
   }catch{ return null; }
 }
-// Loads "<base>.csv" for each software (base = header without date). One bullet per line.
-// If a manifest is present, only fetch files that are listed (prevents 404s).
+// Only used when manifest is present:
 async function loadReleaseNotesFromFiles(swCols, manifestSet){
   const out = {};
   for (const sw of (swCols||[])){
     const file = `${sw.base}.csv`;
-    if (manifestSet && !manifestSet.has(file.toLowerCase())) continue; // skip unknown files
+    if (!manifestSet.has(file.toLowerCase())) continue; // only fetch listed files
     const txt = await readTextOrNull(file);
     if (!txt) continue;
     const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
     if (lines.length){
-      const joined = lines.join('\n'); // real newlines; modal code splits on \n
+      const joined = lines.join('\n'); // real newlines; modal splits on \n
       out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
   }
@@ -465,7 +473,7 @@ function renderSummary(container, parsed){
         const a = tdNote.append('span').attr('class','link').text('Release Note');
         a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
       } else {
-        tdNote.text(''); // empty when other rows have notes but this one doesn't
+        tdNote.text('');
       }
     }
   });
@@ -474,6 +482,7 @@ function renderSummary(container, parsed){
   if (chartData.length){
     card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
 
+    // simple sizing
     const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
       const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px');
@@ -546,7 +555,7 @@ function renderCharts(parsed){
   renderSummary(container, parsed);
 }
 
-/* ---------- Loader (uses optional manifest, hides links when missing) ---------- */
+/* ---------- Loader (skips file notes unless manifest is configured) ---------- */
 async function loadCsvAndRender(){
   const file = (document.getElementById('csvFile').value || '').trim() || 'weekly_kpi_data.csv';
   try{
@@ -556,10 +565,15 @@ async function loadCsvAndRender(){
     LAST_RAW = text;
 
     let parsed = parseTable(text);
-    const manifestSet = await loadReleaseNotesManifest(); // may be null
-    const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
-    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
 
+    // Try to load manifest; if null, skip file-note fetching entirely (no 404s)
+    const manifestSet = await loadReleaseNotesManifest();
+    let fileNotes = {};
+    if (manifestSet) {
+      fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+    }
+
+    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
     renderCharts(parsed);
   }catch(err){
     d3.select('#charts').html('');
@@ -574,8 +588,13 @@ async function rerenderAll(){
     return;
   }
   let parsed = parseTable(LAST_RAW);
+
   const manifestSet = await loadReleaseNotesManifest();
-  const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+  let fileNotes = {};
+  if (manifestSet) {
+    fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+  }
+
   parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes } };
   renderCharts(parsed);
 }
@@ -587,7 +606,6 @@ function initialThresholds(){
   setThresholdsToUI(t);
 }
 document.addEventListener('DOMContentLoaded', ()=>{
-  console.log('Initialized driver at:', new Date().toString());
   initialThresholds();
   loadCsvAndRender();
 
