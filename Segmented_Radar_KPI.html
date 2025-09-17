@@ -49,6 +49,15 @@
     .modal .content ul{ margin:0; padding-left:18px; }
     .modal .content li{ margin:6px 0; line-height:1.35; }
     .modal .empty{ color:#666; font-style:italic; }
+
+    /* KPI × Software matrix (CC-only) */
+    .matrix-wrap{ margin:10px 0 6px; overflow:auto; max-width:100%; }
+    .matrix-title{ font-weight:600; font-size:12px; color:#555; margin:6px 0 6px; }
+    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; }
+    .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
+    .matrix-table th{ background:#f6f7fb; position:sticky; top:0; z-index:1; }
+    .matrix-table th.software{ text-align:center; white-space:nowrap; }
+    .matrix-table td.num{ text-align:right; white-space:nowrap; }
   </style>
 </head>
 <body>
@@ -78,31 +87,16 @@
 
 <script>
 /* ==================== CONFIG ==================== */
-// Main KPI CSV (Excel export)
 const DATA_CSV = 'weekly_kpi_data.csv';
-
-/*
-  Release-note CSV fetching:
-  'auto'     → try <software base>.csv for every software (one bullet per line). Missing files are ignored.
-  'manifest' → only fetch files listed in release_notes_manifest.json (avoids 404 noise).
-  'off'      → never fetch file-based notes. (Inline "Release note" rows in DATA_CSV still work.)
-*/
-const RN_FETCH_MODE = 'auto';
-const RN_MANIFEST_FILE = 'release_notes_manifest.json'; // used only if RN_FETCH_MODE === 'manifest'
-
-/*
-  Scoring thresholds — lower bounds for scores 1→10.
-  If you want fixed thresholds, set SCORE_THRESHOLDS to a 10-number array. Otherwise defaults to DEFAULT_THRESH_STR.
-*/
+const RN_FETCH_MODE = 'auto';                 // 'auto' | 'manifest' | 'off'
+const RN_MANIFEST_FILE = 'release_notes_manifest.json';
 const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
-const SCORE_THRESHOLDS = null; // e.g., [100,60,40,30,20,15,10,5,3,2]
+const SCORE_THRESHOLDS = null;                // set to 10 numbers to hard-fix thresholds
 const LS_KEY = 'segRadarKPI.thresholds';
 
-/* View modes */
 const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
 let CURRENT_MODE = MODES.INTERNAL;
 
-/* ====== HARD-CODED KPI WHITELIST for the External view ====== */
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
   'TSI — Wrong speed detected',
@@ -111,12 +105,8 @@ const EXTERNAL_WHITELIST = [
   'ELKA — False positive'
 ];
 
-/* ====== Unified font sizes for score-boxes (legend + software cards) ====== */
-const SCORE_FONTS = {
-  number: 13, // the big 1..10
-  label: 11,  // "Unacceptable", "Good", ...
-  range: 10   // "≥ 60", "< 3 (incl. 0)", ...
-};
+/* Unified font sizes for score-boxes */
+const SCORE_FONTS = { number:13, label:11, range:10 };
 
 /* ==================== Helpers & Scoring ==================== */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
@@ -226,13 +216,19 @@ function parseTable(text){
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
+    const m = raw.match(/\[(\d{4}-\d{2}-\d2)\]\s*$/); // typo safe? fix pattern
+  }
+  // Corrected date extract pattern:
+  const swCols2 = [];
+  for (let i = idxMax + 1; i < headers.length; i++) {
+    const raw = headers[i].trim();
     const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
     const date = m ? m[1] : null;
     const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
     const basePretty = baseNoDate.replace('(TO)', ' (TO)');
-    const countPrev = swCols.filter(s => s.base === basePretty).length;
+    const countPrev = swCols2.filter(s => s.base === basePretty).length;
     const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
-    swCols.push({ idx: i, base: basePretty, label, date });
+    swCols2.push({ idx: i, base: basePretty, label, date });
   }
 
   const releaseNotes = {};
@@ -246,8 +242,7 @@ function parseTable(text){
     const firstNorm = normalizeHeader(firstCellRaw);
 
     if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
-      // Inline style: collect notes in matching software columns (bullets separated by literal \n)
-      for (const sw of swCols) {
+      for (const sw of swCols2) {
         const raw = (row[sw.idx] ?? '').trim();
         if (raw) {
           releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
@@ -261,12 +256,12 @@ function parseTable(text){
     const max    = parseNumber(row[idxMax]);
 
     const values = {};
-    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
+    for (const sw of swCols2) values[sw.label] = parseNumber(row[sw.idx]);
 
     entries.push({ func, kpi, target, max, values });
   }
 
-  return { headers, entries, software: swCols, releaseNotes };
+  return { headers, entries, software: swCols2, releaseNotes };
 }
 
 /* ==================== Modal ==================== */
@@ -322,7 +317,6 @@ async function loadReleaseNotesManifest(){
     return new Set(list.map(s => String(s).toLowerCase()));
   }catch{ return null; }
 }
-// Loads "<base>.csv" for each software (base = header without date). One bullet per line.
 async function loadReleaseNotesFromFiles(swCols, manifestSet){
   if (RN_FETCH_MODE === 'off') return {};
   const out = {};
@@ -333,7 +327,7 @@ async function loadReleaseNotesFromFiles(swCols, manifestSet){
     if (!txt) continue;
     const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
     if (lines.length){
-      const joined = lines.join('\n'); // real newlines; modal handles \n or \\n
+      const joined = lines.join('\n');
       out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
   }
@@ -493,6 +487,40 @@ function renderSummary(container, parsed){
     gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
+
+  /* === KPI × Software matrix (CC-only) === */
+  const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
+  if (ccSoftwares.length){
+    // Unique KPI names in the (possibly mode-filtered) entries, preserving order
+    const kpiNames = [];
+    parsed.entries.forEach(e=>{
+      const name = `${e.func} — ${e.kpi}`;
+      if (!kpiNames.includes(name)) kpiNames.push(name);
+    });
+
+    // Index for fast lookup: KPI name -> entry
+    const entryByName = new Map();
+    parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+    const wrap = card.append('div').attr('class','matrix-wrap');
+    wrap.append('div').attr('class','matrix-title').text('KPI × Software matrix (CC-only)');
+
+    const mtable = wrap.append('table').attr('class','matrix-table');
+    const thead2 = mtable.append('thead').append('tr');
+    thead2.append('th').text('KPI');
+    ccSoftwares.forEach(sw => thead2.append('th').attr('class','software').text(sw.label));
+
+    const tbody2 = mtable.append('tbody');
+    kpiNames.forEach(name=>{
+      const tr = tbody2.append('tr');
+      tr.append('td').text(name);
+      const e = entryByName.get(name);
+      ccSoftwares.forEach(sw=>{
+        const v = e ? e.values[sw.label] : null;
+        tr.append('td').attr('class','num').text(fmtCell(v));
+      });
+    });
+  }
 }
 
 /* ==================== Per-software cards ==================== */
@@ -532,14 +560,9 @@ function renderSoftwareCards(container, parsed){
 
     const svg = card.append('svg').attr('width', w);
 
-    // Title (include test date when available)
+    // Title
     const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
-    svg.append('text')
-      .attr('x', w/2)
-      .attr('y', TITLE_Y)
-      .attr('text-anchor','middle')
-      .attr('font-weight',700)
-      .text(titleText);
+    svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
 
     // Legend (top-right)
     const legendItems = [
@@ -577,7 +600,6 @@ function renderSoftwareCards(container, parsed){
 
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
-    // Functions present in filtered entries
     const functions = [];
     parsed.entries.forEach(e=>{
       const v = e.values[swLabel];
