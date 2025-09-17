@@ -35,12 +35,7 @@
       --border: #2a2d33;
     }
     * { box-sizing: border-box }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--fg);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
-    }
+    body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif; }
     header {
       position: sticky; top: 0; z-index: 10;
       background: linear-gradient(180deg, rgba(14,15,17,0.95), rgba(14,15,17,0.85) 60%, transparent);
@@ -85,11 +80,7 @@
       padding: 4px;
       overflow: hidden;
     }
-    .chart-frame > canvas {
-      display: block;
-      height: 320px;
-      width: 100%;
-    }
+    .chart-frame > canvas { display: block; height: 320px; width: 100%; }
 
     .status { font-size: 12px; color: var(--muted) }
     .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
@@ -119,6 +110,11 @@
     a { color: var(--accent); text-decoration: none } a:hover { text-decoration: underline }
     input[type=file] { display:none }
     #openFolderLabel::before, #openFilesLabel::before { content: "📁"; filter: grayscale(100%); margin-right: 6px; }
+
+    /* Small inline control */
+    .inline-ctrl { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .num { background: var(--card); color: var(--fg); border:1px solid var(--border); border-radius:8px; padding:6px 8px; width:100px; }
+    .kbd { font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; color: var(--muted);}
   </style>
 </head>
 <body>
@@ -178,7 +174,6 @@ Chart.defaults.font = {
 Chart.defaults.devicePixelRatio = () => Math.max(1, window.devicePixelRatio || 1);
 
 /* ---------- CRISP CANVAS SIZER ---------- */
-const crispObservers = new WeakMap();
 function attachCrispSizer(frame, canvas, chartRefGetter) {
   const apply = () => {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -194,7 +189,7 @@ function attachCrispSizer(frame, canvas, chartRefGetter) {
     if (chart && chart.resize) chart.resize(0);
   };
   apply();
-  const ro = new ResizeObserver(apply); ro.observe(frame); crispObservers.set(canvas, ro);
+  const ro = new ResizeObserver(apply); ro.observe(frame);
   window.addEventListener('resize', apply);
 }
 
@@ -211,15 +206,11 @@ function toXY(lat,lon,lat0){ const R=6371008.8; const x=(lon*Math.PI/180)*R*Math
 function distMeters(a,b){ const dx=a[0]-b[0], dy=a[1]-b[1]; return Math.hypot(dx,dy); }
 function toXYChain(latlngs){ const lat0=(latlngs[0][0]+latlngs[latlngs.length-1][0])/2; const xy=latlngs.map(([lat,lon])=>toXY(lat,lon,lat0)); const cum=[0]; for(let i=1;i<xy.length;i++) cum[i]=cum[i-1]+distMeters(xy[i],xy[i-1]); return {xy,cum,lat0}; }
 function projectChainage({xy,cum},lat0,lat,lon){ const p=toXY(lat,lon,lat0); let best={d:Infinity,s:0}; for(let i=0;i<xy.length-1;i++){ const a=xy[i], b=xy[i+1]; const abx=b[0]-a[0], aby=b[1]-a[1]; const apx=p[0]-a[0], apy=p[1]-a[1]; const ab2=abx*abx+aby*aby; let t=ab2?(abx*apx+aby*apy)/ab2:0; t=Math.max(0,Math.min(1,t)); const proj=[a[0]+abx*t,a[1]+aby*t]; const d=distMeters(p,proj); if(d<best.d) best={d,s:cum[i]+Math.hypot((proj[0]-a[0]),(proj[1]-a[1]))}; } return best.s; }
-
-/* Interpolate lat/lon at a given chainage s (meters) */
 function latlngAtS(latlngs, chain, s){
-  const cum = chain.cum;
-  let i = 0, j = cum.length - 1;
+  const cum = chain.cum; let i = 0, j = cum.length - 1;
   while (i < j) { const mid = (i + j) >> 1; if (cum[mid] < s) i = mid + 1; else j = mid; }
   const k = Math.max(1, i);
-  const s0 = cum[k-1], s1 = cum[k];
-  const t = s1 > s0 ? (s - s0) / (s1 - s0) : 0;
+  const s0 = cum[k-1], s1 = cum[k]; const t = s1 > s0 ? (s - s0) / (s1 - s0) : 0;
   const [lat0, lon0] = latlngs[k-1], [lat1, lon1] = latlngs[k];
   return [lat0 + (lat1-lat0)*t, lon0 + (lon1-lon0)*t, k-1, k];
 }
@@ -335,13 +326,13 @@ function addOsmFeaturesToMap(geojson, groupLayer, latlngs){
   return markerMeta;
 }
 
-/* ===================== Chart plugin: markers + 100m ticks ===================== */
+/* ===================== Chart plugin: A/B markers + 100m ticks ===================== */
 const MarkerPlugin={ id:'twoMarkers', afterDatasetsDraw(chart){
   const markers=chart.$markers; const distTicks=chart.$distTicks || [];
   const speedDataset=chart.data.datasets?.[0]; if(!speedDataset) return;
   const {ctx,chartArea,scales}=chart; const xScale=scales.x, yScale=scales.y; const labels=chart.data.labels;
 
-  /* 100 m vertical ticks */
+  /* Distance vertical ticks */
   ctx.save();
   ctx.strokeStyle = 'rgba(200, 210, 225, 0.35)';
   ctx.fillStyle   = 'rgba(220, 230, 245, 0.85)';
@@ -353,8 +344,6 @@ const MarkerPlugin={ id:'twoMarkers', afterDatasetsDraw(chart){
     ctx.setLineDash([3,3]); ctx.lineWidth=1;
     ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke();
     ctx.setLineDash([]);
-    // Label near the top
-    const pad = 3;
     const text = t.label;
     const tw = ctx.measureText(text).width + 6;
     const th = 16;
@@ -363,10 +352,8 @@ const MarkerPlugin={ id:'twoMarkers', afterDatasetsDraw(chart){
     ctx.fillStyle = 'rgba(0,0,0,0.65)';
     ctx.strokeStyle = 'rgba(160,170,185,0.5)';
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect(bx, by, tw, th, 4);
-    ctx.fill();
-    ctx.stroke();
+    if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(bx, by, tw, th, 4); ctx.fill(); ctx.stroke(); }
+    else { ctx.fillRect(bx,by,tw,th); ctx.strokeRect(bx,by,tw,th); }
     ctx.fillStyle = '#e9eef7';
     ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(text, bx + tw/2, by + th/2 + 0.5);
@@ -375,7 +362,6 @@ const MarkerPlugin={ id:'twoMarkers', afterDatasetsDraw(chart){
 
   if(!markers) return;
 
-  /* A/B markers + accel bubble */
   function drawOne(i,color,tag){
     if(i==null||i<0||i>=labels.length) return;
     const yVal=speedDataset.data[i]; if(!Number.isFinite(yVal)) return;
@@ -566,19 +552,28 @@ function createSessionCard(sessionName){
   const charts=document.createElement('div'); charts.className='charts';
   const speedFrame=document.createElement('div'); speedFrame.className='chart-frame';
   const speedCanvas=document.createElement('canvas'); speedFrame.appendChild(speedCanvas);
-  const markerControls=document.createElement('div'); markerControls.style.display='flex'; markerControls.style.gap='8px'; markerControls.style.alignItems='center';
+  const markerControls=document.createElement('div'); markerControls.className='inline-ctrl';
   const btnExport=document.createElement('button'); btnExport.className='btn'; btnExport.textContent='Export Speed CSV';
   const btnSetA=document.createElement('button'); btnSetA.className='btn'; btnSetA.textContent='Set A';
   const btnSetB=document.createElement('button'); btnSetB.className='btn'; btnSetB.textContent='Set B';
   const btnClear=document.createElement('button'); btnClear.className='btn'; btnClear.textContent='Clear';
+
+  // NEW: per-log distance spacing input
+  const spacingWrap = document.createElement('div'); spacingWrap.className='inline-ctrl';
+  const spacingLabel = document.createElement('span'); spacingLabel.className='kbd'; spacingLabel.textContent='Tick spacing (m):';
+  const spacingInput = document.createElement('input'); spacingInput.type='number'; spacingInput.className='num';
+  spacingInput.min='10'; spacingInput.max='100000'; spacingInput.step='10'; spacingInput.value='100';
+  spacingWrap.append(spacingLabel, spacingInput);
+
   const tip=document.createElement('span'); tip.className='tiny'; tip.textContent='Click the speed plot after choosing A/B.';
-  markerControls.append(btnExport,btnSetA,btnSetB,btnClear,tip);
+  markerControls.append(btnExport,btnSetA,btnSetB,btnClear, spacingWrap, tip);
+
   const accFrame=document.createElement('div'); accFrame.className='chart-frame';
   const accCanvas=document.createElement('canvas'); accFrame.appendChild(accCanvas);
 
   charts.append(speedFrame, markerControls, accFrame);
   body.append(gallery,map,row,charts); wrap.append(head,body);
-  return { wrap, gallery, map, status, speedFrame, speedCanvas, accFrame, accCanvas, btnSetA, btnSetB, btnClear, btnExport };
+  return { wrap, gallery, map, status, speedFrame, speedCanvas, accFrame, accCanvas, btnSetA, btnSetB, btnClear, btnExport, spacingInput };
 }
 
 /* =============================== Lightbox ================================= */
@@ -596,7 +591,7 @@ async function processZipFile(file){
   function fmtRel(ms){ const s=Math.floor(ms/1000),m=Math.floor(s/60),r=s%60; return m>0?`${m}:${String(r).padStart(2,'0')}`:`${r}s`; }
 
   let latlngs=null, maxspeedProfile=[], featureLayer=null, markersMeta=[], speedChartRef=null;
-  let chain=null, totalMeters=0;
+  let chain=null, totalMeters=0, distLayer=null;
 
   try{
     ui.status.textContent='Reading ZIP…';
@@ -639,17 +634,23 @@ async function processZipFile(file){
         L.polylineDecorator(poly,{patterns:[{offset:'85%',repeat:0,symbol:L.Symbol.arrowHead({pixelSize:14,headAngle:60,pathOptions:{color:'#3a86ff',weight:2,opacity:0.9}})}]}).addTo(map);
       }catch(e){ console.warn('PolylineDecorator unavailable; skipping arrow.', e); }
 
-      /* ---- Distance ticks every 100 m on the map ---- */
-      const distLayer = L.layerGroup().addTo(map);
-      for(let s=100; s <= totalMeters - 1; s += 100){
-        const [lat,lon] = latlngAtS(latlngs, chain, s);
-        const m = L.circleMarker([lat,lon], { radius:4, color:'#cfd6e3', fillColor:'#cfd6e3', fillOpacity:0.9, weight:1 })
-          .addTo(distLayer);
-        const label = `${(s/1000).toFixed(1)} km`;
-        m.bindTooltip(label, { permanent:true, direction:'top', offset:[0,-6], className:'distance-tag' });
+      /* ---- Distance ticks (user adjustable) ---- */
+      distLayer = L.layerGroup().addTo(map);
+
+      function drawDistanceTicks(spacingMeters){
+        if(!Number.isFinite(spacingMeters) || spacingMeters < 10) spacingMeters = 10;
+        distLayer.clearLayers();
+        if (totalMeters <= spacingMeters) return;
+        for(let s=spacingMeters; s <= totalMeters - 1; s += spacingMeters){
+          const [lat,lon] = latlngAtS(latlngs, chain, s);
+          const m = L.circleMarker([lat,lon], { radius:4, color:'#cfd6e3', fillColor:'#cfd6e3', fillOpacity:0.9, weight:1 })
+            .addTo(distLayer);
+          const label = (s >= 1000) ? `${(s/1000).toFixed(1)} km` : `${Math.round(s)} m`;
+          m.bindTooltip(label, { permanent:true, direction:'top', offset:[0,-6], className:'distance-tag' });
+        }
       }
 
-      /* Session controller reacting to master toggle */
+      // per-session controller to toggle OSM lookups
       async function enableOSM(){
         if(featureLayer){ try{ featureLayer.clearLayers(); }catch{} }
         featureLayer=L.layerGroup().addTo(map);
@@ -694,37 +695,30 @@ async function processZipFile(file){
       const km = (totalMeters/1000);
       ui.status.textContent = `${ui.status.textContent}  •  Distance: ${km.toFixed(2)} km`;
 
+      // initial draw with default spacing (100 m)
+      drawDistanceTicks(Number(ui.spacingInput.value) || 100);
+
+      // Hook spacing input changes -> redraw map ticks + speed chart ticks
+      let spacingTimer=null;
+      function spacingChanged(){
+        const spacing = Math.max(10, Math.min(100000, Number(ui.spacingInput.value)||100));
+        ui.spacingInput.value = String(Math.round(spacing/10)*10);
+        drawDistanceTicks(spacing);
+        rebuildSpeedDistanceTicks(spacing);
+      }
+      ui.spacingInput.addEventListener('input', ()=>{ clearTimeout(spacingTimer); spacingTimer=setTimeout(spacingChanged, 200); });
+      ui.spacingInput.addEventListener('change', spacingChanged);
+
     } else {
       map.setView([59.3293,18.0686],10);
       ui.status.textContent='No coordinates found.';
     }
 
     /* -------- Speed chart -------- */
-    ui.status.textContent += osmlEnabled ? '  •  Preparing speed…' : '  •  Preparing speed (no OSM)…';
     const speedSeries=computeSpeedSeriesFromLocation(locationRows||[]);
     const speedLabels=speedSeries.labels, speedValues=speedSeries.values;
 
     attachCrispSizer(ui.speedFrame, ui.speedCanvas, () => speedChartRef);
-
-    /* Build distance ticks for the speed chart (map every 100 m -> nearest plotted point) */
-    let distTicks = [];
-    if (latlngs?.length && speedSeries.idx?.length) {
-      // For each 100 m, find approximate location index, then nearest displayed point index
-      for (let s=100; s <= totalMeters - 1; s += 100) {
-        const [, , k0] = latlngAtS(latlngs, chain, s); // segment starts at k0
-        // Find nearest index in speedSeries.idx (those are original row indices) to k0
-        const idxArr = speedSeries.idx;
-        // binary search
-        let lo=0, hi=idxArr.length-1, best=0, bestD=Infinity;
-        while (lo <= hi) {
-          const mid = (lo+hi)>>1;
-          const d = Math.abs(idxArr[mid] - k0);
-          if (d < bestD) { bestD = d; best = mid; }
-          if (idxArr[mid] < k0) lo = mid + 1; else hi = mid - 1;
-        }
-        distTicks.push({ i: best, label: `${(s/1000).toFixed(1)} km` });
-      }
-    }
 
     let maxspeedValues = new Array(speedLabels.length).fill(null);
     if(osmlEnabled && latlngs?.length && maxspeedProfile?.length && speedSeries.idx?.length){
@@ -747,9 +741,34 @@ async function processZipFile(file){
     speedChart.$series={relMs:speedSeries.relMs, speedKmH:speedValues};
     speedChart.$speedIdx = speedSeries.idx || speedLabels.map((_,i)=>i);
     speedChart.$maxspeedValues = maxspeedValues;
-    speedChart.$distTicks = distTicks;     // <-- feed the 100 m ticks to the plugin
+    speedChart.$distTicks = []; // set shortly
     speedChartRef=speedChart;
-    speedChart.update();
+
+    // Build speed distance ticks based on current spacing input
+    function rebuildSpeedDistanceTicks(spacingMeters){
+      if(!latlngs?.length || !speedSeries.idx?.length || !chain) { speedChart.$distTicks=[]; speedChart.update(); return; }
+      const ticks=[];
+      const totalMeters = chain.cum[chain.cum.length-1] || 0;
+      for(let s=spacingMeters; s <= totalMeters - 1; s += spacingMeters){
+        const [, , k0] = latlngAtS(latlngs, chain, s); // nearest segment start index
+        const idxArr = speedSeries.idx;
+        // binary search by original row index
+        let lo=0, hi=idxArr.length-1, best=0, bestD=Infinity;
+        while (lo <= hi) {
+          const mid = (lo+hi)>>1;
+          const d = Math.abs(idxArr[mid] - k0);
+          if (d < bestD) { bestD = d; best = mid; }
+          if (idxArr[mid] < k0) lo = mid + 1; else hi = mid - 1;
+        }
+        const label = (s >= 1000) ? `${(s/1000).toFixed(1)} km` : `${Math.round(s)} m`;
+        ticks.push({ i: best, label });
+      }
+      speedChart.$distTicks = ticks;
+      speedChart.update();
+    }
+
+    // Initial ticks with default spacing
+    rebuildSpeedDistanceTicks(Number(ui.spacingInput.value) || 100);
 
     // Marker controls
     ui.btnSetA.addEventListener('click',()=>{ speedChart.$markers.active='A'; });
@@ -769,7 +788,6 @@ async function processZipFile(file){
     });
 
     /* -------- Acceleration chart -------- */
-    ui.status.textContent+='  •  Preparing acceleration…';
     attachCrispSizer(ui.accFrame, ui.accCanvas, () => null);
 
     const accelXYZ=computeAccelXYZSeries(accelRows);
