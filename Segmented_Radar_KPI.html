@@ -111,9 +111,23 @@ const EXTERNAL_WHITELIST = [
   'ELKA — False positive'
 ];
 
-/* Weather config: Göteborg, Sweden */
+/* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
-const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT';
+const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
+const H_START = 10, H_END = 14; // inclusive hours (local time)
+const WMO_TEXT = {
+  0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
+  45:'Fog',48:'Depositing rime fog',
+  51:'Drizzle: light',53:'Drizzle: moderate',55:'Drizzle: dense',
+  56:'Freezing drizzle: light',57:'Freezing drizzle: dense',
+  61:'Rain: slight',63:'Rain: moderate',65:'Rain: heavy',
+  66:'Freezing rain: light',67:'Freezing rain: heavy',
+  71:'Snow fall: slight',73:'Snow fall: moderate',75:'Snow fall: heavy',
+  77:'Snow grains',
+  80:'Rain showers: slight',81:'Rain showers: moderate',82:'Rain showers: violent',
+  85:'Snow showers: slight',86:'Snow showers: heavy',
+  95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
+};
 
 /* Unified font sizes for score-boxes */
 const SCORE_FONTS = { number:13, label:11, range:10 };
@@ -339,20 +353,7 @@ async function loadReleaseNotesFromFiles(swCols, manifestSet){
   return out;
 }
 
-/* ==================== Weather (Open-Meteo archive) ==================== */
-const WMO_TEXT = {
-  0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
-  45:'Fog',48:'Depositing rime fog',
-  51:'Drizzle: light',53:'Drizzle: moderate',55:'Drizzle: dense',
-  56:'Freezing drizzle: light',57:'Freezing drizzle: dense',
-  61:'Rain: slight',63:'Rain: moderate',65:'Rain: heavy',
-  66:'Freezing rain: light',67:'Freezing rain: heavy',
-  71:'Snow fall: slight',73:'Snow fall: moderate',75:'Snow fall: heavy',
-  77:'Snow grains',
-  80:'Rain showers: slight',81:'Rain showers: moderate',82:'Rain showers: violent',
-  85:'Snow showers: slight',86:'Snow showers: heavy',
-  95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
-};
+/* ==================== Weather (hourly, aggregate 10–14 local) ==================== */
 function loadWeatherCache(){
   try{ return JSON.parse(localStorage.getItem(WEATHER_LS_KEY) || '{}'); }catch{ return {}; }
 }
@@ -368,38 +369,72 @@ function isoMinMax(dates){
   });
   return {min, max};
 }
+function mode(arr){
+  const m = new Map();
+  let bestVal = null, bestCnt = -1;
+  for (const v of arr){
+    const c = (m.get(v)||0)+1; m.set(v,c);
+    if (c > bestCnt || (c===bestCnt && v>bestVal)){ bestCnt=c; bestVal=v; } // tie-break: higher code
+  }
+  return bestVal;
+}
+/** Fetch hourly weather and aggregate 10–14 (local) into tmax/tmin + representative condition text per date */
 async function fetchWeatherForDates(dates){
   const wanted = Array.from(new Set(dates.filter(Boolean)));
   const cache = loadWeatherCache();
   const missing = wanted.filter(d => !cache[d]);
 
-  // Nothing to fetch
   if (!missing.length) return cache;
 
   const {min, max} = isoMinMax(missing);
   if (!min || !max) return cache;
 
-  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}&start_date=${min}&end_date=${max}&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
+  // Hourly series in local time; slice hours 10..14
+  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}`+
+              `&start_date=${min}&end_date=${max}`+
+              `&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
+
   try{
     const res = await fetch(url, {cache:'no-store'});
     if (!res.ok) throw new Error('weather HTTP ' + res.status);
     const data = await res.json();
-    const days = (data.daily && data.daily.time) ? data.daily.time.length : 0;
-    for (let i=0;i<days;i++){
-      const d = data.daily.time[i];
-      const tmax = data.daily.temperature_2m_max[i];
-      const tmin = data.daily.temperature_2m_min[i];
-      const code = data.daily.weathercode[i];
-      cache[d] = {
-        tmax: (tmax!=null) ? Math.round(tmax) : null,
-        tmin: (tmin!=null) ? Math.round(tmin) : null,
-        code: code,
-        text: (code in WMO_TEXT) ? WMO_TEXT[code] : '—'
+    const times = (data.hourly && data.hourly.time) || [];
+    const temps = (data.hourly && data.hourly.temperature_2m) || [];
+    const codes = (data.hourly && data.hourly.weathercode) || [];
+
+    // Group by YYYY-MM-DD → collect indices with hour in [10..14]
+    const byDate = new Map();
+    for (let i=0;i<times.length;i++){
+      const t = times[i];
+      const day = t.slice(0,10);
+      const hr = parseInt(t.slice(11,13),10);
+      if (hr >= H_START && hr <= H_END){
+        if (!byDate.has(day)) byDate.set(day, []);
+        byDate.get(day).push(i);
+      }
+    }
+
+    // Aggregate into cache
+    for (const [day, idxs] of byDate.entries()){
+      if (!idxs.length) continue;
+      const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
+      const cvals = idxs.map(i => codes[i]).filter(v => v!=null);
+      if (!tvals.length){
+        cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' };
+        continue;
+      }
+      const tmax = Math.round(Math.max(...tvals));
+      const tmin = Math.round(Math.min(...tvals));
+      const c = cvals.length ? mode(cvals) : null;
+      cache[day] = {
+        tmax, tmin,
+        code: c,
+        text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—',
+        hours:'10–14'
       };
     }
     saveWeatherCache(cache);
   }catch(e){
-    // Fail silently; we’ll just show "—"
     console.warn('Weather fetch failed:', e);
   }
   return cache;
@@ -432,7 +467,7 @@ function renderSummary(container, parsed){
       score,
       text: score == null ? 'n/a' : scoreText[score - 1],
       note,
-      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
+      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text} (10–14)` : '—'
     };
   });
 
@@ -459,7 +494,7 @@ function renderSummary(container, parsed){
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
   theadRow.append('th').attr('class','col-date').text('Test date');
-  theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg)');
+  theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg, 10–14)');
   theadRow.append('th').attr('class','col-avg').text('Average events per 1000 km');
   theadRow.append('th').attr('class','col-score').text('Score');
   theadRow.append('th').attr('class','col-rating').text('Rating');
@@ -663,7 +698,7 @@ function renderNonCCPlusLatestCCMatrix(container, parsed){
   });
 }
 
-/* ==================== Per-software cards (unchanged layout) ==================== */
+/* ==================== Per-software cards ==================== */
 function renderSoftwareCards(container, parsed){
   const T = getThresholds();
   (parsed.software||[]).forEach(sw=>{
@@ -891,10 +926,11 @@ function renderSoftwareCards(container, parsed){
     const x4 = x3 + col3W + colGap;
     const tableWUsed = x4 - x0 + col4W;
 
-    const tableH = tableHeaderH + rows.length * rowH + 8;
+    const tableHeaderH = 24;
+    const rowH = 22;
     tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
-      .attr('width', tableWUsed + 8).attr('height', tableH)
+      .attr('width', tableWUsed + 8).attr('height', tableHeaderH + rows.length * rowH + 8)
       .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
 
     tableG.append('rect')
