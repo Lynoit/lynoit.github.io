@@ -32,11 +32,18 @@
 
     /* Overview (contribution heatmap) */
     .overview { max-width: 980px; }
-    .heatmap-wrap { display: flex; gap: 16px; align-items: flex-start; }
     .heatmap-months { font-size: 12px; fill: #333; }
     .heatmap-dow { font-size: 12px; fill: #666; }
     .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-top: 10px; }
     .legend .box { width: 12px; height: 12px; border: 1px solid #ccd3d9; }
+
+    /* Latest routes grid */
+    .routes-wrap { margin-top: 18px; }
+    .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 14px; max-width: 980px; }
+    .route-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; }
+    .route-title { font-size: 13px; color: #333; margin-bottom: 8px; }
+    .route-meta { font-size: 12px; color: #666; margin-top: 6px; }
+    .route-map { width: 100%; height: 180px; border: 1px solid #aaa; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -47,9 +54,17 @@
   <div id="content">
     <h1>Test activity overview</h1>
     <div id="overview" class="overview">
+      <div style="color:#666; margin:6px 0 14px 0;">Aggregated issue counts per day (sessions &lt; 1 km ignored).</div>
       <div id="heatmap-host"></div>
+
+      <div class="routes-wrap">
+        <h2 style="margin-top:16px;">Latest routes (≥ 1 km)</h2>
+        <div id="routes-grid" class="route-grid"></div>
+      </div>
     </div>
   </div>
+
+  <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">Ver 1.3</footer>
 
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -61,7 +76,7 @@
     const CONTAINER = 'csv';
     const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
     const BASE_URL  = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
-    const MIN_KM_FOR_OVERVIEW = 5; // ignore sessions below this distance
+    const MIN_KM_FOR_OVERVIEW = 1; // <-- changed to 1 km
 
     // ---------- CACHES / HELPERS ----------
     const summaryCache = new Map(); // filename -> { mileageKm, issueCount, loaded:true }
@@ -74,27 +89,31 @@
       const R = 6371000;
       const dLat = toRad(lat2 - lat1);
       const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sin2(dLon/2);
       return 2 * R * Math.asin(Math.sqrt(a));
+      function sin2(x){ x = Math.sin(x); return x*x; }
     }
 
-    function computeMileageKmFromSampling(sheet) {
+    function computeMileageAndPathFromSampling(sheet) {
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      if (rows.length < 3) return null;
+      if (rows.length < 3) return { km: null, path: [] };
+
       const headers = rows[0].map(h => String(h ?? '').toLowerCase());
       const latIdx = headers.findIndex(h => h.includes('lat'));
       const lonIdx = headers.findIndex(h => h.includes('lon') || h.includes('lng') || h.includes('long'));
-      if (latIdx < 0 || lonIdx < 0) return null;
+      if (latIdx < 0 || lonIdx < 0) return { km: null, path: [] };
 
       let km = 0, prev = null;
+      const path = [];
       for (let i = 1; i < rows.length; i++) {
         const lat = parseFloat(rows[i][latIdx]);
         const lon = parseFloat(rows[i][lonIdx]);
         if (isNaN(lat) || isNaN(lon)) continue;
-        if (prev) km += haversine(prev.lat, prev.lon, lat, lon) / 1000;
-        prev = { lat, lon };
+        path.push([lat, lon]);
+        if (prev) km += haversine(prev[0], prev[1], lat, lon) / 1000;
+        prev = [lat, lon];
       }
-      return Math.round(km);
+      return { km: Math.round(km), path };
     }
 
     function countIssuesFromWorkbook(wb) {
@@ -128,7 +147,11 @@
         .then(buf => {
           const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
           const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          const mileageKm = samplingName ? computeMileageKmFromSampling(wb.Sheets[samplingName]) : null;
+          let mileageKm = null;
+          if (samplingName) {
+            const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+            mileageKm = km;
+          }
           const issueCount = countIssuesFromWorkbook(wb);
           const summary = { mileageKm, issueCount, loaded:true };
           summaryCache.set(filename, summary);
@@ -158,11 +181,9 @@
           const xlsx  = names.filter(n => n.toLowerCase().endsWith('.xlsx'));
           if (xlsx.length === 0) { showError('No .xlsx files found.'); return; }
 
-          // Build sidebar as before
           buildSidebar(xlsx);
-
-          // Build overview heatmap NOW (before any session chosen)
           buildOverviewHeatmap(xlsx);
+          buildLatestRoutePreviews(xlsx); // <-- NEW
         })
         .catch(err => showError('Failed to list blobs: ' + err));
     }
@@ -212,7 +233,6 @@
           lst.appendChild(li);
         });
 
-        // Lazy load meta on expand
         let loadedThisGroup = false;
         hdr.onclick = () => {
           const expand = lst.style.display !== 'block';
@@ -237,13 +257,12 @@
 
     // ---------- OVERVIEW HEATMAP ----------
     function buildOverviewHeatmap(files){
-      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions >= 5km)
+      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions >= 1km)
       const withDates = files
         .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
         .filter(x => x.m)
         .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      // Fetch all summaries
       Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
         .then(rows => {
           rows.forEach(r => {
@@ -252,17 +271,15 @@
             byDay.set(r.dayStr, prev + (r.issueCount || 0));
           });
 
-          // Determine date range
           const days = Array.from(byDay.keys()).sort();
           if (days.length === 0){
             document.getElementById('heatmap-host').innerHTML =
-              '<div style="color:#666;">No eligible sessions (≥ 5 km) to show yet.</div>';
+              '<div style="color:#666;">No eligible sessions (≥ 1 km) to show yet.</div>';
             return;
           }
           const minDate = toDateOnly(days[0]);
           const maxDate = toDateOnly(days[days.length-1]);
 
-          // Align to Monday start (GitHub uses Sunday; you can switch if you prefer)
           const start = new Date(minDate);
           const day = start.getDay(); // 0 Sun … 6 Sat
           const offsetToMonday = (day === 0 ? 6 : day - 1);
@@ -275,7 +292,6 @@
           end.setDate(end.getDate() + addToSunday);
           end.setHours(0,0,0,0);
 
-          // Build a dense map day->count for the whole range
           const dense = [];
           let cur = new Date(start);
           while (cur <= end) {
@@ -284,111 +300,152 @@
             cur.setDate(cur.getDate() + 1);
           }
 
-          renderHeatmap(dense, start, end);
+          renderHeatmap(dense);
         });
     }
 
-    function renderHeatmap(denseDays, start, end){
+    function renderHeatmap(denseDays){
       const host = document.getElementById('heatmap-host');
       host.innerHTML = '';
 
-      // Layout
-      const cell = 12;       // px
-      const gap = 3;         // px between cells
-      const rows = 7;        // Mon..Sun (we label Mon/Wed/Fri)
+      const cell = 12, gap = 3, rows = 7;
       const weeks = Math.ceil(denseDays.length / 7);
+      const width  = weeks * (cell + gap) + 40;
+      const height = rows  * (cell + gap) + 20;
 
-      const width  = weeks * (cell + gap) + 40; // +left margin for DOW labels
-      const height = rows  * (cell + gap) + 20; // +top for months
-
-      // Colors (GitHub-ish greens on white)
-      const colors = [
-        '#eaeef2', // 0
-        '#c6e48b', // 1-4
-        '#7bc96f', // 5-9
-        '#239a3b', // 10-19
-        '#196127'  // 20+
-      ];
+      const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
       const level = v => (v === 0) ? 0 : (v < 5 ? 1 : (v < 10 ? 2 : (v < 20 ? 3 : 4)));
 
-      // SVG
-      const svgNS = 'http://www.w3.org/2000/svg';
-      const svg = document.createElementNS(svgNS, 'svg');
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
       svg.setAttribute('width', width);
       svg.setAttribute('height', height);
 
-      // Month labels along top: label first column where the month changes
-      const monthsG = document.createElementNS(svgNS, 'g');
-      monthsG.setAttribute('class', 'heatmap-months');
+      const months = document.createElementNS(NS, 'g'); months.setAttribute('class','heatmap-months');
       let lastMonth = -1;
       for (let w = 0; w < weeks; w++) {
-        const idx = w * 7; // Monday index for each week
+        const idx = w * 7;
         if (idx >= denseDays.length) break;
         const d = denseDays[idx].date;
         const m = d.getMonth();
         if (m !== lastMonth) {
           lastMonth = m;
-          const text = document.createElementNS(svgNS, 'text');
-          text.textContent = d.toLocaleString(undefined, { month: 'short' });
-          text.setAttribute('x', 40 + w * (cell + gap));
-          text.setAttribute('y', 10);
-          monthsG.appendChild(text);
+          const t = document.createElementNS(NS,'text');
+          t.textContent = d.toLocaleString(undefined,{month:'short'});
+          t.setAttribute('x', 40 + w*(cell+gap));
+          t.setAttribute('y', 10);
+          months.appendChild(t);
         }
       }
-      svg.appendChild(monthsG);
+      svg.appendChild(months);
 
-      // Day-of-week labels: Mon, Wed, Fri
-      const dowG = document.createElementNS(svgNS, 'g');
-      dowG.setAttribute('class', 'heatmap-dow');
-      const labels = [{name:'Mon', row:0}, {name:'Wed', row:2}, {name:'Fri', row:4}];
-      labels.forEach(l => {
-        const t = document.createElementNS(svgNS, 'text');
-        t.textContent = l.name;
-        t.setAttribute('x', 0);
-        t.setAttribute('y', 24 + l.row * (cell + gap));
-        dowG.appendChild(t);
+      const dow = document.createElementNS(NS,'g'); dow.setAttribute('class','heatmap-dow');
+      [['Mon',0],['Wed',2],['Fri',4]].forEach(([name,row])=>{
+        const t=document.createElementNS(NS,'text');
+        t.textContent=name; t.setAttribute('x',0); t.setAttribute('y',24+row*(cell+gap));
+        dow.appendChild(t);
       });
-      svg.appendChild(dowG);
+      svg.appendChild(dow);
 
-      // Cells
-      const cellsG = document.createElementNS(svgNS, 'g');
+      const cellsG = document.createElementNS(NS,'g');
       for (let i = 0; i < denseDays.length; i++) {
         const d = denseDays[i];
         const w = Math.floor(i / 7);
         const r = i % 7;
-        const rect = document.createElementNS(svgNS, 'rect');
-        rect.setAttribute('x', 40 + w * (cell + gap));
-        rect.setAttribute('y', 16 + r * (cell + gap));
+        const rect = document.createElementNS(NS,'rect');
+        rect.setAttribute('x', 40 + w*(cell+gap));
+        rect.setAttribute('y', 16 + r*(cell+gap));
         rect.setAttribute('width', cell);
         rect.setAttribute('height', cell);
-        rect.setAttribute('rx', 2);
-        rect.setAttribute('ry', 2);
+        rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
         rect.setAttribute('fill', colors[level(d.count)]);
         rect.setAttribute('stroke', '#ccd3d9');
         rect.setAttribute('stroke-width', '1');
-        rect.setAttribute('title', `${d.date.toISOString().slice(0,10)} — ${d.count} issues`);
         cellsG.appendChild(rect);
       }
       svg.appendChild(cellsG);
 
       host.appendChild(svg);
 
-      // Legend
       const legend = document.createElement('div');
       legend.className = 'legend';
-      legend.innerHTML = `
-        Less
+      legend.innerHTML = `Less
         <span class="box" style="background:${colors[0]}"></span>
         <span class="box" style="background:${colors[1]}"></span>
         <span class="box" style="background:${colors[2]}"></span>
         <span class="box" style="background:${colors[3]}"></span>
         <span class="box" style="background:${colors[4]}"></span>
-        More
-      `;
+        More`;
       host.appendChild(legend);
     }
 
-    // ---------- SESSION VIEWER (unchanged core) ----------
+    // ---------- LATEST ROUTE PREVIEWS (top 5 ≥ 1 km) ----------
+    function buildLatestRoutePreviews(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+
+      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
+        .then(rows => {
+          // Filter ≥ 1 km, sort by date desc, take 5 newest
+          const take = rows
+            .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW)
+            .sort((a,b) => b.dayStr.localeCompare(a.dayStr))
+            .slice(0,5);
+
+          if (take.length === 0) return;
+
+          const grid = document.getElementById('routes-grid');
+          grid.innerHTML = '';
+
+          // For each, fetch workbook again to extract the full path
+          take.forEach(item => {
+            fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
+              .then(res => res.arrayBuffer())
+              .then(buf => {
+                const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+                const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+                if (!samplingName) return;
+
+                const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+                if (!path || path.length < 2) return;
+
+                const card = document.createElement('div');
+                card.className = 'route-card';
+
+                const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
+                const title = document.createElement('div');
+                title.className = 'route-title';
+                title.textContent = `${item.dayStr} — ${niceName}`;
+                card.appendChild(title);
+
+                const mapDiv = document.createElement('div');
+                mapDiv.className = 'route-map';
+                mapDiv.id = `route_${cssSafeId(item.filename)}`;
+                card.appendChild(mapDiv);
+
+                const meta = document.createElement('div');
+                meta.className = 'route-meta';
+                meta.textContent = `Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+                card.appendChild(meta);
+
+                grid.appendChild(card);
+
+                // Mini map with polyline
+                const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+
+                const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
+                mini.fitBounds(line.getBounds(), { padding:[8,8] });
+                mini.whenReady(()=>mini.invalidateSize());
+              })
+              .catch(()=>{ /* ignore individual failures */ });
+          });
+        });
+    }
+
+    // ---------- SESSION VIEWER (unchanged core except CSS fix) ----------
     function loadFile(filename) {
       const content = document.getElementById('content');
       content.innerHTML = '';
@@ -645,6 +702,3 @@
   </script>
 </body>
 </html>
-
-
-
