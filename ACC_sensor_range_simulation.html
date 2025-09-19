@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACC Approach Simulator — IDM Controller (Full History)</title>
+<title>ACC Approach Simulator — IDM Controller (Full History + Fixed Y Labels)</title>
 <style>
   :root{
     --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6;
@@ -153,164 +153,91 @@
 
 <script>
 (function(){
-  // --- config ---
-  const STOP_TGAP = 1.2; // seconds: stop sim if live time gap falls below this
+  const STOP_TGAP = 1.2; 
   const speedsKph = [60,70,80,90,100,110,120,130,140,150];
 
-  // UI helpers
+  // UI elements
   const q = id => document.getElementById(id);
-  const inpStartDist = q('inpStartDist');
-  const inpVset      = q('inpVset');
-  const inpTgap      = q('inpTgap');
-  const inpS0        = q('inpS0');
-  const inpAmaxAccel = q('inpAmaxAccel');
-  const inpBcomfort  = q('inpBcomfort');
-  const inpAmaxBrake = q('inpAmaxBrake');
-  const selLead      = q('selLead');
-  const btnCompute   = q('btnCompute');
-  const btnReset     = q('btnReset');
-
-  const tblBody = document.querySelector('#tbl tbody');
-
-  const lane   = q('lane');
-  const leadEl = q('lead');
-  const egoEl  = q('ego');
-  const ruler  = q('ruler');
-
-  const pillGap   = q('pillGap');
-  const pillTGap  = q('pillTGap');
-  const pillVego  = q('pillVego');
-  const pillVlead = q('pillVlead');
-  const pillA     = q('pillA');
-  const statusEl  = q('status');
-
-  const btnStart  = q('btnStart');
-  const btnPause  = q('btnPause');
-  const btnStep   = q('btnStep');
-  const btnRestart= q('btnRestart');
-  const inpSimSpeed = q('inpSimSpeed');
-
-  // Canvases
-  const accCv = q('accCanvas'), accCtx = accCv.getContext('2d');
-  const spdCv = q('spdCanvas'), spdCtx = spdCv.getContext('2d');
+  const inpStartDist=q('inpStartDist'), inpVset=q('inpVset'), inpTgap=q('inpTgap'),
+        inpS0=q('inpS0'), inpAmaxAccel=q('inpAmaxAccel'), inpBcomfort=q('inpBcomfort'),
+        inpAmaxBrake=q('inpAmaxBrake'), selLead=q('selLead');
+  const btnCompute=q('btnCompute'), btnReset=q('btnReset');
+  const tblBody=document.querySelector('#tbl tbody');
+  const lane=q('lane'), leadEl=q('lead'), egoEl=q('ego'), ruler=q('ruler');
+  const pillGap=q('pillGap'), pillTGap=q('pillTGap'), pillVego=q('pillVego'),
+        pillVlead=q('pillVlead'), pillA=q('pillA'), statusEl=q('status');
+  const btnStart=q('btnStart'), btnPause=q('btnPause'), btnStep=q('btnStep'),
+        btnRestart=q('btnRestart'), inpSimSpeed=q('inpSimSpeed');
+  const accCv=q('accCanvas'), accCtx=accCv.getContext('2d');
+  const spdCv=q('spdCanvas'), spdCtx=spdCv.getContext('2d');
 
   // Helpers
-  const kph2mps = v => v * (1000/3600);
-  const mps2kph = v => v * 3.6;
-  const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
-  const fmt = (n,d=1)=>Number(n).toFixed(d);
+  const kph2mps=v=>v*1000/3600, mps2kph=v=>v*3.6, clamp=(x,min,max)=>Math.max(min,Math.min(max,x));
+  const fmt=(n,d=1)=>Number(n).toFixed(d);
 
   // Required distance formula
   function requiredDistance(vSet_kph, vLead_kph, T, a_brake){
-    const vEgo  = kph2mps(vSet_kph);
-    const vLead = kph2mps(vLead_kph);
-    if (vEgo <= vLead) return T * vLead;
-    const dv = vEgo - vLead;
-    return T * vLead + 0.5 * (dv*dv) / a_brake;
+    const vEgo=kph2mps(vSet_kph), vLead=kph2mps(vLead_kph);
+    if(vEgo<=vLead) return T*vLead;
+    const dv=vEgo-vLead;
+    return T*vLead + 0.5*(dv*dv)/a_brake;
   }
 
   function rebuildTable(){
-    const vSet = Number(inpVset.value);
-    const T = Number(inpTgap.value);
-    const aBrake = Number(inpAmaxBrake.value);
-
-    tblBody.innerHTML = '';
+    const vSet=Number(inpVset.value), T=Number(inpTgap.value), aBrake=Number(inpAmaxBrake.value);
+    tblBody.innerHTML='';
     speedsKph.forEach(vLead=>{
-      const Dreq = requiredDistance(vSet, vLead, T, aBrake);
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${vLead}</td>
-        <td>${fmt(Dreq,1)}</td>
-      `;
+      const Dreq=requiredDistance(vSet,vLead,T,aBrake);
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${vLead}</td><td>${fmt(Dreq,1)}</td>`;
       tblBody.appendChild(tr);
     });
   }
 
   // Simulation state (IDM)
-  let sim = {
-    vLead_kph: Number(selLead.value),
-    v0_kph: Number(inpVset.value),          // desired free-flow speed
-    T: Number(inpTgap.value),
-    s0: Number(inpS0.value),
-    aMax: Number(inpAmaxAccel.value),
-    bComfort: Number(inpBcomfort.value),
-    aBrakeMax: Number(inpAmaxBrake.value),
-
-    startGap: Number(inpStartDist.value),
-
-    // dynamic
-    t: 0,
-    xGap: 0,
-    vEgo: 0,
-    vLead: 0,
-    aEgo: 0,
-    running: false,
-    raf: null,
-
-    // history (kept in full; no trimming)
-    histT: [],
-    histA: [],
-    histV: []
+  let sim={
+    vLead_kph:Number(selLead.value), v0_kph:Number(inpVset.value), T:Number(inpTgap.value),
+    s0:Number(inpS0.value), aMax:Number(inpAmaxAccel.value), bComfort:Number(inpBcomfort.value),
+    aBrakeMax:Number(inpAmaxBrake.value), startGap:Number(inpStartDist.value),
+    t:0, xGap:0, vEgo:0, vLead:0, aEgo:0, running:false, raf:null,
+    histT:[], histA:[], histV:[]
   };
 
   function resetSim(fromInputs=true){
-    if (fromInputs){
-      sim.vLead_kph = Number(selLead.value);
-      sim.v0_kph    = Number(inpVset.value);
-      sim.T         = Number(inpTgap.value);
-      sim.s0        = Number(inpS0.value);
-      sim.aMax      = Number(inpAmaxAccel.value);
-      sim.bComfort  = Number(inpBcomfort.value);
-      sim.aBrakeMax = Number(inpAmaxBrake.value);
-      sim.startGap  = Number(inpStartDist.value);
+    if(fromInputs){
+      sim.vLead_kph=Number(selLead.value); sim.v0_kph=Number(inpVset.value);
+      sim.T=Number(inpTgap.value); sim.s0=Number(inpS0.value); sim.aMax=Number(inpAmaxAccel.value);
+      sim.bComfort=Number(inpBcomfort.value); sim.aBrakeMax=Number(inpAmaxBrake.value);
+      sim.startGap=Number(inpStartDist.value);
     }
-    sim.vLead = kph2mps(sim.vLead_kph);
-    sim.vEgo  = kph2mps(sim.v0_kph); // start at set speed
-    sim.xGap = sim.startGap;
-    sim.t = 0; sim.aEgo = 0;
-    sim.running = false;
-    if (sim.raf){ cancelAnimationFrame(sim.raf); sim.raf=null; }
-
-    // full history from t=0
-    sim.histT = [0];
-    sim.histA = [0];
-    sim.histV = [mps2kph(sim.vEgo)];
-
-    layoutCars(); drawRuler(); updatePills();
-    rebuildTable(); // keep table in sync when restarting
-    drawPlots();
+    sim.vLead=kph2mps(sim.vLead_kph);
+    sim.vEgo=kph2mps(sim.v0_kph);
+    sim.xGap=sim.startGap; sim.t=0; sim.aEgo=0; sim.running=false;
+    if(sim.raf){ cancelAnimationFrame(sim.raf); sim.raf=null; }
+    sim.histT=[0]; sim.histA=[0]; sim.histV=[mps2kph(sim.vEgo)];
+    layoutCars(); drawRuler(); updatePills(); rebuildTable(); drawPlots();
   }
 
   // IDM controller
   function idmAcceleration(){
-    const v = sim.vEgo;
-    const v0 = kph2mps(sim.v0_kph);
-    const s = Math.max(sim.xGap, 0.1);
-    const dv = v - sim.vLead; // positive if ego faster
-    const a = sim.aMax;
-    const b = sim.bComfort;
-    const delta = 4;
-
-    const sStar = sim.s0 + sim.T * v + (v * dv) / (2 * Math.sqrt(a*b));
-    let acc = a * (1 - Math.pow(v / Math.max(v0,0.1), delta) - Math.pow(sStar / s, 2));
-
-    // clamp to hard limits
-    acc = clamp(acc, -sim.aBrakeMax, sim.aMax);
-    return acc;
+    const v=sim.vEgo, v0=kph2mps(sim.v0_kph);
+    const s=Math.max(sim.xGap,0.1);
+    const dv=v-sim.vLead; // ego minus lead
+    const a=sim.aMax, b=sim.bComfort, delta=4;
+    const sStar=sim.s0 + sim.T*v + (v*dv)/(2*Math.sqrt(a*b));
+    let acc = a * (1 - Math.pow(v/Math.max(v0,0.1), delta) - Math.pow(sStar/s, 2));
+    return clamp(acc, -sim.aBrakeMax, sim.aMax);
   }
 
   // Integration step
   function step(dt){
-    // Update acceleration from IDM
     sim.aEgo = idmAcceleration();
-
-    // Integrate ego speed and gap
     sim.vEgo = Math.max(0, sim.vEgo + sim.aEgo*dt);
     sim.xGap += (sim.vLead - sim.vEgo) * dt;
-    sim.xGap = Math.max(sim.xGap, 0.01); // avoid negative
+    sim.xGap = Math.max(sim.xGap, 0.01);
     sim.t += dt;
 
-    // Safety stop on too-low time gap
+    // Safety stop on low time gap
     const tgapNow = sim.vEgo > 0 ? sim.xGap / sim.vEgo : Infinity;
     if (tgapNow < STOP_TGAP){
       sim.running = false;
@@ -318,57 +245,41 @@
       statusEl.textContent = `Stopped: time gap ${tgapNow.toFixed(2)} s < ${STOP_TGAP.toFixed(1)} s`;
     } else {
       statusEl.style.color = '#7ff2a8';
-      statusEl.textContent = `t = ${fmt(sim.t,1)} s  •  time gap ${fmt(tgapNow,2)} s`;
+      statusEl.textContent = `t = ${fmt(sim.t,1)} s • time gap ${fmt(tgapNow,2)} s`;
     }
 
-    layoutCars();
-    updatePills();
-
-    // Save history (FULL history – no trimming)
-    sim.histT.push(sim.t);
-    sim.histA.push(sim.aEgo);
-    sim.histV.push(mps2kph(sim.vEgo));
-
+    layoutCars(); updatePills();
+    // full history
+    sim.histT.push(sim.t); sim.histA.push(sim.aEgo); sim.histV.push(mps2kph(sim.vEgo));
     drawPlots();
   }
 
   // Birdview layout
-  function m2px(m){
-    const visibleM = Math.max(sim.xGap, 200) + 60;
-    const pad = 24;
-    const w = lane.clientWidth - pad*2;
-    return (m / visibleM) * w;
-  }
+  function m2px(m){ const visibleM=Math.max(sim.xGap,200)+60, pad=24, w=lane.clientWidth-pad*2; return (m/visibleM)*w; }
   function layoutCars(){
-    const pad = 24, midY = lane.clientHeight/2 - 12, laneWidth = lane.clientWidth;
-    const leadX = laneWidth - pad - 60;
-    const egoX  = leadX - m2px(sim.xGap);
-    leadEl.style.left = `${leadX}px`; leadEl.style.top = `${midY}px`;
-    egoEl.style.left  = `${egoX}px`;  egoEl.style.top  = `${midY}px`;
+    const pad=24, midY=lane.clientHeight/2 - 12, laneWidth=lane.clientWidth;
+    const leadX=laneWidth - pad - 60, egoX = leadX - m2px(sim.xGap);
+    leadEl.style.left=`${leadX}px`; leadEl.style.top=`${midY}px`;
+    egoEl.style.left =`${egoX}px`;  egoEl.style.top =`${midY}px`;
   }
   function drawRuler(){
-    ruler.innerHTML = '';
-    const visibleM = Math.max(sim.xGap, 200) + 60;
-    const step = niceTick(visibleM/6);
-    for(let x=0; x<=visibleM; x+=step){
-      const tick = document.createElement('div');
-      tick.className='tick';
-      const px = m2px(x) + 24;
-      tick.style.left = `${px}px`;
-      const lab = document.createElement('div');
-      lab.textContent = `${Math.round(x)} m`;
+    ruler.innerHTML='';
+    const visibleM=Math.max(sim.xGap,200)+60, step=niceTick(visibleM/6);
+    for(let x=0;x<=visibleM;x+=step){
+      const tick=document.createElement('div'); tick.className='tick';
+      const px=m2px(x)+24; tick.style.left=`${px}px`;
+      const lab=document.createElement('div'); lab.textContent=`${Math.round(x)} m`;
       lab.style.position='absolute'; lab.style.left='0'; lab.style.bottom='12px';
       lab.style.transform='translateX(-50%)'; lab.style.color='#9fb2ff'; lab.style.fontSize='11px';
-      tick.appendChild(lab);
-      ruler.appendChild(tick);
+      tick.appendChild(lab); ruler.appendChild(tick);
     }
   }
   function niceTick(range){
-    const pow10 = Math.pow(10, Math.floor(Math.log10(range)));
-    const fr = range / pow10;
-    if (fr < 1.5) return 1*pow10;
-    if (fr < 3)   return 2*pow10;
-    if (fr < 7)   return 5*pow10;
+    const pow10=Math.pow(10, Math.floor(Math.log10(range)));
+    const fr=range/pow10;
+    if(fr<1.5) return 1*pow10;
+    if(fr<3)   return 2*pow10;
+    if(fr<7)   return 5*pow10;
     return 10*pow10;
   }
 
@@ -381,83 +292,89 @@
     pillA.textContent    = `Ego a: ${fmt(sim.aEgo,2)} m/s²`;
   }
 
-  // Simple canvas line plotter
+  // Canvas line plotter with rotated Y-axis label
   function drawLine(ctx, xs, ys, xmin, xmax, ymin, ymax, labelY){
-    const w = ctx.canvas.width, h = ctx.canvas.height;
+    const w=ctx.canvas.width, h=ctx.canvas.height;
     ctx.clearRect(0,0,w,h);
-    // axes
-    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-    ctx.lineWidth = 1;
+
+    // Axes
+    ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.moveTo(40,10); ctx.lineTo(40,h-24); ctx.lineTo(w-8,h-24); ctx.stroke();
-    ctx.fillStyle = '#cfe'; ctx.font = '12px system-ui';
-    ctx.fillText(labelY, 8, 14);
 
-    if (xs.length<2) return;
+    // Rotated Y label (to avoid tick overlap)
+    ctx.save();
+    ctx.translate(16, h/2);
+    ctx.rotate(-Math.PI/2);
+    ctx.fillStyle='#cfe'; ctx.font='12px system-ui'; ctx.textAlign='center';
+    ctx.fillText(labelY, 0, 0);
+    ctx.restore();
 
-    const toX = t => 40 + ( (t - xmin) / (xmax - xmin || 1) ) * (w-48);
-    const toY = y => (h-24) - ( (y - ymin) / (ymax - ymin || 1) ) * (h-34);
+    if(xs.length<2) return;
 
-    // grid ticks
-    const xticks = 5, yticks = 4;
+    // Scales
+    const toX=t=>40 + ((t - xmin) / (xmax - xmin || 1)) * (w-48);
+    const toY=y=>(h-24) - ((y - ymin) / (ymax - ymin || 1)) * (h-34);
+
+    // Grid + ticks
+    const xticks=5, yticks=4;
     for(let i=0;i<=xticks;i++){
-      const tx = xmin + i*(xmax-xmin)/xticks;
-      const px = toX(tx);
+      const tx=xmin + i*(xmax-xmin)/xticks, px=toX(tx);
       ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(px,10); ctx.lineTo(px,h-24); ctx.stroke();
-      ctx.fillStyle='#9fd'; ctx.fillText(tx.toFixed(1), px-8, h-6);
+      ctx.fillStyle='#9fd'; ctx.font='12px system-ui'; ctx.textAlign='center';
+      ctx.fillText(tx.toFixed(1), px, h-6);
     }
     for(let j=0;j<=yticks;j++){
-      const ty = ymin + j*(ymax-ymin)/yticks;
-      const py = toY(ty);
+      const ty=ymin + j*(ymax-ymin)/yticks, py=toY(ty);
       ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(40,py); ctx.lineTo(w-8,py); ctx.stroke();
-      ctx.fillStyle='#9fd'; ctx.fillText(ty.toFixed(1), 6, py+4);
+      ctx.fillStyle='#9fd'; ctx.font='12px system-ui'; ctx.textAlign='right';
+      ctx.fillText(ty.toFixed(1), 36, py+4);
     }
 
-    // line
-    ctx.strokeStyle = '#7fb3ff';
-    ctx.lineWidth = 2; ctx.beginPath();
+    // Data line
+    ctx.strokeStyle='#7fb3ff'; ctx.lineWidth=2; ctx.beginPath();
     for(let i=0;i<xs.length;i++){
-      const px = toX(xs[i]), py = toY(ys[i]);
-      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      const px=toX(xs[i]), py=toY(ys[i]);
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
     }
     ctx.stroke();
   }
 
   function drawPlots(){
-    const xs = sim.histT;
-    const xmin = 0;                                // <-- full history
-    const xmax = Math.max(5, xs[xs.length-1] || 5);
+    const xs=sim.histT;
+    const xmin=0;
+    const xmax=Math.max(5, xs[xs.length-1] || 5);
 
-    const aMin = -Number(inpAmaxBrake.value) * 1.1, aMax = Number(inpAmaxAccel.value) * 1.1;
+    const aMin=-Number(inpAmaxBrake.value)*1.1, aMax=Number(inpAmaxAccel.value)*1.1;
     drawLine(accCtx, xs, sim.histA, xmin, xmax, aMin, aMax, 'a (m/s²)');
 
-    const vMax = Math.max(Number(inpVset.value), Number(selLead.value), ...sim.histV) * 1.05;
+    const vMax=Math.max(Number(inpVset.value), Number(selLead.value), ...sim.histV) * 1.05;
     drawLine(spdCtx, xs, sim.histV, xmin, xmax, 0, Math.max(10, vMax), 'v (km/h)');
   }
 
   // Loop
   function loop(lastTs){
     sim.raf = requestAnimationFrame((ts)=>{
-      if (!lastTs) lastTs = ts;
-      const simSpeed = Math.max(0.1, Number(inpSimSpeed.value)||1);
-      let dt = (ts - lastTs)/1000 * simSpeed;
-      dt = clamp(dt, 0, 0.05);
-      if (sim.running) { step(dt); loop(ts); }
+      if(!lastTs) lastTs = ts;
+      const simSpeed=Math.max(0.1, Number(inpSimSpeed.value)||1);
+      let dt=(ts - lastTs)/1000 * simSpeed;
+      dt=clamp(dt, 0, 0.05);
+      if(sim.running){ step(dt); loop(ts); }
     });
   }
 
   // Events
   btnCompute.addEventListener('click', rebuildTable);
   btnReset.addEventListener('click', ()=>{
-    inpStartDist.value = 200; inpVset.value = 180; inpTgap.value = 1; inpS0.value = 2;
-    inpAmaxAccel.value = 2; inpBcomfort.value = 2.5; inpAmaxBrake.value = 5; selLead.value = '90';
+    inpStartDist.value=200; inpVset.value=180; inpTgap.value=1; inpS0.value=2;
+    inpAmaxAccel.value=2; inpBcomfort.value=2.5; inpAmaxBrake.value=5; selLead.value='90';
     rebuildTable(); resetSim(true);
   });
   [inpStartDist, inpVset, inpTgap, inpS0, inpAmaxAccel, inpBcomfort, inpAmaxBrake, selLead]
-    .forEach(el => el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
+    .forEach(el=>el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
 
-  btnStart.addEventListener('click', ()=>{ if (!sim.running){ sim.running = true; loop(); } });
-  btnPause.addEventListener('click', ()=>{ sim.running = false; });
-  btnStep.addEventListener('click', ()=>{ sim.running = false; step(0.1); });
+  btnStart.addEventListener('click', ()=>{ if(!sim.running){ sim.running=true; loop(); } });
+  btnPause.addEventListener('click', ()=>{ sim.running=false; });
+  btnStep.addEventListener('click', ()=>{ sim.running=false; step(0.1); });
   btnRestart.addEventListener('click', ()=>{ resetSim(true); });
 
   window.addEventListener('resize', ()=>{ layoutCars(); drawRuler(); drawPlots(); });
