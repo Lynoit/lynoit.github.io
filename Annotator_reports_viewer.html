@@ -54,7 +54,6 @@
   <div id="content">
     <h1>Test activity overview</h1>
     <div id="overview" class="overview">
-      <div style="color:#666; margin:6px 0 14px 0;">Aggregated issue counts per day (sessions &lt; 1 km ignored; only sessions with &gt; 0 issues).</div>
       <div id="heatmap-host"></div>
 
       <div class="routes-wrap">
@@ -394,76 +393,80 @@
     }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
-    function buildLatestRoutePreviews(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+   // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
+function buildLatestRoutePreviews(files){
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
-        .then(rows => {
-          // Filter (≥ 1 km and > 0 issues), sort strictly by Last-Modified desc, take 10
-          const take = rows
-            .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
-            .sort((a, b) => {
-              const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
-              if (diff !== 0) return diff;
-              const byDateStr = b.dayStr.localeCompare(a.dayStr);
-              if (byDateStr !== 0) return byDateStr;
-              return b.filename.localeCompare(a.filename);
-            })
-            .slice(0,10);
+  Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
+    .then(rows => {
+      // Filter and sort strictly by Last-Modified DESC
+      const take = rows
+        .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
+        .sort((a, b) => {
+          const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
+          if (diff !== 0) return diff;
+          const byDateStr = b.dayStr.localeCompare(a.dayStr);
+          if (byDateStr !== 0) return byDateStr;
+          return b.filename.localeCompare(a.filename);
+        })
+        .slice(0,10);
 
-          if (take.length === 0) return;
+      const grid = document.getElementById('routes-grid');
+      grid.innerHTML = '';
+      if (take.length === 0) return;
 
-          const grid = document.getElementById('routes-grid');
-          grid.innerHTML = '';
+      // 1) Create and append all cards in the sorted order (placeholders)
+      const slots = take.map(item => {
+        const card = document.createElement('div');
+        card.className = 'route-card';
 
-          // For each, fetch workbook again to extract the full path
-          take.forEach(item => {
-            fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
-              .then(res => res.arrayBuffer())
-              .then(buf => {
-                const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-                const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-                if (!samplingName) return;
+        const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
+        const title = document.createElement('div');
+        title.className = 'route-title';
+        title.textContent = `${item.dayStr} — ${niceName}`;
+        card.appendChild(title);
 
-                const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-                if (!path || path.length < 2) return;
+        const mapDiv = document.createElement('div');
+        mapDiv.className = 'route-map';
+        mapDiv.id = `route_${cssSafeId(item.filename)}`;
+        card.appendChild(mapDiv);
 
-                const card = document.createElement('div');
-                card.className = 'route-card';
+        const meta = document.createElement('div');
+        meta.className = 'route-meta';
+        meta.textContent = `Mileage: … km  •  Issues: ${item.issueCount}`;
+        card.appendChild(meta);
 
-                const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
-                const title = document.createElement('div');
-                title.className = 'route-title';
-                title.textContent = `${item.dayStr} — ${niceName}`;
-                card.appendChild(title);
+        grid.appendChild(card);
+        return { item, mapDiv, meta };
+      });
 
-                const mapDiv = document.createElement('div');
-                mapDiv.className = 'route-map';
-                mapDiv.id = `route_${cssSafeId(item.filename)}`;
-                card.appendChild(mapDiv);
+      // 2) Fill each card asynchronously (order of appending is preserved)
+      slots.forEach(({ item, mapDiv, meta }) => {
+        fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
+          .then(res => res.arrayBuffer())
+          .then(buf => {
+            const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+            const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+            if (!samplingName) return;
 
-                const meta = document.createElement('div');
-                meta.className = 'route-meta';
-                meta.textContent = `Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
-                card.appendChild(meta);
+            const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+            if (!path || path.length < 2) return;
 
-                grid.appendChild(card);
+            meta.textContent = `Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
 
-                // Mini map with polyline
-                const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
-
-                const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
-                mini.fitBounds(line.getBounds(), { padding:[8,8] });
-                mini.whenReady(()=>mini.invalidateSize());
-              })
-              .catch(()=>{ /* ignore individual failures */ });
-          });
-        });
-    }
+            const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+            const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
+            mini.fitBounds(line.getBounds(), { padding:[8,8] });
+            mini.whenReady(()=>mini.invalidateSize());
+          })
+          .catch(()=>{ /* ignore individual failures */ });
+      });
+    });
+}
 
     // ---------- SESSION VIEWER ----------
     function loadFile(filename) {
@@ -724,3 +727,4 @@
   </script>
 </body>
 </html>
+
