@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACC Approach Simulator — IDM Controller (No external libs)</title>
+<title>ACC Approach Simulator — IDM Controller (Stop on t-gap & 200 m default)</title>
 <style>
   :root{
     --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6;
@@ -27,7 +27,7 @@
   th{color:#cfd6ff; font-weight:600; background:rgba(255,255,255,.03)}
   .tag{display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600}
   .tag.ok{background:rgba(24,165,88,.18); color:#7ff2a8; border:1px solid rgba(24,165,88,.35)}
-  .tag.bad{background:rgba(255,82,82,.14); color:#ff9d9d; border:1px solid rgba(255,82,82,.35)}
+  .tag.bad{background:rgba(255,82,82,.14); color:#ff9d9d; border:1px solid rgba(255,255,255,.35)}
   .meta{color:var(--muted); font-size:13px}
   .simWrap{padding:12px 12px 16px}
   .lane{position:relative; width:100%; height:340px; background:
@@ -57,7 +57,7 @@
       <div class="bd">
         <div class="row">
           <label>Initial detection distance (m)<br><small>Gap at t=0</small></label>
-          <input id="inpStartDist" type="number" min="0" step="10" value="300" />
+          <input id="inpStartDist" type="number" min="0" step="10" value="200" />
         </div>
         <div class="row">
           <label>Ego set speed v₀ (km/h)</label>
@@ -96,8 +96,7 @@
           <button class="ghost" id="btnReset">Reset</button>
         </div>
         <p class="meta" style="margin-top:8px">
-          Detection distance (worst-case constant brake):<br>
-          <code>D<sub>req</sub> = T·v<sub>lead</sub> + (Δv)² / (2 a<sub>brake,max</sub>)</code>.
+          Required distance (worst-case const brake): <code>D = T·v<sub>lead</sub> + (Δv)²/(2·a<sub>brake,max</sub>)</code>
         </p>
       </div>
     </div>
@@ -158,9 +157,11 @@
 
 <script>
 (function(){
+  // --- config ---
+  const STOP_TGAP = 1.2; // seconds: stop sim if live time gap falls below this
   const speedsKph = [60,70,80,90,100,110,120,130,140,150];
 
-  // UI
+  // UI helpers
   const q = id => document.getElementById(id);
   const inpStartDist = q('inpStartDist');
   const inpVset      = q('inpVset');
@@ -232,7 +233,7 @@
     });
   }
 
-  // Simulation state using IDM
+  // Simulation state (IDM)
   let sim = {
     vLead_kph: Number(selLead.value),
     v0_kph: Number(inpVset.value),          // desired free-flow speed
@@ -309,6 +310,14 @@
     sim.xGap += (sim.vLead - sim.vEgo) * dt;
     sim.xGap = Math.max(sim.xGap, 0.01); // avoid negative
     sim.t += dt;
+
+    // Safety stop on too-low time gap
+    const tgapNow = sim.vEgo > 0 ? sim.xGap / sim.vEgo : Infinity;
+    if (tgapNow < STOP_TGAP){
+      sim.running = false;
+      statusEl.style.color = '#ff9d9d';
+      statusEl.textContent = `Stopped: time gap ${tgapNow.toFixed(2)} s < ${STOP_TGAP.toFixed(1)} s`;
+    }
 
     layoutCars();
     updatePills();
@@ -392,11 +401,10 @@
 
     if (xs.length<2) return;
 
-    const toX = t => 40 + ( (t - xmin) / (xmax - xmin) ) * (w-48);
-    const toY = y => (h-24) - ( (y - ymin) / (ymax - ymin) ) * (h-34);
+    const toX = t => 40 + ( (t - xmin) / (xmax - xmin || 1) ) * (w-48);
+    const toY = y => (h-24) - ( (y - ymin) / (ymax - ymin || 1) ) * (h-34);
 
     // grid ticks
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
     const xticks = 5, yticks = 4;
     for(let i=0;i<=xticks;i++){
       const tx = xmin + i*(xmax-xmin)/xticks;
@@ -443,26 +451,24 @@
       const simSpeed = Math.max(0.1, Number(inpSimSpeed.value)||1);
       let dt = (ts - lastTs)/1000 * simSpeed;
       dt = clamp(dt, 0, 0.05);
-      step(dt);
-      lastTs = ts;
-      if (sim.running) loop(lastTs);
+      if (sim.running) { step(dt); loop(ts); }
     });
   }
 
   // Events
   btnCompute.addEventListener('click', ()=>{ rebuildTable(); updateStatus(); });
   btnReset.addEventListener('click', ()=>{
-    inpStartDist.value = 300; inpVset.value = 180; inpTgap.value = 1; inpS0.value = 2;
+    inpStartDist.value = 200; inpVset.value = 180; inpTgap.value = 1; inpS0.value = 2;
     inpAmaxAccel.value = 2; inpBcomfort.value = 2.5; inpAmaxBrake.value = 5; selLead.value = '90';
     rebuildTable(); resetSim(true);
   });
   [inpStartDist, inpVset, inpTgap, inpS0, inpAmaxAccel, inpBcomfort, inpAmaxBrake, selLead]
     .forEach(el => el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
 
-  q('btnStart').addEventListener('click', ()=>{ if (!sim.running){ sim.running = true; loop(); } });
-  q('btnPause').addEventListener('click', ()=>{ sim.running = false; });
-  q('btnStep').addEventListener('click', ()=>{ sim.running = false; step(0.1); });
-  q('btnRestart').addEventListener('click', ()=>{ resetSim(true); });
+  btnStart.addEventListener('click', ()=>{ if (!sim.running){ sim.running = true; loop(); } });
+  btnPause.addEventListener('click', ()=>{ sim.running = false; });
+  btnStep.addEventListener('click', ()=>{ sim.running = false; step(0.1); });
+  btnRestart.addEventListener('click', ()=>{ resetSim(true); });
 
   window.addEventListener('resize', ()=>{ layoutCars(); drawRuler(); drawPlots(); });
 
