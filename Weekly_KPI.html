@@ -33,7 +33,7 @@
     .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
     .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
 
-    /* Column alignment via classes (robust to column count changes) */
+    /* Column alignment via classes */
     .summary-table th.col-date,    .summary-table td.col-date    { text-align:center; white-space:nowrap; }
     .summary-table th.col-weather, .summary-table td.col-weather { text-align:center; white-space:nowrap; }
     .summary-table th.col-avg,     .summary-table td.col-avg     { text-align:right;  white-space:nowrap; }
@@ -63,6 +63,16 @@
     .matrix-table th.software{ text-align:center; white-space:nowrap; }
     .matrix-table td.num{ text-align:right; white-space:nowrap; }
     .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
+
+    /* ===== Calendar trio card ===== */
+    .cal-title{ font-weight:700; font-size:16px; text-align:center; margin:4px 0 10px; }
+    .cal-block{ margin:8px 6px 14px; }
+    .cal-caption{ font-weight:600; font-size:12px; color:#555; margin:2px 0 6px; }
+    .cal-legend{ display:flex; align-items:center; gap:6px; font-size:11px; color:#666; margin:4px 0 0; }
+    .cal-legend .swatch{ width:12px; height:12px; border-radius:3px; border:1px solid #d9dee8; }
+    .cal-ylabel{ font-size:10px; fill:#666; }
+    .cal-month{ font-size:10px; fill:#666; }
+    .cal-cell{ rx:3; ry:3; stroke:#dfe3ec; stroke-width:1; }
   </style>
 </head>
 <body>
@@ -128,6 +138,16 @@ const WMO_TEXT = {
   85:'Snow showers: slight',86:'Snow showers: heavy',
   95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
 };
+/* Weather severity (for monotone green) */
+function weatherSeverityFromCode(code){
+  if (code==null) return null;
+  if ([95,96,99].includes(code)) return 4;            // thunder
+  if ([61,63,65,66,67,80,81,82,85,86,71,73,75].includes(code)) return 3; // rain/snow
+  if ([51,53,55,56,57,77].includes(code)) return 2;   // drizzle/freezing drizzle/snow grains
+  if ([3,45,48].includes(code)) return 1;             // overcast/fog
+  if ([0,1,2].includes(code)) return 0;               // clear to partly cloudy
+  return 1;
+}
 
 /* Unified font sizes for score-boxes */
 const SCORE_FONTS = { number:13, label:11, range:10 };
@@ -144,6 +164,7 @@ const fmtCell = v =>
   : (Number.isInteger(v) ? String(v)
   : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
 
+/* ---- thresholds, parsing helpers ---- */
 function parseThresholds(str){
   const arr = (str||'').split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number);
   if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
@@ -389,7 +410,6 @@ async function fetchWeatherForDates(dates){
   const {min, max} = isoMinMax(missing);
   if (!min || !max) return cache;
 
-  // Hourly series in local time; slice hours 10..14
   const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}`+
               `&start_date=${min}&end_date=${max}`+
               `&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
@@ -402,7 +422,6 @@ async function fetchWeatherForDates(dates){
     const temps = (data.hourly && data.hourly.temperature_2m) || [];
     const codes = (data.hourly && data.hourly.weathercode) || [];
 
-    // Group by YYYY-MM-DD → collect indices with hour in [10..14]
     const byDate = new Map();
     for (let i=0;i<times.length;i++){
       const t = times[i];
@@ -414,7 +433,6 @@ async function fetchWeatherForDates(dates){
       }
     }
 
-    // Aggregate into cache
     for (const [day, idxs] of byDate.entries()){
       if (!idxs.length) continue;
       const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
@@ -467,7 +485,6 @@ function renderSummary(container, parsed){
       score,
       text: score == null ? 'n/a' : scoreText[score - 1],
       note,
-      //weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text} (10–14)` : '—'
       weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
     };
   });
@@ -490,7 +507,6 @@ function renderSummary(container, parsed){
   const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
-  // Table header (with Weather column)
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
@@ -499,6 +515,7 @@ function renderSummary(container, parsed){
   theadRow.append('th').attr('class','col-avg').text('Average events per 1000 km');
   theadRow.append('th').attr('class','col-score').text('Score');
   theadRow.append('th').attr('class','col-rating').text('Rating');
+
   if (hasAnyNotes) theadRow.append('th').attr('class','col-note').text('Release Note');
 
   const tbody = table.append('tbody');
@@ -595,6 +612,156 @@ function renderSummary(container, parsed){
     gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
+}
+
+/* ==================== NEW: Activity/Temperature/Weather calendar trio ==================== */
+function renderCalendarTrio(container, parsed){
+  // Collect date → counts / temp / weather severity
+  const sw = parsed.software || [];
+  const dateCounts = {};
+  const datesList = [];
+  sw.forEach(s => {
+    if (!s.date) return;
+    datesList.push(s.date);
+    dateCounts[s.date] = (dateCounts[s.date] || 0) + 1;
+  });
+  if (!datesList.length) return;
+
+  const minDateStr = datesList.reduce((a,b)=> a<b?a:b);
+  const maxDateStr = datesList.reduce((a,b)=> a>b?a:b);
+  const toDate = s => new Date(s+'T00:00:00');
+  const minDate = toDate(minDateStr);
+  const maxDate = toDate(maxDateStr);
+
+  // Clamp to full weeks (Mon..Sun)
+  const start = new Date(minDate);
+  const wdStart = (start.getDay()+6)%7; // 0=Mon..6=Sun
+  start.setDate(start.getDate() - wdStart);
+  const end = new Date(maxDate);
+  const wdEnd = (end.getDay()+6)%7;
+  end.setDate(end.getDate() + (6 - wdEnd));
+
+  // Build value maps
+  const wx = parsed.weatherByDate || {};
+  const tempByDate = {};
+  const sevByDate = {};
+  Object.keys(wx).forEach(d=>{
+    const w = wx[d];
+    if (!w) return;
+    const avgT = (w.tmin==null || w.tmax==null) ? null : Math.round((w.tmin + w.tmax)/2);
+    tempByDate[d] = avgT;
+    sevByDate[d]  = weatherSeverityFromCode(w.code);
+  });
+
+  // Color scales (greens, 5 steps)
+  const greens = ['#edf7ed','#d7efd7','#a8e0a8','#66bb6a','#2e7d32'];
+  // Activity domain
+  const actVals = Object.values(dateCounts);
+  const actMax = d3.max(actVals);
+  const actScale = d3.scaleQuantize().domain([1, Math.max(1, actMax)]).range(greens);
+  // Temperature domain (use observed range)
+  const tVals = Object.values(tempByDate).filter(v=>v!=null);
+  const tMin = d3.min(tVals), tMax = d3.max(tVals);
+  const tempScale = (tVals.length ? d3.scaleQuantize().domain([tMin, tMax]).range(greens) : null);
+  // Weather severity domain 0..4
+  const wxScale = d3.scaleLinear().domain([0,4]).range([greens[0], greens[4]]).interpolate(d3.interpolateRgb);
+
+  // Reusable draw
+  function drawCalChart(holder, caption, valueFn, colorFn, tipFn){
+    const cell = 12, gap = 2, leftPad = 28, topPad = 16, monthPad = 12;
+    // number of weeks
+    const days = Math.floor((end - start)/(24*3600*1000)) + 1;
+    const weeks = Math.ceil(days / 7);
+    const w = leftPad + weeks*(cell+gap) + 6;
+    const h = topPad + monthPad + 7*(cell+gap) + 6;
+
+    const svg = holder.append('svg').attr('width', w).attr('height', h);
+    const g = svg.append('g').attr('transform', `translate(${leftPad},${topPad + monthPad})`);
+
+    // Month labels
+    const monthFmt = new Intl.DateTimeFormat('sv-SE', { month: 'short' });
+    const monthCols = new Map(); // col -> label
+    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
+      if (d.getDate() === 1){
+        const col = Math.floor(idx/7);
+        monthCols.set(col, monthFmt.format(d));
+      }
+    }
+    monthCols.forEach((lab, col)=>{
+      svg.append('text').attr('class','cal-month').attr('x', leftPad + col*(cell+gap)).attr('y', topPad+8).text(lab);
+    });
+
+    // Y labels: Mon, Wed, Fri
+    const yNames = ['Mon','','Wed','','Fri','',''];
+    yNames.forEach((lab, r)=>{
+      if (!lab) return;
+      svg.append('text').attr('class','cal-ylabel').attr('x', 4).attr('y', topPad + monthPad + r*(cell+gap) + cell*0.75).text(lab);
+    });
+
+    // Cells
+    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
+      const col = Math.floor(idx/7);
+      const row = (d.getDay()+6)%7; // Mon=0
+      const ds = d.toISOString().slice(0,10);
+      const v = valueFn(ds);
+      const fill = (v==null) ? '#f3f4f8' : colorFn(v);
+
+      g.append('rect')
+        .attr('class', 'cal-cell')
+        .attr('x', col*(cell+gap)).attr('y', row*(cell+gap))
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill)
+        .append('title')
+        .text(tipFn(ds, v));
+    }
+
+    // Caption + legend
+    holder.append('div').attr('class','cal-caption').text(caption);
+    const legend = holder.append('div').attr('class','cal-legend');
+    legend.append('span').text('Less');
+    greens.forEach(c => legend.append('span').attr('class','swatch').style('background', c));
+    legend.append('span').text('More');
+  }
+
+  // Card container
+  const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
+  card.append('div').attr('class','cal-title').text('Activity & Weather (calendar style)');
+
+  // Blocks
+  const block1 = card.append('div').attr('class','cal-block');
+  drawCalChart(
+    block1,
+    'Test activity (count of software tests per date)',
+    d => dateCounts[d] || null,
+    v => actScale(v),
+    (d,v) => v==null ? `${d}: no test` : `${d}: ${v} test${v===1?'':'s'}`
+  );
+
+  const block2 = card.append('div').attr('class','cal-block');
+  drawCalChart(
+    block2,
+    'Temperature (Göteborg, 10–14) — avg of tmin/tmax (°C)',
+    d => (d in tempByDate ? tempByDate[d] : null),
+    v => tempScale ? tempScale(v) : '#f3f4f8',
+    (d,v) => {
+      const w = wx[d];
+      if (v==null || !w) return `${d}: no data`;
+      return `${d}: ${v}°C (avg), range ${w.tmin}°–${w.tmax}°, ${w.text}`;
+    }
+  );
+
+  const block3 = card.append('div').attr('class','cal-block');
+  drawCalChart(
+    block3,
+    'Weather condition severity (Göteborg, 10–14)',
+    d => (d in sevByDate ? sevByDate[d] : null),
+    v => v==null ? '#f3f4f8' : wxScale(v),
+    (d,v) => {
+      const w = wx[d];
+      if (!w || v==null) return `${d}: no data`;
+      return `${d}: ${w.text}`;
+    }
+  );
 }
 
 /* ==================== KPI × Software matrix (CC-only) ==================== */
@@ -1027,10 +1194,11 @@ function renderCharts(parsedFull){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
-  renderSummary(container, parsed);                 // 1) Summary card (now with Weather column)
-  renderCCMatrix(container, parsed);               // 2) CC-only matrix card
-  renderNonCCPlusLatestCCMatrix(container, parsed);// 3) Non-CC + latest CC matrix card
-  renderSoftwareCards(container, parsed);          // 4) Per-software cards
+  renderSummary(container, parsed);                 // 1) Summary card
+  renderCalendarTrio(container, parsed);           // 2) NEW calendar trio card
+  renderCCMatrix(container, parsed);               // 3) CC-only matrix card
+  renderNonCCPlusLatestCCMatrix(container, parsed);// 4) Non-CC + latest CC matrix card
+  renderSoftwareCards(container, parsed);          // 5) Per-software cards
 }
 
 /* ==================== Loader (CSV + release notes + weather) ==================== */
