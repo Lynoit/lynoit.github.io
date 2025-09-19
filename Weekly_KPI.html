@@ -64,6 +64,11 @@
     .matrix-table td.num{ text-align:right; white-space:nowrap; }
     .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
 
+    /* Calendar trio: 3-column layout + titles */
+.cal-grid{ display:grid; grid-template-columns:repeat(3,minmax(220px,1fr)); gap:12px; align-items:start; }
+@media (max-width: 980px){ .cal-grid{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); } }
+.cal-col-title{ font-weight:600; font-size:12px; color:#555; margin:2px 0 6px; text-align:left; }
+
     /* ===== Calendar trio card ===== */
     .cal-title{ font-weight:700; font-size:16px; text-align:center; margin:4px 0 10px; }
     .cal-block{ margin:8px 6px 14px; }
@@ -614,7 +619,7 @@ function renderSummary(container, parsed){
   legend.attr('height', 20 + boxH + 28 + 6);
 }
 
-/* ==================== NEW: Activity/Temperature/Weather calendar trio ==================== */
+/* ==================== Activity/Temperature/Weather calendar trio ==================== */
 function renderCalendarTrio(container, parsed){
   // Collect date → counts / temp / weather severity
   const sw = parsed.software || [];
@@ -641,7 +646,7 @@ function renderCalendarTrio(container, parsed){
   const wdEnd = (end.getDay()+6)%7;
   end.setDate(end.getDate() + (6 - wdEnd));
 
-  // Build value maps
+  // Weather-derived maps
   const wx = parsed.weatherByDate || {};
   const tempByDate = {};
   const sevByDate = {};
@@ -658,7 +663,7 @@ function renderCalendarTrio(container, parsed){
   // Activity domain
   const actVals = Object.values(dateCounts);
   const actMax = d3.max(actVals);
-  const actScale = d3.scaleQuantize().domain([1, Math.max(1, actMax)]).range(greens);
+  const actScale = d3.scaleQuantize().domain([1, Math.max(1, actMax || 1)]).range(greens);
   // Temperature domain (use observed range)
   const tVals = Object.values(tempByDate).filter(v=>v!=null);
   const tMin = d3.min(tVals), tMax = d3.max(tVals);
@@ -667,8 +672,12 @@ function renderCalendarTrio(container, parsed){
   const wxScale = d3.scaleLinear().domain([0,4]).range([greens[0], greens[4]]).interpolate(d3.interpolateRgb);
 
   // Reusable draw
-  function drawCalChart(holder, caption, valueFn, colorFn, tipFn){
-    const cell = 12, gap = 2, leftPad = 28, topPad = 16, monthPad = 12;
+  function drawCalChart(holder, caption, valueFn, colorFn, tipFn, opts={}){
+    const showWeekdays = opts.showWeekdays ?? true;
+    const cell = 12, gap = 2, leftPad = showWeekdays ? 28 : 8, topPad = 16, monthPad = 12;
+
+    holder.append('div').attr('class','cal-col-title').text(caption);
+
     // number of weeks
     const days = Math.floor((end - start)/(24*3600*1000)) + 1;
     const weeks = Math.ceil(days / 7);
@@ -691,12 +700,18 @@ function renderCalendarTrio(container, parsed){
       svg.append('text').attr('class','cal-month').attr('x', leftPad + col*(cell+gap)).attr('y', topPad+8).text(lab);
     });
 
-    // Y labels: Mon, Wed, Fri
-    const yNames = ['Mon','','Wed','','Fri','',''];
-    yNames.forEach((lab, r)=>{
-      if (!lab) return;
-      svg.append('text').attr('class','cal-ylabel').attr('x', 4).attr('y', topPad + monthPad + r*(cell+gap) + cell*0.75).text(lab);
-    });
+    // Y labels only if requested (Mon, Wed, Fri)
+    if (showWeekdays){
+      const yNames = ['Mon','','Wed','','Fri','',''];
+      yNames.forEach((lab, r)=>{
+        if (!lab) return;
+        svg.append('text')
+          .attr('class','cal-ylabel')
+          .attr('x', 4)
+          .attr('y', topPad + monthPad + r*(cell+gap) + cell*0.75)
+          .text(lab);
+      });
+    }
 
     // Cells
     for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
@@ -715,31 +730,31 @@ function renderCalendarTrio(container, parsed){
         .text(tipFn(ds, v));
     }
 
-    // Caption + legend
-    holder.append('div').attr('class','cal-caption').text(caption);
+    // Legend
     const legend = holder.append('div').attr('class','cal-legend');
     legend.append('span').text('Less');
     greens.forEach(c => legend.append('span').attr('class','swatch').style('background', c));
     legend.append('span').text('More');
   }
 
-  // Card container
+  // Parent card + 3-column grid
   const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
   card.append('div').attr('class','cal-title').text('Activity & Weather (calendar style)');
+  const grid = card.append('div').attr('class','cal-grid');
 
-  // Blocks
-  const block1 = card.append('div').attr('class','cal-block');
+  // 1) Test activity (with weekdays)
   drawCalChart(
-    block1,
+    grid.append('div'),
     'Test activity (count of software tests per date)',
     d => dateCounts[d] || null,
     v => actScale(v),
-    (d,v) => v==null ? `${d}: no test` : `${d}: ${v} test${v===1?'':'s'}`
+    (d,v) => v==null ? `${d}: no test` : `${d}: ${v} test${v===1?'':'s'}`,
+    { showWeekdays: true }
   );
 
-  const block2 = card.append('div').attr('class','cal-block');
+  // 2) Temperature (no weekdays)
   drawCalChart(
-    block2,
+    grid.append('div'),
     'Temperature (Göteborg, 10–14) — avg of tmin/tmax (°C)',
     d => (d in tempByDate ? tempByDate[d] : null),
     v => tempScale ? tempScale(v) : '#f3f4f8',
@@ -747,12 +762,13 @@ function renderCalendarTrio(container, parsed){
       const w = wx[d];
       if (v==null || !w) return `${d}: no data`;
       return `${d}: ${v}°C (avg), range ${w.tmin}°–${w.tmax}°, ${w.text}`;
-    }
+    },
+    { showWeekdays: false }
   );
 
-  const block3 = card.append('div').attr('class','cal-block');
+  // 3) Weather severity (no weekdays)
   drawCalChart(
-    block3,
+    grid.append('div'),
     'Weather condition severity (Göteborg, 10–14)',
     d => (d in sevByDate ? sevByDate[d] : null),
     v => v==null ? '#f3f4f8' : wxScale(v),
@@ -760,7 +776,8 @@ function renderCalendarTrio(container, parsed){
       const w = wx[d];
       if (!w || v==null) return `${d}: no data`;
       return `${d}: ${w.text}`;
-    }
+    },
+    { showWeekdays: false }
   );
 }
 
