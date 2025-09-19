@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACC Approach Simulator — PID Gap Control (Fixed Charts)</title>
+<title>ACC Approach Simulator — IDM Controller (No external libs)</title>
 <style>
   :root{
     --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6;
-    --accent:#5aa7ff; --ok:#18a558; --warn:#ffcc00; --bad:#ff5252;
+    --accent:#5aa7ff; --ok:#18a558; --bad:#ff5252;
     --grid:16px; --card-radius:18px;
   }
   html,body{margin:0; background:var(--bg); color:var(--ink); font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
@@ -17,15 +17,14 @@
   .card .bd{padding:14px 16px}
   .row{display:grid; grid-template-columns: 1fr 120px; gap:10px; align-items:center; margin:8px 0}
   .row small{color:var(--muted)}
-  input[type="number"]{width:120px; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0c1020; color:var(--ink)}
-  select{padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0c1020; color:var(--ink)}
+  input, select {width:120px; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0c1020; color:var(--ink)}
   button{appearance:none; border:0; background:var(--accent); color:#041021; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer}
   button.ghost{background:transparent; color:var(--ink); border:1px solid rgba(255,255,255,.15)}
   .btnrow{display:flex; gap:10px; flex-wrap:wrap; margin-top:6px}
   table{width:100%; border-collapse:collapse; font-size:14px}
   th,td{padding:10px 8px; border-bottom:1px solid rgba(255,255,255,.08); text-align:right}
   th:first-child, td:first-child{text-align:left}
-  th{color:#cfd6ff; font-weight:600; background:rgba(255,255,255,.03); position:sticky; top:0}
+  th{color:#cfd6ff; font-weight:600; background:rgba(255,255,255,.03)}
   .tag{display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600}
   .tag.ok{background:rgba(24,165,88,.18); color:#7ff2a8; border:1px solid rgba(24,165,88,.35)}
   .tag.bad{background:rgba(255,82,82,.14); color:#ff9d9d; border:1px solid rgba(255,82,82,.35)}
@@ -47,68 +46,58 @@
   .tick{position:absolute; bottom:0; width:1px; height:12px; background:#8fa6ff55}
   .tiny{font-size:12px; color:var(--muted)}
   .charts{display:grid; grid-template-columns: 1fr; gap:12px; margin-top:12px}
-  /* Force dark canvas even if a global CSS overrides it */
-  canvas{background:#0d1224 !important; border:1px solid rgba(255,255,255,.06); border-radius:12px}
+  canvas{background:#0d1224; border:1px solid rgba(255,255,255,.06); border-radius:12px; display:block; width:100%; height:150px}
 </style>
 </head>
 <body>
   <div class="wrap">
-    <!-- Controls -->
+    <!-- Inputs -->
     <div class="card">
       <div class="hd">Inputs</div>
       <div class="bd">
         <div class="row">
-          <label>Initial detection distance (m)<br><small>Distance to slower vehicle at t=0</small></label>
+          <label>Initial detection distance (m)<br><small>Gap at t=0</small></label>
           <input id="inpStartDist" type="number" min="0" step="10" value="300" />
         </div>
         <div class="row">
-          <label>Ego set speed (km/h)</label>
+          <label>Ego set speed v₀ (km/h)</label>
           <input id="inpVset" type="number" min="0" step="1" value="180" />
         </div>
         <div class="row">
-          <label>Minimum time gap T (s)</label>
+          <label>Time gap T (s)</label>
           <input id="inpTgap" type="number" min="0" step="0.1" value="1" />
         </div>
         <div class="row">
-          <label>Max brake decel (m/s²)</label>
+          <label>Standstill gap s₀ (m)</label>
+          <input id="inpS0" type="number" min="0" step="0.1" value="2" />
+        </div>
+        <div class="row">
+          <label>Max accel a (m/s²)</label>
+          <input id="inpAmaxAccel" type="number" min="0.1" step="0.1" value="2" />
+        </div>
+        <div class="row">
+          <label>Comfort brake b (m/s²)</label>
+          <input id="inpBcomfort" type="number" min="0.1" step="0.1" value="2.5" />
+        </div>
+        <div class="row">
+          <label>Hard brake limit (m/s²)</label>
           <input id="inpAmaxBrake" type="number" min="0.1" step="0.1" value="5" />
         </div>
         <div class="row">
-          <label>Max accel (m/s²)</label>
-          <input id="inpAmaxAccel" type="number" min="0.1" step="0.1" value="2" />
-        </div>
-
-        <div class="row">
-          <label>PID k<sub>p</sub> (m/s² per m)</label>
-          <input id="inpKp" type="number" step="0.01" value="0.08" />
-        </div>
-        <div class="row">
-          <label>PID k<sub>d</sub> (m/s² per m/s)</label>
-          <input id="inpKd" type="number" step="0.01" value="0.9" />
-        </div>
-        <div class="row">
-          <label>PID k<sub>i</sub> (m/s³)</label>
-          <input id="inpKi" type="number" step="0.001" value="0.02" />
-        </div>
-
-        <div class="row">
-          <label>Slower vehicle (km/h) for sim</label>
+          <label>Lead speed for sim (km/h)</label>
           <select id="selLead">
             <option>60</option><option>70</option><option>80</option><option selected>90</option>
             <option>100</option><option>110</option><option>120</option><option>130</option>
             <option>140</option><option>150</option>
           </select>
         </div>
-
         <div class="btnrow">
           <button id="btnCompute">Compute Table</button>
-          <button class="ghost" id="btnReset">Reset Defaults</button>
+          <button class="ghost" id="btnReset">Reset</button>
         </div>
-
         <p class="meta" style="margin-top:8px">
-          Required detection distance (worst-case constant brake):<br>
-          <code>D<sub>req</sub> = T · v<sub>lead</sub> + 0.5 · (Δv)² / a<sub>brake,max</sub></code>,
-          Δv in m/s.
+          Detection distance (worst-case constant brake):<br>
+          <code>D<sub>req</sub> = T·v<sub>lead</sub> + (Δv)² / (2 a<sub>brake,max</sub>)</code>.
         </p>
       </div>
     </div>
@@ -116,14 +105,14 @@
     <!-- Results + Simulation -->
     <div class="card">
       <div class="hd">Results & Simulation</div>
-      <div class="bd" id="results">
-        <div style="overflow:auto; max-height:240px; border:1px solid rgba(255,255,255,.08); border-radius:12px">
+      <div class="bd">
+        <div style="overflow:auto; max-height:220px; border:1px solid rgba(255,255,255,.08); border-radius:12px">
           <table id="tbl">
             <thead>
               <tr>
                 <th>Slower vehicle speed (km/h)</th>
                 <th>Required detection distance D<sub>req</sub> (m)</th>
-                <th>Meets current initial distance?</th>
+                <th>Meets initial distance?</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -157,77 +146,70 @@
           </div>
 
           <div class="charts">
-            <canvas id="accChart" height="140" style="display:block;"></canvas>
-            <canvas id="spdChart" height="140" style="display:block;"></canvas>
+            <canvas id="accCanvas" width="800" height="150"></canvas>
+            <canvas id="spdCanvas" width="800" height="150"></canvas>
           </div>
 
           <div id="status" class="tiny" style="margin-top:8px"></div>
-          <div class="tiny" style="margin-top:6px">
-            Controller: PID on gap error with relative-speed damping; saturations applied.
-          </div>
         </div>
       </div>
     </div>
   </div>
-
-<!-- Chart.js -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
 <script>
 (function(){
   const speedsKph = [60,70,80,90,100,110,120,130,140,150];
 
   // UI
-  const inpStartDist = document.getElementById('inpStartDist');
-  const inpVset      = document.getElementById('inpVset');
-  const inpTgap      = document.getElementById('inpTgap');
-  const inpAmaxBrake = document.getElementById('inpAmaxBrake');
-  const inpAmaxAccel = document.getElementById('inpAmaxAccel');
-  const inpKp        = document.getElementById('inpKp');
-  const inpKd        = document.getElementById('inpKd');
-  const inpKi        = document.getElementById('inpKi');
-  const selLead      = document.getElementById('selLead');
+  const q = id => document.getElementById(id);
+  const inpStartDist = q('inpStartDist');
+  const inpVset      = q('inpVset');
+  const inpTgap      = q('inpTgap');
+  const inpS0        = q('inpS0');
+  const inpAmaxAccel = q('inpAmaxAccel');
+  const inpBcomfort  = q('inpBcomfort');
+  const inpAmaxBrake = q('inpAmaxBrake');
+  const selLead      = q('selLead');
+  const btnCompute   = q('btnCompute');
+  const btnReset     = q('btnReset');
 
-  const btnCompute   = document.getElementById('btnCompute');
-  const btnReset     = document.getElementById('btnReset');
+  const tblBody = document.querySelector('#tbl tbody');
 
-  const tblBody      = document.querySelector('#tbl tbody');
+  const lane   = q('lane');
+  const leadEl = q('lead');
+  const egoEl  = q('ego');
+  const ruler  = q('ruler');
 
-  // Sim elements
-  const lane   = document.getElementById('lane');
-  const leadEl = document.getElementById('lead');
-  const egoEl  = document.getElementById('ego');
-  const ruler  = document.getElementById('ruler');
+  const pillGap   = q('pillGap');
+  const pillTGap  = q('pillTGap');
+  const pillVego  = q('pillVego');
+  const pillVlead = q('pillVlead');
+  const pillA     = q('pillA');
+  const statusEl  = q('status');
 
-  const pillGap   = document.getElementById('pillGap');
-  const pillTGap  = document.getElementById('pillTGap');
-  const pillVego  = document.getElementById('pillVego');
-  const pillVlead = document.getElementById('pillVlead');
-  const pillA     = document.getElementById('pillA');
-  const statusEl  = document.getElementById('status');
+  const btnStart  = q('btnStart');
+  const btnPause  = q('btnPause');
+  const btnStep   = q('btnStep');
+  const btnRestart= q('btnRestart');
+  const inpSimSpeed = q('inpSimSpeed');
 
-  const btnStart  = document.getElementById('btnStart');
-  const btnPause  = document.getElementById('btnPause');
-  const btnStep   = document.getElementById('btnStep');
-  const btnRestart= document.getElementById('btnRestart');
-  const inpSimSpeed = document.getElementById('inpSimSpeed');
-
-  // Charts
-  let accChart, spdChart;
+  // Canvases
+  const accCv = q('accCanvas'), accCtx = accCv.getContext('2d');
+  const spdCv = q('spdCanvas'), spdCtx = spdCv.getContext('2d');
 
   // Helpers
   const kph2mps = v => v * (1000/3600);
   const mps2kph = v => v * 3.6;
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
-  function fmt(n,d=1){ return Number(n).toFixed(d); }
+  const fmt = (n,d=1)=>Number(n).toFixed(d);
 
-  // Required distance
-  function requiredDistance(vSet_kph, vLead_kph, T_sec, a_brake){
+  // Required distance formula
+  function requiredDistance(vSet_kph, vLead_kph, T, a_brake){
     const vEgo  = kph2mps(vSet_kph);
     const vLead = kph2mps(vLead_kph);
-    if (vEgo <= vLead) return T_sec * vLead;
+    if (vEgo <= vLead) return T * vLead;
     const dv = vEgo - vLead;
-    return T_sec * vLead + 0.5 * (dv*dv) / a_brake;
+    return T * vLead + 0.5 * (dv*dv) / a_brake;
   }
 
   function rebuildTable(){
@@ -250,67 +232,97 @@
     });
   }
 
-  // --- Simulation state ---
+  // Simulation state using IDM
   let sim = {
     vLead_kph: Number(selLead.value),
-    vSet_kph: Number(inpVset.value),
+    v0_kph: Number(inpVset.value),          // desired free-flow speed
     T: Number(inpTgap.value),
+    s0: Number(inpS0.value),
+    aMax: Number(inpAmaxAccel.value),
+    bComfort: Number(inpBcomfort.value),
     aBrakeMax: Number(inpAmaxBrake.value),
-    aAccelMax: Number(inpAmaxAccel.value),
-    startGap: Number(inpStartDist.value),
-    kp: Number(inpKp.value),
-    kd: Number(inpKd.value),
-    ki: Number(inpKi.value),
 
+    startGap: Number(inpStartDist.value),
+
+    // dynamic
     t: 0,
     xGap: 0,
     vEgo: 0,
     vLead: 0,
     aEgo: 0,
-    iErr: 0,
     running: false,
     raf: null,
 
-    // plotting data as {x, y}
-    accPts: [{x:0, y:0}],
-    spdPts: [{x:0, y:0}],
+    // history
+    histT: [],
+    histA: [],
+    histV: []
   };
 
   function resetSim(fromInputs=true){
     if (fromInputs){
       sim.vLead_kph = Number(selLead.value);
-      sim.vSet_kph  = Number(inpVset.value);
+      sim.v0_kph    = Number(inpVset.value);
       sim.T         = Number(inpTgap.value);
+      sim.s0        = Number(inpS0.value);
+      sim.aMax      = Number(inpAmaxAccel.value);
+      sim.bComfort  = Number(inpBcomfort.value);
       sim.aBrakeMax = Number(inpAmaxBrake.value);
-      sim.aAccelMax = Number(inpAmaxAccel.value);
       sim.startGap  = Number(inpStartDist.value);
-      sim.kp        = Number(inpKp.value);
-      sim.kd        = Number(inpKd.value);
-      sim.ki        = Number(inpKi.value);
     }
     sim.vLead = kph2mps(sim.vLead_kph);
-    sim.vEgo  = kph2mps(sim.vSet_kph);
-    sim.t = 0;
+    sim.vEgo  = kph2mps(sim.v0_kph); // start at set speed
     sim.xGap = sim.startGap;
-    sim.aEgo = 0;
-    sim.iErr = 0;
+    sim.t = 0; sim.aEgo = 0;
     sim.running = false;
     if (sim.raf){ cancelAnimationFrame(sim.raf); sim.raf=null; }
+    sim.histT = [0]; sim.histA = [0]; sim.histV = [mps2kph(sim.vEgo)];
+    layoutCars(); drawRuler(); updatePills(); updateStatus();
+    drawPlots();
+  }
 
-    sim.accPts = [{x:0, y:0}];
-    sim.spdPts = [{x:0, y: mps2kph(sim.vEgo)}];
+  // IDM controller
+  function idmAcceleration(){
+    const v = sim.vEgo;
+    const v0 = kph2mps(sim.v0_kph);
+    const s = Math.max(sim.xGap, 0.1);
+    const dv = v - sim.vLead; // positive if ego faster
+    const a = sim.aMax;
+    const b = sim.bComfort;
+    const delta = 4;
+
+    const sStar = sim.s0 + sim.T * v + (v * dv) / (2 * Math.sqrt(a*b));
+    let acc = a * (1 - Math.pow(v / Math.max(v0,0.1), delta) - Math.pow(sStar / s, 2));
+
+    // clamp to hard limits
+    acc = clamp(acc, -sim.aBrakeMax, sim.aMax);
+    return acc;
+  }
+
+  // Integration step
+  function step(dt){
+    // Update acceleration from IDM
+    sim.aEgo = idmAcceleration();
+
+    // Integrate ego speed and gap
+    sim.vEgo = Math.max(0, sim.vEgo + sim.aEgo*dt);
+    sim.xGap += (sim.vLead - sim.vEgo) * dt;
+    sim.xGap = Math.max(sim.xGap, 0.01); // avoid negative
+    sim.t += dt;
 
     layoutCars();
     updatePills();
-    drawRuler();
-    updateStatus();
 
-    accChart.data.datasets[0].data = sim.accPts;
-    spdChart.data.datasets[0].data = sim.spdPts;
-    accChart.update('none'); spdChart.update('none');
+    // Save history (cap length)
+    sim.histT.push(sim.t);
+    sim.histA.push(sim.aEgo);
+    sim.histV.push(mps2kph(sim.vEgo));
+    if (sim.histT.length > 4000){ sim.histT.shift(); sim.histA.shift(); sim.histV.shift(); }
+
+    drawPlots();
   }
 
-  // Layout & scaling (same lane)
+  // Birdview layout
   function m2px(m){
     const visibleM = Math.max(sim.xGap, 200) + 60;
     const pad = 24;
@@ -321,8 +333,8 @@
     const pad = 24, midY = lane.clientHeight/2 - 12, laneWidth = lane.clientWidth;
     const leadX = laneWidth - pad - 60;
     const egoX  = leadX - m2px(sim.xGap);
-    leadEl.style.left = `${leadX}px`; leadEl.style.top  = `${midY}px`;
-    egoEl.style.left  = `${egoX}px`;  egoEl.style.top   = `${midY}px`;
+    leadEl.style.left = `${leadX}px`; leadEl.style.top = `${midY}px`;
+    egoEl.style.left  = `${egoX}px`;  egoEl.style.top  = `${midY}px`;
   }
   function drawRuler(){
     ruler.innerHTML = '';
@@ -335,12 +347,8 @@
       tick.style.left = `${px}px`;
       const lab = document.createElement('div');
       lab.textContent = `${Math.round(x)} m`;
-      lab.style.position='absolute';
-      lab.style.left='0';
-      lab.style.bottom='12px';
-      lab.style.transform='translateX(-50%)';
-      lab.style.color='#9fb2ff';
-      lab.style.fontSize='11px';
+      lab.style.position='absolute'; lab.style.left='0'; lab.style.bottom='12px';
+      lab.style.transform='translateX(-50%)'; lab.style.color='#9fb2ff'; lab.style.fontSize='11px';
       tick.appendChild(lab);
       ruler.appendChild(tick);
     }
@@ -363,57 +371,72 @@
     pillA.textContent    = `Ego a: ${fmt(sim.aEgo,2)} m/s²`;
   }
   function updateStatus(){
-    const Dreq = requiredDistance(sim.vSet_kph, sim.vLead_kph, sim.T, sim.aBrakeMax);
-    const ok = sim.startGap >= Dreq;
+    const Dreq = requiredDistance(Number(inpVset.value), Number(selLead.value), Number(inpTgap.value), Number(inpAmaxBrake.value));
+    const ok = Number(inpStartDist.value) >= Dreq;
     statusEl.style.color = ok ? '#7ff2a8' : '#ff9d9d';
     statusEl.textContent = ok ?
-      `OK: Initial ${fmt(sim.startGap,1)} m ≥ required ${fmt(Dreq,1)} m`
-      : `NOT OK: Initial ${fmt(sim.startGap,1)} m < required ${fmt(Dreq,1)} m`;
+      `OK: Initial ${fmt(Number(inpStartDist.value),1)} m ≥ required ${fmt(Dreq,1)} m`
+      : `NOT OK: Initial ${fmt(Number(inpStartDist.value),1)} m < required ${fmt(Dreq,1)} m`;
   }
 
-  // Controller
-  function controller(dt){
-    const s_des = sim.T * sim.vEgo;
-    const e = sim.xGap - s_des;
-    const relV = sim.vLead - sim.vEgo;
-    sim.iErr += e * dt;
-    sim.iErr = clamp(sim.iErr, -200, 200);
+  // Simple canvas line plotter
+  function drawLine(ctx, xs, ys, xmin, xmax, ymin, ymax, labelY){
+    const w = ctx.canvas.width, h = ctx.canvas.height;
+    ctx.clearRect(0,0,w,h);
+    // axes
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(40,10); ctx.lineTo(40,h-24); ctx.lineTo(w-8,h-24); ctx.stroke();
+    ctx.fillStyle = '#cfe'; ctx.font = '12px system-ui';
+    ctx.fillText(labelY, 8, 14);
 
-    const vSet = kph2mps(sim.vSet_kph);
-    const a_set = 0.3 * (vSet - sim.vEgo);
+    if (xs.length<2) return;
 
-    let a_cmd = sim.kp*e + sim.kd*relV + sim.ki*sim.iErr + a_set;
-    sim.aEgo = clamp(a_cmd, -sim.aBrakeMax, sim.aAccelMax);
-  }
+    const toX = t => 40 + ( (t - xmin) / (xmax - xmin) ) * (w-48);
+    const toY = y => (h-24) - ( (y - ymin) / (ymax - ymin) ) * (h-34);
 
-  // Step
-  function step(dt){
-    controller(dt);
-    sim.vEgo = Math.max(0, sim.vEgo + sim.aEgo*dt);
-    sim.xGap += (sim.vLead - sim.vEgo) * dt;
-    sim.t += dt;
-
-    if (sim.xGap < 0.2){
-      sim.xGap = 0.2;
-      sim.running = false;
-      statusEl.style.color = '#ff9d9d';
-      statusEl.textContent = 'Simulation stopped: collision imminent.';
+    // grid ticks
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    const xticks = 5, yticks = 4;
+    for(let i=0;i<=xticks;i++){
+      const tx = xmin + i*(xmax-xmin)/xticks;
+      const px = toX(tx);
+      ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(px,10); ctx.lineTo(px,h-24); ctx.stroke();
+      ctx.fillStyle='#9fd'; ctx.fillText(tx.toFixed(1), px-8, h-6);
+    }
+    for(let j=0;j<=yticks;j++){
+      const ty = ymin + j*(ymax-ymin)/yticks;
+      const py = toY(ty);
+      ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(40,py); ctx.lineTo(w-8,py); ctx.stroke();
+      ctx.fillStyle='#9fd'; ctx.fillText(ty.toFixed(1), 6, py+4);
     }
 
-    layoutCars();
-    updatePills();
+    // line
+    ctx.strokeStyle = '#7fb3ff';
+    ctx.lineWidth = 2; ctx.beginPath();
+    for(let i=0;i<xs.length;i++){
+      const px = toX(xs[i]), py = toY(ys[i]);
+      if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  }
 
-    // Append point objects for linear x-axis
-    sim.accPts.push({x: sim.t, y: sim.aEgo});
-    sim.spdPts.push({x: sim.t, y: mps2kph(sim.vEgo)});
+  function drawPlots(){
+    // Determine window for x (last 20 s visible)
+    const xs = sim.histT;
+    const xmin = Math.max(0, xs[xs.length-1] - 20);
+    const xmax = Math.max(5, xs[xs.length-1]);
 
-    // Keep buffers bounded
-    if (sim.accPts.length > 4000){ sim.accPts.splice(0, sim.accPts.length - 4000); }
-    if (sim.spdPts.length > 4000){ sim.spdPts.splice(0, sim.spdPts.length - 4000); }
+    // Acc plot bounds
+    const aMin = -Number(inpAmaxBrake.value) * 1.1, aMax = Number(inpAmaxAccel.value) * 1.1;
+    drawLine(accCtx, xs, sim.histA, xmin, xmax, aMin, aMax, 'a (m/s²)');
+
+    // Speed plot bounds (km/h)
+    const vMax = Math.max(Number(inpVset.value), Number(selLead.value)) * 1.1;
+    drawLine(spdCtx, xs, sim.histV, xmin, xmax, 0, vMax, 'v (km/h)');
   }
 
   // Loop
-  let frameCount = 0;
   function loop(lastTs){
     sim.raf = requestAnimationFrame((ts)=>{
       if (!lastTs) lastTs = ts;
@@ -422,78 +445,28 @@
       dt = clamp(dt, 0, 0.05);
       step(dt);
       lastTs = ts;
-
-      // Throttle chart redraws to ~30 fps
-      if (++frameCount % 2 === 0){
-        accChart.data.datasets[0].data = sim.accPts;
-        spdChart.data.datasets[0].data = sim.spdPts;
-        accChart.update('none');
-        spdChart.update('none');
-      }
-
       if (sim.running) loop(lastTs);
     });
   }
 
   // Events
-  document.getElementById('btnCompute').addEventListener('click', ()=>{ rebuildTable(); resetSim(true); });
-  document.getElementById('btnReset').addEventListener('click', ()=>{
-    inpStartDist.value = 300;
-    inpVset.value = 180;
-    inpTgap.value = 1;
-    inpAmaxBrake.value = 5;
-    inpAmaxAccel.value = 2;
-    inpKp.value = 0.08;
-    inpKd.value = 0.9;
-    inpKi.value = 0.02;
-    selLead.value = "90";
+  btnCompute.addEventListener('click', ()=>{ rebuildTable(); updateStatus(); });
+  btnReset.addEventListener('click', ()=>{
+    inpStartDist.value = 300; inpVset.value = 180; inpTgap.value = 1; inpS0.value = 2;
+    inpAmaxAccel.value = 2; inpBcomfort.value = 2.5; inpAmaxBrake.value = 5; selLead.value = '90';
     rebuildTable(); resetSim(true);
   });
+  [inpStartDist, inpVset, inpTgap, inpS0, inpAmaxAccel, inpBcomfort, inpAmaxBrake, selLead]
+    .forEach(el => el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
 
-  [inpStartDist, inpVset, inpTgap, inpAmaxBrake, inpAmaxAccel, inpKp, inpKd, inpKi, selLead]
-    .forEach(el=> el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
+  q('btnStart').addEventListener('click', ()=>{ if (!sim.running){ sim.running = true; loop(); } });
+  q('btnPause').addEventListener('click', ()=>{ sim.running = false; });
+  q('btnStep').addEventListener('click', ()=>{ sim.running = false; step(0.1); });
+  q('btnRestart').addEventListener('click', ()=>{ resetSim(true); });
 
-  document.getElementById('btnStart').addEventListener('click', ()=>{
-    if (!sim.running){ sim.running = true; loop(); }
-  });
-  document.getElementById('btnPause').addEventListener('click', ()=>{ sim.running = false; });
-  document.getElementById('btnStep').addEventListener('click', ()=>{ sim.running = false; step(0.1);
-    accChart.data.datasets[0].data = sim.accPts; spdChart.data.datasets[0].data = sim.spdPts;
-    accChart.update('none'); spdChart.update('none'); });
-  document.getElementById('btnRestart').addEventListener('click', ()=>{ resetSim(true); });
-
-  window.addEventListener('resize', ()=>{ layoutCars(); drawRuler(); });
-
-  // Init charts (x axis = linear time, feed {x,y} points)
-  function makeCharts(){
-    const commonOpts = {
-      responsive: true,
-      animation: false,
-      maintainAspectRatio: false,
-      normalized: true,
-      parsing: false,                // we supply {x,y}
-      plugins:{ legend:{display:false}, tooltip:{mode:'nearest', intersect:false} },
-      scales:{
-        x:{ type:'linear', title:{display:true, text:'Time (s)'}, grid:{color:'rgba(255,255,255,0.07)'}, ticks:{color:'#cfe'} },
-        y:{ grid:{color:'rgba(255,255,255,0.07)'}, ticks:{color:'#cfe'} }
-      }
-    };
-    const accCtx = document.getElementById('accChart').getContext('2d');
-    accChart = new Chart(accCtx, {
-      type:'line',
-      data:{ datasets:[{ label:'a_ego', data:[], borderWidth:2, pointRadius:0 }]},
-      options:{ ...commonOpts, scales:{...commonOpts.scales, y:{...commonOpts.scales.y, title:{display:true, text:'Acceleration (m/s²)'}}}}
-    });
-    const spdCtx = document.getElementById('spdChart').getContext('2d');
-    spdChart = new Chart(spdCtx, {
-      type:'line',
-      data:{ datasets:[{ label:'v_ego', data:[], borderWidth:2, pointRadius:0 }]},
-      options:{ ...commonOpts, scales:{...commonOpts.scales, y:{...commonOpts.scales.y, title:{display:true, text:'Speed (km/h)'}}}}
-    });
-  }
+  window.addEventListener('resize', ()=>{ layoutCars(); drawRuler(); drawPlots(); });
 
   // Boot
-  makeCharts();
   rebuildTable();
   resetSim(true);
 })();
