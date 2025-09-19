@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KPI Scoring Visualizer</title>
+  <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
+
+    /* Top tabs */
+    .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
+    .tabs{ display:flex; gap:8px; padding:10px 16px; }
+    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; background:#e9ecf5; }
+    .tab.active{ background:#111; color:#fff; }
+
+    .container{padding:16px;}
+    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
+    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
+    .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
+    .summary-card{ grid-column: 1 / -1; display:grid; justify-content:center; }
+    .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
+    .small{font-size:12px; color:#666}
+    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
+
+    /* Summary table */
+    .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
+    .summary-table{ display:inline-table; margin:6px 0 10px; table-layout:auto; border-collapse:separate; border-spacing:0; font-size:12px; }
+    .summary-table th, .summary-table td{ padding:8px 10px; text-align:left; border-bottom:1px solid #eef1fb; vertical-align:middle; }
+    .summary-table th{ background:#f6f7fb; font-weight:700; }
+    .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+    .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
+
+    /* Column alignment via classes (robust to column count changes) */
+    .summary-table th.col-date,    .summary-table td.col-date    { text-align:center; white-space:nowrap; }
+    .summary-table th.col-weather, .summary-table td.col-weather { text-align:center; white-space:nowrap; }
+    .summary-table th.col-avg,     .summary-table td.col-avg     { text-align:right;  white-space:nowrap; }
+    .summary-table th.col-score,   .summary-table td.col-score   { text-align:center; white-space:nowrap; width:1%; }
+    .summary-table th.col-rating,  .summary-table td.col-rating  { white-space:nowrap; }
+    .summary-table th.col-note,    .summary-table td.col-note    { text-align:center; white-space:nowrap; }
+
+    /* Modal */
+    .modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:1000; }
+    .modal{ background:#fff; color:#111; border-radius:12px; box-shadow:0 20px 70px rgba(0,0,0,.35);
+      width:min(760px, 92vw); max-height:80vh; overflow:auto; padding:16px 16px 8px; }
+    .modal header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .modal h2{ margin:0; font-size:16px; }
+    .modal .close{ background:#e9ecf5; color:#111; border:none; border-radius:10px; padding:6px 10px; cursor:pointer; }
+    .modal .content{ margin:12px 2px 8px; }
+    .modal .content ul{ margin:0; padding-left:18px; }
+    .modal .content li{ margin:6px 0; line-height:1.35; }
+    .modal .empty{ color:#666; font-style:italic; }
+
+    /* KPI × Software matrix tables */
+    .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
+    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 6px; }
+    .matrix-sub{ font-weight:600; font-size:12px; color:#555; margin:0 0 10px; text-align:center; }
+    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; margin:0 auto; }
+    .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
+    .matrix-table th{ background:#f6f7fb; position:sticky; top:0; z-index:1; }
+    .matrix-table th.software{ text-align:center; white-space:nowrap; }
+    .matrix-table td.num{ text-align:right; white-space:nowrap; }
+    .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="tabs">
+      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
+      <button class="tab" data-mode="external" aria-pressed="false">External</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="panel">
+      <div id="charts" class="charts"></div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header>
+        <h2 id="modalTitle">Release Note</h2>
+        <button class="close" id="modalClose" aria-label="Close">Close</button>
+      </header>
+      <div class="content" id="modalContent"></div>
+    </div>
+  </div>
+
+<script>
+/* ==================== CONFIG ==================== */
+const DATA_CSV = 'weekly_kpi_data.csv';
+const RN_FETCH_MODE = 'auto';                 // 'auto' | 'manifest' | 'off'
+const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
+const SCORE_THRESHOLDS = null;                // set to 10 numbers to hard-fix thresholds
+const LS_KEY = 'segRadarKPI.thresholds';
+
+const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
+let CURRENT_MODE = MODES.INTERNAL;
+
+const EXTERNAL_WHITELIST = [
+  'ACC — False brake',
+  'LCC — False brake',
+  'TSI — Wrong speed detected',
+  'LDW — False positive',
+  'LDP — False positive',
+  'ELKA — False positive'
+];
+
+/* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
+const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
+const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
+const H_START = 10, H_END = 14; // inclusive hours (local time)
+const WMO_TEXT = {
+  0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
+  45:'Fog',48:'Depositing rime fog',
+  51:'Drizzle: light',53:'Drizzle: moderate',55:'Drizzle: dense',
+  56:'Freezing drizzle: light',57:'Freezing drizzle: dense',
+  61:'Rain: slight',63:'Rain: moderate',65:'Rain: heavy',
+  66:'Freezing rain: light',67:'Freezing rain: heavy',
+  71:'Snow fall: slight',73:'Snow fall: moderate',75:'Snow fall: heavy',
+  77:'Snow grains',
+  80:'Rain showers: slight',81:'Rain showers: moderate',82:'Rain showers: violent',
+  85:'Snow showers: slight',86:'Snow showers: heavy',
+  95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
+};
+
+/* Unified font sizes for score-boxes */
+const SCORE_FONTS = { number:13, label:11, range:10 };
+
+/* ==================== Helpers & Scoring ==================== */
+const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
+const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+let LAST_RAW = '';
+let LAST_PARSED = null; // parsed + merged release notes + weather
+
+const fmtCell = v =>
+  (v==null || Number.isNaN(v)) ? '—'
+  : (Number.isInteger(v) ? String(v)
+  : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
+
+function parseThresholds(str){
+  const arr = (str||'').split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number);
+  if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
+  for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; }
+  return arr;
+}
+function getThresholds(){
+  if (Array.isArray(SCORE_THRESHOLDS) && SCORE_THRESHOLDS.length===10) return SCORE_THRESHOLDS;
+  const ls = localStorage.getItem(LS_KEY);
+  let t = parseThresholds(ls);
+  if (t) return t;
+  return parseThresholds(DEFAULT_THRESH_STR);
+}
+const fmtNum = n => Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(2)));
+function scoreRangeLabels(T){
+  const lab = [];
+  for (let i=0;i<9;i++) lab.push('≥ ' + fmtNum(T[i]));
+  lab.push('< ' + fmtNum(T[8]) + (T[9] === 0 ? ' (incl. 0)' : ''));
+  return lab;
+}
+function scoreFromAvg(a, thresholds){
+  if (a == null || Number.isNaN(a)) return null;
+  if (a === 0) return 10;
+  for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
+  return 10;
+}
+function colorFor(v, tgt, max){
+  if (v == null || Number.isNaN(v)) return null;
+  if (v === 1000) return BLACK;
+  if (v <= tgt) return GREEN;
+  if (v < (max + 1)) return YELLOW;
+  return RED;
+}
+function parseNumber(x){
+  if (x==null) return null;
+  const t = (""+x).trim();
+  if (!t) return null;
+  const v = Number(t.replace(',', '.'));
+  return isNaN(v) ? null : v;
+}
+function detectDelimiter(text){
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return '\t';
+  const cand = ['\t', ',', ';'];
+  let best = '\t', bestCnt = 0;
+  for (const d of cand){ const c = lines[0].split(d).length; if (c > bestCnt){ bestCnt = c; best = d; } }
+  return best;
+}
+function splitFuncKpi(s){
+  if (!s) return {func:'', kpi:''};
+  const em = s.split('—'); if (em.length>=2) return {func:em[0].trim(), kpi:em.slice(1).join('—').trim()};
+  const dash = s.split(' - '); if (dash.length>=2) return {func:dash[0].trim(), kpi:dash.slice(1).join(' - ').trim()};
+  const sp = s.split(' ');
+  return {func: sp[0]||'', kpi: s};
+}
+function normalizeHeader(h){
+  if(!h) return '';
+  return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
+}
+
+/* ==================== Parse table (dates + inline "Release note") ==================== */
+function parseTable(text){
+  const tryParse = (d)=> text
+    .split(/\r?\n/)
+    .filter(r => r.trim().length > 0)
+    .map(r => r.split(d));
+
+  let delim = detectDelimiter(text);
+  let rows = tryParse(delim);
+  if (!rows.length) return { headers: [], entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+
+  let headers = rows[0].map(h => h.trim());
+
+  // Auto-insert missing first header cell if needed
+  if (rows.length > 1 && rows[1].length === headers.length + 1) {
+    const firstCell = (rows[1][0] || '').trim();
+    const looksText = parseNumber(firstCell) == null;
+    const normH = headers.map(normalizeHeader);
+    const hasTarget = normH.includes('target');
+    const hasMax = normH.includes('max allowed') || normH.includes('maxallowed');
+    if (looksText && hasTarget && hasMax) headers = ['Function — KPI', ...headers];
+  }
+
+  let norm = headers.map(normalizeHeader);
+  let idxTarget = norm.findIndex(h => h === 'target');
+  let idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
+
+  if (idxTarget < 0 || idxMax < 0) {
+    alert("Missing required columns: 'Target' and 'Max allowed'.\nHeaders seen: " + headers.join(', '));
+    return { headers, entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+  }
+
+  // Software columns (strip optional [YYYY-MM-DD])
+  const swCols = [];
+  for (let i = idxMax + 1; i < headers.length; i++) {
+    const raw = headers[i].trim();
+    const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const date = m ? m[1] : null;
+    const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
+    const basePretty = baseNoDate.replace('(TO)', ' (TO)');
+    const countPrev = swCols.filter(s => s.base === basePretty).length;
+    const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
+    swCols.push({ idx: i, base: basePretty, label, date });
+  }
+
+  const releaseNotes = {};
+  const entries = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length === 0) continue;
+
+    const firstCellRaw = (row[0] || '').trim();
+    const firstNorm = normalizeHeader(firstCellRaw);
+
+    if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
+      // Inline style: collect notes in matching software columns (bullets separated by literal \n)
+      for (const sw of swCols) {
+        const raw = (row[sw.idx] ?? '').trim();
+        if (raw) {
+          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
+        }
+      }
+      continue;
+    }
+
+    const { func, kpi } = splitFuncKpi(firstCellRaw);
+    const target = parseNumber(row[idxTarget]);
+    const max    = parseNumber(row[idxMax]);
+
+    const values = {};
+    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
+
+    entries.push({ func, kpi, target, max, values });
+  }
+
+  return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
+}
+
+/* ==================== Modal ==================== */
+function openReleaseNoteModal(title, noteText){
+  const backdrop = document.getElementById('modalBackdrop');
+  const titleEl  = document.getElementById('modalTitle');
+  const content  = document.getElementById('modalContent');
+
+  titleEl.textContent = title || 'Release Note';
+
+  const parts = String(noteText || '')
+    .replace(/\r/g,'')
+    .split(/\\n|\n/g)
+    .map(s => s.trim())
+    .filter(s => s.length);
+
+  content.innerHTML = '';
+  if (parts.length === 0){
+    const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'No release note provided.'; content.appendChild(p);
+  } else {
+    const ul = document.createElement('ul');
+    parts.forEach(t => { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+    content.appendChild(ul);
+  }
+
+  backdrop.style.display = 'flex';
+  backdrop.setAttribute('aria-hidden', 'false');
+}
+function closeReleaseNoteModal(){
+  const backdrop = document.getElementById('modalBackdrop');
+  backdrop.style.display = 'none';
+  backdrop.setAttribute('aria-hidden', 'true');
+}
+document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeReleaseNoteModal(); });
+document.getElementById('modalBackdrop').addEventListener('click', (e)=>{ if (e.target.id === 'modalBackdrop') closeReleaseNoteModal(); });
+document.getElementById('modalClose').addEventListener('click', closeReleaseNoteModal);
+
+/* ==================== Release-note files ==================== */
+async function readTextOrNull(path){
+  try{
+    const res = await fetch(encodeURI(path) + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    return await res.text();
+  }catch{ return null; }
+}
+async function loadReleaseNotesManifest(){
+  if (RN_FETCH_MODE !== 'manifest') return null;
+  try{
+    const res = await fetch(RN_MANIFEST_FILE + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    const list = await res.json();
+    if (!Array.isArray(list)) return null;
+    return new Set(list.map(s => String(s).toLowerCase()));
+  }catch{ return null; }
+}
+async function loadReleaseNotesFromFiles(swCols, manifestSet){
+  if (RN_FETCH_MODE === 'off') return {};
+  const out = {};
+  for (const sw of (swCols||[])){
+    const file = `${sw.base}.csv`;
+    if (RN_FETCH_MODE === 'manifest' && (!manifestSet || !manifestSet.has(file.toLowerCase()))) continue;
+    const txt = await readTextOrNull(file);
+    if (!txt) continue;
+    const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
+    if (lines.length){
+      const joined = lines.join('\n');
+      out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
+    }
+  }
+  return out;
+}
+
+/* ==================== Weather (hourly, aggregate 10–14 local) ==================== */
+function loadWeatherCache(){
+  try{ return JSON.parse(localStorage.getItem(WEATHER_LS_KEY) || '{}'); }catch{ return {}; }
+}
+function saveWeatherCache(cache){
+  try{ localStorage.setItem(WEATHER_LS_KEY, JSON.stringify(cache)); }catch{}
+}
+function isoMinMax(dates){
+  let min = null, max = null;
+  dates.forEach(d=>{
+    if (!d) return;
+    if (!min || d < min) min = d;
+    if (!max || d > max) max = d;
+  });
+  return {min, max};
+}
+function mode(arr){
+  const m = new Map();
+  let bestVal = null, bestCnt = -1;
+  for (const v of arr){
+    const c = (m.get(v)||0)+1; m.set(v,c);
+    if (c > bestCnt || (c===bestCnt && v>bestVal)){ bestCnt=c; bestVal=v; } // tie-break: higher code
+  }
+  return bestVal;
+}
+/** Fetch hourly weather and aggregate 10–14 (local) into tmax/tmin + representative condition text per date */
+async function fetchWeatherForDates(dates){
+  const wanted = Array.from(new Set(dates.filter(Boolean)));
+  const cache = loadWeatherCache();
+  const missing = wanted.filter(d => !cache[d]);
+
+  if (!missing.length) return cache;
+
+  const {min, max} = isoMinMax(missing);
+  if (!min || !max) return cache;
+
+  // Hourly series in local time; slice hours 10..14
+  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}`+
+              `&start_date=${min}&end_date=${max}`+
+              `&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
+
+  try{
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) throw new Error('weather HTTP ' + res.status);
+    const data = await res.json();
+    const times = (data.hourly && data.hourly.time) || [];
+    const temps = (data.hourly && data.hourly.temperature_2m) || [];
+    const codes = (data.hourly && data.hourly.weathercode) || [];
+
+    // Group by YYYY-MM-DD → collect indices with hour in [10..14]
+    const byDate = new Map();
+    for (let i=0;i<times.length;i++){
+      const t = times[i];
+      const day = t.slice(0,10);
+      const hr = parseInt(t.slice(11,13),10);
+      if (hr >= H_START && hr <= H_END){
+        if (!byDate.has(day)) byDate.set(day, []);
+        byDate.get(day).push(i);
+      }
+    }
+
+    // Aggregate into cache
+    for (const [day, idxs] of byDate.entries()){
+      if (!idxs.length) continue;
+      const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
+      const cvals = idxs.map(i => codes[i]).filter(v => v!=null);
+      if (!tvals.length){
+        cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' };
+        continue;
+      }
+      const tmax = Math.round(Math.max(...tvals));
+      const tmin = Math.round(Math.min(...tvals));
+      const c = cvals.length ? mode(cvals) : null;
+      cache[day] = {
+        tmax, tmin,
+        code: c,
+        text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—',
+        hours:'10–14'
+      };
+    }
+    saveWeatherCache(cache);
+  }catch(e){
+    console.warn('Weather fetch failed:', e);
+  }
+  return cache;
+}
+
+/* ==================== Filtering for External view ==================== */
+function filterEntriesForMode(parsed){
+  if (CURRENT_MODE === MODES.INTERNAL) return parsed;
+  const wl = new Set(EXTERNAL_WHITELIST.map(s => s.trim().toLowerCase()));
+  const filteredEntries = parsed.entries.filter(e => wl.has(`${e.func} — ${e.kpi}`.toLowerCase()));
+  return { ...parsed, entries: filteredEntries };
+}
+
+/* ==================== Summary (with Weather column) ==================== */
+function renderSummary(container, parsed){
+  const T = getThresholds();
+  if (!parsed || !parsed.software || !parsed.software.length) return;
+
+  const rowsRaw = parsed.software.map(sw => {
+    const swLabel = sw.label;
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
+    const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
+    const score = avg == null ? null : scoreFromAvg(avg, T);
+    const note = (parsed.releaseNotes?.[swLabel] || '').trim();
+    const wx = (sw.date && parsed.weatherByDate) ? parsed.weatherByDate[sw.date] : null;
+    return {
+      sw: swLabel,
+      date: sw.date,
+      avg,
+      score,
+      text: score == null ? 'n/a' : scoreText[score - 1],
+      note,
+      //weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text} (10–14)` : '—'
+      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
+    };
+  });
+
+  const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
+
+  const rows = rowsRaw.slice().sort((a,b)=>{
+    const sa = a.score ?? -1, sb = b.score ?? -1;
+    if (sa !== sb) return sb - sa;
+    if (a.avg == null && b.avg == null) return 0;
+    if (a.avg == null) return 1;
+    if (b.avg == null) return -1;
+    return a.avg - b.avg;
+  });
+
+  const chartData = rows.filter(r => r.avg != null);
+  if (!rows.length) return;
+
+  const card = container.append('div').attr('class', 'chart-card summary-card');
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
+  card.append('div').attr('class','summary-title').text(modeLabel);
+
+  // Table header (with Weather column)
+  const table = card.append('table').attr('class', 'summary-table');
+  const theadRow = table.append('thead').append('tr');
+  theadRow.append('th').attr('class','col-sw').text('Software');
+  theadRow.append('th').attr('class','col-date').text('Test date');
+  theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg, 10–14)');
+  theadRow.append('th').attr('class','col-avg').text('Average events per 1000 km');
+  theadRow.append('th').attr('class','col-score').text('Score');
+  theadRow.append('th').attr('class','col-rating').text('Rating');
+  if (hasAnyNotes) theadRow.append('th').attr('class','col-note').text('Release Note');
+
+  const tbody = table.append('tbody');
+  rows.forEach(r=>{
+    const tr = tbody.append('tr');
+    tr.append('td').attr('class','col-sw').append('span').attr('class','software-cell').attr('title', r.sw).text(r.sw);
+    tr.append('td').attr('class','col-date').text(r.date || '—');
+    tr.append('td').attr('class','col-weather').text(r.date ? r.weatherText : '—');
+    tr.append('td').attr('class','col-avg').text(r.avg == null ? '—' : r.avg.toFixed(1));
+
+    const scoreCell = tr.append('td').attr('class','col-score');
+    if (r.score == null){
+      scoreCell.text('—'); tr.append('td').attr('class','col-rating').text('n/a');
+    } else {
+      scoreCell.append('span')
+        .attr('class', 'summary-chip')
+        .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`)
+        .text(r.score);
+      tr.append('td').attr('class','col-rating').text(r.text);
+    }
+
+    if (hasAnyNotes){
+      const tdNote = tr.append('td').attr('class','col-note');
+      if (r.note){
+        const a = tdNote.append('span').attr('class','link').text('Release Note');
+        a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
+      } else {
+        tdNote.text('');
+      }
+    }
+  });
+
+  // Bars
+  if (chartData.length){
+    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
+
+    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
+      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px');
+      let max = 0;
+      texts.forEach(t=>{
+        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
+        max = Math.max(max, node.getComputedTextLength());
+      });
+      tmp.remove(); return max;
+    };
+
+    const labelW = Math.ceil(measureTextWidth(yLabels, 12, 400));
+    const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+    const cw = Math.max(560, Math.min(1000, cardW));
+    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14));
+    const rightPad = 16, topPad = 8, barH = 22, gap = 6;
+
+    const svg = card.append('svg').style('display','block').style('margin','0 auto 6px').attr('width', cw).attr('height', topPad + chartData.length * (barH + gap) + 34);
+    const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
+
+    const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
+    const x = d3.scaleLinear().domain([0, Math.max(1, maxAvg)]).range([leftPad, cw - rightPad]);
+
+    chartData.forEach((d,i)=> d._y = i * (barH + gap));
+
+    g.selectAll('.ylabel').data(chartData).enter().append('text')
+      .attr('class','ylabel').attr('x', leftPad - 10).attr('y', d => d._y + barH/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .text((d,i)=> yLabels[i]).append('title').text(d => d.sw);
+
+    g.selectAll('.bar').data(chartData).enter().append('rect')
+      .attr('class','bar').attr('x', x(0)).attr('y', d => d._y)
+      .attr('width', d => x(Math.min(1000, d.avg)) - x(0)).attr('height', barH)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
+      .append('title').text(d => `Score ${d.score}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+
+    g.selectAll('.val').data(chartData).enter().append('text')
+      .attr('x', d => x(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH/2)
+      .attr('dominant-baseline','middle').attr('font-size', 12).text(d => d.avg.toFixed(1));
+
+    const axisY = chartData.length * (barH + gap);
+    g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
+  }
+
+  // Scoring legend
+  const ranges = scoreRangeLabels(getThresholds());
+  const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
+  const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
+  const bandMargin = 20, boxH = 42;
+  const barW = legCw - bandMargin*2, boxW = barW / 10;
+  legend.append('text').attr('x', 12).attr('y', 12).attr('font-size', 12).attr('fill', '#555').text('Scoring legend (1 = worst, 10 = best)');
+  for (let i=0;i<10;i++){
+    const x0 = bandMargin + i*boxW; const gBox = legend.append('g');
+    gBox.append('rect').attr('x', x0).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[i]).attr('stroke', '#111').attr('stroke-width', 0.4)
+      .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i+1);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
+    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
+  }
+  legend.attr('height', 20 + boxH + 28 + 6);
+}
+
+/* ==================== KPI × Software matrix (CC-only) ==================== */
+function renderCCMatrix(container, parsed){
+  const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
+  if (!ccSoftwares.length) return;
+
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
+
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('CC-only');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  thead.append('th').attr('class','target').text('Target');
+  ccSoftwares.forEach(sw => thead.append('th').attr('class','software').text(sw.label));
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(name);
+    const e = entryByName.get(name);
+    tr.append('td').attr('class','target').text(fmtCell(e ? e.target : null));
+    ccSoftwares.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      const td = tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`);
+      td.text(fmtCell(v));
+    });
+  });
+}
+
+/* ==================== KPI × Software matrix (Non-CC + latest CC) ==================== */
+function renderNonCCPlusLatestCCMatrix(container, parsed){
+  const allSoft = parsed.software || [];
+  const ccList = allSoft.filter(sw => /^CC\b/i.test(sw.base));
+  const nonCC  = allSoft.filter(sw => !/^CC\b/i.test(sw.base));
+
+  if (!nonCC.length && !ccList.length) return;
+
+  let latestCC = null;
+  if (ccList.length){
+     const withDate = ccList.filter(sw => !!sw.date);
+     if (withDate.length){
+       latestCC = withDate.reduce((best, cur)=> (best==null || cur.date > best.date) ? cur : best, null);
+     } else {
+       latestCC = ccList[ccList.length - 1];
+     }
+  }
+
+  const cols = nonCC.slice();
+  if (latestCC) cols.push({...latestCC, _latest:true});
+  if (!cols.length) return;
+
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
+
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('Non-CC + latest CC');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  thead.append('th').attr('class','target').text('Target');
+  cols.forEach(sw => {
+    const th = thead.append('th').attr('class','software');
+    th.text(sw._latest ? `${sw.label} (latest CC)` : sw.label);
+  });
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(name);
+    const e = entryByName.get(name);
+    tr.append('td').attr('class','target').text(fmtCell(e ? e.target : null));
+    cols.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      const td = tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`);
+      td.text(fmtCell(v));
+    });
+  });
+}
+
+/* ==================== Per-software cards ==================== */
+function renderSoftwareCards(container, parsed){
+  const T = getThresholds();
+  (parsed.software||[]).forEach(sw=>{
+    const swLabel = sw.label;
+    const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
+    if (!hasAny) return;
+
+    const card = container.append('div').attr('class','chart-card');
+    const w = 680;
+
+    // Download PNG
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const svg = card.select('svg').node();
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type:'image/svg+xml'}));
+      const img = new Image();
+      const W = svg.viewBox?.baseVal?.width || svg.width.baseVal.value;
+      const H = svg.viewBox?.baseVal?.height || svg.height.baseVal.value;
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+        ctx.drawImage(img,0,0);
+        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    });
+
+    // Layout constants
+    const radarH = 540;
+    const scoreTopPad = 28;
+    const rowH = 22, tableHeaderH = 24, tableSidePad = 12, colGap = 8;
+    const TITLE_Y = 26, TITLE_TO_RADAR_GAP = 50, RADAR_PAD_LEFT = 30, MIN_SIDE_MARGIN = 8, FUNC_LABEL_OFFSET = 16;
+
+    const svg = card.append('svg').attr('width', w);
+
+    // Title
+    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
+    svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
+
+    // Legend (top-right)
+    const legendItems = [
+      {label:'Green = Good',  color: GREEN},
+      {label:'Yellow = OK',   color: YELLOW},
+      {label:'Red = NOK',     color: RED},
+      {label:'Black = No function', color: BLACK},
+    ];
+    const legendG = svg.append('g').attr('class','legend');
+    legendItems.forEach((it, i)=>{
+      const y = 8 + i*18 + 12;
+      legendG.append('rect').attr('x',8).attr('y',y-7).attr('width',12).attr('height',12).attr('fill',it.color);
+      legendG.append('text').attr('x',26).attr('y',y).attr('dominant-baseline','middle').attr('font-size',12).text(it.label);
+    });
+    const pad = 8;
+    const lb = legendG.node().getBBox();
+    const legW = Math.ceil(lb.width) + pad*2;
+    const legH = Math.ceil(lb.height) + pad*2;
+    legendG.insert('rect',':first-child')
+      .attr('x', lb.x - pad).attr('y', lb.y - pad)
+      .attr('rx',8).attr('ry',8)
+      .attr('width', legW).attr('height', legH)
+      .attr('fill','#ffffff').attr('fill-opacity',0.85);
+    legendG.attr('transform', `translate(${w - legW - 12}, 32)`);
+
+    // Radar geometry
+    const leftAreaWidth = w - legW - 12;
+    const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
+    const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
+    const centerX = RADAR_PAD_LEFT + availableW / 2;
+    const rMaxCandidateW = Math.max(10, availableW/2 - FUNC_LABEL_OFFSET);
+    const rMaxCandidateH = (radarH - radarTop) - 16;
+    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH));
+    const centerY = radarTop + rMax;
+
+    const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
+
+    const functions = [];
+    parsed.entries.forEach(e=>{
+      const v = e.values[swLabel];
+      if (v!=null && !Number.isNaN(v) && !functions.includes(e.func)) functions.push(e.func);
+    });
+    if (!functions.length){
+      card.append('div').attr('class','small').text('No KPI values for this software.');
+      return;
+    }
+
+    const linearPortion = 0.55;
+    const rLinear = rMax * linearPortion;
+    const logMin = 10, logMax = 1000;
+    const logDen = Math.log10(logMax) - Math.log10(logMin);
+    function toR(v){
+      if (v==null || Number.isNaN(v)) return null;
+      if (v <= 0) return 0;
+      const vv = Math.min(v, logMax);
+      if (vv < logMin) return (vv / logMin) * rLinear;
+      return rLinear + ((Math.log10(vv) - Math.log10(logMin)) / logDen) * (rMax - rLinear);
+    }
+
+    const ringGrid = [1,2,3,4,5,6,7,8,9,10,30,100,300,1000];
+    g.selectAll('.ring').data(ringGrid).enter().append('circle')
+      .attr('r', d=>toR(d)).attr('fill','none').attr('stroke','#999').attr('stroke-opacity',0.22);
+    g.selectAll('.rlabel').data(ringGrid).enter().append('text')
+      .attr('x', 6).attr('y', d=> -toR(d))
+      .attr('dominant-baseline','middle').attr('font-size', 11).attr('fill', '#666')
+      .text(d=>d);
+
+    const axisY = -rMax * 0.70;
+    g.append('text').attr('x', -8).attr('y', axisY).attr('transform', `rotate(-90, 0, ${axisY})`)
+      .attr('text-anchor','end').attr('font-size', 11).text('Number of events');
+
+    const F = functions.length;
+    const wedge = (Math.PI*2) / F;
+    const innerFrac = 0.98;
+    const spread = wedge * innerFrac;
+    const arc = d3.arc();
+
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const end = start + wedge;
+      g.append('path')
+        .attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
+        .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
+      g.append('line')
+        .attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
+        .attr('stroke','#000').attr('stroke-opacity',0.25);
+      const cen = (start + end) / 2;
+      g.append('text')
+        .attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
+        .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
+    });
+
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const center = start + wedge/2;
+      const items = parsed.entries.filter(e=>e.func===f);
+      const K = items.length;
+      const avail = spread * 0.96;
+      const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
+      const placed = [];
+      const minSep = wedge * 0.09;
+      const radBin = rMax * 0.12;
+      const labelAvoid = wedge * 0.18;
+
+      items.forEach((e, i)=>{
+        const v = e.values[swLabel]; if (v==null || Number.isNaN(v)) return;
+        let r = toR(v);
+        let ang = center + baseOffs[i];
+        const isBlack = (v === 1000);
+
+        if (isBlack && Math.abs(ang - center) < labelAvoid){
+          const dir = (ang >= center) ? 1 : -1;
+          ang = center + dir * (labelAvoid + wedge*0.02);
+        }
+        ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+        let tries = 0;
+        while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
+          const dir = (tries % 2 === 0) ? 1 : -1;
+          ang += dir * (minSep * 0.65);
+          ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+          tries++;
+        }
+        if (tries >= 120){ r = Math.min(r + 8, rMax * 0.98); }
+        placed.push({ang, r});
+
+        const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
+        const fill = colorFor(v, e.target, e.max);
+        if (!fill) return;
+
+        g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 7).attr('fill', fill)
+          .append('title').text(`${f} — ${e.kpi}: ${v}`);
+
+        const rLabel = Math.min(r + 18, rMax * 0.98);
+        const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
+        g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+          .attr('font-size', 11).attr('paint-order','stroke').attr('stroke','white').attr('stroke-width',3)
+          .text(e.kpi);
+      });
+    });
+
+    // Table caption
+    const RADAR_TO_TABLE_GAP = 50;
+    const tableCaptionY = centerY + rMax + RADAR_TO_TABLE_GAP;
+    svg.append('text').attr('x', tableSidePad).attr('y', tableCaptionY).attr('font-size', 12).attr('fill', '#555').text('KPI summary per 1000 km');
+
+    const TABLE_CAPTION_GAP = 8;
+    const tableY = tableCaptionY + TABLE_CAPTION_GAP;
+    const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
+
+    // Build table rows
+    const rows = parsed.entries
+      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
+      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
+
+    // Measure widths
+    function measureMaxWidth(texts, fontSize=11, fontWeight=400){
+      const tmp = d3.select('body').append('svg')
+        .attr('width',0).attr('height',0)
+        .style('position','absolute').style('left','-9999px').style('top','-9999px');
+      let max = 0;
+      texts.forEach(t=>{
+        const node = tmp.append('text')
+          .attr('font-size', fontSize)
+          .attr('font-weight', fontWeight)
+          .text(t==null ? '' : String(t))
+          .node();
+        max = Math.max(max, node.getComputedTextLength());
+      });
+      tmp.remove();
+      return max;
+    }
+    const kpiTexts  = rows.map(r=>r.kpi);
+    const funcTexts = rows.map(r=>r.func);
+    const tgtTexts  = rows.map(r=>fmtCell(r.target));
+    const maxTexts  = rows.map(r=>fmtCell(r.max));
+    const evtTexts  = rows.map(r=>fmtCell(r.events));
+    const kpiW  = measureMaxWidth(kpiTexts , 11, 400) + 16;
+    const funcW = Math.max(90, Math.min(180, measureMaxWidth(funcTexts, 11, 400) + 16));
+    let col2W   = Math.max(50, Math.min(120, measureMaxWidth(tgtTexts , 11, 400) + 16));
+    let col3W   = Math.max(60, Math.min(140, measureMaxWidth(maxTexts , 11, 400) + 16));
+    let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16));
+    const x0 = tableSidePad;
+    const x1 = x0 + kpiW + colGap;
+    const x2 = x1 + funcW + colGap;
+    const x3 = x2 + col2W + colGap;
+    const x4 = x3 + col3W + colGap;
+    const tableWUsed = x4 - x0 + col4W;
+
+    tableG.append('rect')
+      .attr('x', 12-4).attr('y', 2)
+      .attr('width', tableWUsed + 8).attr('height', tableHeaderH + rows.length * rowH + 8)
+      .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
+
+    tableG.append('rect')
+      .attr('x', x0).attr('y', 4)
+      .attr('width', tableWUsed).attr('height', tableHeaderH)
+      .attr('rx', 6).attr('ry', 6).attr('fill', '#f6f7fb');
+
+    const hdrYmid = 4 + tableHeaderH/2;
+    tableG.append('text').attr('x', x0+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('KPI');
+    tableG.append('text').attr('x', x1+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Function');
+    tableG.append('text').attr('x', x2 + col2W - 6).attr('y', hdrYmid).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Target');
+
+    const hMax = tableG.append('text').attr('x', x3 + col3W - 6).attr('y', 4 + 8).attr('text-anchor','end').attr('font-size',12).attr('font-weight',700);
+    hMax.append('tspan').text('Max').attr('x', x3 + col3W - 6).attr('dy', 0);
+    hMax.append('tspan').text('allowed').attr('x', x3 + col3W - 6).attr('dy', 12);
+
+    const hEvt = tableG.append('text').attr('x', x4 + col4W - 6).attr('y', 4 + 8).attr('text-anchor','end').attr('font-size',12).attr('font-weight',700);
+    hEvt.append('tspan').text('Number of').attr('x', x4 + col4W - 6).attr('dy', 0);
+    hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
+
+    rows.forEach((r, i)=>{
+      const y = 4 + tableHeaderH + i*rowH;
+      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH).attr('fill', i%2 ? '#fafbff' : '#ffffff');
+
+      tableG.append('text').attr('x', x0+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
+      tableG.append('text').attr('x', x1+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
+      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
+      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
+      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
+    });
+
+    [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
+      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + tableHeaderH).attr('y2', 4 + tableHeaderH + rows.length*rowH).attr('stroke', '#eef1fb');
+    });
+
+    // Scoring band
+    const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
+    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
+
+    const barMargin = 20, boxH2 = 42;
+    const barW = w - barMargin*2;
+    const boxW = barW / 10;
+    const scoreBandY = tableY + (tableHeaderH + rows.length * rowH + 8) + scoreTopPad;
+    const scoreG = svg.append('g').attr('transform', `translate(0, ${scoreBandY})`);
+
+    const caption = (avgEvents==null)
+      ? 'Average per 1000km:  n/a (only "No function" or missing values)'
+      : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
+    scoreG.append('text').attr('x', barMargin).attr('y', 14).attr('font-size', 12).text(caption);
+
+    const ranges = scoreRangeLabels(T);
+    for (let i=0;i<10;i++){
+      const x = barMargin + i*boxW;
+      const isSel = (score === i+1);
+      scoreG.append('rect')
+        .attr('x', x).attr('y', 28)
+        .attr('width', boxW).attr('height', boxH2)
+        .attr('fill', scoreColors[i])
+        .attr('stroke', isSel ? '#000' : '#111')
+        .attr('stroke-width', isSel ? 3 : 0.4)
+        .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
+
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + 14)
+        .attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750)
+        .attr('font-size', SCORE_FONTS.number)
+        .text(i+1);
+
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + 14 + 16)
+        .attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550)
+        .attr('font-size', SCORE_FONTS.label)
+        .text(scoreText[i]);
+
+      scoreG.append('text')
+        .attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14)
+        .attr('text-anchor','middle')
+        .attr('font-size', SCORE_FONTS.range)
+        .text(ranges[i]);
+    }
+
+    const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
+    svg.attr('height', totalHeight);
+  });
+}
+
+/* ==================== Main renderer ==================== */
+function renderCharts(parsedFull){
+  const parsed = filterEntriesForMode(parsedFull);
+  const container = d3.select('#charts').html('');
+  if (!parsed || !parsed.entries || !parsed.entries.length){
+    container.append('div').attr('class','small').text('No data to render.');
+    return;
+  }
+  renderSummary(container, parsed);                 // 1) Summary card (now with Weather column)
+  renderCCMatrix(container, parsed);               // 2) CC-only matrix card
+  renderNonCCPlusLatestCCMatrix(container, parsed);// 3) Non-CC + latest CC matrix card
+  renderSoftwareCards(container, parsed);          // 4) Per-software cards
+}
+
+/* ==================== Loader (CSV + release notes + weather) ==================== */
+async function loadCsvAndRender(){
+  try{
+    const res = await fetch(DATA_CSV + '?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    LAST_RAW = text;
+
+    let parsed = parseTable(text);
+
+    // Release notes (files / optional manifest)
+    const manifestSet = await loadReleaseNotesManifest();
+    const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+
+    // Weather: collect unique dates, fetch archive weather, merge
+    const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
+    const weatherByDate = await fetchWeatherForDates(dates);
+
+    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, weatherByDate };
+
+    LAST_PARSED = parsed;
+    renderCharts(LAST_PARSED);
+  }catch(err){
+    d3.select('#charts').html('');
+    alert(`Could not load "${DATA_CSV}". Make sure it sits next to this HTML and that you're serving over http(s).\n\nError: ${err.message}`);
+  }
+}
+
+/* ==================== Tabs wiring ==================== */
+function updateTabsUI(){
+  document.querySelectorAll('.tab').forEach(btn=>{
+    const on = (btn.dataset.mode === CURRENT_MODE);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const mode = btn.dataset.mode;
+    if (!mode || mode === CURRENT_MODE) return;
+    CURRENT_MODE = mode;
+    updateTabsUI();
+    if (LAST_PARSED) renderCharts(LAST_PARSED);
+  });
+});
+
+/* ==================== Boot ==================== */
+document.addEventListener('DOMContentLoaded', ()=>{
+  updateTabsUI();
+  loadCsvAndRender();
+});
+</script>
+</body>
+</html>
