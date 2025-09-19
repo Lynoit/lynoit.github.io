@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>ACC Approach Simulator — PID Gap Control</title>
+<title>ACC Approach Simulator — PID Gap Control (Fixed Charts)</title>
 <style>
   :root{
     --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6;
@@ -47,7 +47,8 @@
   .tick{position:absolute; bottom:0; width:1px; height:12px; background:#8fa6ff55}
   .tiny{font-size:12px; color:var(--muted)}
   .charts{display:grid; grid-template-columns: 1fr; gap:12px; margin-top:12px}
-  canvas{background:#0d1224; border:1px solid rgba(255,255,255,.06); border-radius:12px}
+  /* Force dark canvas even if a global CSS overrides it */
+  canvas{background:#0d1224 !important; border:1px solid rgba(255,255,255,.06); border-radius:12px}
 </style>
 </head>
 <body>
@@ -156,14 +157,13 @@
           </div>
 
           <div class="charts">
-            <canvas id="accChart" height="120"></canvas>
-            <canvas id="spdChart" height="120"></canvas>
+            <canvas id="accChart" height="140" style="display:block;"></canvas>
+            <canvas id="spdChart" height="140" style="display:block;"></canvas>
           </div>
 
           <div id="status" class="tiny" style="margin-top:8px"></div>
           <div class="tiny" style="margin-top:6px">
             Controller: PID on gap error with relative-speed damping; saturations applied.
-            Stops if collision is imminent or when steady time gap is reached.
           </div>
         </div>
       </div>
@@ -221,7 +221,7 @@
   const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
   function fmt(n,d=1){ return Number(n).toFixed(d); }
 
-  // Required distance (analytical, constant max braking to match lead + T headway)
+  // Required distance
   function requiredDistance(vSet_kph, vLead_kph, T_sec, a_brake){
     const vEgo  = kph2mps(vSet_kph);
     const vLead = kph2mps(vLead_kph);
@@ -250,7 +250,7 @@
     });
   }
 
-  // --- Simulation state (ACC with PID gap control) ---
+  // --- Simulation state ---
   let sim = {
     vLead_kph: Number(selLead.value),
     vSet_kph: Number(inpVset.value),
@@ -262,20 +262,18 @@
     kd: Number(inpKd.value),
     ki: Number(inpKi.value),
 
-    // dynamic
     t: 0,
-    xGap: 0,      // meters gap (lead ahead of ego)
-    vEgo: 0,      // m/s
-    vLead: 0,     // m/s
-    aEgo: 0,      // m/s² command/saturated
-    iErr: 0,      // integral term
+    xGap: 0,
+    vEgo: 0,
+    vLead: 0,
+    aEgo: 0,
+    iErr: 0,
     running: false,
     raf: null,
 
-    // plotting buffers
-    times: [],
-    accs: [],
-    vegs: [],
+    // plotting data as {x, y}
+    accPts: [{x:0, y:0}],
+    spdPts: [{x:0, y:0}],
   };
 
   function resetSim(fromInputs=true){
@@ -291,7 +289,7 @@
       sim.ki        = Number(inpKi.value);
     }
     sim.vLead = kph2mps(sim.vLead_kph);
-    sim.vEgo  = kph2mps(sim.vSet_kph); // start at set speed
+    sim.vEgo  = kph2mps(sim.vSet_kph);
     sim.t = 0;
     sim.xGap = sim.startGap;
     sim.aEgo = 0;
@@ -299,43 +297,32 @@
     sim.running = false;
     if (sim.raf){ cancelAnimationFrame(sim.raf); sim.raf=null; }
 
-    // reset plots
-    sim.times = [0];
-    sim.accs  = [0];
-    sim.vegs  = [sim.vEgo];
+    sim.accPts = [{x:0, y:0}];
+    sim.spdPts = [{x:0, y: mps2kph(sim.vEgo)}];
 
     layoutCars();
     updatePills();
     drawRuler();
     updateStatus();
 
-    accChart.data.labels = [...sim.times];
-    accChart.data.datasets[0].data = [...sim.accs];
-    accChart.update('none');
-
-    spdChart.data.labels = [...sim.times];
-    spdChart.data.datasets[0].data = sim.vegs.map(mps2kph);
-    spdChart.update('none');
+    accChart.data.datasets[0].data = sim.accPts;
+    spdChart.data.datasets[0].data = sim.spdPts;
+    accChart.update('none'); spdChart.update('none');
   }
 
   // Layout & scaling (same lane)
   function m2px(m){
-    const visibleM = Math.max(sim.xGap, 200) + 60; // meters
+    const visibleM = Math.max(sim.xGap, 200) + 60;
     const pad = 24;
     const w = lane.clientWidth - pad*2;
     return (m / visibleM) * w;
   }
   function layoutCars(){
-    const pad = 24;
-    const midY = lane.clientHeight/2 - 12; // center lane for both
-    const laneWidth = lane.clientWidth;
-    const leadX = laneWidth - pad - 60; // right reference
+    const pad = 24, midY = lane.clientHeight/2 - 12, laneWidth = lane.clientWidth;
+    const leadX = laneWidth - pad - 60;
     const egoX  = leadX - m2px(sim.xGap);
-
-    leadEl.style.left = `${leadX}px`;
-    leadEl.style.top  = `${midY}px`;
-    egoEl.style.left  = `${egoX}px`;
-    egoEl.style.top   = `${midY}px`;
+    leadEl.style.left = `${leadX}px`; leadEl.style.top  = `${midY}px`;
+    egoEl.style.left  = `${egoX}px`;  egoEl.style.top   = `${midY}px`;
   }
   function drawRuler(){
     ruler.innerHTML = '';
@@ -384,41 +371,28 @@
       : `NOT OK: Initial ${fmt(sim.startGap,1)} m < required ${fmt(Dreq,1)} m`;
   }
 
-  // Controller step
+  // Controller
   function controller(dt){
-    // Desired gap s_des = s0 + T * v_ego (s0≈0)
     const s_des = sim.T * sim.vEgo;
-    const e = sim.xGap - s_des;                      // (m)
-    const relV = sim.vLead - sim.vEgo;               // (m/s)
-    sim.iErr += e * dt;                              // integral
-    // Anti-windup (simple clamp)
+    const e = sim.xGap - s_des;
+    const relV = sim.vLead - sim.vEgo;
+    sim.iErr += e * dt;
     sim.iErr = clamp(sim.iErr, -200, 200);
 
-    // Base speed keeping (toward set speed when no lead influence)
     const vSet = kph2mps(sim.vSet_kph);
-    const a_set = 0.3 * (vSet - sim.vEgo); // gentle push toward set speed
+    const a_set = 0.3 * (vSet - sim.vEgo);
 
-    // PID for gap + relative-speed damping
     let a_cmd = sim.kp*e + sim.kd*relV + sim.ki*sim.iErr + a_set;
-
-    // Saturate
-    a_cmd = clamp(a_cmd, -sim.aBrakeMax, sim.aAccelMax);
-
-    sim.aEgo = a_cmd;
+    sim.aEgo = clamp(a_cmd, -sim.aBrakeMax, sim.aAccelMax);
   }
 
-  // Simulation step (semi-implicit Euler)
+  // Step
   function step(dt){
     controller(dt);
-
-    // Update speeds
     sim.vEgo = Math.max(0, sim.vEgo + sim.aEgo*dt);
-    // Lead keeps constant speed here
-    // Update gap: dx/dt = v_lead - v_ego
     sim.xGap += (sim.vLead - sim.vEgo) * dt;
     sim.t += dt;
 
-    // Collision guard
     if (sim.xGap < 0.2){
       sim.xGap = 0.2;
       sim.running = false;
@@ -426,58 +400,44 @@
       statusEl.textContent = 'Simulation stopped: collision imminent.';
     }
 
-    // Stop if near steady: |e| small and |relV| small for some time
-    // (we’ll do a soft check each frame)
-    const e = sim.xGap - sim.T*sim.vEgo;
-    const relV = Math.abs(sim.vLead - sim.vEgo);
-    if (Math.abs(e) < 0.5 && relV < 0.1 && sim.t > 1){
-      // close enough to steady state headway
-      // keep running so user can watch; no auto-stop here
-    }
-
-    // Layout & UI
     layoutCars();
     updatePills();
 
-    // Append to plots (throttle points to ~100 Hz max)
-    sim.times.push(sim.t);
-    sim.accs.push(sim.aEgo);
-    sim.vegs.push(sim.vEgo);
+    // Append point objects for linear x-axis
+    sim.accPts.push({x: sim.t, y: sim.aEgo});
+    sim.spdPts.push({x: sim.t, y: mps2kph(sim.vEgo)});
 
-    // Keep buffers reasonable
-    if (sim.times.length > 2000){
-      sim.times.shift(); sim.accs.shift(); sim.vegs.shift();
-    }
+    // Keep buffers bounded
+    if (sim.accPts.length > 4000){ sim.accPts.splice(0, sim.accPts.length - 4000); }
+    if (sim.spdPts.length > 4000){ sim.spdPts.splice(0, sim.spdPts.length - 4000); }
   }
 
+  // Loop
+  let frameCount = 0;
   function loop(lastTs){
     sim.raf = requestAnimationFrame((ts)=>{
       if (!lastTs) lastTs = ts;
       const simSpeed = Math.max(0.1, Number(inpSimSpeed.value)||1);
       let dt = (ts - lastTs)/1000 * simSpeed;
-      dt = clamp(dt, 0, 0.05); // clamp to 50 ms
+      dt = clamp(dt, 0, 0.05);
       step(dt);
       lastTs = ts;
 
-      // Update charts every frame (cheap datasets)
-      accChart.data.labels = sim.times;
-      accChart.data.datasets[0].data = sim.accs;
-      accChart.update('none');
-
-      spdChart.data.labels = sim.times;
-      spdChart.data.datasets[0].data = sim.vegs.map(mps2kph);
-      spdChart.update('none');
+      // Throttle chart redraws to ~30 fps
+      if (++frameCount % 2 === 0){
+        accChart.data.datasets[0].data = sim.accPts;
+        spdChart.data.datasets[0].data = sim.spdPts;
+        accChart.update('none');
+        spdChart.update('none');
+      }
 
       if (sim.running) loop(lastTs);
     });
   }
 
   // Events
-  btnCompute.addEventListener('click', ()=>{
-    rebuildTable();
-    resetSim(true);
-  });
-  btnReset.addEventListener('click', ()=>{
+  document.getElementById('btnCompute').addEventListener('click', ()=>{ rebuildTable(); resetSim(true); });
+  document.getElementById('btnReset').addEventListener('click', ()=>{
     inpStartDist.value = 300;
     inpVset.value = 180;
     inpTgap.value = 1;
@@ -487,47 +447,47 @@
     inpKd.value = 0.9;
     inpKi.value = 0.02;
     selLead.value = "90";
-    rebuildTable();
-    resetSim(true);
+    rebuildTable(); resetSim(true);
   });
 
   [inpStartDist, inpVset, inpTgap, inpAmaxBrake, inpAmaxAccel, inpKp, inpKd, inpKi, selLead]
     .forEach(el=> el.addEventListener('change', ()=>{ rebuildTable(); resetSim(true); }));
 
-  btnStart.addEventListener('click', ()=>{
-    if (!sim.running){
-      sim.running = true;
-      loop();
-    }
+  document.getElementById('btnStart').addEventListener('click', ()=>{
+    if (!sim.running){ sim.running = true; loop(); }
   });
-  btnPause.addEventListener('click', ()=>{ sim.running = false; });
-  btnStep.addEventListener('click', ()=>{ sim.running = false; step(0.1); });
-  btnRestart.addEventListener('click', ()=>{ resetSim(true); });
+  document.getElementById('btnPause').addEventListener('click', ()=>{ sim.running = false; });
+  document.getElementById('btnStep').addEventListener('click', ()=>{ sim.running = false; step(0.1);
+    accChart.data.datasets[0].data = sim.accPts; spdChart.data.datasets[0].data = sim.spdPts;
+    accChart.update('none'); spdChart.update('none'); });
+  document.getElementById('btnRestart').addEventListener('click', ()=>{ resetSim(true); });
 
   window.addEventListener('resize', ()=>{ layoutCars(); drawRuler(); });
 
-  // Init charts
+  // Init charts (x axis = linear time, feed {x,y} points)
   function makeCharts(){
     const commonOpts = {
       responsive: true,
       animation: false,
       maintainAspectRatio: false,
+      normalized: true,
+      parsing: false,                // we supply {x,y}
       plugins:{ legend:{display:false}, tooltip:{mode:'nearest', intersect:false} },
       scales:{
-        x:{ title:{display:true, text:'Time (s)'}, grid:{color:'rgba(255,255,255,0.07)'}, ticks:{color:'#cfe'}},
+        x:{ type:'linear', title:{display:true, text:'Time (s)'}, grid:{color:'rgba(255,255,255,0.07)'}, ticks:{color:'#cfe'} },
         y:{ grid:{color:'rgba(255,255,255,0.07)'}, ticks:{color:'#cfe'} }
       }
     };
     const accCtx = document.getElementById('accChart').getContext('2d');
     accChart = new Chart(accCtx, {
       type:'line',
-      data:{ labels:[], datasets:[{ label:'a_ego (m/s²)', data:[], borderWidth:2, pointRadius:0 }]},
+      data:{ datasets:[{ label:'a_ego', data:[], borderWidth:2, pointRadius:0 }]},
       options:{ ...commonOpts, scales:{...commonOpts.scales, y:{...commonOpts.scales.y, title:{display:true, text:'Acceleration (m/s²)'}}}}
     });
     const spdCtx = document.getElementById('spdChart').getContext('2d');
     spdChart = new Chart(spdCtx, {
       type:'line',
-      data:{ labels:[], datasets:[{ label:'v_ego (km/h)', data:[], borderWidth:2, pointRadius:0 }]},
+      data:{ datasets:[{ label:'v_ego', data:[], borderWidth:2, pointRadius:0 }]},
       options:{ ...commonOpts, scales:{...commonOpts.scales, y:{...commonOpts.scales.y, title:{display:true, text:'Speed (km/h)'}}}}
     });
   }
