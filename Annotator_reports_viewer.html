@@ -54,7 +54,7 @@
   <div id="content">
     <h1>Test activity overview</h1>
     <div id="overview" class="overview">
-      <div style="color:#666; margin:6px 0 14px 0;">Aggregated issue counts per day (sessions &lt; 1 km ignored).</div>
+      <div style="color:#666; margin:6px 0 14px 0;">Aggregated issue counts per day (sessions &lt; 1 km ignored; only sessions with &gt; 0 issues).</div>
       <div id="heatmap-host"></div>
 
       <div class="routes-wrap">
@@ -74,10 +74,11 @@
     const CONTAINER = 'csv';
     const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
     const BASE_URL  = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
-    const MIN_KM_FOR_OVERVIEW = 1; // <-- changed to 1 km
+    const MIN_KM_FOR_OVERVIEW = 1;
 
     // ---------- CACHES / HELPERS ----------
     const summaryCache = new Map(); // filename -> { mileageKm, issueCount, loaded:true }
+    const blobMeta = new Map();     // filename -> lastModifiedMs (strict sort)
 
     function cssSafeId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
     function toDateOnly(d){ const t = new Date(d); t.setHours(0,0,0,0); return t; }
@@ -87,9 +88,8 @@
       const R = 6371000;
       const dLat = toRad(lat2 - lat1);
       const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sin2(dLon/2);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
       return 2 * R * Math.asin(Math.sqrt(a));
-      function sin2(x){ x = Math.sin(x); return x*x; }
     }
 
     function computeMileageAndPathFromSampling(sheet) {
@@ -174,19 +174,34 @@
       fetch(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`)
         .then(r => r.text())
         .then(xml => {
-          const doc   = new DOMParser().parseFromString(xml, 'application/xml');
-          const names = Array.from(doc.getElementsByTagName('Name')).map(n => n.textContent);
-          const xlsx  = names.filter(n => n.toLowerCase().endsWith('.xlsx'));
+          const doc = new DOMParser().parseFromString(xml, 'application/xml');
+
+          // Read blobs with their Last-Modified timestamps
+          const blobs = Array.from(doc.getElementsByTagName('Blob')).map(b => {
+            const name = b.getElementsByTagName('Name')[0]?.textContent || '';
+            const lmEl = b.getElementsByTagName('Last-Modified')[0] ||
+                         b.getElementsByTagName('Properties')[0]?.getElementsByTagName('Last-Modified')[0];
+            const lm   = lmEl?.textContent || '';
+            return { name, lastModifiedMs: Date.parse(lm) || 0 };
+          });
+
+          const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
           if (xlsx.length === 0) { showError('No .xlsx files found.'); return; }
 
-          buildSidebar(xlsx);
-          buildOverviewHeatmap(xlsx);
-          buildLatestRoutePreviews(xlsx); // <-- NEW
+          // Cache for strict chronological sorting
+          blobMeta.clear();
+          xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
+
+          const xlsxNames = xlsx.map(b => b.name);
+
+          buildSidebar(xlsxNames);
+          buildOverviewHeatmap(xlsxNames);
+          buildLatestRoutePreviews(xlsxNames); // latest first using blobMeta
         })
         .catch(err => showError('Failed to list blobs: ' + err));
     }
 
-    // ---------- SIDEBAR (with small meta) ----------
+    // ---------- SIDEBAR ----------
     function buildSidebar(files) {
       const sb = document.getElementById('sidebar');
       sb.innerHTML = '';
@@ -255,7 +270,7 @@
 
     // ---------- OVERVIEW HEATMAP ----------
     function buildOverviewHeatmap(files){
-      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions >= 1km)
+      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
       const withDates = files
         .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
         .filter(x => x.m)
@@ -270,11 +285,12 @@
           });
 
           const days = Array.from(byDay.keys()).sort();
+          const host = document.getElementById('heatmap-host');
           if (days.length === 0){
-            document.getElementById('heatmap-host').innerHTML =
-              '<div style="color:#666;">No eligible sessions (≥ 1 km) to show yet.</div>';
+            host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
             return;
           }
+
           const minDate = toDateOnly(days[0]);
           const maxDate = toDateOnly(days[days.length-1]);
 
@@ -377,7 +393,7 @@
       host.appendChild(legend);
     }
 
-    // ---------- LATEST ROUTE PREVIEWS (top 5 ≥ 1 km) ----------
+    // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
     function buildLatestRoutePreviews(files){
       const withDates = files
         .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
@@ -386,10 +402,16 @@
 
       Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
         .then(rows => {
-          // Filter ≥ 1 km, sort by date desc, take 5 newest
+          // Filter (≥ 1 km and > 0 issues), sort strictly by Last-Modified desc, take 10
           const take = rows
             .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
-            .sort((a,b) => b.dayStr.localeCompare(a.dayStr))
+            .sort((a, b) => {
+              const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
+              if (diff !== 0) return diff;
+              const byDateStr = b.dayStr.localeCompare(a.dayStr);
+              if (byDateStr !== 0) return byDateStr;
+              return b.filename.localeCompare(a.filename);
+            })
             .slice(0,10);
 
           if (take.length === 0) return;
@@ -443,7 +465,7 @@
         });
     }
 
-    // ---------- SESSION VIEWER (unchanged core except CSS fix) ----------
+    // ---------- SESSION VIEWER ----------
     function loadFile(filename) {
       const content = document.getElementById('content');
       content.innerHTML = '';
@@ -501,20 +523,22 @@
                   const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
                   issueTableInfo.headerNames.col1 = rawHdrs[0].textContent.trim();
                   issueTableInfo.headerNames.col2 = rawHdrs[1].textContent.trim();
-                  issueTableInfo.headerNames.col3 = rawHdrs[12]?.textContent.trim() || '';
+                  issueTableInfo.headerNames.col3 = (rawHdrs[12]?.textContent || '').trim();
 
                   rows.slice(1).forEach(row => {
                     const cells = Array.from(row.querySelectorAll('td'));
-                    const issueNo = cells[0].textContent.trim();
+                    const issueNo = (cells[0]?.textContent || '').trim();
                     const col1 = issueNo;
-                    const col2 = cells[1].textContent.trim();
-                    const col3 = cells[12]?.textContent.trim() || '';
-                    const lat = parseFloat(cells[latIdx].textContent.trim());
-                    const lon = parseFloat(cells[lonIdx].textContent.trim());
+                    const col2 = (cells[1]?.textContent || '').trim();
+                    const col3 = (cells[12]?.textContent || '').trim();
+                    const lat = parseFloat((cells[latIdx]?.textContent || '').trim());
+                    const lon = parseFloat((cells[lonIdx]?.textContent || '').trim());
                     if (!isNaN(lat) && !isNaN(lon)) {
                       issueCoords.push({ issueNo, lat, lon });
                     }
-                    issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
+                    if (issueNo) {
+                      issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
+                    }
                   });
                 }
               }
@@ -700,5 +724,3 @@
   </script>
 </body>
 </html>
-
-
