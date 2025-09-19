@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ACC Approach Simulator — Required Detection Distance</title>
+<style>
+  :root{
+    --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6;
+    --accent:#5aa7ff; --ok:#18a558; --warn:#ffcc00; --bad:#ff5252;
+    --grid:16px; --card-radius:18px;
+  }
+  html,body{margin:0; background:var(--bg); color:var(--ink); font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+  .wrap{display:grid; grid-template-columns: 360px 1fr; gap:var(--grid); padding:var(--grid)}
+  .card{background:var(--panel); border-radius:var(--card-radius); box-shadow:0 16px 40px rgba(0,0,0,.35)}
+  .card .hd{padding:14px 16px; font-weight:600; border-bottom:1px solid rgba(255,255,255,.06)}
+  .card .bd{padding:14px 16px}
+  .row{display:grid; grid-template-columns: 1fr 120px; gap:10px; align-items:center; margin:8px 0}
+  .row small{color:var(--muted)}
+  input[type="number"]{width:120px; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0c1020; color:var(--ink)}
+  select{padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.15); background:#0c1020; color:var(--ink)}
+  button{appearance:none; border:0; background:var(--accent); color:#041021; padding:10px 14px; border-radius:12px; font-weight:600; cursor:pointer}
+  button.ghost{background:transparent; color:var(--ink); border:1px solid rgba(255,255,255,.15)}
+  .btnrow{display:flex; gap:10px; flex-wrap:wrap; margin-top:6px}
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  th,td{padding:10px 8px; border-bottom:1px solid rgba(255,255,255,.08); text-align:right}
+  th:first-child, td:first-child{text-align:left}
+  th{color:#cfd6ff; font-weight:600; background:rgba(255,255,255,.03); position:sticky; top:0}
+  .tag{display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600}
+  .tag.ok{background:rgba(24,165,88,.18); color:#7ff2a8; border:1px solid rgba(24,165,88,.35)}
+  .tag.bad{background:rgba(255,82,82,.14); color:#ff9d9d; border:1px solid rgba(255,82,82,.35)}
+  .meta{color:var(--muted); font-size:13px}
+  .simWrap{padding:12px 12px 16px}
+  .lane{position:relative; width:100%; height:360px; background:
+      repeating-linear-gradient(90deg, #202744 0 3px, transparent 3px 100%),
+      linear-gradient(#0d1224,#0b1020);
+      border-radius:16px; overflow:hidden; border:1px solid rgba(255,255,255,.08)}
+  .roadMark{position:absolute; left:50%; top:0; width:4px; height:100%;
+            background:repeating-linear-gradient(#e6ecff 0 20px, transparent 20px 40px);
+            transform:translateX(-50%); opacity:.35}
+  .car{position:absolute; width:46px; height:24px; border-radius:6px}
+  .car.lead{background:#ffd95e; box-shadow:0 0 18px rgba(255,217,94,.55)}
+  .car.ego{background:#59f; box-shadow:0 0 18px rgba(90,167,255,.55)}
+  .infoRow{display:flex; gap:14px; flex-wrap:wrap; margin-top:10px}
+  .pill{background:#0c1226; border:1px solid rgba(255,255,255,.08); padding:8px 10px; border-radius:999px; font-size:13px}
+  .ruler{position:absolute; bottom:10px; left:10px; right:10px; height:26px; pointer-events:none}
+  .tick{position:absolute; bottom:0; width:1px; height:12px; background:#8fa6ff55}
+  .tick label{position:absolute; bottom:12px; transform:translateX(-50%); color:#9fb2ff; font-size:11px}
+  .legend{display:flex; gap:10px; align-items:center; margin-top:8px}
+  .dot{width:12px; height:12px; border-radius:50%}
+  .dot.lead{background:#ffd95e}
+  .dot.ego{background:#59f}
+  .status{margin-top:10px; font-weight:600}
+  .status.ok{color:#7ff2a8}
+  .status.bad{color:#ff9d9d}
+  .tiny{font-size:12px; color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- Controls -->
+    <div class="card">
+      <div class="hd">Inputs</div>
+      <div class="bd">
+        <div class="row">
+          <label>Initial detection distance (m)<br><small>Distance to slower vehicle at t=0</small></label>
+          <input id="inpStartDist" type="number" min="0" step="10" value="300" />
+        </div>
+        <div class="row">
+          <label>Ego speed (km/h)</label>
+          <input id="inpVego" type="number" min="0" step="1" value="180" />
+        </div>
+        <div class="row">
+          <label>Minimum time gap (s)</label>
+          <input id="inpTgap" type="number" min="0" step="0.1" value="1" />
+        </div>
+        <div class="row">
+          <label>Max ACC deceleration (m/s²)</label>
+          <input id="inpAmax" type="number" min="0.1" step="0.1" value="5" />
+        </div>
+        <div class="row">
+          <label>Simulated slower vehicle (km/h)</label>
+          <select id="selLead">
+            <option>60</option><option>70</option><option>80</option><option selected>90</option>
+            <option>100</option><option>110</option><option>120</option><option>130</option>
+            <option>140</option><option>150</option>
+          </select>
+        </div>
+        <div class="btnrow">
+          <button id="btnCompute">Compute Table</button>
+          <button class="ghost" id="btnReset">Reset Defaults</button>
+        </div>
+        <p class="meta" style="margin-top:8px">
+          Formula used for required detection distance:<br>
+          <code>D<sub>req</sub> = T · v<sub>lead</sub> + 0.5 · (Δv)² / a<sub>max</sub></code><br>
+          where Δv = v<sub>ego</sub> − v<sub>lead</sub> (in m/s).
+        </p>
+      </div>
+    </div>
+
+    <!-- Results + Simulation -->
+    <div class="card">
+      <div class="hd">Required Detection Distance — by Slower Vehicle Speed</div>
+      <div class="bd" id="results">
+        <div style="overflow:auto; max-height:260px; border:1px solid rgba(255,255,255,.08); border-radius:12px">
+          <table id="tbl">
+            <thead>
+              <tr>
+                <th>Slower vehicle speed (km/h)</th>
+                <th>Required detection distance D<sub>req</sub> (m)</th>
+                <th>Meets current initial distance?</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="simWrap">
+          <div class="legend">
+            <div class="dot lead"></div><div>Lead vehicle</div>
+            <div class="dot ego"></div><div>Ego vehicle</div>
+          </div>
+          <div class="lane" id="lane">
+            <div class="roadMark"></div>
+            <div class="car lead" id="lead"></div>
+            <div class="car ego" id="ego"></div>
+            <div class="ruler" id="ruler"></div>
+          </div>
+          <div class="infoRow">
+            <div class="pill" id="pillGap">Gap: –</div>
+            <div class="pill" id="pillTGap">Time gap: –</div>
+            <div class="pill" id="pillVego">Ego v: –</div>
+            <div class="pill" id="pillVlead">Lead v: –</div>
+            <div class="pill" id="pillA">Ego a: –</div>
+          </div>
+          <div class="btnrow" style="margin-top:12px">
+            <button id="btnStart">▶ Play</button>
+            <button class="ghost" id="btnPause">⏸ Pause</button>
+            <button class="ghost" id="btnStep">⏭ Step 0.1 s</button>
+            <button class="ghost" id="btnRestart">⟲ Restart</button>
+            <label class="pill">Sim speed ×
+              <input id="inpSimSpeed" type="number" value="1" step="0.5" min="0.1" style="width:70px; margin-left:6px" />
+            </label>
+          </div>
+          <div id="status" class="status tiny"></div>
+          <div class="tiny" style="margin-top:6px">Note: The simulation applies constant deceleration up to the max value until the ego speed matches the lead speed, then holds it. The closest approach happens right as speeds match.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const speedsKph = [60,70,80,90,100,110,120,130,140,150];
+
+  // UI elems
+  const inpStartDist = document.getElementById('inpStartDist');
+  const inpVego      = document.getElementById('inpVego');
+  const inpTgap      = document.getElementById('inpTgap');
+  const inpAmax      = document.getElementById('inpAmax');
+  const selLead      = document.getElementById('selLead');
+
+  const btnCompute   = document.getElementById('btnCompute');
+  const btnReset     = document.getElementById('btnReset');
+
+  const tblBody      = document.querySelector('#tbl tbody');
+
+  // Sim elements
+  const lane   = document.getElementById('lane');
+  const leadEl = document.getElementById('lead');
+  const egoEl  = document.getElementById('ego');
+  const ruler  = document.getElementById('ruler');
+
+  const pillGap   = document.getElementById('pillGap');
+  const pillTGap  = document.getElementById('pillTGap');
+  const pillVego  = document.getElementById('pillVego');
+  const pillVlead = document.getElementById('pillVlead');
+  const pillA     = document.getElementById('pillA');
+  const statusEl  = document.getElementById('status');
+
+  const btnStart  = document.getElementById('btnStart');
+  const btnPause  = document.getElementById('btnPause');
+  const btnStep   = document.getElementById('btnStep');
+  const btnRestart= document.getElementById('btnRestart');
+  const inpSimSpeed = document.getElementById('inpSimSpeed');
+
+  // Helpers
+  const kph2mps = v => v * (1000/3600);
+  const clamp = (x,min,max)=>Math.max(min,Math.min(max,x));
+
+  // Physics core:
+  // Required detection distance ensuring at least T seconds headway at match speed:
+  // Dreq = T * v_lead + 0.5 * (Δv)^2 / amax
+  function requiredDistance(vEgo_kph, vLead_kph, T_sec, amax_ms2){
+    const vEgo  = kph2mps(vEgo_kph);
+    const vLead = kph2mps(vLead_kph);
+    if (vEgo <= vLead) return T_sec * vLead; // no closing, just keep time gap
+    const dv = vEgo - vLead;
+    return T_sec * vLead + 0.5 * (dv*dv) / amax_ms2;
+  }
+
+  function fmt(n,digits=1){ return Number(n).toFixed(digits); }
+
+  function rebuildTable(){
+    const D0 = Number(inpStartDist.value);
+    const vEgo = Number(inpVego.value);
+    const T = Number(inpTgap.value);
+    const amax = Number(inpAmax.value);
+
+    tblBody.innerHTML = '';
+    speedsKph.forEach(vLead=>{
+      const Dreq = requiredDistance(vEgo, vLead, T, amax);
+      const ok = D0 >= Dreq;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${vLead}</td>
+        <td>${fmt(Dreq,1)}</td>
+        <td>${ ok ? '<span class="tag ok">Yes</span>' : '<span class="tag bad">No</span>' }</td>
+      `;
+      tblBody.appendChild(tr);
+    });
+  }
+
+  // --- Simulation state ---
+  let sim = {
+    vLead_kph: Number(selLead.value),
+    vEgo_kph: Number(inpVego.value),
+    T: Number(inpTgap.value),
+    amax: Number(inpAmax.value),
+    startGap: Number(inpStartDist.value),
+
+    // dynamic
+    t: 0,
+    xGap: 0,      // meters gap (lead ahead of ego)
+    vEgo: 0,      // m/s
+    vLead: 0,     // m/s
+    aEgo: 0,      // m/s^2 (negative when braking)
+    running: false,
+    raf: null
+  };
+
+  function resetSim(fromInputs=true){
+    if (fromInputs){
+      sim.vLead_kph = Number(selLead.value);
+      sim.vEgo_kph  = Number(inpVego.value);
+      sim.T         = Number(inpTgap.value);
+      sim.amax      = Number(inpAmax.value);
+      sim.startGap  = Number(inpStartDist.value);
+    }
+    sim.vLead = kph2mps(sim.vLead_kph);
+    sim.vEgo  = kph2mps(sim.vEgo_kph);
+    sim.t = 0;
+    sim.xGap = sim.startGap;
+    sim.aEgo = 0;
+    sim.running = false;
+    if (sim.raf){ cancelAnimationFrame(sim.raf); sim.raf=null; }
+    layoutCars();
+    updatePills();
+    drawRuler();
+    updateStatus();
+  }
+
+  // Layout & scaling
+  // Map longitudinal meters to pixels within the lane width.
+  function m2px(m){
+    // dynamic scale so that both cars stay visible.
+    // Show up to current gap + a headroom.
+    const visibleM = Math.max(sim.xGap, 200) + 60; // meters
+    const pad = 24; // px padding on both sides
+    const w = lane.clientWidth - pad*2;
+    return (m / visibleM) * w;
+  }
+
+  function layoutCars(){
+    // We'll place lead car near the right, ego car to the left by current gap.
+    const pad = 24;
+    const midY = lane.clientHeight/2;
+    const laneWidth = lane.clientWidth;
+
+    const leadX = laneWidth - pad - 60; // fixed reference point near right edge
+    const egoX  = leadX - m2px(sim.xGap);
+
+    leadEl.style.left = `${leadX}px`;
+    leadEl.style.top  = `${midY - 70}px`;  // upper lane
+    egoEl.style.left  = `${egoX}px`;
+    egoEl.style.top   = `${midY + 30}px`;  // lower lane (for visibility)
+  }
+
+  function drawRuler(){
+    ruler.innerHTML = '';
+    const visibleM = Math.max(sim.xGap, 200) + 60;
+    const step = niceTick(visibleM/6);
+    for(let x=0; x<=visibleM; x+=step){
+      const tick = document.createElement('div');
+      tick.className='tick';
+      const px = m2px(x) + 24; // +pad
+      tick.style.left = `${px}px`;
+      const lab = document.createElement('div');
+      lab.textContent = `${Math.round(x)} m`;
+      lab.className = 'label';
+      tick.appendChild(lab);
+      lab.style.position='absolute';
+      lab.style.left='0';
+      lab.style.bottom='12px';
+      lab.style.transform='translateX(-50%)';
+      lab.style.color='#9fb2ff';
+      lab.style.fontSize='11px';
+      ruler.appendChild(tick);
+    }
+  }
+  function niceTick(range){
+    // choose a "nice" tick spacing
+    const pow10 = Math.pow(10, Math.floor(Math.log10(range)));
+    const fr = range / pow10;
+    let step;
+    if (fr < 1.5) step = 1*pow10;
+    else if (fr < 3) step = 2*pow10;
+    else if (fr < 7) step = 5*pow10;
+    else step = 10*pow10;
+    return step;
+  }
+
+  function updatePills(){
+    pillGap.textContent  = `Gap: ${fmt(sim.xGap,1)} m`;
+    const tgap = sim.vEgo>0 ? sim.xGap / sim.vEgo : Infinity;
+    pillTGap.textContent = `Time gap: ${isFinite(tgap)? fmt(tgap,2)+' s' : '–'}`;
+    pillVego.textContent = `Ego v: ${fmt(sim.vEgo*3.6,1)} km/h`;
+    pillVlead.textContent= `Lead v: ${fmt(sim.vLead*3.6,1)} km/h`;
+    pillA.textContent    = `Ego a: ${fmt(sim.aEgo,2)} m/s²`;
+  }
+
+  function updateStatus(){
+    // Check if current initial distance meets requirement for selected speed
+    const Dreq = requiredDistance(sim.vEgo_kph, sim.vLead_kph, sim.T, sim.amax);
+    const ok = sim.startGap >= Dreq;
+    statusEl.className = 'status ' + (ok ? 'ok' : 'bad');
+    statusEl.textContent = ok ?
+      `OK: Initial ${fmt(sim.startGap,1)} m ≥ required ${fmt(Dreq,1)} m`
+      : `NOT OK: Initial ${fmt(sim.startGap,1)} m < required ${fmt(Dreq,1)} m`;
+  }
+
+  // Simulation step (dt seconds)
+  function step(dt){
+    // If ego is faster, brake with amax until vEgo == vLead
+    if (sim.vEgo > sim.vLead){
+      sim.aEgo = -sim.amax;
+      sim.vEgo = Math.max(sim.vLead, sim.vEgo + sim.aEgo*dt);
+    } else {
+      sim.aEgo = 0;
+    }
+
+    // Update gap: dx/dt = v_lead - v_ego
+    sim.xGap += (sim.vLead - sim.vEgo) * dt;
+    sim.t += dt;
+
+    // Never let gap go negative for layout; if it goes tiny, clamp
+    sim.xGap = Math.max(sim.xGap, 0.0001);
+
+    layoutCars();
+    updatePills();
+  }
+
+  function loop(lastTs){
+    sim.raf = requestAnimationFrame((ts)=>{
+      if (!lastTs) lastTs = ts;
+      const simSpeed = Math.max(0.1, Number(inpSimSpeed.value)||1);
+      const dt = clamp((ts - lastTs)/1000 * simSpeed, 0, 0.2); // clamp to avoid spikes
+      step(dt);
+      lastTs = ts;
+      if (sim.running) loop(lastTs);
+    });
+  }
+
+  // Event wiring
+  btnCompute.addEventListener('click', ()=>{
+    rebuildTable();
+    resetSim(true);
+  });
+  btnReset.addEventListener('click', ()=>{
+    inpStartDist.value = 300;
+    inpVego.value = 180;
+    inpTgap.value = 1;
+    inpAmax.value = 5;
+    selLead.value = "90";
+    rebuildTable();
+    resetSim(true);
+  });
+
+  [inpStartDist, inpVego, inpTgap, inpAmax, selLead].forEach(el=>{
+    el.addEventListener('change', ()=>{
+      rebuildTable();
+      resetSim(true);
+    });
+  });
+
+  btnStart.addEventListener('click', ()=>{
+    if (!sim.running){
+      sim.running = true;
+      loop();
+    }
+  });
+  btnPause.addEventListener('click', ()=>{
+    sim.running = false;
+  });
+  btnStep.addEventListener('click', ()=>{
+    sim.running = false;
+    step(0.1);
+  });
+  btnRestart.addEventListener('click', ()=>{
+    resetSim(true);
+  });
+
+  window.addEventListener('resize', ()=>{
+    layoutCars();
+    drawRuler();
+  });
+
+  // Init
+  rebuildTable();
+  resetSim(true);
+})();
+</script>
+</body>
+</html>
