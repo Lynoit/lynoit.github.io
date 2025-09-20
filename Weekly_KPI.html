@@ -7,7 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
-    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
+    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; --green:#0a9910; }
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
 
     /* Top tabs */
@@ -19,8 +19,10 @@
     .container{padding:16px;}
     .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
     .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
+
     .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
     .summary-card{ grid-column: 1 / -1; display:grid; justify-content:center; }
+
     .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
     .small{font-size:12px; color:#666}
     .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
@@ -64,10 +66,15 @@
     .matrix-table td.num{ text-align:right; white-space:nowrap; }
     .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
 
-    /* Calendar trio (layout helpers) */
-    .cal-title{ font-weight:700; font-size:14px; margin:2px 0 8px; text-align:center; }
-    .cal-grid{ display:grid; grid-template-columns:repeat(3, minmax(220px, 1fr)); gap:16px; padding:6px 10px 12px; }
-    .cal-col-title{ font-weight:600; font-size:13px; margin:0 0 4px; }
+    /* Trio charts card */
+    .trio-card{ grid-column: 1 / -1; }
+    .trio-grid{ display:grid; grid-template-columns: repeat(3, minmax(280px, 1fr)); gap:12px; }
+    .mini-card{ background:#fff; border:1px solid #eef1fb; border-radius:12px; padding:10px; box-shadow:0 2px 10px rgba(0,0,0,.05); }
+    .mini-title{ font-weight:700; font-size:14px; margin:0 0 6px 0; text-align:center; }
+    .axis path, .axis line { stroke:#999; stroke-opacity:.6; shape-rendering:crispEdges; }
+    .bar { fill: var(--green); }
+    .line { fill:none; stroke: var(--green); stroke-width:2; }
+    .dot { fill: var(--green); }
   </style>
 </head>
 <body>
@@ -101,13 +108,12 @@ const DATA_CSV = 'weekly_kpi_data.csv';
 const RN_FETCH_MODE = 'auto';                 // 'auto' | 'manifest' | 'off'
 const RN_MANIFEST_FILE = 'release_notes_manifest.json';
 const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
-const SCORE_THRESHOLDS = null;                // optional fixed thresholds
+const SCORE_THRESHOLDS = null;                // set to 10 numbers to hard-fix thresholds
 const LS_KEY = 'segRadarKPI.thresholds';
 
 const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
 let CURRENT_MODE = MODES.INTERNAL;
 
-/* Hard-coded whitelist (External view filters KPI rows) */
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
   'LCC — False brake',
@@ -117,15 +123,14 @@ const EXTERNAL_WHITELIST = [
   'ELKA — False positive'
 ];
 
-/* >>> Hard-coded card visibility for EXTERNAL page <<< */
-const EXTERNAL_CARDS = {
-  summary:      false,  // Summary table + bars
-  calendar:     false,  // 3-column calendar (activity, temperature, weather)
-  ccMatrix:     true,  // KPI × Software (CC-only)
-  nonCCLatest:  true,  // KPI × Software (Non-CC + latest CC)
-  perSoftware:  false  // Per-software radar cards
-};
-// (Internal mode always shows all cards)
+/* Which cards to show on the External page (Internal always shows everything) */
+const EXTERNAL_CARDS = Object.freeze({
+  summary: true,           // Summary card
+  trio: true,              // 3 small charts (tests, temp, weather)
+  ccMatrix: true,          // KPI × Software (CC-only)
+  nonCCLatestCC: true,     // KPI × Software (Non-CC + latest CC)
+  perSoftware: false       // Individual software cards
+});
 
 /* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
@@ -150,7 +155,6 @@ const SCORE_FONTS = { number:13, label:11, range:10 };
 
 /* ==================== Helpers & Scoring ==================== */
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
-const DARK_GREEN = '#2e7d32';
 const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
 const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
 let LAST_RAW = '';
@@ -391,10 +395,11 @@ function mode(arr){
   let bestVal = null, bestCnt = -1;
   for (const v of arr){
     const c = (m.get(v)||0)+1; m.set(v,c);
-    if (c > bestCnt || (c===bestCnt && v>bestVal)){ bestCnt=c; bestVal=v; }
+    if (c > bestCnt || (c===bestCnt && v>bestVal)){ bestCnt=c; bestVal=v; } // tie-break: higher code
   }
   return bestVal;
 }
+/** Fetch hourly weather and aggregate 10–14 (local) into tmax/tmin + representative condition text per date */
 async function fetchWeatherForDates(dates){
   const wanted = Array.from(new Set(dates.filter(Boolean)));
   const cache = loadWeatherCache();
@@ -405,6 +410,7 @@ async function fetchWeatherForDates(dates){
   const {min, max} = isoMinMax(missing);
   if (!min || !max) return cache;
 
+  // Hourly series in local time; slice hours 10..14
   const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}`+
               `&start_date=${min}&end_date=${max}`+
               `&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
@@ -417,6 +423,7 @@ async function fetchWeatherForDates(dates){
     const temps = (data.hourly && data.hourly.temperature_2m) || [];
     const codes = (data.hourly && data.hourly.weathercode) || [];
 
+    // Group by YYYY-MM-DD → collect indices with hour in [10..14]
     const byDate = new Map();
     for (let i=0;i<times.length;i++){
       const t = times[i];
@@ -428,6 +435,7 @@ async function fetchWeatherForDates(dates){
       }
     }
 
+    // Aggregate into cache
     for (const [day, idxs] of byDate.entries()){
       if (!idxs.length) continue;
       const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
@@ -502,6 +510,7 @@ function renderSummary(container, parsed){
   const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
+  // Table header (with Weather column)
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
@@ -542,7 +551,7 @@ function renderSummary(container, parsed){
     }
   });
 
-  // Bars
+  // Bars (avg values)
   if (chartData.length){
     card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
 
@@ -608,236 +617,150 @@ function renderSummary(container, parsed){
   legend.attr('height', 20 + boxH + 28 + 6);
 }
 
-/* ==================== Calendar trio helpers ==================== */
-function measureTextWidthCal(texts, fontSize=11, fontWeight=600){
-  const tmp = d3.select('body').append('svg')
-    .attr('width',0).attr('height',0)
-    .style('position','absolute').style('left','-9999px').style('top','-9999px');
-  let max = 0;
-  (texts||[]).forEach(t=>{
-    const n = tmp.append('text')
-      .attr('font-size', fontSize)
-      .attr('font-weight', fontWeight)
-      .text(t==null ? '' : String(t))
-      .node();
-    max = Math.max(max, n.getComputedTextLength());
-  });
-  tmp.remove();
-  return Math.ceil(max);
-}
-// Weather rows (top→bottom)
-const WEATHER_LABELS = ['Clear/Clouds','Fog/Drizzle','Rain/Snow','Heavy precip','Thunderstorm'];
-function weatherCategoryForWMO(code){
-  if (code==null) return null;
-  if (code>=95) return 'Thunderstorm';
-  if (code===66 || code===67 || code===85 || code===86) return 'Heavy precip';
-  if ((code>=61 && code<=65) || (code>=71 && code<=77) || (code>=80 && code<=82)) return 'Rain/Snow';
-  if (code===45 || code===48 || (code>=51 && code<=57)) return 'Fog/Drizzle';
-  return 'Clear/Clouds';
-}
-
-/* ==================== Calendar trio (Activity, Temperature, Weather) ==================== */
+/* ==================== Trio charts (Tests, Temp, Weather) ==================== */
 function renderCalendarTrio(container, parsed){
+  // Build series from software dates
   const sw = parsed.software || [];
-  const dateCounts = {};
-  const datesList = [];
-  sw.forEach(s => {
+  if (!sw.length) return;
+
+  const byDate = new Map(); // date -> {count, tmin, tmax, text}
+  sw.forEach(s=>{
     if (!s.date) return;
-    datesList.push(s.date);
-    dateCounts[s.date] = (dateCounts[s.date] || 0) + 1;
+    if (!byDate.has(s.date)) byDate.set(s.date, {count:0});
+    byDate.get(s.date).count++;
   });
-  if (!datesList.length) return;
 
-  const toDate = s => new Date(s+'T00:00:00');
-  const minDateStr = datesList.reduce((a,b)=> a<b?a:b);
-  const maxDateStr = datesList.reduce((a,b)=> a>b?a:b);
-  const minDate = toDate(minDateStr);
-  const maxDate = toDate(maxDateStr);
-
-  // Snap to full weeks (Mon..Sun)
-  const start = new Date(minDate);
-  const wdStart = (start.getDay()+6)%7; start.setDate(start.getDate() - wdStart);
-  const end = new Date(maxDate);
-  const wdEnd = (end.getDay()+6)%7; end.setDate(end.getDate() + (6 - wdEnd));
-
-  // Weather aggregates already used by summary
+  // Merge weather (already fetched)
   const wx = parsed.weatherByDate || {};
-  const tempByDate = {};
-  const catRowByDate = {};
-  Object.keys(wx).forEach(d=>{
-    const w = wx[d]; if (!w) return;
-    const avgT = (w.tmin==null || w.tmax==null) ? null : Math.round((w.tmin + w.tmax)/2);
-    tempByDate[d] = avgT;
-    const cat = weatherCategoryForWMO(w.code);
-    const row = (cat==null) ? null : WEATHER_LABELS.indexOf(cat);
-    catRowByDate[d] = (row>=0? row : null);
-  });
-
-  // Compute temperature bounds ONCE (avoid duplicate declarations)
-const tValsAll = Object.values(tempByDate).filter(v => v != null);
-const tMin = tValsAll.length ? Math.min(...tValsAll) : null;
-const tMax = tValsAll.length ? Math.max(...tValsAll) : null;
-  
-  function drawCalendar(holder, caption, options){
-    const {
-      numRows,
-      rowForDate,      // (ds) → row index 0..numRows-1 (null = skip)
-      hasValue,        // (ds) → boolean
-      leftLabels,      // array (explicit labels) OR null
-      labelMode='explicit' // 'explicit' or 'weekdays'
-    } = options;
-
-    const EMPTY = '#f1f3f8';
-    const cell = 12, gap = 2;
-    const topPad = 18, monthPad = 12;
-
-    const visibleLabels = Array.isArray(leftLabels) ? leftLabels.filter(x=>x && x.length) : [];
-    const leftPadBase = (labelMode==='weekdays') ? 30 : 40;
-    const leftPad = Math.max(leftPadBase, measureTextWidthCal(visibleLabels, 11, 600) + 14);
-
-    const days = Math.floor((end - start)/(24*3600*1000)) + 1;
-    const weeks = Math.ceil(days / 7);
-    const w = leftPad + weeks*(cell+gap) + 6;
-    const h = topPad + monthPad + numRows*(cell+gap) + 6;
-
-    holder.append('div').attr('class','cal-col-title').text(caption);
-    const svg = holder.append('svg').attr('width', w).attr('height', h);
-    const monthFmt = new Intl.DateTimeFormat('sv-SE', { month: 'short' });
-
-    // Month labels
-    const monthCols = new Map();
-    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
-      if (d.getDate() === 1){
-        const col = Math.floor(idx/7);
-        monthCols.set(col, monthFmt.format(d));
-      }
+  for (const [d, o] of byDate.entries()){
+    const w = wx[d];
+    if (w){
+      o.tmin = w.tmin; o.tmax = w.tmax; o.text = w.text || '—';
+    } else {
+      o.tmin = null; o.tmax = null; o.text = '—';
     }
-    monthCols.forEach((lab, col)=>{
-      svg.append('text')
-        .attr('x', leftPad + col*(cell+gap))
-        .attr('y', topPad+8)
-        .attr('font-size', 11)
-        .text(lab);
+  }
+
+  // Sort dates asc
+  const dates = Array.from(byDate.keys()).sort();
+  if (!dates.length) return;
+  const series = dates.map(d => ({ date:d, ...byDate.get(d) }));
+
+  const card = container.append('div').attr('class','chart-card trio-card');
+  const grid = card.append('div').attr('class','trio-grid');
+
+  /* Utility: parse date string to Date (local) */
+  function parseISODate(d){ const [y,m,da] = d.split('-').map(Number); return new Date(y, m-1, da); }
+
+  /* ---- 1) Test activity (bars) ---- */
+  (function(){
+    const box = grid.append('div').attr('class','mini-card');
+    box.append('div').attr('class','mini-title').text('Test activity (count of software tests per date)');
+
+    const W = Math.max(280, Math.floor((card.node().getBoundingClientRect().width - 48)/3));
+    const H = 180, pad = {t:10,r:12,b:26,l:34};
+    const svg = box.append('svg').attr('width', W).attr('height', H);
+
+    const x = d3.scaleBand().domain(series.map(d=>d.date)).range([pad.l, W-pad.r]).padding(0.18);
+    const y = d3.scaleLinear().domain([0, d3.max(series, d=>d.count)||1]).nice().range([H-pad.b, pad.t]);
+
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(0,${H-pad.b})`)
+      .call(d3.axisBottom(x).tickFormat(d=> d.slice(5)).tickSizeOuter(0));
+
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(${pad.l},0)`)
+      .call(d3.axisLeft(y).ticks(5));
+
+    svg.selectAll('.bar').data(series).enter().append('rect')
+      .attr('class','bar')
+      .attr('x', d=>x(d.date))
+      .attr('y', d=>y(d.count))
+      .attr('width', x.bandwidth())
+      .attr('height', d=>y(0)-y(d.count))
+      .append('title').text(d => `${d.date}: ${d.count} test(s)`);
+  })();
+
+  /* ---- 2) Temperature (bars by mid of 10–14) ---- */
+  (function(){
+    const box = grid.append('div').attr('class','mini-card');
+    box.append('div').attr('class','mini-title').text('Temperature (Göteborg, 10–14)');
+
+    const W = Math.max(280, Math.floor((card.node().getBoundingClientRect().width - 48)/3));
+    const H = 180, pad = {t:10,r:12,b:26,l:38};
+    const svg = box.append('svg').attr('width', W).attr('height', H);
+
+    const haveTemp = series.filter(d => d.tmin!=null && d.tmax!=null);
+    const x = d3.scaleBand().domain(series.map(d=>d.date)).range([pad.l, W-pad.r]).padding(0.18);
+    const y = d3.scaleLinear()
+      .domain(d3.extent(haveTemp.length? haveTemp.flatMap(d=>[d.tmin,d.tmax]) : [0,10]))
+      .nice()
+      .range([H-pad.b, pad.t]);
+
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(0,${H-pad.b})`)
+      .call(d3.axisBottom(x).tickFormat(d=> d.slice(5)).tickSizeOuter(0));
+
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(${pad.l},0)`)
+      .call(d3.axisLeft(y).ticks(5).tickFormat(d=>`${d}°`));
+
+    // draw a bar at the mid temp (or skip if missing)
+    svg.selectAll('.bar-t').data(series).enter().append('rect')
+      .attr('class','bar')
+      .attr('x', d=>x(d.date))
+      .attr('width', x.bandwidth())
+      .attr('y', d=>{
+        if (d.tmin==null || d.tmax==null) return y(0);
+        const mid=(d.tmin+d.tmax)/2; return y(mid);
+      })
+      .attr('height', d=>{
+        if (d.tmin==null || d.tmax==null) return 0;
+        const mid=(d.tmin+d.tmax)/2; return y(0)-y(mid);
+      })
+      .append('title').text(d=>{
+        if (d.tmin==null || d.tmax==null) return `${d.date}: no weather`;
+        return `${d.date}: ${d.tmax}°/${d.tmin}° (mid ~ ${(Math.round((d.tmin+d.tmax)/2))}°)`;
+      });
+  })();
+
+  /* ---- 3) Weather condition (scatter on categorical y) ---- */
+  (function(){
+    const box = grid.append('div').attr('class','mini-card');
+    box.append('div').attr('class','mini-title').text('Weather condition (Göteborg, 10–14)');
+
+    const W = Math.max(280, Math.floor((card.node().getBoundingClientRect().width - 48)/3));
+    const H = 180, pad = {t:12,r:12,b:26,l:110};
+    const svg = box.append('svg').attr('width', W).attr('height', H);
+
+    // Collect unique condition labels in the data, sorted by a simple priority order
+    const conds = Array.from(new Set(series.map(d=>d.text||'—'))).filter(Boolean);
+    // keep '—' at bottom
+    conds.sort((a,b)=>{
+      if (a==='—' && b==='—') return 0;
+      if (a==='—') return -1;
+      if (b==='—') return 1;
+      return a.localeCompare(b);
     });
 
-    // Axis labels
-    const ax = svg.append('g');
-    const yTop = topPad + monthPad;
-    const axX  = leftPad - 6;
-    if (labelMode==='weekdays'){
-      const yNames = ['Mon','','Wed','','Fri','',''];
-      yNames.forEach((lab, r)=>{
-        if (!lab) return;
-        ax.append('text')
-          .attr('x', axX)
-          .attr('y', yTop + r*(cell+gap) + cell*0.75)
-          .attr('font-size', 11)
-          .attr('fill', '#666')
-          .attr('text-anchor','end')
-          .text(lab);
-      });
-    } else if (Array.isArray(leftLabels) && leftLabels.length){
-      leftLabels.forEach((lab, r)=>{
-        if (!lab) return;
-        ax.append('text')
-          .attr('x', axX)
-          .attr('y', yTop + r*(cell+gap) + cell*0.75)
-          .attr('font-size', 11)
-          .attr('fill', '#666')
-          .attr('text-anchor','end')
-          .text(lab);
-      });
-    }
+    const x = d3.scaleBand().domain(series.map(d=>d.date)).range([pad.l, W-pad.r]).padding(0.35);
+    const y = d3.scalePoint().domain(conds).range([H-pad.b, pad.t]).padding(0.4);
 
-    // Grid cells
-    const g = svg.append('g').attr('transform', `translate(${leftPad},${yTop})`);
-    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
-      const ds = d.toISOString().slice(0,10);
-      let row = null;
-      if (labelMode==='weekdays'){
-        row = (d.getDay()+6)%7; // Mon=0..Sun=6
-      } else {
-        row = rowForDate(ds);
-      }
-      const col = Math.floor(idx/7);
-      const fill = (row==null || !hasValue(ds)) ? EMPTY : DARK_GREEN;
-      const y = (row==null ? 0 : row*(cell+gap));
-      g.append('rect')
-        .attr('x', col*(cell+gap)).attr('y', y)
-        .attr('width', cell).attr('height', cell)
-        .attr('fill', fill);
-    }
-  }
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(0,${H-pad.b})`)
+      .call(d3.axisBottom(x).tickFormat(d=> d.slice(5)).tickSizeOuter(0));
 
-  // Card
-  const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
-  card.append('div').attr('class','cal-title').text('Activity & Weather (calendar style)');
-  const grid = card.append('div').attr('class','cal-grid');
+    svg.append('g').attr('class','axis')
+      .attr('transform',`translate(${pad.l},0)`)
+      .call(d3.axisLeft(y).tickSizeOuter(0));
 
-  // 1) Test activity
-  drawCalendar(
-    grid.append('div'),
-    'Test activity (count of software tests per date)',
-    {
-      numRows: 7,
-      labelMode: 'weekdays',
-      leftLabels: null,
-      rowForDate: null,
-      hasValue: (ds)=> (dateCounts[ds] || 0) > 0
-    }
-  );
-
-  // 2) Temperature
-  const TEMP_ROWS = 7;
-  let tempLabels = Array(TEMP_ROWS).fill('');
-  // derive bounds from data
-  const tVals = Object.values(tempByDate).filter(v=>v!=null);
-  const tMin = tVals.length ? Math.min(...tVals) : null;
-  const tMax = tVals.length ? Math.max(...tVals) : null;
-  if (tMin!=null && tMax!=null){
-    const span = Math.max(1, tMax - tMin);
-    for (let r=0;r<TEMP_ROWS;r++){
-      const fracTop = 1 - r/(TEMP_ROWS-1);
-      const val = Math.round(tMin + fracTop*span);
-      if (r===0 || r===Math.floor((TEMP_ROWS-1)/2) || r===TEMP_ROWS-1 || r===2 || r===TEMP_ROWS-3){
-        tempLabels[r] = `${val}°`;
-      }
-    }
-  }
-  drawCalendar(
-    grid.append('div'),
-    'Temperature (Göteborg, 10–14) — avg of tmin/tmax (°C)',
-    {
-      numRows: TEMP_ROWS,
-      labelMode: 'explicit',
-      leftLabels: tempLabels,
-      rowForDate: (ds)=>{
-        const v = tempByDate[ds];
-        if (v==null || tMin==null || tMax==null) return null;
-        if (tMax===tMin) return Math.floor(TEMP_ROWS/2);
-        const ratio = (v - tMin) / (tMax - tMin);
-        const idx = (TEMP_ROWS-1) - Math.max(0, Math.min(TEMP_ROWS-1, Math.floor(ratio*(TEMP_ROWS-1)+1e-6)));
-        return idx;
-      },
-      hasValue: (ds)=> tempByDate[ds] != null
-    }
-  );
-
-  // 3) Weather condition
-  drawCalendar(
-    grid.append('div'),
-    'Weather condition (Göteborg, 10–14)',
-    {
-      numRows: WEATHER_LABELS.length,
-      labelMode: 'explicit',
-      leftLabels: WEATHER_LABELS,
-      rowForDate: (ds)=> {
-        const r = catRowByDate[ds];
-        return (r==null ? null : r);
-      },
-      hasValue: (ds)=> catRowByDate[ds] != null
-    }
-  );
+    svg.selectAll('.dot').data(series).enter().append('circle')
+      .attr('class','dot')
+      .attr('cx', d=>x(d.date) + (x.bandwidth()/2))
+      .attr('cy', d=> y(d.text || '—'))
+      .attr('r', 5)
+      .append('title').text(d=> `${d.date}: ${d.text || '—'}`);
+  })();
 }
 
 /* ==================== KPI × Software matrix (CC-only) ==================== */
@@ -1170,18 +1093,17 @@ function renderSoftwareCards(container, parsed){
     const x4 = x3 + col3W + colGap;
     const tableWUsed = x4 - x0 + col4W;
 
-    svg.append('g').attr('transform', `translate(0, ${tableY})`)
-      .append('rect')
+    tableG.append('rect')
       .attr('x', 12-4).attr('y', 2)
-      .attr('width', tableWUsed + 8).attr('height', 24 + rows.length * 22 + 8)
+      .attr('width', tableWUsed + 8).attr('height', tableHeaderH + rows.length * rowH + 8)
       .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
 
     tableG.append('rect')
       .attr('x', x0).attr('y', 4)
-      .attr('width', tableWUsed).attr('height', 24)
+      .attr('width', tableWUsed).attr('height', tableHeaderH)
       .attr('rx', 6).attr('ry', 6).attr('fill', '#f6f7fb');
 
-    const hdrYmid = 4 + 12;
+    const hdrYmid = 4 + tableHeaderH/2;
     tableG.append('text').attr('x', x0+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('KPI');
     tableG.append('text').attr('x', x1+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Function');
     tableG.append('text').attr('x', x2 + col2W - 6).attr('y', hdrYmid).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Target');
@@ -1195,17 +1117,18 @@ function renderSoftwareCards(container, parsed){
     hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
 
     rows.forEach((r, i)=>{
-      const y = 4 + 24 + i*22;
-      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', 22).attr('fill', i%2 ? '#fafbff' : '#ffffff');
-      tableG.append('text').attr('x', x0+6).attr('y', y + 11).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
-      tableG.append('text').attr('x', x1+6).attr('y', y + 11).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
-      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
-      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
-      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
+      const y = 4 + tableHeaderH + i*rowH;
+      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', rowH).attr('fill', i%2 ? '#fafbff' : '#ffffff');
+
+      tableG.append('text').attr('x', x0+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
+      tableG.append('text').attr('x', x1+6).attr('y', y + rowH/2).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
+      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
+      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
+      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + rowH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
     });
 
     [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
-      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + 24).attr('y2', 4 + 24 + rows.length*22).attr('stroke', '#eef1fb');
+      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + tableHeaderH).attr('y2', 4 + tableHeaderH + rows.length*rowH).attr('stroke', '#eef1fb');
     });
 
     // Scoring band
@@ -1216,7 +1139,7 @@ function renderSoftwareCards(container, parsed){
     const barMargin = 20, boxH2 = 42;
     const barW = w - barMargin*2;
     const boxW = barW / 10;
-    const scoreBandY = tableY + (24 + rows.length * 22 + 8) + scoreTopPad;
+    const scoreBandY = tableY + (tableHeaderH + rows.length * rowH + 8) + scoreTopPad;
     const scoreG = svg.append('g').attr('transform', `translate(0, ${scoreBandY})`);
 
     const caption = (avgEvents==null)
@@ -1262,7 +1185,7 @@ function renderSoftwareCards(container, parsed){
   });
 }
 
-/* ==================== Main renderer ==================== */
+/* ==================== Main renderer (with External toggles) ==================== */
 function renderCharts(parsedFull){
   const parsed = filterEntriesForMode(parsedFull);
   const container = d3.select('#charts').html('');
@@ -1271,17 +1194,23 @@ function renderCharts(parsedFull){
     return;
   }
 
-  // Determine which cards to render
-  const show = (name)=>{
-    if (CURRENT_MODE === MODES.INTERNAL) return true;
-    return !!EXTERNAL_CARDS[name];
-  };
+  const onExternal = (CURRENT_MODE === MODES.EXTERNAL);
 
-  if (show('summary'))     renderSummary(container, parsed);
-  if (show('calendar'))    renderCalendarTrio(container, parsed);
-  if (show('ccMatrix'))    renderCCMatrix(container, parsed);
-  if (show('nonCCLatest')) renderNonCCPlusLatestCCMatrix(container, parsed);
-  if (show('perSoftware')) renderSoftwareCards(container, parsed);
+  if (!onExternal || EXTERNAL_CARDS.summary) {
+    renderSummary(container, parsed);
+  }
+  if (!onExternal || EXTERNAL_CARDS.trio) {
+    renderCalendarTrio(container, parsed);
+  }
+  if (!onExternal || EXTERNAL_CARDS.ccMatrix) {
+    renderCCMatrix(container, parsed);
+  }
+  if (!onExternal || EXTERNAL_CARDS.nonCCLatestCC) {
+    renderNonCCPlusLatestCCMatrix(container, parsed);
+  }
+  if (!onExternal || EXTERNAL_CARDS.perSoftware) {
+    renderSoftwareCards(container, parsed);
+  }
 }
 
 /* ==================== Loader (CSV + release notes + weather) ==================== */
