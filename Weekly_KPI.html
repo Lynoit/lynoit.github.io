@@ -64,7 +64,7 @@
     .matrix-table td.num{ text-align:right; white-space:nowrap; }
     .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
 
-    /* Calendar trio (simple layout helpers) */
+    /* Calendar trio (layout helpers) */
     .cal-title{ font-weight:700; font-size:14px; margin:2px 0 8px; text-align:center; }
     .cal-grid{ display:grid; grid-template-columns:repeat(3, minmax(220px, 1fr)); gap:16px; padding:6px 10px 12px; }
     .cal-col-title{ font-weight:600; font-size:13px; margin:0 0 4px; }
@@ -107,6 +107,7 @@ const LS_KEY = 'segRadarKPI.thresholds';
 const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
 let CURRENT_MODE = MODES.INTERNAL;
 
+/* Hard-coded whitelist (External view filters KPI rows) */
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
   'LCC — False brake',
@@ -115,6 +116,16 @@ const EXTERNAL_WHITELIST = [
   'LDP — False positive',
   'ELKA — False positive'
 ];
+
+/* >>> Hard-coded card visibility for EXTERNAL page <<< */
+const EXTERNAL_CARDS = {
+  summary:      false,  // Summary table + bars
+  calendar:     false,  // 3-column calendar (activity, temperature, weather)
+  ccMatrix:     true,  // KPI × Software (CC-only)
+  nonCCLatest:  true,  // KPI × Software (Non-CC + latest CC)
+  perSoftware:  false  // Per-software radar cards
+};
+// (Internal mode always shows all cards)
 
 /* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
@@ -246,9 +257,9 @@ function parseTable(text){
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
-    theDate = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
-    const date = theDate ? theDate[1] : null;
-    const baseNoDate = theDate ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
+    const m = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const date = m ? m[1] : null;
+    const baseNoDate = m ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
     const basePretty = baseNoDate.replace('(TO)', ' (TO)');
     const countPrev = swCols.filter(s => s.base === basePretty).length;
     const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
@@ -491,7 +502,6 @@ function renderSummary(container, parsed){
   const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
-  // Table header (with Weather column)
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
@@ -761,13 +771,13 @@ function renderCalendarTrio(container, parsed){
 
   // Card
   const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
-  card.append('div').attr('class','cal-title').text('Activity & weather statistics');
+  card.append('div').attr('class','cal-title').text('Activity & Weather (calendar style)');
   const grid = card.append('div').attr('class','cal-grid');
 
   // 1) Test activity
   drawCalendar(
     grid.append('div'),
-    'Test activity',
+    'Test activity (count of software tests per date)',
     {
       numRows: 7,
       labelMode: 'weekdays',
@@ -780,6 +790,10 @@ function renderCalendarTrio(container, parsed){
   // 2) Temperature
   const TEMP_ROWS = 7;
   let tempLabels = Array(TEMP_ROWS).fill('');
+  // derive bounds from data
+  const tVals = Object.values(tempByDate).filter(v=>v!=null);
+  const tMin = tVals.length ? Math.min(...tVals) : null;
+  const tMax = tVals.length ? Math.max(...tVals) : null;
   if (tMin!=null && tMax!=null){
     const span = Math.max(1, tMax - tMin);
     for (let r=0;r<TEMP_ROWS;r++){
@@ -792,7 +806,7 @@ function renderCalendarTrio(container, parsed){
   }
   drawCalendar(
     grid.append('div'),
-    'Temperature',
+    'Temperature (Göteborg, 10–14) — avg of tmin/tmax (°C)',
     {
       numRows: TEMP_ROWS,
       labelMode: 'explicit',
@@ -812,7 +826,7 @@ function renderCalendarTrio(container, parsed){
   // 3) Weather condition
   drawCalendar(
     grid.append('div'),
-    'Weather condition',
+    'Weather condition (Göteborg, 10–14)',
     {
       numRows: WEATHER_LABELS.length,
       labelMode: 'explicit',
@@ -1256,11 +1270,18 @@ function renderCharts(parsedFull){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
-  renderSummary(container, parsed);                 // 1) Summary card
-  renderCalendarTrio(container, parsed);           // 2) NEW 3-chart calendar card
-  renderCCMatrix(container, parsed);               // 3) CC-only matrix card
-  renderNonCCPlusLatestCCMatrix(container, parsed);// 4) Non-CC + latest CC matrix card
-  renderSoftwareCards(container, parsed);          // 5) Per-software cards
+
+  // Determine which cards to render
+  const show = (name)=>{
+    if (CURRENT_MODE === MODES.INTERNAL) return true;
+    return !!EXTERNAL_CARDS[name];
+  };
+
+  if (show('summary'))     renderSummary(container, parsed);
+  if (show('calendar'))    renderCalendarTrio(container, parsed);
+  if (show('ccMatrix'))    renderCCMatrix(container, parsed);
+  if (show('nonCCLatest')) renderNonCCPlusLatestCCMatrix(container, parsed);
+  if (show('perSoftware')) renderSoftwareCards(container, parsed);
 }
 
 /* ==================== Loader (CSV + release notes + weather) ==================== */
