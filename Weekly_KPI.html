@@ -107,6 +107,19 @@ const LS_KEY = 'segRadarKPI.thresholds';
 const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
 let CURRENT_MODE = MODES.INTERNAL;
 
+// Optional: ?mode=external in URL
+const urlMode = new URLSearchParams(location.search).get('mode');
+if (urlMode && (urlMode.toLowerCase() in MODES)) CURRENT_MODE = urlMode.toLowerCase();
+
+// Which cards are shown when mode = EXTERNAL (hard-coded)
+const EXTERNAL_CARD_VISIBILITY = {
+  summary: true,              // Summary Weekly KPI
+  calendar: true,             // Activity & weather statistics (calendar trio)
+  ccMatrix: false,            // KPI × Software matrix (CC-only)
+  nonCCPlusLatestCC: true,    // KPI × Software matrix (Non-CC + latest CC)
+  softwareCards: true         // Per-software cards
+};
+
 const EXTERNAL_WHITELIST = [
   'ACC — False brake',
   'LCC — False brake',
@@ -115,6 +128,16 @@ const EXTERNAL_WHITELIST = [
   'LDP — False positive',
   'ELKA — False positive'
 ];
+
+// Normalize "Function — KPI" keys: case-insensitive, unify dashes, collapse spaces
+function normKey(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\u2013\u2014-]/g, '—')   // en/em/ASCII hyphen -> em dash
+    .replace(/\s+/g, ' ')               // collapse spaces
+    .trim();
+}
+const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
 
 /* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
@@ -151,15 +174,15 @@ const fmtCell = v =>
   : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
 
 function parseThresholds(str){
-  const arr = (str||'').split(',').map(s=>s.trim()).filter(s=>s!=='').map(Number);
+  const arr = (str||'').split(',').map(s=>s.trim()).filter(s!=='').map(Number);
   if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
   for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; }
   return arr;
 }
 function getThresholds(){
   if (Array.isArray(SCORE_THRESHOLDS) && SCORE_THRESHOLDS.length===10) return SCORE_THRESHOLDS;
-  const ls = localStorage.getItem(LS_KEY);
-  let t = parseThresholds(ls);
+  let t = null;
+  try { t = parseThresholds(localStorage.getItem(LS_KEY)); } catch {}
   if (t) return t;
   return parseThresholds(DEFAULT_THRESH_STR);
 }
@@ -200,8 +223,12 @@ function detectDelimiter(text){
 }
 function splitFuncKpi(s){
   if (!s) return {func:'', kpi:''};
-  const em = s.split('—'); if (em.length>=2) return {func:em[0].trim(), kpi:em.slice(1).join('—').trim()};
-  const dash = s.split(' - '); if (dash.length>=2) return {func:dash[0].trim(), kpi:dash.slice(1).join(' - ').trim()};
+  for (const sep of ['—', '–', ' - ']){
+    const parts = s.split(sep);
+    if (parts.length >= 2) return { func: parts[0].trim(), kpi: parts.slice(1).join(sep).trim() };
+  }
+  const idx = s.indexOf('-');
+  if (idx > 0) return { func: s.slice(0, idx).trim(), kpi: s.slice(idx+1).trim() };
   const sp = s.split(' ');
   return {func: sp[0]||'', kpi: s};
 }
@@ -213,6 +240,7 @@ function normalizeHeader(h){
 /* ==================== Parse table (dates + inline "Release note") ==================== */
 function parseTable(text){
   const tryParse = (d)=> text
+    .replace(/^\uFEFF/, '') // strip BOM
     .split(/\r?\n/)
     .filter(r => r.trim().length > 0)
     .map(r => r.split(d));
@@ -246,7 +274,7 @@ function parseTable(text){
   const swCols = [];
   for (let i = idxMax + 1; i < headers.length; i++) {
     const raw = headers[i].trim();
-    theDate = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const theDate = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
     const date = theDate ? theDate[1] : null;
     const baseNoDate = theDate ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
     const basePretty = baseNoDate.replace('(TO)', ' (TO)');
@@ -266,11 +294,10 @@ function parseTable(text){
     const firstNorm = normalizeHeader(firstCellRaw);
 
     if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
-      // Inline style: collect notes in matching software columns (bullets separated by literal \n)
       for (const sw of swCols) {
         const raw = (row[sw.idx] ?? '').trim();
         if (raw) {
-          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\\n' + raw) : raw);
+          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\n' + raw) : raw);
         }
       }
       continue;
@@ -299,7 +326,7 @@ function openReleaseNoteModal(title, noteText){
 
   const parts = String(noteText || '')
     .replace(/\r/g,'')
-    .split(/\\n|\n/g)
+    .split(/\n/g)
     .map(s => s.trim())
     .filter(s => s.length);
 
@@ -428,13 +455,16 @@ async function fetchWeatherForDates(dates){
       const tmax = Math.round(Math.max(...tvals));
       const tmin = Math.round(Math.min(...tvals));
       const c = cvals.length ? mode(cvals) : null;
-      cache[day] = {
-        tmax, tmin,
-        code: c,
-        text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—',
-        hours:'10–14'
-      };
+      cache[day] = { tmax, tmin, code: c, text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—', hours:'10–14' };
     }
+
+    // Ensure all requested days exist even if no 10–14 samples
+    missing.forEach(day=>{
+      if (!cache[day] && !byDate.has(day)){
+        cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' };
+      }
+    });
+
     saveWeatherCache(cache);
   }catch(e){
     console.warn('Weather fetch failed:', e);
@@ -445,8 +475,9 @@ async function fetchWeatherForDates(dates){
 /* ==================== Filtering for External view ==================== */
 function filterEntriesForMode(parsed){
   if (CURRENT_MODE === MODES.INTERNAL) return parsed;
-  const wl = new Set(EXTERNAL_WHITELIST.map(s => s.trim().toLowerCase()));
-  const filteredEntries = parsed.entries.filter(e => wl.has(`${e.func} — ${e.kpi}`.toLowerCase()));
+  const filteredEntries = (parsed.entries || []).filter(e =>
+    EXTERNAL_WL_KEYS.has(normKey(`${e.func} — ${e.kpi}`))
+  );
   return { ...parsed, entries: filteredEntries };
 }
 
@@ -491,7 +522,6 @@ function renderSummary(container, parsed){
   const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
-  // Table header (with Weather column)
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
@@ -538,7 +568,7 @@ function renderSummary(container, parsed){
 
     const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
-      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px');
+      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
       let max = 0;
       texts.forEach(t=>{
         const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
@@ -588,12 +618,12 @@ function renderSummary(container, parsed){
   const barW = legCw - bandMargin*2, boxW = barW / 10;
   legend.append('text').attr('x', 12).attr('y', 12).attr('font-size', 12).attr('fill', '#555').text('Scoring legend (1 = worst, 10 = best)');
   for (let i=0;i<10;i++){
-    const x0 = bandMargin + i*boxW; const gBox = legend.append('g');
-    gBox.append('rect').attr('x', x0).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[i]).attr('stroke', '#111').attr('stroke-width', 0.4)
+    const x = bandMargin + i*boxW; const g = legend.append('g');
+    g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[i]).attr('stroke', '#111').attr('stroke-width', 0.4)
       .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i+1);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
-    gBox.append('text').attr('x', x0 + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i+1);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
 }
@@ -602,20 +632,15 @@ function renderSummary(container, parsed){
 function measureTextWidthCal(texts, fontSize=11, fontWeight=600){
   const tmp = d3.select('body').append('svg')
     .attr('width',0).attr('height',0)
-    .style('position','absolute').style('left','-9999px').style('top','-9999px');
+    .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
   let max = 0;
   (texts||[]).forEach(t=>{
-    const n = tmp.append('text')
-      .attr('font-size', fontSize)
-      .attr('font-weight', fontWeight)
-      .text(t==null ? '' : String(t))
-      .node();
+    const n = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
     max = Math.max(max, n.getComputedTextLength());
   });
   tmp.remove();
   return Math.ceil(max);
 }
-// Weather rows (top→bottom)
 const WEATHER_LABELS = ['Clear/Clouds','Fog/Drizzle','Rain/Snow','Heavy precip','Thunderstorm'];
 function weatherCategoryForWMO(code){
   if (code==null) return null;
@@ -663,20 +688,12 @@ function renderCalendarTrio(container, parsed){
     catRowByDate[d] = (row>=0? row : null);
   });
 
-  // Temperature scale bounds from available data
   const tVals = Object.values(tempByDate).filter(v=>v!=null);
   const tMin = tVals.length ? Math.min(...tVals) : null;
   const tMax = tVals.length ? Math.max(...tVals) : null;
 
   function drawCalendar(holder, caption, options){
-    const {
-      numRows,
-      rowForDate,      // (ds) → row index 0..numRows-1 (null = skip)
-      hasValue,        // (ds) → boolean
-      leftLabels,      // array (explicit labels) OR null
-      labelMode='explicit' // 'explicit' or 'weekdays'
-    } = options;
-
+    const { numRows, rowForDate, hasValue, leftLabels, labelMode='explicit' } = options;
     const EMPTY = '#f1f3f8';
     const cell = 12, gap = 2;
     const topPad = 18, monthPad = 12;
@@ -694,7 +711,6 @@ function renderCalendarTrio(container, parsed){
     const svg = holder.append('svg').attr('width', w).attr('height', h);
     const monthFmt = new Intl.DateTimeFormat('sv-SE', { month: 'short' });
 
-    // Month labels
     const monthCols = new Map();
     for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
       if (d.getDate() === 1){
@@ -703,14 +719,9 @@ function renderCalendarTrio(container, parsed){
       }
     }
     monthCols.forEach((lab, col)=>{
-      svg.append('text')
-        .attr('x', leftPad + col*(cell+gap))
-        .attr('y', topPad+8)
-        .attr('font-size', 11)
-        .text(lab);
+      svg.append('text').attr('x', leftPad + col*(cell+gap)).attr('y', topPad+8).attr('font-size', 11).text(lab);
     });
 
-    // Axis labels
     const ax = svg.append('g');
     const yTop = topPad + monthPad;
     const axX  = leftPad - 6;
@@ -718,28 +729,15 @@ function renderCalendarTrio(container, parsed){
       const yNames = ['Mon','','Wed','','Fri','',''];
       yNames.forEach((lab, r)=>{
         if (!lab) return;
-        ax.append('text')
-          .attr('x', axX)
-          .attr('y', yTop + r*(cell+gap) + cell*0.75)
-          .attr('font-size', 11)
-          .attr('fill', '#666')
-          .attr('text-anchor','end')
-          .text(lab);
+        ax.append('text').attr('x', axX).attr('y', yTop + r*(cell+gap) + cell*0.75).attr('font-size', 11).attr('fill', '#666').attr('text-anchor','end').text(lab);
       });
     } else if (Array.isArray(leftLabels) && leftLabels.length){
       leftLabels.forEach((lab, r)=>{
         if (!lab) return;
-        ax.append('text')
-          .attr('x', axX)
-          .attr('y', yTop + r*(cell+gap) + cell*0.75)
-          .attr('font-size', 11)
-          .attr('fill', '#666')
-          .attr('text-anchor','end')
-          .text(lab);
+        ax.append('text').attr('x', axX).attr('y', yTop + r*(cell+gap) + cell*0.75).attr('font-size', 11).attr('fill', '#666').attr('text-anchor','end').text(lab);
       });
     }
 
-    // Grid cells
     const g = svg.append('g').attr('transform', `translate(${leftPad},${yTop})`);
     for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
       const ds = d.toISOString().slice(0,10);
@@ -752,32 +750,19 @@ function renderCalendarTrio(container, parsed){
       const col = Math.floor(idx/7);
       const fill = (row==null || !hasValue(ds)) ? EMPTY : DARK_GREEN;
       const y = (row==null ? 0 : row*(cell+gap));
-      g.append('rect')
-        .attr('x', col*(cell+gap)).attr('y', y)
-        .attr('width', cell).attr('height', cell)
-        .attr('fill', fill);
+      g.append('rect').attr('x', col*(cell+gap)).attr('y', y).attr('width', cell).attr('height', cell).attr('fill', fill);
     }
   }
 
-  // Card
   const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
   card.append('div').attr('class','cal-title').text('Activity & weather statistics');
   const grid = card.append('div').attr('class','cal-grid');
 
-  // 1) Test activity
-  drawCalendar(
-    grid.append('div'),
-    'Test activity',
-    {
-      numRows: 7,
-      labelMode: 'weekdays',
-      leftLabels: null,
-      rowForDate: null,
-      hasValue: (ds)=> (dateCounts[ds] || 0) > 0
-    }
-  );
+  drawCalendar(grid.append('div'),'Test activity',{
+    numRows: 7, labelMode: 'weekdays', leftLabels: null,
+    hasValue: (ds)=> (dateCounts[ds] || 0) > 0
+  });
 
-  // 2) Temperature
   const TEMP_ROWS = 7;
   let tempLabels = Array(TEMP_ROWS).fill('');
   if (tMin!=null && tMax!=null){
@@ -790,40 +775,27 @@ function renderCalendarTrio(container, parsed){
       }
     }
   }
-  drawCalendar(
-    grid.append('div'),
-    'Temperature',
-    {
-      numRows: TEMP_ROWS,
-      labelMode: 'explicit',
-      leftLabels: tempLabels,
-      rowForDate: (ds)=>{
-        const v = tempByDate[ds];
-        if (v==null || tMin==null || tMax==null) return null;
-        if (tMax===tMin) return Math.floor(TEMP_ROWS/2);
-        const ratio = (v - tMin) / (tMax - tMin);
-        const idx = (TEMP_ROWS-1) - Math.max(0, Math.min(TEMP_ROWS-1, Math.floor(ratio*(TEMP_ROWS-1)+1e-6)));
-        return idx;
-      },
-      hasValue: (ds)=> tempByDate[ds] != null
-    }
-  );
+  drawCalendar(grid.append('div'),'Temperature',{
+    numRows: TEMP_ROWS, labelMode:'explicit', leftLabels: tempLabels,
+    rowForDate: (ds)=>{
+      const v = tempByDate[ds];
+      if (v==null || tMin==null || tMax==null) return null;
+      if (tMax===tMin) return Math.floor(TEMP_ROWS/2);
+      const ratio = (v - tMin) / (tMax - tMin);
+      const idx = (TEMP_ROWS-1) - Math.max(0, Math.min(TEMP_ROWS-1, Math.floor(ratio*(TEMP_ROWS-1)+1e-6)));
+      return idx;
+    },
+    hasValue: (ds)=> tempByDate[ds] != null
+  });
 
-  // 3) Weather condition
-  drawCalendar(
-    grid.append('div'),
-    'Weather condition',
-    {
-      numRows: WEATHER_LABELS.length,
-      labelMode: 'explicit',
-      leftLabels: WEATHER_LABELS,
-      rowForDate: (ds)=> {
-        const r = catRowByDate[ds];
-        return (r==null ? null : r);
-      },
-      hasValue: (ds)=> catRowByDate[ds] != null
-    }
-  );
+  drawCalendar(grid.append('div'),'Weather condition',{
+    numRows: WEATHER_LABELS.length, labelMode:'explicit', leftLabels: WEATHER_LABELS,
+    rowForDate: (ds)=> {
+      const r = catRowByDate[ds];
+      return (r==null ? null : r);
+    },
+    hasValue: (ds)=> catRowByDate[ds] != null
+  });
 }
 
 /* ==================== KPI × Software matrix (CC-only) ==================== */
@@ -917,8 +889,8 @@ function renderNonCCPlusLatestCCMatrix(container, parsed){
   const tbody = mtable.append('tbody');
   kpiNames.forEach(name=>{
     const tr = tbody.append('tr');
-    tr.append('td').text(name);
     const e = entryByName.get(name);
+    tr.append('td').text(name);
     tr.append('td').attr('class','target').text(fmtCell(e ? e.target : null));
     cols.forEach(sw=>{
       const v = e ? e.values[sw.label] : null;
@@ -933,29 +905,13 @@ function renderSoftwareCards(container, parsed){
   const T = getThresholds();
   (parsed.software||[]).forEach(sw=>{
     const swLabel = sw.label;
+
+    // Any value for this SW after (possible) external filtering?
     const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
     if (!hasAny) return;
 
     const card = container.append('div').attr('class','chart-card');
     const w = 680;
-
-    // Download PNG
-    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
-      const svg = card.select('svg').node();
-      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type:'image/svg+xml'}));
-      const img = new Image();
-      const W = svg.viewBox?.baseVal?.width || svg.width.baseVal.value;
-      const H = svg.viewBox?.baseVal?.height || svg.height.baseVal.value;
-      img.onload = ()=>{
-        const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
-        ctx.drawImage(img,0,0);
-        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
-    });
 
     // Layout constants
     const radarH = 540;
@@ -969,32 +925,44 @@ function renderSoftwareCards(container, parsed){
     const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
     svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
 
-    // Legend (top-right)
-    const legendItems = [
-      {label:'Green = Good',  color: GREEN},
-      {label:'Yellow = OK',   color: YELLOW},
-      {label:'Red = NOK',     color: RED},
-      {label:'Black = No function', color: BLACK},
-    ];
-    const legendG = svg.append('g').attr('class','legend');
-    legendItems.forEach((it, i)=>{
-      const y = 8 + i*18 + 12;
-      legendG.append('rect').attr('x',8).attr('y',y-7).attr('width',12).attr('height',12).attr('fill',it.color);
-      legendG.append('text').attr('x',26).attr('y',y).attr('dominant-baseline','middle').attr('font-size',12).text(it.label);
+    // Download PNG
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const s = new XMLSerializer().serializeToString(svg.node());
+      const url = URL.createObjectURL(new Blob([s], {type:'image/svg+xml'}));
+      const vb = svg.node().viewBox && svg.node().viewBox.baseVal;
+      const bbox = svg.node().getBBox ? svg.node().getBBox() : null;
+      const W = (vb && vb.width)  || (svg.node().width?.baseVal?.value)  || Math.ceil((bbox?.width  || 800));
+      const H = (vb && vb.height) || (svg.node().height?.baseVal?.value) || Math.ceil((bbox?.height || 600));
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+        ctx.drawImage(img,0,0);
+        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
     });
-    const pad = 8;
-    const lb = legendG.node().getBBox();
-    const legW = Math.ceil(lb.width) + pad*2;
-    const legH = Math.ceil(lb.height) + pad*2;
-    legendG.insert('rect',':first-child')
-      .attr('x', lb.x - pad).attr('y', lb.y - pad)
-      .attr('rx',8).attr('ry',8)
-      .attr('width', legW).attr('height', legH)
-      .attr('fill','#ffffff').attr('fill-opacity',0.85);
-    legendG.attr('transform', `translate(${w - legW - 12}, 32)`);
 
-    // Radar geometry
-    const leftAreaWidth = w - legW - 12;
+    // ===== Build surviving rows first (prevents empty "KPI summary" box) =====
+    const rows = parsed.entries
+      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
+      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
+
+    if (rows.length === 0) {
+      console.warn('[KPI cards] No rows for software:', swLabel, 'mode:', CURRENT_MODE,
+        'available keys:', (parsed.entries || []).map(e => `${e.func} — ${e.kpi}`));
+      card.append('div').attr('class','small').style('margin','8px 10px 12px')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
+    }
+
+    // ===== Radar geometry (functions derived from surviving rows) =====
+    const leftAreaWidth = w;
     const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
     const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
     const centerX = RADAR_PAD_LEFT + availableW / 2;
@@ -1005,13 +973,13 @@ function renderSoftwareCards(container, parsed){
 
     const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
 
-    const functions = [];
-    parsed.entries.forEach(e=>{
-      const v = e.values[swLabel];
-      if (v!=null && !Number.isNaN(v) && !functions.includes(e.func)) functions.push(e.func);
-    });
+    const functions = Array.from(new Set(rows.map(r => r.func)));
     if (!functions.length){
-      card.append('div').attr('class','small').text('No KPI values for this software.');
+      card.append('div').attr('class','small')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
       return;
     }
 
@@ -1045,25 +1013,24 @@ function renderSoftwareCards(container, parsed){
     const spread = wedge * innerFrac;
     const arc = d3.arc();
 
+    // Alternating background and labels
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const end = start + wedge;
-      g.append('path')
-        .attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
+      g.append('path').attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
         .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
-      g.append('line')
-        .attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
         .attr('stroke','#000').attr('stroke-opacity',0.25);
       const cen = (start + end) / 2;
-      g.append('text')
-        .attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
+      g.append('text').attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
         .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
     });
 
+    // Plot KPIs for each function using surviving rows
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const center = start + wedge/2;
-      const items = parsed.entries.filter(e=>e.func===f);
+      const items = rows.filter(r=>r.func===f);
       const K = items.length;
       const avail = spread * 0.96;
       const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
@@ -1073,7 +1040,7 @@ function renderSoftwareCards(container, parsed){
       const labelAvoid = wedge * 0.18;
 
       items.forEach((e, i)=>{
-        const v = e.values[swLabel]; if (v==null || Number.isNaN(v)) return;
+        const v = e.events; if (v==null || Number.isNaN(v)) return;
         let r = toR(v);
         let ang = center + baseOffs[i];
         const isBlack = (v === 1000);
@@ -1108,7 +1075,7 @@ function renderSoftwareCards(container, parsed){
       });
     });
 
-    // Table caption
+    // ===== KPI summary table (only if we have rows) =====
     const RADAR_TO_TABLE_GAP = 50;
     const tableCaptionY = centerY + rMax + RADAR_TO_TABLE_GAP;
     svg.append('text').attr('x', tableSidePad).attr('y', tableCaptionY).attr('font-size', 12).attr('fill', '#555').text('KPI summary per 1000 km');
@@ -1117,23 +1084,13 @@ function renderSoftwareCards(container, parsed){
     const tableY = tableCaptionY + TABLE_CAPTION_GAP;
     const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
 
-    // Build table rows
-    const rows = parsed.entries
-      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
-      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
-
     // Measure widths
     function measureMaxWidth(texts, fontSize=11, fontWeight=400){
-      const tmp = d3.select('body').append('svg')
-        .attr('width',0).attr('height',0)
-        .style('position','absolute').style('left','-9999px').style('top','-9999px');
+      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0)
+        .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
       let max = 0;
       texts.forEach(t=>{
-        const node = tmp.append('text')
-          .attr('font-size', fontSize)
-          .attr('font-weight', fontWeight)
-          .text(t==null ? '' : String(t))
-          .node();
+        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
         max = Math.max(max, node.getComputedTextLength());
       });
       tmp.remove();
@@ -1162,10 +1119,7 @@ function renderSoftwareCards(container, parsed){
       .attr('width', tableWUsed + 8).attr('height', 24 + rows.length * 22 + 8)
       .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
 
-    tableG.append('rect')
-      .attr('x', x0).attr('y', 4)
-      .attr('width', tableWUsed).attr('height', 24)
-      .attr('rx', 6).attr('ry', 6).attr('fill', '#f6f7fb');
+    tableG.append('rect').attr('x', x0).attr('y', 4).attr('width', tableWUsed).attr('height', 24).attr('rx', 6).attr('ry', 6).attr('fill', '#f6f7fb');
 
     const hdrYmid = 4 + 12;
     tableG.append('text').attr('x', x0+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('KPI');
@@ -1195,7 +1149,7 @@ function renderSoftwareCards(container, parsed){
     });
 
     // Scoring band
-    const valuesForAvg = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
+    const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
@@ -1222,25 +1176,13 @@ function renderSoftwareCards(container, parsed){
         .attr('stroke-width', isSel ? 3 : 0.4)
         .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
 
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 950 : 750)
-        .attr('font-size', SCORE_FONTS.number)
-        .text(i+1);
+      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750).attr('font-size', SCORE_FONTS.number).text(i+1);
 
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + 14 + 16)
-        .attr('text-anchor','middle')
-        .attr('font-weight', isSel ? 850 : 550)
-        .attr('font-size', SCORE_FONTS.label)
-        .text(scoreText[i]);
+      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14 + 16).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550).attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
 
-      scoreG.append('text')
-        .attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-size', SCORE_FONTS.range)
-        .text(ranges[i]);
+      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
     }
 
     const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
@@ -1256,11 +1198,14 @@ function renderCharts(parsedFull){
     container.append('div').attr('class','small').text('No data to render.');
     return;
   }
-  renderSummary(container, parsed);                 // 1) Summary card
-  renderCalendarTrio(container, parsed);           // 2) NEW 3-chart calendar card
-  renderCCMatrix(container, parsed);               // 3) CC-only matrix card
-  renderNonCCPlusLatestCCMatrix(container, parsed);// 4) Non-CC + latest CC matrix card
-  renderSoftwareCards(container, parsed);          // 5) Per-software cards
+
+  const ext = (CURRENT_MODE === MODES.EXTERNAL);
+
+  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.calendar)              renderCalendarTrio(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
 }
 
 /* ==================== Loader (CSV + release notes + weather) ==================== */
@@ -1307,6 +1252,11 @@ document.querySelectorAll('.tab').forEach(btn=>{
     CURRENT_MODE = mode;
     updateTabsUI();
     if (LAST_PARSED) renderCharts(LAST_PARSED);
+  });
+  // a11y: keyboard toggle
+  btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
+  btn.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
   });
 });
 
