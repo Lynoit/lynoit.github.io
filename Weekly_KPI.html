@@ -41,18 +41,6 @@
     .summary-table th.col-rating,  .summary-table td.col-rating  { white-space:nowrap; }
     .summary-table th.col-note,    .summary-table td.col-note    { text-align:center; white-space:nowrap; }
 
-    /* Modal */
-    .modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:1000; }
-    .modal{ background:#fff; color:#111; border-radius:12px; box-shadow:0 20px 70px rgba(0,0,0,.35);
-      width:min(760px, 92vw); max-height:80vh; overflow:auto; padding:16px 16px 8px; }
-    .modal header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    .modal h2{ margin:0; font-size:16px; }
-    .modal .close{ background:#e9ecf5; color:#111; border:none; border-radius:10px; padding:6px 10px; cursor:pointer; }
-    .modal .content{ margin:12px 2px 8px; }
-    .modal .content ul{ margin:0; padding-left:18px; }
-    .modal .content li{ margin:6px 0; line-height:1.35; }
-    .modal .empty{ color:#666; font-style:italic; }
-
     /* KPI × Software matrix tables */
     .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
     .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 6px; }
@@ -68,6 +56,9 @@
     .cal-title{ font-weight:700; font-size:14px; margin:2px 0 8px; text-align:center; }
     .cal-grid{ display:grid; grid-template-columns:repeat(3, minmax(220px, 1fr)); gap:16px; padding:6px 10px 12px; }
     .cal-col-title{ font-weight:600; font-size:13px; margin:0 0 4px; }
+
+    /* HTML KPI table wrapper */
+    .kpi-table-wrap{ margin-top:8px; }
   </style>
 </head>
 <body>
@@ -85,7 +76,7 @@
   </div>
 
   <!-- Modal -->
-  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true">
+  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true" style="display:none">
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <header>
         <h2 id="modalTitle">Release Note</h2>
@@ -177,7 +168,7 @@ function parseThresholds(str){
   const arr = (str||'')
     .split(',')
     .map(s => s.trim())
-    .filter(s => s !== '')   // <-- add the parameter here
+    .filter(s => s !== '')
     .map(Number);
   if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
   for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; }
@@ -917,15 +908,12 @@ function renderSoftwareCards(container, parsed){
     const card = container.append('div').attr('class','chart-card');
     const w = 680;
 
-    // Layout constants
+    // Title SVG (radar sits inside same SVG)
     const radarH = 540;
-    const scoreTopPad = 28;
-    const rowH = 22, tableHeaderH = 24, tableSidePad = 12, colGap = 8;
     const TITLE_Y = 26, TITLE_TO_RADAR_GAP = 50, RADAR_PAD_LEFT = 30, MIN_SIDE_MARGIN = 8, FUNC_LABEL_OFFSET = 16;
 
     const svg = card.append('svg').attr('width', w);
 
-    // Title
     const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
     svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
 
@@ -949,14 +937,12 @@ function renderSoftwareCards(container, parsed){
       img.src = url;
     });
 
-    // ===== Build surviving rows first (prevents empty "KPI summary" box) =====
+    // Build surviving rows first (prevents empty KPI table later)
     const rows = parsed.entries
       .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
       .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
 
     if (rows.length === 0) {
-      console.warn('[KPI cards] No rows for software:', swLabel, 'mode:', CURRENT_MODE,
-        'available keys:', (parsed.entries || []).map(e => `${e.func} — ${e.kpi}`));
       card.append('div').attr('class','small').style('margin','8px 10px 12px')
         .text(CURRENT_MODE === MODES.EXTERNAL
           ? 'No KPIs remain for this software after External whitelist filtering.'
@@ -1079,80 +1065,35 @@ function renderSoftwareCards(container, parsed){
       });
     });
 
-    // ===== KPI summary table (only if we have rows) =====
-    const RADAR_TO_TABLE_GAP = 50;
-    const tableCaptionY = centerY + rMax + RADAR_TO_TABLE_GAP;
-    svg.append('text').attr('x', tableSidePad).attr('y', tableCaptionY).attr('font-size', 12).attr('fill', '#555').text('KPI summary per 1000 km');
+    // ===== KPI summary table (HTML table version — robust) =====
+    const htmlCaption = document.createElement('div');
+    htmlCaption.className = 'small';
+    htmlCaption.style.margin = '18px 0 6px';
+    htmlCaption.textContent = 'KPI summary per 1000 km';
+    card.node().appendChild(htmlCaption);
 
-    const TABLE_CAPTION_GAP = 8;
-    const tableY = tableCaptionY + TABLE_CAPTION_GAP;
-    const tableG = svg.append('g').attr('transform', `translate(0, ${tableY})`);
+    const wrapDiv = d3.select(card.node()).append('div').attr('class','kpi-table-wrap');
+    const t = wrapDiv.append('table').attr('class','summary-table');
 
-    // Measure widths
-    function measureMaxWidth(texts, fontSize=11, fontWeight=400){
-      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0)
-        .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
-      let max = 0;
-      texts.forEach(t=>{
-        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
-        max = Math.max(max, node.getComputedTextLength());
-      });
-      tmp.remove();
-      return max;
-    }
-    const kpiTexts  = rows.map(r=>r.kpi);
-    const funcTexts = rows.map(r=>r.func);
-    const tgtTexts  = rows.map(r=>fmtCell(r.target));
-    const maxTexts  = rows.map(r=>fmtCell(r.max));
-    const evtTexts  = rows.map(r=>fmtCell(r.events));
-    const kpiW  = measureMaxWidth(kpiTexts , 11, 400) + 16;
-    const funcW = Math.max(90, Math.min(180, measureMaxWidth(funcTexts, 11, 400) + 16));
-    let col2W   = Math.max(50, Math.min(120, measureMaxWidth(tgtTexts , 11, 400) + 16));
-    let col3W   = Math.max(60, Math.min(140, measureMaxWidth(maxTexts , 11, 400) + 16));
-    let col4W   = Math.max(60, Math.min(140, measureMaxWidth(evtTexts , 11, 700) + 16));
-    const x0 = tableSidePad;
-    const x1 = x0 + kpiW + colGap;
-    const x2 = x1 + funcW + colGap;
-    const x3 = x2 + col2W + colGap;
-    const x4 = x3 + col3W + colGap;
-    const tableWUsed = x4 - x0 + col4W;
+    const thead = t.append('thead').append('tr');
+    thead.append('th').text('KPI');
+    thead.append('th').text('Function');
+    thead.append('th').style('text-align','right').text('Target');
+    thead.append('th').style('text-align','right').text('Max allowed');
+    thead.append('th').style('text-align','right').text('Number of events');
 
-    svg.append('g').attr('transform', `translate(0, ${tableY})`)
-      .append('rect')
-      .attr('x', 12-4).attr('y', 2)
-      .attr('width', tableWUsed + 8).attr('height', 24 + rows.length * 22 + 8)
-      .attr('rx', 8).attr('ry', 8).attr('fill', '#ffffff').attr('stroke', '#e4e7f3');
-
-    tableG.append('rect').attr('x', x0).attr('y', 4).attr('width', tableWUsed).attr('height', 24).attr('rx', 6).attr('ry', 6).attr('fill', '#f6f7fb');
-
-    const hdrYmid = 4 + 12;
-    tableG.append('text').attr('x', x0+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('KPI');
-    tableG.append('text').attr('x', x1+6).attr('y', hdrYmid).attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Function');
-    tableG.append('text').attr('x', x2 + col2W - 6).attr('y', hdrYmid).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size',12).attr('font-weight',700).text('Target');
-
-    const hMax = tableG.append('text').attr('x', x3 + col3W - 6).attr('y', 4 + 8).attr('text-anchor','end').attr('font-size',12).attr('font-weight',700);
-    hMax.append('tspan').text('Max').attr('x', x3 + col3W - 6).attr('dy', 0);
-    hMax.append('tspan').text('allowed').attr('x', x3 + col3W - 6).attr('dy', 12);
-
-    const hEvt = tableG.append('text').attr('x', x4 + col4W - 6).attr('y', 4 + 8).attr('text-anchor','end').attr('font-size',12).attr('font-weight',700);
-    hEvt.append('tspan').text('Number of').attr('x', x4 + col4W - 6).attr('dy', 0);
-    hEvt.append('tspan').text('events').attr('x', x4 + col4W - 6).attr('dy', 12);
-
-    rows.forEach((r, i)=>{
-      const y = 4 + 24 + i*22;
-      tableG.append('rect').attr('x', x0).attr('y', y).attr('width', tableWUsed).attr('height', 22).attr('fill', i%2 ? '#fafbff' : '#ffffff');
-      tableG.append('text').attr('x', x0+6).attr('y', y + 11).attr('dominant-baseline','middle').attr('font-size', 11).text(r.kpi);
-      tableG.append('text').attr('x', x1+6).attr('y', y + 11).attr('dominant-baseline','middle').attr('font-size', 11).text(r.func);
-      tableG.append('text').attr('x', x2 + col2W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.target));
-      tableG.append('text').attr('x', x3 + col3W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).text(fmtCell(r.max));
-      tableG.append('text').attr('x', x4 + col4W - 6).attr('y', y + 11).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 11).attr('font-weight',600).text(fmtCell(r.events));
+    const tbody = t.append('tbody');
+    rows.forEach(r=>{
+      const tr = tbody.append('tr');
+      tr.append('td').text(r.kpi);
+      tr.append('td').text(r.func);
+      tr.append('td').style('text-align','right').text(fmtCell(r.target));
+      tr.append('td').style('text-align','right').text(fmtCell(r.max));
+      tr.append('td').style('text-align','right').style('font-weight','600').text(fmtCell(r.events));
     });
 
-    [x1 - colGap/2, x2 - colGap/2, x3 - colGap/2, x4 - colGap/2].forEach(xx=>{
-      tableG.append('line').attr('x1', xx).attr('x2', xx).attr('y1', 4 + 24).attr('y2', 4 + 24 + rows.length*22).attr('stroke', '#eef1fb');
-    });
-
-    // Scoring band
+    // ===== Scoring band (SVG below the table) =====
+    const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
     const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
     const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
@@ -1160,37 +1101,36 @@ function renderSoftwareCards(container, parsed){
     const barMargin = 20, boxH2 = 42;
     const barW = w - barMargin*2;
     const boxW = barW / 10;
-    const scoreBandY = tableY + (24 + rows.length * 22 + 8) + scoreTopPad;
-    const scoreG = svg.append('g').attr('transform', `translate(0, ${scoreBandY})`);
-
     const caption = (avgEvents==null)
       ? 'Average per 1000km:  n/a (only "No function" or missing values)'
       : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
-    scoreG.append('text').attr('x', barMargin).attr('y', 14).attr('font-size', 12).text(caption);
 
+    scoreBand.append('text').attr('x', barMargin).attr('y', 16).attr('font-size', 12).text(caption);
     const ranges = scoreRangeLabels(T);
+
     for (let i=0;i<10;i++){
       const x = barMargin + i*boxW;
       const isSel = (score === i+1);
-      scoreG.append('rect')
-        .attr('x', x).attr('y', 28)
+      const g2 = scoreBand.append('g');
+      g2.append('rect')
+        .attr('x', x).attr('y', 30)
         .attr('width', boxW).attr('height', boxH2)
         .attr('fill', scoreColors[i])
         .attr('stroke', isSel ? '#000' : '#111')
         .attr('stroke-width', isSel ? 3 : 0.4)
         .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
-
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14).attr('text-anchor','middle')
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14).attr('text-anchor','middle')
         .attr('font-weight', isSel ? 950 : 750).attr('font-size', SCORE_FONTS.number).text(i+1);
-
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + 14 + 16).attr('text-anchor','middle')
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14 + 16).attr('text-anchor','middle')
         .attr('font-weight', isSel ? 850 : 550).attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
-
-      scoreG.append('text').attr('x', x + boxW/2).attr('y', 28 + boxH2 + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + boxH2 + 14).attr('text-anchor','middle')
+        .attr('font-size', SCORE_FONTS.range).text(ranges[i]);
     }
+    scoreBand.attr('height', 30 + boxH2 + 28 + 8);
 
-    const totalHeight = scoreBandY + 28 + boxH2 + 26 + 16;
-    svg.attr('height', totalHeight);
+    // Final SVG height (for PNG export to include radar only)
+    const totalRadarHeight = centerY + rMax + 10;
+    svg.attr('height', totalRadarHeight);
   });
 }
 
