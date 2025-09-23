@@ -42,6 +42,8 @@
     .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 14px; max-width: 980px; }
     .route-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; }
     .route-title { font-size: 13px; color: #333; margin-bottom: 8px; }
+    .route-title a { color: inherit; text-decoration: none; }
+    .route-title a:hover { text-decoration: underline; }
     .route-meta { font-size: 12px; color: #666; margin-top: 6px; }
     .route-map { width: 100%; height: 180px; border: 1px solid #aaa; border-radius: 6px; }
   </style>
@@ -161,13 +163,70 @@
         });
     }
 
+    // NEW: Extract "test purpose" from any non-Sampling sheet
+    function extractTestPurpose(wb){
+      const isSampling = n => n.toLowerCase() === 'sampling';
+
+      for (const sheetName of wb.SheetNames){
+        if (isSampling(sheetName)) continue;
+
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
+        if (!rows || rows.length === 0) continue;
+
+        // A) Header row contains "purpose"
+        const hdr = rows[0].map(h => String(h ?? '').toLowerCase());
+        let idx = hdr.findIndex(h => h.includes('purpose'));
+        if (idx >= 0){
+          for (let r = 1; r < rows.length; r++){
+            const val = rows[r][idx];
+            if (val != null && String(val).trim() !== '') return String(val).trim();
+          }
+        }
+
+        // B) Key-value style search within first ~40 rows/8 cols
+        for (let r = 0; r < Math.min(rows.length, 40); r++){
+          const row = rows[r].map(c => (c == null ? '' : String(c)));
+          for (let c = 0; c < Math.min(row.length, 8); c++){
+            const cell = row[c].toLowerCase();
+            if (cell.includes('purpose')){
+              const afterColon = row[c].split(':').slice(1).join(':').trim();
+              if (afterColon) return afterColon;
+              const next = row[c+1];
+              if (next && String(next).trim()) return String(next).trim();
+            }
+          }
+        }
+      }
+      return null; // not found
+    }
+
     // ---------- APP STATE ----------
     let issueCoords = [];
     let samplingCoords = [];
     let mapRef = null;
     let samplingLayerGroup = null;
+    let allFiles = []; // NEW: used to re-render overview
 
     document.addEventListener('DOMContentLoaded', listBlobs);
+
+    // NEW: Helper to render the default overview page
+    function renderOverview(){
+      const content = document.getElementById('content');
+      content.innerHTML = `
+        <h1>Test activity overview</h1>
+        <div id="overview" class="overview">
+          <div id="heatmap-host"></div>
+          <div class="routes-wrap">
+            <h2 style="margin-top:16px;">Latest routes</h2>
+            <div id="routes-grid" class="route-grid"></div>
+          </div>
+        </div>
+      `;
+      if (allFiles.length){
+        buildOverviewHeatmap(allFiles);
+        buildLatestRoutePreviews(allFiles);
+      }
+    }
 
     function listBlobs() {
       fetch(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`)
@@ -192,6 +251,7 @@
           xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
 
           const xlsxNames = xlsx.map(b => b.name);
+          allFiles = xlsxNames; // NEW: remember for overview re-render
 
           buildSidebar(xlsxNames);
           buildOverviewHeatmap(xlsxNames);
@@ -209,6 +269,9 @@
       header.style.padding = '16px';
       header.style.margin = '0';
       header.style.borderBottom = '1px solid #ddd';
+      header.style.cursor = 'pointer';
+      header.title = 'Back to overview';
+      header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); }); // NEW: back to overview
       sb.appendChild(header);
 
       const groups = files.reduce((acc, f) => {
@@ -275,46 +338,45 @@
         .filter(x => x.m)
         .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
-        .then(rows => {
-          rows.forEach(r => {
-            if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
-            const prev = byDay.get(r.dayStr) || 0;
-            byDay.set(r.dayStr, prev + (r.issueCount || 0));
-          });
-
-          const days = Array.from(byDay.keys()).sort();
-          const host = document.getElementById('heatmap-host');
-          if (days.length === 0){
-            host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
-            return;
-          }
-
-          const minDate = toDateOnly(days[0]);
-          const maxDate = toDateOnly(days[days.length-1]);
-
-          const start = new Date(minDate);
-          const day = start.getDay(); // 0 Sun … 6 Sat
-          const offsetToMonday = (day === 0 ? 6 : day - 1);
-          start.setDate(start.getDate() - offsetToMonday);
-          start.setHours(0,0,0,0);
-
-          const end = new Date(maxDate);
-          const endDay = end.getDay();
-          const addToSunday = (7 - endDay) % 7;
-          end.setDate(end.getDate() + addToSunday);
-          end.setHours(0,0,0,0);
-
-          const dense = [];
-          let cur = new Date(start);
-          while (cur <= end) {
-            const ymd = cur.toISOString().slice(0,10);
-            dense.push({ date: new Date(cur), count: byDay.get(ymd) || 0 });
-            cur.setDate(cur.getDate() + 1);
-          }
-
-          renderHeatmap(dense);
+      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s})))).then(rows => {
+        rows.forEach(r => {
+          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
+          const prev = byDay.get(r.dayStr) || 0;
+          byDay.set(r.dayStr, prev + (r.issueCount || 0));
         });
+
+        const days = Array.from(byDay.keys()).sort();
+        const host = document.getElementById('heatmap-host');
+        if (days.length === 0){
+          host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
+          return;
+        }
+
+        const minDate = toDateOnly(days[0]);
+        const maxDate = toDateOnly(days[days.length-1]);
+
+        const start = new Date(minDate);
+        const day = start.getDay(); // 0 Sun … 6 Sat
+        const offsetToMonday = (day === 0 ? 6 : day - 1);
+        start.setDate(start.getDate() - offsetToMonday);
+        start.setHours(0,0,0,0);
+
+        const end = new Date(maxDate);
+        const endDay = end.getDay();
+        const addToSunday = (7 - endDay) % 7;
+        end.setDate(end.getDate() + addToSunday);
+        end.setHours(0,0,0,0);
+
+        const dense = [];
+        let cur = new Date(start);
+        while (cur <= end) {
+          const ymd = cur.toISOString().slice(0,10);
+          dense.push({ date: new Date(cur), count: byDay.get(ymd) || 0 });
+          cur.setDate(cur.getDate() + 1);
+        }
+
+        renderHeatmap(dense);
+      });
     }
 
     function renderHeatmap(denseDays){
@@ -393,80 +455,89 @@
     }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
-   // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
-function buildLatestRoutePreviews(files){
-  const withDates = files
-    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-    .filter(x => x.m)
-    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+    function buildLatestRoutePreviews(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-  Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
-    .then(rows => {
-      // Filter and sort strictly by Last-Modified DESC
-      const take = rows
-        .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
-        .sort((a, b) => {
-          const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
-          if (diff !== 0) return diff;
-          const byDateStr = b.dayStr.localeCompare(a.dayStr);
-          if (byDateStr !== 0) return byDateStr;
-          return b.filename.localeCompare(a.filename);
-        })
-        .slice(0,10);
+      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
+        .then(rows => {
+          // Filter and sort strictly by Last-Modified DESC
+          const take = rows
+            .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
+            .sort((a, b) => {
+              const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
+              if (diff !== 0) return diff;
+              const byDateStr = b.dayStr.localeCompare(a.dayStr);
+              if (byDateStr !== 0) return byDateStr;
+              return b.filename.localeCompare(a.filename);
+            })
+            .slice(0,10);
 
-      const grid = document.getElementById('routes-grid');
-      grid.innerHTML = '';
-      if (take.length === 0) return;
+          const grid = document.getElementById('routes-grid');
+          grid.innerHTML = '';
+          if (take.length === 0) return;
 
-      // 1) Create and append all cards in the sorted order (placeholders)
-      const slots = take.map(item => {
-        const card = document.createElement('div');
-        card.className = 'route-card';
+          // 1) Create and append all cards in the sorted order (placeholders)
+          const slots = take.map(item => {
+            const card = document.createElement('div');
+            card.className = 'route-card';
 
-        const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
-        const title = document.createElement('div');
-        title.className = 'route-title';
-        title.textContent = `${item.dayStr} — ${niceName}`;
-        card.appendChild(title);
+            const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
+            const title = document.createElement('div');
+            title.className = 'route-title';
 
-        const mapDiv = document.createElement('div');
-        mapDiv.className = 'route-map';
-        mapDiv.id = `route_${cssSafeId(item.filename)}`;
-        card.appendChild(mapDiv);
+            // NEW: title as link to open the drive
+            const link = document.createElement('a');
+            link.href = '#';
+            link.textContent = `${item.dayStr} — ${niceName}`;
+            link.addEventListener('click', (e)=>{ e.preventDefault(); loadFile(item.filename); });
+            title.appendChild(link);
+            card.appendChild(title);
 
-        const meta = document.createElement('div');
-        meta.className = 'route-meta';
-        meta.textContent = `Mileage: … km  •  Issues: ${item.issueCount}`;
-        card.appendChild(meta);
+            const mapDiv = document.createElement('div');
+            mapDiv.className = 'route-map';
+            mapDiv.id = `route_${cssSafeId(item.filename)}`;
+            card.appendChild(mapDiv);
 
-        grid.appendChild(card);
-        return { item, mapDiv, meta };
-      });
+            const meta = document.createElement('div');
+            meta.className = 'route-meta';
+            meta.textContent = `Mileage: … km  •  Issues: ${item.issueCount}`;
+            card.appendChild(meta);
 
-      // 2) Fill each card asynchronously (order of appending is preserved)
-      slots.forEach(({ item, mapDiv, meta }) => {
-        fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
-          .then(res => res.arrayBuffer())
-          .then(buf => {
-            const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-            const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-            if (!samplingName) return;
+            grid.appendChild(card);
+            return { item, mapDiv, meta };
+          });
 
-            const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-            if (!path || path.length < 2) return;
+          // 2) Fill each card asynchronously (order of appending is preserved)
+          slots.forEach(({ item, mapDiv, meta }) => {
+            fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
+              .then(res => res.arrayBuffer())
+              .then(buf => {
+                const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+                const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+                if (!samplingName) return;
 
-            meta.textContent = `Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+                const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+                if (!path || path.length < 2) return;
 
-            const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
-            const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
-            mini.fitBounds(line.getBounds(), { padding:[8,8] });
-            mini.whenReady(()=>mini.invalidateSize());
-          })
-          .catch(()=>{ /* ignore individual failures */ });
-      });
-    });
-}
+                // NEW: extract purpose and show before mileage
+                const purpose = extractTestPurpose(wb);
+                const purposeText = purpose ? `Purpose: ${purpose}  •  ` : '';
+
+                meta.textContent = `${purposeText}Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+
+                const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+                const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
+                mini.fitBounds(line.getBounds(), { padding:[8,8] });
+                mini.whenReady(()=>mini.invalidateSize());
+              })
+              .catch(()=>{ /* ignore individual failures */ });
+          });
+        });
+    }
 
     // ---------- SESSION VIEWER ----------
     function loadFile(filename) {
@@ -727,4 +798,3 @@ function buildLatestRoutePreviews(files){
   </script>
 </body>
 </html>
-
