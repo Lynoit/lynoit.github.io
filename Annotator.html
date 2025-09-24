@@ -507,6 +507,18 @@ function renderMetaForm(questions) {
     </div>
     <button class="bigButton orangeButton" id="uploadNowButton">Upload data to cloud</button>
     <button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button>
+    <!-- USB Camera Picker (non-intrusive) -->
+<div id="cameraPicker" style="margin:10px 0;">
+  <label for="cameraSelect" style="display:block;margin-bottom:6px;">Camera</label>
+  <div style="display:flex; gap:6px; align-items:center;">
+    <select id="cameraSelect" style="flex:1; background:#1e1e1e; color:#e0e0e0; border:1px solid #444; padding:6px;"></select>
+    <button id="refreshCams" class="greyButton" style="min-width:40px; padding:6px 8px;">↻</button>
+  </div>
+  <small style="display:block;margin-top:6px;color:#aaa;">
+    If list is empty, click ↻ and allow camera access.
+  </small>
+</div>
+
   </div>
 
   <div id="mainContent">
@@ -883,6 +895,9 @@ setInterval(() => {
   // initial build
   buildButtons(configSelect.value);
   startCamera();
+  wireCameraPickerEvents();
+  listCamerasAndPopulateSelect(); // populates the dropdown and switches to the last-used camera
+
 }   
 
     let recognizer;  // Azure continuous recogniser
@@ -1078,6 +1093,134 @@ async function initAzureSpeech() {
       .then(stream => { video.srcObject = stream; })
       .catch(err   => { console.error('Camera error', err); });
    }
+
+    /* ───────────────────────────────────────────────────────────
+   USB Camera Support (additive, non-breaking)
+   - Keeps your original startCamera() untouched.
+   - Lets you pick a specific videoinput (USB, internal, etc.)
+   - Remembers last choice; refreshes on plug/unplug.
+─────────────────────────────────────────────────────────── */
+
+function stopCurrentCamera() {
+  try {
+    const video = document.getElementById('camera');
+    const stream = video && video.srcObject;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (video) video.srcObject = null;
+  } catch (e) {
+    console.warn('stopCurrentCamera():', e);
+  }
+}
+
+async function startUsbCamera(deviceId) {
+  // Stop whatever is currently running
+  stopCurrentCamera();
+
+  // Use an explicit deviceId if we have one, otherwise let the browser pick
+  const constraints = {
+    video: deviceId ? { deviceId: { exact: deviceId } } : { video: true },
+    audio: false
+  };
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const video  = document.getElementById('camera');
+    if (video) video.srcObject = stream;
+    // Remember selection
+    if (deviceId) localStorage.setItem('annotator:lastCameraId', deviceId);
+  } catch (err) {
+    console.error('startUsbCamera() failed, falling back to default camera:', err);
+    // Fall back to your original behavior
+    try {
+      // Call your existing startCamera() (unchanged)
+      startCamera();
+    } catch (e2) {
+      console.error('Fallback startCamera() failed:', e2);
+    }
+  }
+}
+
+async function ensurePermissionForLabels() {
+  // To get device labels, browsers require permission once.
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    if (devices.some(d => d.label)) return; // already have labels
+    const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    tmp.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    // user may deny; we can still list devices but labels may be blank
+    console.warn('Camera permission not granted for labels.');
+  }
+}
+
+async function listCamerasAndPopulateSelect() {
+  const sel = document.getElementById('cameraSelect');
+  if (!sel || !navigator.mediaDevices?.enumerateDevices) return;
+
+  await ensurePermissionForLabels();
+
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  devices = devices.filter(d => d.kind === 'videoinput');
+
+  sel.innerHTML = '';
+  if (devices.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(No cameras found)';
+    sel.appendChild(opt);
+    return;
+  }
+
+  // Optional: show likely USB/UVC first
+  devices.sort((a, b) => {
+    const aUsb = /usb|uvc/i.test(a.label);
+    const bUsb = /usb|uvc/i.test(b.label);
+    return (aUsb === bUsb) ? 0 : (aUsb ? -1 : 1);
+  });
+
+  const storedId = localStorage.getItem('annotator:lastCameraId');
+  devices.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Camera ${i + 1}`;
+    sel.appendChild(opt);
+  });
+
+  const desiredId = storedId && devices.some(d => d.deviceId === storedId)
+    ? storedId
+    : devices[0].deviceId;
+
+  // Select in UI
+  for (const opt of sel.options) opt.selected = (opt.value === desiredId);
+
+  // Switch to the selected device
+  await startUsbCamera(desiredId);
+}
+
+function wireCameraPickerEvents() {
+  const sel = document.getElementById('cameraSelect');
+  const btn = document.getElementById('refreshCams');
+
+  if (sel) {
+    sel.addEventListener('change', async () => {
+      const id = sel.value || null;
+      await startUsbCamera(id);
+    });
+  }
+
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      await listCamerasAndPopulateSelect();
+    });
+  }
+
+  // React to plug/unplug without user clicking refresh
+  if (navigator.mediaDevices?.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', async () => {
+      await listCamerasAndPopulateSelect();
+    });
+  }
+}
     
   function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
@@ -2423,3 +2566,4 @@ uploadNowBtn.addEventListener('click', () => {
   </script>
 </body>
 </html>
+
