@@ -163,41 +163,25 @@
         });
     }
 
-    // NEW: Extract "test purpose" from any non-Sampling sheet
-    function extractTestPurpose(wb){
-      const isSampling = n => n.toLowerCase() === 'sampling';
+    // NEW: Read "Test details" sheet (col1=label, col2=value) → map
+    function extractTestDetails(wb){
+      const details = {};
+      const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+      if (!sheetName) return details;
 
-      for (const sheetName of wb.SheetNames){
-        if (isSampling(sheetName)) continue;
-
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
-        if (!rows || rows.length === 0) continue;
-
-        // A) Header row contains "purpose"
-        const hdr = rows[0].map(h => String(h ?? '').toLowerCase());
-        let idx = hdr.findIndex(h => h.includes('purpose'));
-        if (idx >= 0){
-          for (let r = 1; r < rows.length; r++){
-            const val = rows[r][idx];
-            if (val != null && String(val).trim() !== '') return String(val).trim();
-          }
-        }
-
-        // B) Key-value style search within first ~40 rows/8 cols
-        for (let r = 0; r < Math.min(rows.length, 40); r++){
-          const row = rows[r].map(c => (c == null ? '' : String(c)));
-          for (let c = 0; c < Math.min(row.length, 8); c++){
-            const cell = row[c].toLowerCase();
-            if (cell.includes('purpose')){
-              const afterColon = row[c].split(':').slice(1).join(':').trim();
-              if (afterColon) return afterColon;
-              const next = row[c+1];
-              if (next && String(next).trim()) return String(next).trim();
-            }
-          }
-        }
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row || row.length < 2) continue;
+        const keyRaw = row[0];
+        const valRaw = row[1];
+        if (keyRaw == null || valRaw == null) continue;
+        const key = String(keyRaw).trim().toLowerCase();
+        const val = String(valRaw).trim();
+        if (!key || !val) continue;
+        details[key] = val; // e.g., details['test object'] = 'Volvo ES90'
       }
-      return null; // not found
+      return details;
     }
 
     // ---------- APP STATE ----------
@@ -205,11 +189,11 @@
     let samplingCoords = [];
     let mapRef = null;
     let samplingLayerGroup = null;
-    let allFiles = []; // NEW: used to re-render overview
+    let allFiles = []; // used to re-render overview
 
     document.addEventListener('DOMContentLoaded', listBlobs);
 
-    // NEW: Helper to render the default overview page
+    // Helper to render the default overview page
     function renderOverview(){
       const content = document.getElementById('content');
       content.innerHTML = `
@@ -251,7 +235,7 @@
           xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
 
           const xlsxNames = xlsx.map(b => b.name);
-          allFiles = xlsxNames; // NEW: remember for overview re-render
+          allFiles = xlsxNames; // remember for overview re-render
 
           buildSidebar(xlsxNames);
           buildOverviewHeatmap(xlsxNames);
@@ -271,7 +255,7 @@
       header.style.borderBottom = '1px solid #ddd';
       header.style.cursor = 'pointer';
       header.title = 'Back to overview';
-      header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); }); // NEW: back to overview
+      header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
       sb.appendChild(header);
 
       const groups = files.reduce((acc, f) => {
@@ -488,7 +472,7 @@
             const title = document.createElement('div');
             title.className = 'route-title';
 
-            // NEW: title as link to open the drive
+            // title as link to open the drive
             const link = document.createElement('a');
             link.href = '#';
             link.textContent = `${item.dayStr} — ${niceName}`;
@@ -522,11 +506,17 @@
                 const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
                 if (!path || path.length < 2) return;
 
-                // NEW: extract purpose and show before mileage
-                const purpose = extractTestPurpose(wb);
-                const purposeText = purpose ? `Purpose: ${purpose}  •  ` : '';
+                // Read column-2 values from "Test details"
+                const details = extractTestDetails(wb);
+                const objVal = details['test object'] || details['object'] || details['vehicle'] || null;
+                const purposeVal = details['purpose'] || details['test purpose'] || null;
 
-                meta.textContent = `${purposeText}Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+                const leftParts = [];
+                if (objVal) leftParts.push(`Test object: ${objVal}`);
+                if (purposeVal) leftParts.push(`Purpose: ${purposeVal}`);
+                const leftText = leftParts.length ? leftParts.join('  •  ') + '  •  ' : '';
+
+                meta.textContent = `${leftText}Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
 
                 const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
@@ -693,7 +683,7 @@
                   const td = document.createElement('td');
                   td.textContent = val;
                   td.style.padding = '8px';
-                  td.style.border = '1px solid #ccc';
+                  td.style.border = '1px solid '#ccc';
                   row.appendChild(td);
                 });
 
