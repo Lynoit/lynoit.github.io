@@ -98,6 +98,169 @@ function renderMetaForm(questions) {
       startApp();
     });
   };
+
+    // ───────────────────────────────────────────────────────────
+// USB/External camera support (picker + robust stream switch)
+// ───────────────────────────────────────────────────────────
+let currentCamStream = null;
+let preferredCamId   = localStorage.getItem('annotator.camId') || null;
+
+async function ensureDeviceLabels() {
+  // On Android, labels are empty until a permission grant; do a quick ask
+  try {
+    const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    tmp.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    // user may deny; we’ll still try to enumerate
+  }
+}
+
+function guessUsbDeviceId(devices) {
+  // Prefer label hints that often show for USB/UVC cams
+  const usbLike = devices.find(d =>
+    /usb|uvc|external|webcam/i.test(d.label)
+  );
+  return usbLike ? usbLike.deviceId : null;
+}
+
+async function listVideoInputs() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter(d => d.kind === 'videoinput');
+}
+
+async function populateCameraSelect() {
+  const sel   = document.getElementById('cameraSelect');
+  const stat  = document.getElementById('camStatus');
+  sel.innerHTML = '';
+
+  let inputs = [];
+  try {
+    inputs = await listVideoInputs();
+  } catch (e) {
+    stat.textContent = 'enumeration failed';
+    console.warn('enumerateDevices failed', e);
+    return;
+  }
+
+  if (!inputs.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no cameras found)';
+    sel.appendChild(opt);
+    stat.textContent = 'no camera';
+    return;
+  }
+
+  // Pick default: previously chosen → otherwise best guess USB → otherwise first
+  let defaultId = preferredCamId && inputs.some(d => d.deviceId === preferredCamId)
+    ? preferredCamId
+    : guessUsbDeviceId(inputs) || inputs[0].deviceId;
+
+  inputs.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    // Show friendly label or a fallback
+    opt.textContent = d.label || `Camera ${sel.length + 1}`;
+    sel.appendChild(opt);
+  });
+
+  sel.value = defaultId;
+  stat.textContent = 'ready';
+}
+
+async function startCameraByDeviceId(deviceId) {
+  const video  = document.getElementById('camera');
+  const stat   = document.getElementById('camStatus');
+
+  // Stop any previous stream
+  if (currentCamStream) {
+    currentCamStream.getTracks().forEach(t => t.stop());
+    currentCamStream = null;
+  }
+
+  // Build constraints: exact deviceId if provided, otherwise environment
+  const constraints = {
+    audio: false,
+    video: deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
+      : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
+  };
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentCamStream = stream;
+    video.srcObject  = stream;
+    await new Promise(res => {
+      if (video.readyState >= 2) return res();
+      video.onloadedmetadata = () => res();
+    });
+
+    // Persist the selected device if we actually requested one
+    if (deviceId) {
+      preferredCamId = deviceId;
+      localStorage.setItem('annotator.camId', deviceId);
+    }
+
+    stat.textContent = `live ${video.videoWidth}×${video.videoHeight}`;
+  } catch (err) {
+    console.error('Camera start failed', err);
+    stat.textContent = 'start failed';
+  }
+}
+
+function stopCamera() {
+  const stat = document.getElementById('camStatus');
+  if (currentCamStream) {
+    currentCamStream.getTracks().forEach(t => t.stop());
+    currentCamStream = null;
+  }
+  stat.textContent = 'stopped';
+}
+
+// Initialize picker & wire events
+async function initCameraPicker() {
+  const sel   = document.getElementById('cameraSelect');
+  const btnR  = document.getElementById('refreshCamsBtn');
+  const btnS  = document.getElementById('startCamBtn');
+  const btnX  = document.getElementById('stopCamBtn');
+  const stat  = document.getElementById('camStatus');
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    stat.textContent = 'unsupported';
+    console.warn('getUserMedia not supported on this browser');
+    return;
+  }
+
+  await ensureDeviceLabels();
+  await populateCameraSelect();
+
+  btnR.onclick = async () => {
+    stat.textContent = 'refreshing…';
+    await ensureDeviceLabels();
+    await populateCameraSelect();
+  };
+
+  btnS.onclick = () => {
+    const id = sel.value || null;
+    startCameraByDeviceId(id);
+  };
+
+  btnX.onclick = () => stopCamera();
+
+  // Auto-start with remembered/USB-guessed device on boot
+  const autoId = document.getElementById('cameraSelect').value || null;
+  startCameraByDeviceId(autoId);
+}
+
+// If the page is backgrounded/foregrounded, some devices drop streams.
+// Try to re-bind when visible again.
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && preferredCamId) {
+    // Attempt a soft restart onto the preferred camera
+    try { await startCameraByDeviceId(preferredCamId); } catch {}
+  }
+});
+    
 </script>
 
 <script defer src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@1.31.0/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle.js"></script>
@@ -581,6 +744,14 @@ function renderMetaForm(questions) {
     
     <div id="cameraContainer" class="section">
       <h3 style="display:none">Camera preview</h3>
+        <div id="cameraControls" style="display:flex; gap:6px; align-items:center; margin:6px 0;">
+    <label for="cameraSelect" style="white-space:nowrap;">Camera:</label>
+    <select id="cameraSelect" style="flex:1; min-width:200px;"></select>
+    <button id="refreshCamsBtn" class="greyButton" type="button">Refresh</button>
+    <button id="startCamBtn" class="blueButton"  type="button">Start</button>
+    <button id="stopCamBtn"  class="redButton"   type="button">Stop</button>
+    <span id="camStatus" style="margin-left:8px; font-size:12px; opacity:.8;">idle</span>
+  </div>
       <video id="camera" autoplay playsinline
          style="border:1px solid #444;"></video>
       </div>
@@ -882,7 +1053,7 @@ setInterval(() => {
   });
   // initial build
   buildButtons(configSelect.value);
-  startCamera();
+  initCameraPicker();
 }   
 
     let recognizer;  // Azure continuous recogniser
@@ -2423,3 +2594,4 @@ uploadNowBtn.addEventListener('click', () => {
   </script>
 </body>
 </html>
+
