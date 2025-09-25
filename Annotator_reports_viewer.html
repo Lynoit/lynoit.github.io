@@ -163,14 +163,14 @@
       return { km: Math.round(km), path };
     }
 
-    // NEW: compute mean temperature and aggregated weather (mode) from Sampling
-    function computeTempWeatherFromSampling(sheet){
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    // --- Mean Temp + Mode Weather from the "Issues" table ---
+    function computeTempWeatherFromIssuesSheet(sheet){
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
       if (rows.length < 2) return { meanTempC: null, weatherAgg: null };
 
-      const headers = rows[0].map(h => String(h ?? '').toLowerCase());
-      const tempIdx = headers.findIndex(h => h.includes('temp'));
-      const wxIdx   = headers.findIndex(h => h.includes('weather') || h.includes('condition'));
+      const headers = rows[0].map(h => String(h ?? '').trim().toLowerCase());
+      const tempIdx = headers.findIndex(h => h === 'temp' || h.includes('temp'));
+      const wxIdx   = headers.findIndex(h => h === 'weather' || h.includes('weather'));
 
       const temps = [];
       const wxCounts = new Map();
@@ -189,6 +189,62 @@
         return v.charAt(0).toUpperCase() + v.slice(1);
       };
 
+      for (let r = 1; r < rows.length; r++){
+        if (tempIdx >= 0){
+          const t = parseFloat(rows[r][tempIdx]);
+          if (!isNaN(t)) temps.push(t);
+        }
+        if (wxIdx >= 0){
+          const w = normWx(rows[r][wxIdx]);
+          if (w) wxCounts.set(w, (wxCounts.get(w)||0) + 1);
+        }
+      }
+
+      const meanTempC = temps.length ? Math.round(temps.reduce((a,b)=>a+b,0) / temps.length) : null;
+      let weatherAgg = null;
+      if (wxCounts.size){
+        weatherAgg = Array.from(wxCounts.entries()).sort((a,b)=> b[1]-a[1])[0][0];
+      }
+      return { meanTempC, weatherAgg };
+    }
+
+    // Try to find a sheet named like "Issues"; fallback to any non-Sampling sheet with Temp/Weather
+    function computeTempWeatherFromIssues(wb){
+      const issueSheets = wb.SheetNames.filter(n => /issue/i.test(n));
+      for (const name of issueSheets){
+        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
+        if (res.meanTempC != null || res.weatherAgg != null) return res;
+      }
+      for (const name of wb.SheetNames){
+        if (name.toLowerCase() === 'sampling') continue;
+        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
+        if (res.meanTempC != null || res.weatherAgg != null) return res;
+      }
+      return { meanTempC: null, weatherAgg: null };
+    }
+
+    // (kept from earlier; not used anymore)
+    function computeTempWeatherFromSampling(sheet){
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (rows.length < 2) return { meanTempC: null, weatherAgg: null };
+      const headers = rows[0].map(h => String(h ?? '').toLowerCase());
+      const tempIdx = headers.findIndex(h => h.includes('temp'));
+      const wxIdx   = headers.findIndex(h => h.includes('weather') || h.includes('condition'));
+      const temps = [];
+      const wxCounts = new Map();
+      const normWx = (s)=>{
+        if (s == null) return null;
+        const v = String(s).trim().toLowerCase();
+        if (!v) return null;
+        if (/thunder|storm/.test(v)) return 'Storm';
+        if (/snow|blizzard|sleet/.test(v)) return 'Snow';
+        if (/rain|drizzle|shower/.test(v)) return 'Rain';
+        if (/fog|mist|haze/.test(v)) return 'Fog';
+        if (/cloud|overcast/.test(v)) return 'Cloudy';
+        if (/clear|sun/.test(v)) return 'Clear';
+        if (/wind/.test(v)) return 'Wind';
+        return v.charAt(0).toUpperCase() + v.slice(1);
+      };
       for (let i = 1; i < rows.length; i++){
         if (tempIdx >= 0){
           const t = parseFloat(rows[i][tempIdx]);
@@ -201,7 +257,6 @@
           }
         }
       }
-
       const meanTempC = temps.length ? Math.round( (temps.reduce((a,b)=>a+b,0) / temps.length) ) : null;
       let weatherAgg = null;
       if (wxCounts.size){
@@ -245,10 +300,12 @@
           if (samplingName) {
             const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
             mileageKm = km;
-            const tw = computeTempWeatherFromSampling(wb.Sheets[samplingName]);
-            meanTempC = tw.meanTempC;
-            weatherAgg = tw.weatherAgg;
           }
+          // NEW: temperature & weather from Issues table
+          const tw = computeTempWeatherFromIssues(wb);
+          meanTempC = tw.meanTempC;
+          weatherAgg = tw.weatherAgg;
+
           const issueCount = countIssuesFromWorkbook(wb);
           const summary = { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true };
           summaryCache.set(filename, summary);
@@ -768,7 +825,7 @@
         const host = document.getElementById('temp-host');
         if (!host) return;
         if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No temperature data found in Sampling.</div>';
+          host.innerHTML = '<div style="color:#666;">No temperature data found in Issues table.</div>';
           return;
         }
 
@@ -909,7 +966,7 @@
         const host = document.getElementById('weather-host');
         if (!host) return;
         if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No weather data found in Sampling.</div>';
+          host.innerHTML = '<div style="color:#666;">No weather data found in Issues table.</div>';
           return;
         }
 
