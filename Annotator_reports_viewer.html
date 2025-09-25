@@ -258,11 +258,8 @@
 function fetchCountriesForFile(filename){
   if (countryCache.has(filename)) {
     const cached = countryCache.get(filename);
-    // Backward compat: cache might hold string|null from previous runs
-    if (Array.isArray(cached)) return Promise.resolve(cached);
-    return Promise.resolve(cached ? [cached] : []);
+    return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
   }
-
   return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
     .then(res => {
       if (!res.ok) throw new Error('Fetch XLSX failed for country');
@@ -271,15 +268,11 @@ function fetchCountriesForFile(filename){
     .then(buf => {
       const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
 
-      // 1) Prefer a sheet whose name contains "country"
-      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
       const out = new Set();
-
+      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
       if (countrySheetName) {
         const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
         if (rows.length) {
-          // Heuristics:
-          // A) Headered table with a column named like "Country"
           const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
           const colIdx = headers.findIndex(h => h.includes('country'));
           if (colIdx >= 0) {
@@ -288,14 +281,12 @@ function fetchCountriesForFile(filename){
               if (v != null && String(v).trim()) out.add(String(v).trim());
             }
           } else {
-            // B) Key/value pairs where first col is label
             for (let r = 0; r < rows.length; r++) {
               const a = rows[r][0], b = rows[r][1];
               const aStr = String(a ?? '').trim().toLowerCase();
               if (aStr.includes('country') && b != null && String(b).trim()) {
                 out.add(String(b).trim());
               }
-              // C) Single-column list (no headers)
               if (!aStr && rows[r].length === 1) {
                 const val = rows[r][0];
                 if (val != null && String(val).trim()) out.add(String(val).trim());
@@ -304,20 +295,17 @@ function fetchCountriesForFile(filename){
           }
         }
       }
-
-      // 2) Fallback: still try "Test details" if no "Country" sheet found
       if (out.size === 0) {
         const details = extractTestDetails(wb);
         const maybe = details['country'] || details['test country'] || details['location country'] || null;
         if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
       }
-
       const arr = Array.from(out);
-      countryCache.set(filename, arr); // cache array
+      countryCache.set(filename, arr);
       return arr;
     })
     .catch(() => {
-      countryCache.set(filename, []); // cache empty
+      countryCache.set(filename, []);
       return [];
     });
 }
@@ -584,7 +572,64 @@ function fetchCountriesForFile(filename){
     }
 
     // ---------- NEW: Countries × Month chart ----------
-   function buildCountryMonthChart(files){
+  // --- replace any old "fetchCountryForFile" or "fetchCountriesForFile" with THIS ---
+function fetchCountriesForFile(filename){
+  if (countryCache.has(filename)) {
+    const cached = countryCache.get(filename);
+    return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
+  }
+  return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+    .then(res => {
+      if (!res.ok) throw new Error('Fetch XLSX failed for country');
+      return res.arrayBuffer();
+    })
+    .then(buf => {
+      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+
+      const out = new Set();
+      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
+      if (countrySheetName) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
+        if (rows.length) {
+          const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
+          const colIdx = headers.findIndex(h => h.includes('country'));
+          if (colIdx >= 0) {
+            for (let r = 1; r < rows.length; r++) {
+              const v = rows[r][colIdx];
+              if (v != null && String(v).trim()) out.add(String(v).trim());
+            }
+          } else {
+            for (let r = 0; r < rows.length; r++) {
+              const a = rows[r][0], b = rows[r][1];
+              const aStr = String(a ?? '').trim().toLowerCase();
+              if (aStr.includes('country') && b != null && String(b).trim()) {
+                out.add(String(b).trim());
+              }
+              if (!aStr && rows[r].length === 1) {
+                const val = rows[r][0];
+                if (val != null && String(val).trim()) out.add(String(val).trim());
+              }
+            }
+          }
+        }
+      }
+      if (out.size === 0) {
+        const details = extractTestDetails(wb);
+        const maybe = details['country'] || details['test country'] || details['location country'] || null;
+        if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
+      }
+      const arr = Array.from(out);
+      countryCache.set(filename, arr);
+      return arr;
+    })
+    .catch(() => {
+      countryCache.set(filename, []);
+      return [];
+    });
+}
+
+// --- replace the whole buildCountryMonthChart with THIS ---
+function buildCountryMonthChart(files){
   const withDates = files
     .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
     .filter(x => x.m)
@@ -609,18 +654,17 @@ function fetchCountriesForFile(filename){
       return;
     }
 
-    // Build Month (YYYY-MM) × WeekBin(1..4) × Country counts
-    const counts = new Map(); // key `${ym}|${wb}|${country}` -> n
+    // Month (YYYY-MM) × weekBin(1..4) × Country
+    const counts = new Map(); // `${ym}|${wb}|${country}` -> n
     const monthsSet = new Set();
     const countriesSet = new Set();
 
     valid.forEach(r => {
-      const ym  = r.dayStr.slice(0,7);         // YYYY-MM
-      const day = parseInt(r.dayStr.slice(8,10), 10); // DD
+      const ym  = r.dayStr.slice(0,7);
+      const day = parseInt(r.dayStr.slice(8,10), 10);
       const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
       monthsSet.add(ym);
 
-      // unique per session
       const uniq = Array.from(new Set(r.countries.map(c => String(c).trim()).filter(Boolean)));
       uniq.forEach(country => {
         countriesSet.add(country);
@@ -641,18 +685,7 @@ function fetchCountriesForFile(filename){
   });
 }
 
-    const months = Array.from(monthsSet).sort(); // columns
-    const countries = Array.from(countriesSet).sort((a,b) => {
-      const sa = months.reduce((s,m)=> s + (counts.get(`${m}||${a}`)||0), 0);
-      const sb = months.reduce((s,m)=> s + (counts.get(`${m}||${b}`)||0), 0);
-      if (sb !== sa) return sb - sa;
-      return a.localeCompare(b);
-    });
-
-    renderCountryMonthHeatmap({months, countries, counts});
-  });
-}
-
+// --- replace the whole renderCountryMonthHeatmap with THIS ---
 function renderCountryMonthHeatmap({months, countries, counts}){
   const host = document.getElementById('country-host');
   host.innerHTML = '';
@@ -661,14 +694,13 @@ function renderCountryMonthHeatmap({months, countries, counts}){
   const leftLabelsW = 110;
   const topLabelsH  = 18;
 
-  const subColsPerMonth = 4; // exactly 4 boxes per month
+  const subColsPerMonth = 4;
   const totalCols = months.length * subColsPerMonth;
 
   const width  = leftLabelsW + totalCols * (cell + gap) + 8;
   const height = topLabelsH  + countries.length * (cell + gap) + 8;
 
   const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
-  // Max across all bins
   const maxVal = Math.max(1, ...months.flatMap(m => countries.flatMap(c => [1,2,3,4].map(w => counts.get(`${m}|${w}|${c}`)||0))));
   const bucket = v => {
     if (v === 0) return 0;
@@ -681,16 +713,16 @@ function renderCountryMonthHeatmap({months, countries, counts}){
   svg.setAttribute('width', width);
   svg.setAttribute('height', height);
 
-  // Month labels (like the main activity chart: short month names along the top)
+  // Month labels (match style of main chart)
   const gMonths = document.createElementNS(NS, 'g');
   for (let m = 0; m < months.length; m++){
-    const d = new Date(`${months[m]}-01`); // months[m] is "YYYY-MM"
-    const label = d.toLocaleString(undefined, { month: 'short' }); // "Jan", "Feb", …
+    const d = new Date(`${months[m]}-01`);
+    const label = d.toLocaleString(undefined, { month: 'short' });
     const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
     const t = document.createElementNS(NS,'text');
     t.textContent = label;
     t.setAttribute('x', x);
-    t.setAttribute('y', 10);       // same vertical position as your main heatmap
+    t.setAttribute('y', 10);
     t.setAttribute('font-size','12');
     t.setAttribute('fill','#333');
     gMonths.appendChild(t);
@@ -710,14 +742,14 @@ function renderCountryMonthHeatmap({months, countries, counts}){
   }
   svg.appendChild(gCountries);
 
-  // Cells: 4 sub-columns (week bins) per month
+  // Cells: 4 sub-columns per month
   const gCells = document.createElementNS(NS, 'g');
   for (let r = 0; r < countries.length; r++){
     const country = countries[r];
     for (let m = 0; m < months.length; m++){
-      for (let w = 1; w <= subColsPerMonth; w++){
+      for (let w = 1; w <= 4; w++){
         const val = counts.get(`${months[m]}|${w}|${country}`) || 0;
-        const colIndex = m * subColsPerMonth + (w - 1);
+        const colIndex = m * 4 + (w - 1);
         const rect = document.createElementNS(NS,'rect');
         rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
         rect.setAttribute('y', topLabelsH  + r*(cell+gap));
@@ -736,7 +768,6 @@ function renderCountryMonthHeatmap({months, countries, counts}){
 
   host.appendChild(svg);
 
-  // Legend
   const legend = document.createElement('div');
   legend.className = 'legend';
   legend.innerHTML = `Fewer
@@ -1100,6 +1131,7 @@ function renderCountryMonthHeatmap({months, countries, counts}){
   </script>
 </body>
 </html>
+
 
 
 
