@@ -1,844 +1,1352 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Annotator Reports Viewer</title>
-  <link rel="icon" href="data:;base64,iVBORw0KGgo=" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KPI Scoring Visualizer</title>
+  <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <style>
-    body { margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background: #fff; color: #000; }
-    #sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 240px; background: #f5f5f5; overflow-y: auto; border-right: 1px solid #ddd; }
-    #content { margin-left: 240px; padding: 20px; }
-    .day-header { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #ddd; }
-    .day-header:hover { background: #e0e0e0; }
-    .session-list { display: none; list-style: none; margin: 0; padding: 0; }
-    .session-item { padding: 8px 32px; cursor: pointer; border-bottom: 1px solid #eee; }
-    .session-item:hover { background: #f0f0f0; }
-    .session-item .meta { font-size: 12px; color: #666; margin-top: 2px; }
+    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
 
-    h1 { margin: 0 0 12px 0; }
-    h2 { margin-top: 1.5em; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 2em; }
-    th, td { border: 1px solid #ccc; padding: 8px; }
-    th { background-color: #f5f5f5 !important; }
-    .error { color: #d00; padding: 16px; }
+    /* Top tabs */
+    .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
+    .tabs{ display:flex; gap:8px; padding:10px 16px; }
+    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; background:#e9ecf5; }
+    .tab.active{ background:#111; color:#fff; }
 
-    .issue-badge { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; background: red; color: white; border-radius: 12px; font-size: 12px; font-weight: bold; pointer-events: none; }
-    #issue-map { width: 100%; height: 400px; margin: 20px 0; border: 1px solid #aaa; }
+    .container{padding:16px;}
+    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
+    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
+    .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
+    .summary-card{ grid-column: 1 / -1; display:grid; justify-content:center; }
+    .download{position:absolute; left:12px; top:12px; font-size:12px; background:#f0f2f8; color:#222; padding:6px 8px; border-radius:8px; cursor:pointer}
+    .small{font-size:12px; color:#666}
+    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
 
-    .download-button { display: inline-block; margin-right: 12px; margin-bottom: 16px; padding: 8px 12px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; font-size: 14px; }
-    .download-button:hover { background: #0056b3; }
+    /* Summary table */
+    .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
+    .summary-table{ display:inline-table; margin:6px 0 10px; table-layout:auto; border-collapse:separate; border-spacing:0; font-size:12px; }
+    .summary-table th, .summary-table td{ padding:8px 10px; text-align:left; border-bottom:1px solid #eef1fb; vertical-align:middle; }
+    .summary-table th{ background:#f6f7fb; font-weight:700; }
+    .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+    .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
 
-    /* Overview (contribution heatmap) */
-    .overview { max-width: 980px; }
-    .heatmap-months { font-size: 12px; fill: #333; }
-    .heatmap-dow { font-size: 12px; fill: #666; }
-    .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-top: 10px; }
-    .legend .box { width: 12px; height: 12px; border: 1px solid #ccd3d9; }
+    /* Column alignment via classes */
+    .summary-table th.col-date,    .summary-table td.col-date    { text-align:center; white-space:nowrap; }
+    .summary-table th.col-weather, .summary-table td.col-weather { text-align:center; white-space:nowrap; }
+    .summary-table th.col-avg,     .summary-table td.col-avg     { text-align:right;  white-space:nowrap; }
+    .summary-table th.col-score,   .summary-table td.col-score   { text-align:center; white-space:nowrap; width:1%; }
+    .summary-table th.col-rating,  .summary-table td.col-rating  { white-space:nowrap; }
+    .summary-table th.col-note,    .summary-table td.col-note    { text-align:center; white-space:nowrap; }
 
-    /* Latest routes grid */
-    .routes-wrap { margin-top: 18px; }
-    .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 14px; max-width: 980px; }
-    .route-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; }
-    .route-title { font-size: 13px; color: #333; margin-bottom: 8px; }
-    /* keep the old style for non-enhanced anchors only */
-    .route-title a:not(.route-link) { color: inherit; text-decoration: none; }
-    .route-title a:not(.route-link):hover { text-decoration: underline; }
-    .route-meta { font-size: 12px; color: #666; margin-top: 6px; }
-    .route-map { width: 100%; height: 180px; border: 1px solid #aaa; border-radius: 6px; }
+    /* KPI × Software matrix tables */
+    .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
+    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 6px; }
+    .matrix-sub{ font-weight:600; font-size:12px; color:#555; margin:0 0 10px; text-align:center; }
+    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; margin:0 auto; }
+    .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
+    .matrix-table th{ background:#f6f7fb; position:sticky; top:0; z-index:1; }
+    .matrix-table th.software{ text-align:center; white-space:nowrap; }
+    .matrix-table td.num{ text-align:right; white-space:nowrap; }
+    .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
 
-    /* --- Link-stylish treatment for Latest routes title links --- */
-    :root{ --accent:#1f3de3; }
-    .route-link{
-      display:inline-flex; align-items:center; gap:8px;
-      color:var(--accent); font-weight:700; text-decoration:none;
-    }
-    .route-link .u{
-      background-image: linear-gradient(currentColor,currentColor);
-      background-repeat: no-repeat;
-      background-size: 100% 2px;
-      background-position: 0 100%;
-      text-underline-offset: 4px;
-      padding-bottom: 2px;
-    }
-    .route-link::after{
-      content:"›"; font-size:1.05em; opacity:.6;
-      transform: translateX(0);
-      transition: transform .18s ease, opacity .18s ease;
-    }
-    .route-link:hover, .route-link:focus{ color:#1430c9; }
-    .route-link:hover::after, .route-link:focus::after{ transform: translateX(3px); opacity:1; }
-    .route-link:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
-    /* Override: black link, no underline */
-.route-link{
-  color:#000 !important;
-  text-decoration:none !important;
-}
-.route-link .u{
-  background-image:none !important; /* remove custom underline */
-  padding-bottom:0;
-}
-.route-link:hover,
-.route-link:focus{
-  color:#000;                /* keep black on hover/focus */
-  text-decoration:none;
-}
-.route-title a.route-link:hover{ text-decoration:none; }
+    /* Calendar trio (simple layout helpers) */
+    .cal-title{ font-weight:700; font-size:14px; margin:2px 0 8px; text-align:center; }
+    .cal-grid{ display:grid; grid-template-columns:repeat(4, minmax(220px, 1fr)); gap:16px; padding:6px 10px 12px; } /* was 3 → 4 */
+    .cal-col-title{ font-weight:600; font-size:13px; margin:0 0 4px; }
 
-/* If a link appears on a dark overlay, still force black + no underline */
-.route-overlay .route-link{ color:#000; text-shadow:none; }
-.route-overlay .route-link .u{ background-image:none; }
-
-/* Optional: neutral focus ring to match black link */
-.route-link:focus-visible{
-  outline:2px solid #000;
-  outline-offset:2px;
-  border-radius:4px;
-}
-    /* ensure no double underline from legacy rule */
-    .route-title a.route-link:hover{ text-decoration:none; }
+    /* HTML KPI table wrapper */
+    .kpi-table-wrap{ margin-top:8px; }
   </style>
 </head>
 <body>
-  <div id="sidebar">
-    <h2 style="padding:16px; margin:0; border-bottom:1px solid #ddd;">Test sessions</h2>
-  </div>
-
-  <div id="content">
-    <h1>Test activity overview</h1>
-    <div id="overview" class="overview">
-      <div id="heatmap-host"></div>
-
-      <div class="routes-wrap">
-        <h2 style="margin-top:16px;">Latest routes</h2>
-        <div id="routes-grid" class="route-grid"></div>
-      </div>
+  <div class="topbar">
+    <div class="tabs">
+      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
+      <button class="tab" data-mode="external" aria-pressed="false">External</button>
     </div>
   </div>
 
-  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.0/jszip.min.js"></script>
+  <div class="container">
+    <div class="panel">
+      <div id="charts" class="charts"></div>
+    </div>
+  </div>
 
-  <script>
-    // ---------- CONFIG ----------
-    const ACCOUNT   = 'annotationcsv';
-    const CONTAINER = 'csv';
-    const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
-    const BASE_URL  = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
-    const MIN_KM_FOR_OVERVIEW = 1;
+  <!-- Modal -->
+  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true" style="display:none">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header>
+        <h2 id="modalTitle">Release Note</h2>
+        <button class="close" id="modalClose" aria-label="Close">Close</button>
+      </header>
+      <div class="content" id="modalContent"></div>
+    </div>
+  </div>
 
-    // ---------- CACHES / HELPERS ----------
-    const summaryCache = new Map(); // filename -> { mileageKm, issueCount, loaded:true }
-    const blobMeta = new Map();     // filename -> lastModifiedMs (strict sort)
+<script>
+/* ==================== CONFIG ==================== */
+const DATA_CSV = 'weekly_kpi_data.csv';
+const RN_FETCH_MODE = 'auto';                 // 'auto' | 'manifest' | 'off'
+const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
+const SCORE_THRESHOLDS = null;                // optional fixed thresholds
+const LS_KEY = 'segRadarKPI.thresholds';
 
-    function cssSafeId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
-    function toDateOnly(d){ const t = new Date(d); t.setHours(0,0,0,0); return t; }
+const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
+let CURRENT_MODE = MODES.INTERNAL;
 
-    function haversine(lat1, lon1, lat2, lon2) {
-      const toRad = d => d * Math.PI / 180;
-      const R = 6371000;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      return 2 * R * Math.asin(Math.sqrt(a));
-    }
+// Optional: ?mode=external in URL
+const urlMode = new URLSearchParams(location.search).get('mode');
+if (urlMode && (urlMode.toLowerCase() in MODES)) CURRENT_MODE = urlMode.toLowerCase();
 
-    function computeMileageAndPathFromSampling(sheet) {
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      if (rows.length < 3) return { km: null, path: [] };
+// Which cards are shown when mode = EXTERNAL (hard-coded)
+const EXTERNAL_CARD_VISIBILITY = {
+  summary: false,              // Summary Weekly KPI
+  calendar: false,             // Activity & weather statistics (calendar trio)
+  ccMatrix: true,              // KPI × Software matrix (CC-only)
+  nonCCPlusLatestCC: true,     // KPI × Software matrix (Non-CC + latest CC)
+  softwareCards: false         // Per-software cards
+};
 
-      const headers = rows[0].map(h => String(h ?? '').toLowerCase());
-      const latIdx = headers.findIndex(h => h.includes('lat'));
-      const lonIdx = headers.findIndex(h => h.includes('lon') || h.includes('lng') || h.includes('long'));
-      if (latIdx < 0 || lonIdx < 0) return { km: null, path: [] };
+const EXTERNAL_WHITELIST = [
+  'ACC — False brake',
+  'LCC — False brake',
+  'TSI — Wrong speed detected',
+  'LDW — False positive',
+  'LDP — False positive',
+  'ELKA — False positive'
+];
 
-      let km = 0, prev = null;
-      const path = [];
-      for (let i = 1; i < rows.length; i++) {
-        const lat = parseFloat(rows[i][latIdx]);
-        const lon = parseFloat(rows[i][lonIdx]);
-        if (isNaN(lat) || isNaN(lon)) continue;
-        path.push([lat, lon]);
-        if (prev) km += haversine(prev[0], prev[1], lat, lon) / 1000;
-        prev = [lat, lon];
-      }
-      return { km: Math.round(km), path };
-    }
+// Normalize "Function — KPI" keys: case-insensitive, unify dashes, collapse spaces
+function normKey(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\u2013\u2014-]/g, '—')   // en/em/ASCII hyphen -> em dash
+    .replace(/\s+/g, ' ')               // collapse spaces
+    .trim();
+}
+const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
 
-    function countIssuesFromWorkbook(wb) {
-      const norm = s => String(s||'').toLowerCase().replace(/\s+/g,'');
-      for (const name of wb.SheetNames) {
-        if (name.toLowerCase() === 'sampling') continue;
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1 });
-        if (rows.length < 2) continue;
-        const hdrs = rows[0].map(norm);
-        const latIdx = hdrs.findIndex(h => h.includes('lat'));
-        const lonIdx = hdrs.findIndex(h => h.includes('lon') || h.includes('lng') || h.includes('long'));
-        if (latIdx < 0 || lonIdx < 0) continue;
-        let count = 0;
-        for (let i = 1; i < rows.length; i++) {
-          const lat = parseFloat(rows[i][latIdx]);
-          const lon = parseFloat(rows[i][lonIdx]);
-          if (!isNaN(lat) && !isNaN(lon)) count++;
+/* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
+const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
+const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
+const H_START = 10, H_END = 14; // inclusive hours (local time)
+const WMO_TEXT = {
+  0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
+  45:'Fog',48:'Depositing rime fog',
+  51:'Drizzle: light',53:'Drizzle: moderate',55:'Drizzle: dense',
+  56:'Freezing drizzle: light',57:'Freezing drizzle: dense',
+  61:'Rain: slight',63:'Rain: moderate',65:'Rain: heavy',
+  66:'Freezing rain: light',67:'Freezing rain: heavy',
+  71:'Snow fall: slight',73:'Snow fall: moderate',75:'Snow fall: heavy',
+  77:'Snow grains',
+  80:'Rain showers: slight',81:'Rain showers: moderate',82:'Rain showers: violent',
+  85:'Snow showers: slight',86:'Snow showers: heavy',
+  95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
+};
+
+/* Unified font sizes for score-boxes */
+const SCORE_FONTS = { number:13, label:11, range:10 };
+
+/* ==================== Helpers & Scoring ==================== */
+const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b', BLACK = '#000';
+const DARK_GREEN = '#2e7d32';
+const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+const scoreText   = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+let LAST_RAW = '';
+let LAST_PARSED = null; // parsed + merged release notes + weather
+
+const fmtCell = v =>
+  (v==null || Number.isNaN(v)) ? '—'
+  : (Number.isInteger(v) ? String(v)
+  : String(parseFloat(v.toFixed(2)).replace(/\.00$/,'')));
+
+function parseThresholds(str){
+  const arr = (str||'')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s !== '')
+    .map(Number);
+  if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
+  for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; }
+  return arr;
+}
+function getThresholds(){
+  if (Array.isArray(SCORE_THRESHOLDS) && SCORE_THRESHOLDS.length===10) return SCORE_THRESHOLDS;
+  let t = null;
+  try { t = parseThresholds(localStorage.getItem(LS_KEY)); } catch {}
+  if (t) return t;
+  return parseThresholds(DEFAULT_THRESH_STR);
+}
+const fmtNum = n => Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(2)));
+function scoreRangeLabels(T){
+  const lab = [];
+  for (let i=0;i<9;i++) lab.push('≥ ' + fmtNum(T[i]));
+  lab.push('< ' + fmtNum(T[8]) + (T[9] === 0 ? ' (incl. 0)' : ''));
+  return lab;
+}
+function scoreFromAvg(a, thresholds){
+  if (a == null || Number.isNaN(a)) return null;
+  if (a === 0) return 10;
+  for (let i=0;i<9;i++){ if (a >= thresholds[i]) return i+1; }
+  return 10;
+}
+function colorFor(v, tgt, max){
+  if (v == null || Number.isNaN(v)) return null;
+  if (v === 1000) return BLACK;
+  if (v <= tgt) return GREEN;
+  if (v < (max + 1)) return YELLOW;
+  return RED;
+}
+function parseNumber(x){
+  if (x==null) return null;
+  const t = (""+x).trim();
+  if (!t) return null;
+  const v = Number(t.replace(',', '.'));
+  return isNaN(v) ? null : v;
+}
+function detectDelimiter(text){
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return '\t';
+  const cand = ['\t', ',', ';'];
+  let best = '\t', bestCnt = 0;
+  for (const d of cand){ const c = lines[0].split(d).length; if (c > bestCnt){ bestCnt = c; best = d; } }
+  return best;
+}
+function splitFuncKpi(s){
+  if (!s) return {func:'', kpi:''};
+  for (const sep of ['—', '–', ' - ']){
+    const parts = s.split(sep);
+    if (parts.length >= 2) return { func: parts[0].trim(), kpi: parts.slice(1).join(sep).trim() };
+  }
+  const idx = s.indexOf('-');
+  if (idx > 0) return { func: s.slice(0, idx).trim(), kpi: s.slice(idx+1).trim() };
+  const sp = s.split(' ');
+  return {func: sp[0]||'', kpi: s};
+}
+function normalizeHeader(h){
+  if(!h) return '';
+  return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
+}
+
+/* ==================== Parse table (dates + inline "Release note") ==================== */
+function parseTable(text){
+  const tryParse = (d)=> text
+    .replace(/^\uFEFF/, '') // strip BOM
+    .split(/\r?\n/)
+    .filter(r => r.trim().length > 0)
+    .map(r => r.split(d));
+
+  let delim = detectDelimiter(text);
+  let rows = tryParse(delim);
+  if (!rows.length) return { headers: [], entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+
+  let headers = rows[0].map(h => h.trim());
+
+  // Auto-insert missing first header cell if needed
+  if (rows.length > 1 && rows[1].length === headers.length + 1) {
+    const firstCell = (rows[1][0] || '').trim();
+    const looksText = parseNumber(firstCell) == null;
+    const normH = headers.map(normalizeHeader);
+    const hasTarget = normH.includes('target');
+    const hasMax = normH.includes('max allowed') || normH.includes('maxallowed');
+    if (looksText && hasTarget && hasMax) headers = ['Function — KPI', ...headers];
+  }
+
+  let norm = headers.map(normalizeHeader);
+  let idxTarget = norm.findIndex(h => h === 'target');
+  let idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
+
+  if (idxTarget < 0 || idxMax < 0) {
+    alert("Missing required columns: 'Target' and 'Max allowed'.\nHeaders seen: " + headers.join(', '));
+    return { headers, entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+  }
+
+  // Software columns (strip optional [YYYY-MM-DD])
+  const swCols = [];
+  for (let i = idxMax + 1; i < headers.length; i++) {
+    const raw = headers[i].trim();
+    const theDate = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const date = theDate ? theDate[1] : null;
+    const baseNoDate = theDate ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
+    const basePretty = baseNoDate.replace('(TO)', ' (TO)');
+    const countPrev = swCols.filter(s => s.base === basePretty).length;
+    const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
+    swCols.push({ idx: i, base: basePretty, label, date });
+  }
+
+  const releaseNotes = {};
+  const entries = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length === 0) continue;
+
+    const firstCellRaw = (row[0] || '').trim();
+    const firstNorm = normalizeHeader(firstCellRaw);
+
+    if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
+      for (const sw of swCols) {
+        const raw = (row[sw.idx] ?? '').trim();
+        if (raw) {
+          releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\n' + raw) : raw);
         }
-        if (count > 0) return count;
       }
-      return 0;
+      continue;
     }
 
-    function fetchSessionSummary(filename) {
-      if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
-      return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then(res => {
-          if (!res.ok) throw new Error(`Fetch XLSX failed ${res.status}`);
-          return res.arrayBuffer();
-        })
-        .then(buf => {
-          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-          const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          let mileageKm = null;
-          if (samplingName) {
-            const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-            mileageKm = km;
-          }
-          const issueCount = countIssuesFromWorkbook(wb);
-          const summary = { mileageKm, issueCount, loaded:true };
-          summaryCache.set(filename, summary);
-          return summary;
-        })
-        .catch(() => {
-          const summary = { mileageKm: null, issueCount: 0, loaded:true };
-          summaryCache.set(filename, summary);
-          return summary;
-        });
+    const { func, kpi } = splitFuncKpi(firstCellRaw);
+    const target = parseNumber(row[idxTarget]);
+    const max    = parseNumber(row[idxMax]);
+
+    const values = {};
+    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
+
+    entries.push({ func, kpi, target, max, values });
+  }
+
+  return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
+}
+
+/* ==================== Modal ==================== */
+function openReleaseNoteModal(title, noteText){
+  const backdrop = document.getElementById('modalBackdrop');
+  const titleEl  = document.getElementById('modalTitle');
+  const content  = document.getElementById('modalContent');
+
+  titleEl.textContent = title || 'Release Note';
+
+  const parts = String(noteText || '')
+    .replace(/\r/g,'')
+    .split(/\n/g)
+    .map(s => s.trim())
+    .filter(s => s.length);
+
+  content.innerHTML = '';
+  if (parts.length === 0){
+    const p = document.createElement('p'); p.className = 'empty'; p.textContent = 'No release note provided.'; content.appendChild(p);
+  } else {
+    const ul = document.createElement('ul');
+    parts.forEach(t => { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+    content.appendChild(ul);
+  }
+
+  backdrop.style.display = 'flex';
+  backdrop.setAttribute('aria-hidden', 'false');
+}
+function closeReleaseNoteModal(){
+  const backdrop = document.getElementById('modalBackdrop');
+  backdrop.style.display = 'none';
+  backdrop.setAttribute('aria-hidden', 'true');
+}
+document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeReleaseNoteModal(); });
+document.getElementById('modalBackdrop').addEventListener('click', (e)=>{ if (e.target.id === 'modalBackdrop') closeReleaseNoteModal(); });
+document.getElementById('modalClose').addEventListener('click', closeReleaseNoteModal);
+
+/* ==================== Release-note files ==================== */
+async function readTextOrNull(path){
+  try{
+    const res = await fetch(encodeURI(path) + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    return await res.text();
+  }catch{ return null; }
+}
+async function loadReleaseNotesManifest(){
+  if (RN_FETCH_MODE !== 'manifest') return null;
+  try{
+    const res = await fetch(RN_MANIFEST_FILE + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    const list = await res.json();
+    if (!Array.isArray(list)) return null;
+    return new Set(list.map(s => String(s).toLowerCase()));
+  }catch{ return null; }
+}
+async function loadReleaseNotesFromFiles(swCols, manifestSet){
+  if (RN_FETCH_MODE === 'off') return {};
+  const out = {};
+  for (const sw of (swCols||[])){
+    const file = `${sw.base}.csv`;
+    if (RN_FETCH_MODE === 'manifest' && (!manifestSet || !manifestSet.has(file.toLowerCase()))) continue;
+    const txt = await readTextOrNull(file);
+    if (!txt) continue;
+    const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
+    if (lines.length){
+      const joined = lines.join('\n');
+      out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
     }
+  }
+  return out;
+}
 
-    // NEW: Read "Test details" sheet (col1=label, col2=value) → map
-    function extractTestDetails(wb){
-      const details = {};
-      const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
-      if (!sheetName) return details;
+/* ==================== Weather (hourly, aggregate 10–14 local) ==================== */
+function loadWeatherCache(){
+  try{ return JSON.parse(localStorage.getItem(WEATHER_LS_KEY) || '{}'); }catch{ return {}; }
+}
+function saveWeatherCache(cache){
+  try{ localStorage.setItem(WEATHER_LS_KEY, JSON.stringify(cache)); }catch{}
+}
+function isoMinMax(dates){
+  let min = null, max = null;
+  dates.forEach(d=>{
+    if (!d) return;
+    if (!min || d < min) min = d;
+    if (!max || d > max) max = d;
+  });
+  return {min, max};
+}
+function mode(arr){
+  const m = new Map();
+  let bestVal = null, bestCnt = -1;
+  for (const v of arr){
+    const c = (m.get(v)||0)+1; m.set(v,c);
+    if (c > bestCnt || (c===bestCnt && v>bestVal)){ bestCnt=c; bestVal=v; }
+  }
+  return bestVal;
+}
+async function fetchWeatherForDates(dates){
+  const wanted = Array.from(new Set(dates.filter(Boolean)));
+  const cache = loadWeatherCache();
+  const missing = wanted.filter(d => !cache[d] || cache[d].tmax == null || cache[d].tmin == null);
 
-      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
-      for (let r = 0; r < rows.length; r++) {
-        const row = rows[r];
-        if (!row || row.length < 2) continue;
-        const keyRaw = row[0];
-        const valRaw = row[1];
-        if (keyRaw == null || valRaw == null) continue;
-        const key = String(keyRaw).trim().toLowerCase();
-        const val = String(valRaw).trim();
-        if (!key || !val) continue;
-        details[key] = val; // e.g., details['test object'] = 'Volvo ES90'
+  if (!missing.length) return cache;
+
+  const {min, max} = isoMinMax(missing);
+  if (!min || !max) return cache;
+
+  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}`+
+              `&start_date=${min}&end_date=${max}`+
+              `&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
+
+  try{
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) throw new Error('weather HTTP ' + res.status);
+    const data = await res.json();
+    const times = (data.hourly && data.hourly.time) || [];
+    const temps = (data.hourly && data.hourly.temperature_2m) || [];
+    const codes = (data.hourly && data.hourly.weathercode) || [];
+
+    const byDate = new Map();
+    for (let i=0;i<times.length;i++){
+      const t = times[i];
+      const day = t.slice(0,10);
+      const hr = parseInt(t.slice(11,13),10);
+      if (hr >= H_START && hr <= H_END){
+        if (!byDate.has(day)) byDate.set(day, []);
+        byDate.get(day).push(i);
       }
-      return details;
     }
 
-    // ---------- APP STATE ----------
-    let issueCoords = [];
-    let samplingCoords = [];
-    let mapRef = null;
-    let samplingLayerGroup = null;
-    let allFiles = []; // used to re-render overview
+    for (const [day, idxs] of byDate.entries()){
+      if (!idxs.length) continue;
+      const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
+      const cvals = idxs.map(i => codes[i]).filter(v => v!=null);
+      if (!tvals.length){
+        cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' };
+        continue;
+      }
+      const tmax = Math.round(Math.max(...tvals));
+      const tmin = Math.round(Math.min(...tvals));
+      const c = cvals.length ? mode(cvals) : null;
+      cache[day] = { tmax, tmin, code: c, text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—', hours:'10–14' };
+    }
 
-    document.addEventListener('DOMContentLoaded', listBlobs);
+    // Ensure all requested days exist even if no 10–14 samples
+    missing.forEach(day=>{
+      if (!cache[day] && !byDate.has(day)){
+        cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' };
+      }
+    });
 
-    // Helper to render the default overview page
-    function renderOverview(){
-      const content = document.getElementById('content');
-      content.innerHTML = `
-        <h1>Test activity overview</h1>
-        <div id="overview" class="overview">
-          <div id="heatmap-host"></div>
-          <div class="routes-wrap">
-            <h2 style="margin-top:16px;">Latest routes</h2>
-            <div id="routes-grid" class="route-grid"></div>
-          </div>
-        </div>
-      `;
-      if (allFiles.length){
-        buildOverviewHeatmap(allFiles);
-        buildLatestRoutePreviews(allFiles);
+    saveWeatherCache(cache);
+  }catch(e){
+    console.warn('Weather fetch failed:', e);
+  }
+  return cache;
+}
+
+/* ==================== Filtering for External view ==================== */
+function filterEntriesForMode(parsed){
+  if (CURRENT_MODE === MODES.INTERNAL) return parsed;
+  const filteredEntries = (parsed.entries || []).filter(e =>
+    EXTERNAL_WL_KEYS.has(normKey(`${e.func} — ${e.kpi}`))
+  );
+  return { ...parsed, entries: filteredEntries };
+}
+
+/* ==================== Summary (with Weather column) ==================== */
+function renderSummary(container, parsed){
+  const T = getThresholds();
+  if (!parsed || !parsed.software || !parsed.software.length) return;
+
+  const rowsRaw = parsed.software.map(sw => {
+    const swLabel = sw.label;
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
+    const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
+    const score = avg == null ? null : scoreFromAvg(avg, T);
+    const note = (parsed.releaseNotes?.[swLabel] || '').trim();
+    const wx = (sw.date && parsed.weatherByDate) ? parsed.weatherByDate[sw.date] : null;
+    return {
+      sw: swLabel,
+      date: sw.date,
+      avg,
+      score,
+      text: score == null ? 'n/a' : scoreText[score - 1],
+      note,
+      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
+    };
+  });
+
+  const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
+
+  const rows = rowsRaw.slice().sort((a,b)=>{
+    const sa = a.score ?? -1, sb = b.score ?? -1;
+    if (sa !== sb) return sb - sa;
+    if (a.avg == null && b.avg == null) return 0;
+    if (a.avg == null) return 1;
+    if (b.avg == null) return -1;
+    return a.avg - b.avg;
+  });
+
+  const chartData = rows.filter(r => r.avg != null);
+  if (!rows.length) return;
+
+  const card = container.append('div').attr('class', 'chart-card summary-card');
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
+  card.append('div').attr('class','summary-title').text(modeLabel);
+
+  const table = card.append('table').attr('class', 'summary-table');
+  const theadRow = table.append('thead').append('tr');
+  theadRow.append('th').attr('class','col-sw').text('Software');
+  theadRow.append('th').attr('class','col-date').text('Test date');
+  theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg, 10–14)');
+  theadRow.append('th').attr('class','col-avg').text('Average events per 1000 km');
+  theadRow.append('th').attr('class','col-score').text('Score');
+  theadRow.append('th').attr('class','col-rating').text('Rating');
+  if (hasAnyNotes) theadRow.append('th').attr('class','col-note').text('Release Note');
+
+  const tbody = table.append('tbody');
+  rows.forEach(r=>{
+    const tr = tbody.append('tr');
+    tr.append('td').attr('class','col-sw').append('span').attr('class','software-cell').attr('title', r.sw).text(r.sw);
+    tr.append('td').attr('class','col-date').text(r.date || '—');
+    tr.append('td').attr('class','col-weather').text(r.date ? r.weatherText : '—');
+    tr.append('td').attr('class','col-avg').text(r.avg == null ? '—' : r.avg.toFixed(1));
+
+    const scoreCell = tr.append('td').attr('class','col-score');
+    if (r.score == null){
+      scoreCell.text('—'); tr.append('td').attr('class','col-rating').text('n/a');
+    } else {
+      scoreCell.append('span')
+        .attr('class', 'summary-chip')
+        .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`)
+        .text(r.score);
+      tr.append('td').attr('class','col-rating').text(r.text);
+    }
+
+    if (hasAnyNotes){
+      const tdNote = tr.append('td').attr('class','col-note');
+      if (r.note){
+        const a = tdNote.append('span').attr('class','link').text('Release Note');
+        a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
+      } else {
+        tdNote.text('');
       }
     }
+  });
 
-    function listBlobs() {
-      fetch(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`)
-        .then(r => r.text())
-        .then(xml => {
-          const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  // Bars
+  if (chartData.length){
+    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
 
-          // Read blobs with their Last-Modified timestamps
-          const blobs = Array.from(doc.getElementsByTagName('Blob')).map(b => {
-            const name = b.getElementsByTagName('Name')[0]?.textContent || '';
-            const lmEl = b.getElementsByTagName('Last-Modified')[0] ||
-                         b.getElementsByTagName('Properties')[0]?.getElementsByTagName('Last-Modified')[0];
-            const lm   = lmEl?.textContent || '';
-            return { name, lastModifiedMs: Date.parse(lm) || 0 };
-          });
+    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
+      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+      let max = 0;
+      texts.forEach(t=>{
+        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
+        max = Math.max(max, node.getComputedTextLength());
+      });
+      tmp.remove(); return max;
+    };
 
-          const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
-          if (xlsx.length === 0) { showError('No .xlsx files found.'); return; }
+    const labelW = Math.ceil(measureTextWidth(yLabels, 12, 400));
+    const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+    const cw = Math.max(560, Math.min(1000, cardW));
+    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14));
+    const rightPad = 16, topPad = 8, barH = 22, gap = 6;
 
-          // Cache for strict chronological sorting
-          blobMeta.clear();
-          xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
+    const svg = card.append('svg').style('display','block').style('margin','0 auto 6px').attr('width', cw).attr('height', topPad + chartData.length * (barH + gap) + 34);
+    const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
 
-          const xlsxNames = xlsx.map(b => b.name);
-          allFiles = xlsxNames; // remember for overview re-render
+    const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
+    const x = d3.scaleLinear().domain([0, Math.max(1, maxAvg)]).range([leftPad, cw - rightPad]);
 
-          buildSidebar(xlsxNames);
-          buildOverviewHeatmap(xlsxNames);
-          buildLatestRoutePreviews(xlsxNames); // latest first using blobMeta
-        })
-        .catch(err => showError('Failed to list blobs: ' + err));
+    chartData.forEach((d,i)=> d._y = i * (barH + gap));
+
+    g.selectAll('.ylabel').data(chartData).enter().append('text')
+      .attr('class','ylabel').attr('x', leftPad - 10).attr('y', d => d._y + barH/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .text((d,i)=> yLabels[i]).append('title').text(d => d.sw);
+
+    g.selectAll('.bar').data(chartData).enter().append('rect')
+      .attr('class','bar').attr('x', x(0)).attr('y', d => d._y)
+      .attr('width', d => x(Math.min(1000, d.avg)) - x(0)).attr('height', barH)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
+      .append('title').text(d => `Score ${d.score}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+
+    g.selectAll('.val').data(chartData).enter().append('text')
+      .attr('x', d => x(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH/2)
+      .attr('dominant-baseline','middle').attr('font-size', 12).text(d => d.avg.toFixed(1));
+
+    const axisY = chartData.length * (barH + gap);
+    g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
+  }
+
+  // Scoring legend
+  const ranges = scoreRangeLabels(getThresholds());
+  const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
+  const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
+  const bandMargin = 20, boxH = 42;
+  const barW = legCw - bandMargin*2, boxW = barW / 10;
+  legend.append('text').attr('x', 12).attr('y', 12).attr('font-size', 12).attr('fill', '#555').text('Scoring legend (1 = worst, 10 = best)');
+  for (let i=0;i<10;i++){
+    const x = bandMargin + i*boxW; const g = legend.append('g');
+    g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[i]).attr('stroke', '#111').attr('stroke-width', 0.4)
+      .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + 14).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i+1);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + 14 + 16).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
+    g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
+  }
+  legend.attr('height', 20 + boxH + 28 + 6);
+}
+
+/* ==================== Calendar trio helpers ==================== */
+function measureTextWidthCal(texts, fontSize=11, fontWeight=600){
+  const tmp = d3.select('body').append('svg')
+    .attr('width',0).attr('height',0)
+    .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+  let max = 0;
+  (texts||[]).forEach(t=>{
+    const n = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
+    max = Math.max(max, n.getComputedTextLength());
+  });
+  tmp.remove();
+  return Math.ceil(max);
+}
+const WEATHER_LABELS = ['Clear/Clouds','Fog/Drizzle','Rain/Snow','Heavy precip','Thunderstorm'];
+function weatherCategoryForWMO(code){
+  if (code==null) return null;
+  if (code>=95) return 'Thunderstorm';
+  if (code===66 || code===67 || code===85 || code===86) return 'Heavy precip';
+  if ((code>=61 && code<=65) || (code>=71 && code<=77) || (code>=80 && code<=82)) return 'Rain/Snow';
+  if (code===45 || code===48 || (code>=51 && code<=57)) return 'Fog/Drizzle';
+  return 'Clear/Clouds';
+}
+
+/* ==================== Country detection helpers (labels / notes) ==================== */
+function detectCountryFromText(text){
+  if (!text) return null;
+  const t = String(text).toLowerCase();
+  const map = [
+    [/sweden|sverige|\bse\b|\bswe\b/, 'Sweden'],
+    [/norway|norge|\bno\b|nor\b/, 'Norway'],
+    [/denmark|danmark|\bdk\b|\bden\b/, 'Denmark'],
+    [/germany|deutschland|\bde\b|\bger\b/, 'Germany'],
+    [/netherlands|holland|\bnl\b|\bned\b/, 'Netherlands'],
+    [/belgium|\bbe\b|\bbel\b/, 'Belgium'],
+    [/france|\bfr\b|\bfra\b/, 'France'],
+    [/spain|españa|\bes\b|\besp\b/, 'Spain'],
+    [/italy|italia|\bit\b|\bita\b/, 'Italy'],
+    [/austria|\bat\b|\bau\b/, 'Austria'],
+    [/poland|polska|\bpl\b|\bpol\b/, 'Poland'],
+    [/luxembourg|\blu\b|\blux\b/, 'Luxembourg'],
+    [/greece|ellada|\bgr\b|\bgre\b/, 'Greece'],
+    [/romania|\bro\b/, 'Romania'],
+    [/bulgaria|\bbg\b/, 'Bulgaria'],
+    [/slovenia|\bsi\b|\bsvn\b/, 'Slovenia'],
+    [/croatia|\bhr\b|\bhrv\b/, 'Croatia']
+  ];
+  for (const [re, name] of map){ if (re.test(t)) return name; }
+  return null;
+}
+function guessCountryForSoftware(sw, parsed){
+  const rn = (parsed.releaseNotes && parsed.releaseNotes[sw.label]) || '';
+  return detectCountryFromText(sw.label) || detectCountryFromText(sw.base) || detectCountryFromText(rn);
+}
+
+/* ==================== Countries × Month heatmap ==================== */
+function renderCountryMonthHeatmap(holder, parsed){
+  const sw = parsed.software || [];
+  const rows = [];
+  sw.forEach(s=>{
+    if (!s.date) return;
+    const country = guessCountryForSoftware(s, parsed);
+    if (!country) return; // skip unknowns
+    const month = s.date.slice(0,7); // YYYY-MM
+    rows.push({month, country});
+  });
+
+  holder.append('div').attr('class','cal-col-title').text('Countries × Month');
+
+  if (!rows.length){
+    holder.append('div').attr('class','small').text('No country info detected.');
+    return;
+  }
+
+  const monthsSet = new Set(rows.map(r=>r.month));
+  const months = Array.from(monthsSet).sort(); // asc YYYY-MM
+
+  const freqByCountry = new Map();
+  rows.forEach(r=> freqByCountry.set(r.country, (freqByCountry.get(r.country)||0)+1));
+  const countries = Array.from(freqByCountry.entries()).sort((a,b)=> b[1]-a[1]).map(d=>d[0]);
+
+  const count = new Map(); // key `${country}||${month}` -> n
+  rows.forEach(r=>{
+    const k = r.country+'||'+r.month;
+    count.set(k, (count.get(k)||0)+1);
+  });
+
+  const EMPTY = '#f1f3f8';
+  const cell = 14, gap = 2;
+  const topPad = 22, leftPadBase = 40;
+
+  // measure label width
+  const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px');
+  let maxW = 0;
+  countries.forEach(c=>{
+    const n = tmp.append('text').attr('font-size', 11).attr('font-weight', 600).text(c).node();
+    maxW = Math.max(maxW, n.getComputedTextLength());
+  });
+  tmp.remove();
+  const leftPad = Math.max(leftPadBase, Math.ceil(maxW)+14);
+
+  const w = leftPad + months.length*(cell+gap) + 6;
+  const h = topPad + countries.length*(cell+gap) + 6;
+  const svg = holder.append('svg').attr('width', w).attr('height', h);
+
+  // Month labels (top)
+  months.forEach((m, i)=>{
+    svg.append('text')
+      .attr('x', leftPad + i*(cell+gap) + cell/2)
+      .attr('y', 14)
+      .attr('text-anchor','middle')
+      .attr('font-size', 11)
+      .text(m);
+  });
+
+  // Country labels (left)
+  countries.forEach((c, r)=>{
+    svg.append('text')
+      .attr('x', leftPad - 6)
+      .attr('y', topPad + r*(cell+gap) + cell*0.75)
+      .attr('font-size', 11)
+      .attr('fill', '#666')
+      .attr('text-anchor','end')
+      .text(c);
+  });
+
+  const maxCnt = d3.max(rows, d => count.get(d.country+'||'+d.month)) || 1;
+
+  const g = svg.append('g').attr('transform', `translate(${leftPad},${topPad})`);
+  countries.forEach((c, r)=>{
+    months.forEach((m, i)=>{
+      const n = count.get(c+'||'+m) || 0;
+      const has = n > 0;
+      const fill = has ? DARK_GREEN : EMPTY;
+      const op = has ? (0.25 + 0.75*(n / maxCnt)) : 1;
+      const rect = g.append('rect')
+        .attr('x', i*(cell+gap))
+        .attr('y', r*(cell+gap))
+        .attr('width', cell)
+        .attr('height', cell)
+        .attr('fill', fill)
+        .attr('fill-opacity', has ? op : 1);
+      if (has){
+        rect.append('title').text(`${c} — ${m}: ${n}`);
+        g.append('text')
+          .attr('x', i*(cell+gap) + cell/2)
+          .attr('y', r*(cell+gap) + cell*0.72)
+          .attr('text-anchor','middle')
+          .attr('font-size', 9)
+          .attr('fill', '#fff')
+          .text(n);
+      }
+    });
+  });
+}
+
+/* ==================== Calendar trio (Activity, Temperature, Weather) ==================== */
+function renderCalendarTrio(container, parsed){
+  const sw = parsed.software || [];
+  const dateCounts = {};
+  const datesList = [];
+  sw.forEach(s => {
+    if (!s.date) return;
+    datesList.push(s.date);
+    dateCounts[s.date] = (dateCounts[s.date] || 0) + 1;
+  });
+  if (!datesList.length) return;
+
+  const toDate = s => new Date(s+'T00:00:00');
+  const minDateStr = datesList.reduce((a,b)=> a<b?a:b);
+  const maxDateStr = datesList.reduce((a,b)=> a>b?a:b);
+  const minDate = toDate(minDateStr);
+  const maxDate = toDate(maxDateStr);
+
+  // Snap to full weeks (Mon..Sun)
+  const start = new Date(minDate);
+  const wdStart = (start.getDay()+6)%7; start.setDate(start.getDate() - wdStart);
+  const end = new Date(maxDate);
+  const wdEnd = (end.getDay()+6)%7; end.setDate(end.getDate() + (6 - wdEnd));
+
+  // Weather aggregates already used by summary
+  const wx = parsed.weatherByDate || {};
+  const tempByDate = {};
+  const catRowByDate = {};
+  Object.keys(wx).forEach(d=>{
+    const w = wx[d]; if (!w) return;
+    const avgT = (w.tmin==null || w.tmax==null) ? null : Math.round((w.tmin + w.tmax)/2);
+    tempByDate[d] = avgT;
+    const cat = weatherCategoryForWMO(w.code);
+    const row = (cat==null) ? null : WEATHER_LABELS.indexOf(cat);
+    catRowByDate[d] = (row>=0? row : null);
+  });
+
+  const tVals = Object.values(tempByDate).filter(v=>v!=null);
+  const tMin = tVals.length ? Math.min(...tVals) : null;
+  const tMax = tVals.length ? Math.max(...tVals) : null;
+
+  function drawCalendar(holder, caption, options){
+    const { numRows, rowForDate, hasValue, leftLabels, labelMode='explicit' } = options;
+    const EMPTY = '#f1f3f8';
+    const cell = 12, gap = 2;
+    const topPad = 18, monthPad = 12;
+
+    const visibleLabels = Array.isArray(leftLabels) ? leftLabels.filter(x=>x && x.length) : [];
+    const leftPadBase = (labelMode==='weekdays') ? 30 : 40;
+    const leftPad = Math.max(leftPadBase, measureTextWidthCal(visibleLabels, 11, 600) + 14);
+
+    const days = Math.floor((end - start)/(24*3600*1000)) + 1;
+    const weeks = Math.ceil(days / 7);
+    const w = leftPad + weeks*(cell+gap) + 6;
+    const h = topPad + monthPad + numRows*(cell+gap) + 6;
+
+    holder.append('div').attr('class','cal-col-title').text(caption);
+    const svg = holder.append('svg').attr('width', w).attr('height', h);
+    const monthFmt = new Intl.DateTimeFormat('sv-SE', { month: 'short' });
+
+    const monthCols = new Map();
+    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
+      if (d.getDate() === 1){
+        const col = Math.floor(idx/7);
+        monthCols.set(col, monthFmt.format(d));
+      }
     }
+    monthCols.forEach((lab, col)=>{
+      svg.append('text').attr('x', leftPad + col*(cell+gap)).attr('y', topPad+8).attr('font-size', 11).text(lab);
+    });
 
-    // ---------- SIDEBAR ----------
-    function buildSidebar(files) {
-      const sb = document.getElementById('sidebar');
-      sb.innerHTML = '';
-      const header = document.createElement('h2');
-      header.textContent = 'Test sessions';
-      header.style.padding = '16px';
-      header.style.margin = '0';
-      header.style.borderBottom = '1px solid #ddd';
-      header.style.cursor = 'pointer';
-      header.title = 'Back to overview';
-      header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
-      sb.appendChild(header);
-
-      const groups = files.reduce((acc, f) => {
-        const m = f.match(/(\d{4}-\d{2}-\d{2})/);
-        if (!m) return acc;
-        (acc[m[1]] ||= []).push(f);
-        return acc;
-      }, {});
-
-      Object.keys(groups).sort().reverse().forEach(day => {
-        const hdr = document.createElement('div');
-        hdr.className = 'day-header';
-        hdr.textContent = day;
-
-        const lst = document.createElement('ul');
-        lst.className = 'session-list';
-
-        groups[day].sort().forEach(f => {
-          const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
-          const li = document.createElement('li');
-          li.className = 'session-item';
-          li.onclick = () => loadFile(f);
-
-          const title = document.createElement('div');
-          title.textContent = namePretty;
-
-          const meta = document.createElement('div');
-          meta.className = 'meta';
-          meta.id = `meta_${cssSafeId(f)}`;
-          meta.textContent = 'Loading…';
-
-          li.appendChild(title);
-          li.appendChild(meta);
-          lst.appendChild(li);
-        });
-
-        let loadedThisGroup = false;
-        hdr.onclick = () => {
-          const expand = lst.style.display !== 'block';
-          lst.style.display = expand ? 'block' : 'none';
-          if (expand && !loadedThisGroup) {
-            loadedThisGroup = true;
-            groups[day].forEach(f => {
-              fetchSessionSummary(f).then(({ mileageKm, issueCount }) => {
-                const el = document.getElementById(`meta_${cssSafeId(f)}`);
-                if (!el) return;
-                const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
-                el.textContent = `Mileage: ${mileageText}  No of issues: ${issueCount}`;
-              });
-            });
-          }
-        };
-
-        sb.appendChild(hdr);
-        sb.appendChild(lst);
+    const ax = svg.append('g');
+    const yTop = topPad + monthPad;
+    const axX  = leftPad - 6;
+    if (labelMode==='weekdays'){
+      const yNames = ['Mon','','Wed','','Fri','',''];
+      yNames.forEach((lab, r)=>{
+        if (!lab) return;
+        ax.append('text').attr('x', axX).attr('y', yTop + r*(cell+gap) + cell*0.75).attr('font-size', 11).attr('fill', '#666').attr('text-anchor','end').text(lab);
+      });
+    } else if (Array.isArray(leftLabels) && leftLabels.length){
+      leftLabels.forEach((lab, r)=>{
+        if (!lab) return;
+        ax.append('text').attr('x', axX).attr('y', yTop + r*(cell+gap) + cell*0.75).attr('font-size', 11).attr('fill', '#666').attr('text-anchor','end').text(lab);
       });
     }
 
-    // ---------- OVERVIEW HEATMAP ----------
-    function buildOverviewHeatmap(files){
-      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
-
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s})))).then(rows => {
-        rows.forEach(r => {
-          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
-          const prev = byDay.get(r.dayStr) || 0;
-          byDay.set(r.dayStr, prev + (r.issueCount || 0));
-        });
-
-        const days = Array.from(byDay.keys()).sort();
-        const host = document.getElementById('heatmap-host');
-        if (days.length === 0){
-          host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
-          return;
-        }
-
-        const minDate = toDateOnly(days[0]);
-        const maxDate = toDateOnly(days[days.length-1]);
-
-        const start = new Date(minDate);
-        const day = start.getDay(); // 0 Sun … 6 Sat
-        const offsetToMonday = (day === 0 ? 6 : day - 1);
-        start.setDate(start.getDate() - offsetToMonday);
-        start.setHours(0,0,0,0);
-
-        const end = new Date(maxDate);
-        const endDay = end.getDay();
-        const addToSunday = (7 - endDay) % 7;
-        end.setDate(end.getDate() + addToSunday);
-        end.setHours(0,0,0,0);
-
-        const dense = [];
-        let cur = new Date(start);
-        while (cur <= end) {
-          const ymd = cur.toISOString().slice(0,10);
-          dense.push({ date: new Date(cur), count: byDay.get(ymd) || 0 });
-          cur.setDate(cur.getDate() + 1);
-        }
-
-        renderHeatmap(dense);
-      });
-    }
-
-    function renderHeatmap(denseDays){
-      const host = document.getElementById('heatmap-host');
-      host.innerHTML = '';
-
-      const cell = 12, gap = 3, rows = 7;
-      const weeks = Math.ceil(denseDays.length / 7);
-      const width  = weeks * (cell + gap) + 40;
-      const height = rows  * (cell + gap) + 20;
-
-      const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
-      const level = v => (v === 0) ? 0 : (v < 5 ? 1 : (v < 10 ? 2 : (v < 20 ? 3 : 4)));
-
-      const NS = 'http://www.w3.org/2000/svg';
-      const svg = document.createElementNS(NS, 'svg');
-      svg.setAttribute('width', width);
-      svg.setAttribute('height', height);
-
-      const months = document.createElementNS(NS, 'g'); months.setAttribute('class','heatmap-months');
-      let lastMonth = -1;
-      for (let w = 0; w < weeks; w++) {
-        const idx = w * 7;
-        if (idx >= denseDays.length) break;
-        const d = denseDays[idx].date;
-        const m = d.getMonth();
-        if (m !== lastMonth) {
-          lastMonth = m;
-          const t = document.createElementNS(NS,'text');
-          t.textContent = d.toLocaleString(undefined,{month:'short'});
-          t.setAttribute('x', 40 + w*(cell+gap));
-          t.setAttribute('y', 10);
-          months.appendChild(t);
-        }
+    const g = svg.append('g').attr('transform', `translate(${leftPad},${yTop})`);
+    for (let d = new Date(start), idx=0; d<=end; d.setDate(d.getDate()+1), idx++){
+      const ds = d.toISOString().slice(0,10);
+      let row = null;
+      if (labelMode==='weekdays'){
+        row = (d.getDay()+6)%7; // Mon=0..Sun=6
+      } else {
+        row = rowForDate(ds);
       }
-      svg.appendChild(months);
+      const col = Math.floor(idx/7);
+      const fill = (row==null || !hasValue(ds)) ? EMPTY : DARK_GREEN;
+      const y = (row==null ? 0 : row*(cell+gap));
+      g.append('rect').attr('x', col*(cell+gap)).attr('y', y).attr('width', cell).attr('height', cell).attr('fill', fill);
+    }
+  }
 
-      const dow = document.createElementNS(NS,'g'); dow.setAttribute('class','heatmap-dow');
-      [['Mon',0],['Wed',2],['Fri',4]].forEach(([name,row])=>{
-        const t=document.createElementNS(NS,'text');
-        t.textContent=name; t.setAttribute('x',0); t.setAttribute('y',24+row*(cell+gap));
-        dow.appendChild(t);
-      });
-      svg.appendChild(dow);
+  const card = container.append('div').attr('class','chart-card').style('grid-column','1 / -1');
+  card.append('div').attr('class','cal-title').text('Activity & weather statistics');
+  const grid = card.append('div').attr('class','cal-grid');
 
-      const cellsG = document.createElementNS(NS,'g');
-      for (let i = 0; i < denseDays.length; i++) {
-        const d = denseDays[i];
-        const w = Math.floor(i / 7);
-        const r = i % 7;
-        const rect = document.createElementNS(NS,'rect');
-        rect.setAttribute('x', 40 + w*(cell+gap));
-        rect.setAttribute('y', 16 + r*(cell+gap));
-        rect.setAttribute('width', cell);
-        rect.setAttribute('height', cell);
-        rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
-        rect.setAttribute('fill', colors[level(d.count)]);
-        rect.setAttribute('stroke', '#ccd3d9');
-        rect.setAttribute('stroke-width', '1');
-        cellsG.appendChild(rect);
+  // 1) Test activity (existing)
+  drawCalendar(grid.append('div'),'Test activity',{
+    numRows: 7, labelMode: 'weekdays', leftLabels: null,
+    hasValue: (ds)=> (dateCounts[ds] || 0) > 0
+  });
+
+  // 2) Countries × Month (new) — placed right of Test activity
+  renderCountryMonthHeatmap(grid.append('div'), parsed);
+
+  // 3) Temperature
+  const TEMP_ROWS = 7;
+  let tempLabels = Array(TEMP_ROWS).fill('');
+  if (tMin!=null && tMax!=null){
+    const span = Math.max(1, tMax - tMin);
+    for (let r=0;r<TEMP_ROWS;r++){
+      const fracTop = 1 - r/(TEMP_ROWS-1);
+      const val = Math.round(tMin + fracTop*span);
+      if (r===0 || r===Math.floor((TEMP_ROWS-1)/2) || r===TEMP_ROWS-1 || r===2 || r===TEMP_ROWS-3){
+        tempLabels[r] = `${val}°`;
       }
-      svg.appendChild(cellsG);
-
-      host.appendChild(svg);
-
-      const legend = document.createElement('div');
-      legend.className = 'legend';
-      legend.innerHTML = `Less
-        <span class="box" style="background:${colors[0]}"></span>
-        <span class="box" style="background:${colors[1]}"></span>
-        <span class="box" style="background:${colors[2]}"></span>
-        <span class="box" style="background:${colors[3]}"></span>
-        <span class="box" style="background:${colors[4]}"></span>
-        More`;
-      host.appendChild(legend);
     }
+  }
+  drawCalendar(grid.append('div'),'Temperature',{
+    numRows: TEMP_ROWS, labelMode:'explicit', leftLabels: tempLabels,
+    rowForDate: (ds)=>{
+      const v = tempByDate[ds];
+      if (v==null || tMin==null || tMax==null) return null;
+      if (tMax===tMin) return Math.floor(TEMP_ROWS/2);
+      const ratio = (v - tMin) / (tMax - tMin);
+      const idx = (TEMP_ROWS-1) - Math.max(0, Math.min(TEMP_ROWS-1, Math.floor(ratio*(TEMP_ROWS-1)+1e-6)));
+      return idx;
+    },
+    hasValue: (ds)=> tempByDate[ds] != null
+  });
 
-    // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
-    function buildLatestRoutePreviews(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+  // 4) Weather condition
+  drawCalendar(grid.append('div'),'Weather condition',{
+    numRows: WEATHER_LABELS.length, labelMode:'explicit', leftLabels: WEATHER_LABELS,
+    rowForDate: (ds)=> {
+      const r = catRowByDate[ds];
+      return (r==null ? null : r);
+    },
+    hasValue: (ds)=> catRowByDate[ds] != null
+  });
+}
 
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
-        .then(rows => {
-          // Filter and sort strictly by Last-Modified DESC
-          const take = rows
-            .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
-            .sort((a, b) => {
-              const diff = (blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0);
-              if (diff !== 0) return diff;
-              const byDateStr = b.dayStr.localeCompare(a.dayStr);
-              if (byDateStr !== 0) return byDateStr;
-              return b.filename.localeCompare(a.filename);
-            })
-            .slice(0,10);
+/* ==================== KPI × Software matrix (CC-only) ==================== */
+function renderCCMatrix(container, parsed){
+  const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
+  if (!ccSoftwares.length) return;
 
-          const grid = document.getElementById('routes-grid');
-          grid.innerHTML = '';
-          if (take.length === 0) return;
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
 
-          // 1) Create and append all cards in the sorted order (placeholders)
-          const slots = take.map(item => {
-            const card = document.createElement('div');
-            card.className = 'route-card';
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
 
-            const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
-            const title = document.createElement('div');
-            title.className = 'route-title';
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('CC-only');
 
-            // title as link to open the drive (styled)
-            const link = document.createElement('a');
-            link.className = 'route-link';
-            link.href = '#';
-            link.innerHTML = `<span class="u">${item.dayStr} — ${niceName}</span>`;
-            link.addEventListener('click', (e)=>{ e.preventDefault(); loadFile(item.filename); });
-            title.appendChild(link);
-            card.appendChild(title);
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
 
-            const mapDiv = document.createElement('div');
-            mapDiv.className = 'route-map';
-            mapDiv.id = `route_${cssSafeId(item.filename)}`;
-            card.appendChild(mapDiv);
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  thead.append('th').attr('class','target').text('Target');
+  ccSoftwares.forEach(sw => thead.append('th').attr('class','software').text(sw.label));
 
-            const meta = document.createElement('div');
-            meta.className = 'route-meta';
-            meta.textContent = `Mileage: … km  •  Issues: ${item.issueCount}`;
-            card.appendChild(meta);
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    tr.append('td').text(name);
+    const e = entryByName.get(name);
+    tr.append('td').attr('class','target').text(fmtCell(e ? e.target : null));
+    ccSoftwares.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      const td = tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`);
+      td.text(fmtCell(v));
+    });
+  });
+}
 
-            grid.appendChild(card);
-            return { item, mapDiv, meta };
-          });
+/* ==================== KPI × Software matrix (Non-CC + latest CC) ==================== */
+function renderNonCCPlusLatestCCMatrix(container, parsed){
+  const allSoft = parsed.software || [];
+  const ccList = allSoft.filter(sw => /^CC\b/i.test(sw.base));
+  const nonCC  = allSoft.filter(sw => !/^CC\b/i.test(sw.base));
 
-          // 2) Fill each card asynchronously (order of appending is preserved)
-          slots.forEach(({ item, mapDiv, meta }) => {
-            fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
-              .then(res => res.arrayBuffer())
-              .then(buf => {
-                const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-                const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-                if (!samplingName) return;
+  if (!nonCC.length && !ccList.length) return;
 
-                const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-                if (!path || path.length < 2) return;
+  let latestCC = null;
+  if (ccList.length){
+     const withDate = ccList.filter(sw => !!sw.date);
+     if (withDate.length){
+       latestCC = withDate.reduce((best, cur)=> (best==null || cur.date > best.date) ? cur : best, null);
+     } else {
+       latestCC = ccList[ccList.length - 1];
+     }
+  }
 
-                // Read column-2 values from "Test details"
-                const details = extractTestDetails(wb);
-                const objVal = details['test object'] || details['object'] || details['vehicle'] || null;
-                const purposeVal = details['purpose'] || details['test purpose'] || null;
+  const cols = nonCC.slice();
+  if (latestCC) cols.push({...latestCC, _latest:true});
+  if (!cols.length) return;
 
-                const leftParts = [];
-                if (objVal) leftParts.push(`Test object: ${objVal}`);
-                if (purposeVal) leftParts.push(`Purpose: ${purposeVal}`);
-                const leftText = leftParts.length ? leftParts.join('  •  ') + '  •  ' : '';
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{
+    const name = `${e.func} — ${e.kpi}`;
+    if (!kpiNames.includes(name)) kpiNames.push(name);
+  });
+  if (!kpiNames.length) return;
 
-                meta.textContent = `${leftText}Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
 
-                const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
-                const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
-                mini.fitBounds(line.getBounds(), { padding:[8,8] });
-                mini.whenReady(()=>mini.invalidateSize());
-              })
-              .catch(()=>{ /* ignore individual failures */ });
-          });
-        });
-    }
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('Non-CC + latest CC');
 
-    // ---------- SESSION VIEWER ----------
-    function loadFile(filename) {
-      const content = document.getElementById('content');
-      content.innerHTML = '';
-      issueCoords = [];
-      samplingCoords = [];
-      mapRef = null;
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
 
-      const issueTableInfo = {
-        sheetName: null,
-        headerNames: { col1: '', col2: '', col3: '' },
-        issueInfo: {}
+  const thead = mtable.append('thead').append('tr');
+  thead.append('th').text('KPI');
+  thead.append('th').attr('class','target').text('Target');
+  cols.forEach(sw => {
+    const th = thead.append('th').attr('class','software');
+    th.text(sw._latest ? `${sw.label} (latest CC)` : sw.label);
+  });
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    const e = entryByName.get(name);
+    tr.append('td').text(name);
+    tr.append('td').attr('class','target').text(fmtCell(e ? e.target : null));
+    cols.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      const td = tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`);
+      td.text(fmtCell(v));
+    });
+  });
+}
+
+/* ==================== Per-software cards ==================== */
+function renderSoftwareCards(container, parsed){
+  const T = getThresholds();
+  (parsed.software||[]).forEach(sw=>{
+    const swLabel = sw.label;
+
+    // Any value for this SW after (possible) external filtering?
+    const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
+    if (!hasAny) return;
+
+    const card = container.append('div').attr('class','chart-card');
+    const w = 680;
+
+    // Title SVG (radar sits inside same SVG)
+    const radarH = 540;
+    const TITLE_Y = 26, TITLE_TO_RADAR_GAP = 50, RADAR_PAD_LEFT = 30, MIN_SIDE_MARGIN = 8, FUNC_LABEL_OFFSET = 16;
+
+    const svg = card.append('svg').attr('width', w);
+
+    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
+    svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
+
+    // Download PNG
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const s = new XMLSerializer().serializeToString(svg.node());
+      const url = URL.createObjectURL(new Blob([s], {type:'image/svg+xml'}));
+      const vb = svg.node().viewBox && svg.node().viewBox.baseVal;
+      const bbox = svg.node().getBBox ? svg.node().getBBox() : null;
+      const W = (vb && vb.width)  || (svg.node().width?.baseVal?.value)  || Math.ceil((bbox?.width  || 800));
+      const H = (vb && vb.height) || (svg.node().height?.baseVal?.value) || Math.ceil((bbox?.height || 600));
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+        ctx.drawImage(img,0,0);
+        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
+        URL.revokeObjectURL(url);
       };
+      img.src = url;
+    });
 
-      const xlsxLink = document.createElement('a');
-      xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
-      xlsxLink.textContent = 'Download XLSX';
-      xlsxLink.className = 'download-button';
-      xlsxLink.setAttribute('download', filename);
-      content.appendChild(xlsxLink);
+    // Build surviving rows first (prevents empty KPI table later)
+    const rows = parsed.entries
+      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
+      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
 
-      const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
-      const pdfLink = document.createElement('a');
-      pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
-      pdfLink.textContent = 'Download PDF';
-      pdfLink.className = 'download-button';
-      pdfLink.setAttribute('download', pdfFilename);
-      content.appendChild(pdfLink);
-
-      fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then(res => res.arrayBuffer())
-        .then(buffer => {
-          const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-
-          const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
-
-          let nonSamplingCount = 0;
-          let mapInserted = false;
-
-          wb.SheetNames.forEach(sheet => {
-            if (sheet.toLowerCase() === 'sampling') return;
-
-            const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
-            content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
-
-            if (!issueTableInfo.sheetName) {
-              const tbl = document.getElementById(sheet);
-              const rows = Array.from(tbl.querySelectorAll('tr'));
-              if (rows.length > 1) {
-                const hdrs = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.textContent.trim().toLowerCase());
-                const latIdx = hdrs.findIndex(h => h.includes('lat'));
-                const lonIdx = hdrs.findIndex(h => h.includes('lon'));
-                if (latIdx >= 0 && lonIdx >= 0) {
-                  issueTableInfo.sheetName = sheet;
-                  const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
-                  issueTableInfo.headerNames.col1 = rawHdrs[0].textContent.trim();
-                  issueTableInfo.headerNames.col2 = rawHdrs[1].textContent.trim();
-                  issueTableInfo.headerNames.col3 = (rawHdrs[12]?.textContent || '').trim();
-
-                  rows.slice(1).forEach(row => {
-                    const cells = Array.from(row.querySelectorAll('td'));
-                    const issueNo = (cells[0]?.textContent || '').trim();
-                    const col1 = issueNo;
-                    const col2 = (cells[1]?.textContent || '').trim();
-                    const col3 = (cells[12]?.textContent || '').trim();
-                    const lat = parseFloat((cells[latIdx]?.textContent || '').trim());
-                    const lon = parseFloat((cells[lonIdx]?.textContent || '').trim());
-                    if (!isNaN(lat) && !isNaN(lon)) {
-                      issueCoords.push({ issueNo, lat, lon });
-                    }
-                    if (issueNo) {
-                      issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
-                    }
-                  });
-                }
-              }
-            }
-
-            nonSamplingCount++;
-            if (nonSamplingCount === 2 && !mapInserted) {
-              const mapDiv = document.createElement('div');
-              mapDiv.id = 'issue-map';
-              mapDiv.style.width = '100%';
-              mapDiv.style.height = '400px';
-              mapDiv.style.margin = '20px 0';
-              mapDiv.style.border = '1px solid #aaa';
-              content.appendChild(mapDiv);
-              mapInserted = true;
-            }
-          });
-        })
-        .then(() => {
-          if (!document.getElementById('issue-map')) {
-            const mapDiv = document.createElement('div');
-            mapDiv.id = 'issue-map';
-            mapDiv.style.width = '100%';
-            mapDiv.style.height = '400px';
-            mapDiv.style.margin = '20px 0';
-            mapDiv.style.border = '1px solid #aaa';
-            document.getElementById('content').appendChild(mapDiv);
-          }
-          if (issueCoords.length || samplingCoords.length) {
-            initMap();
-          } else {
-            const ph = document.getElementById('issue-map');
-            const err = document.createElement('div');
-            err.className = 'error';
-            err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
-            ph.replaceWith(err);
-          }
-        })
-        .then(() => {
-          const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
-          return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`)
-            .then(resp => {
-              if (!resp.ok) return Promise.reject('ZIP not found');
-              return resp.arrayBuffer();
-            })
-            .then(buf => JSZip.loadAsync(buf))
-            .then(zip => {
-              const content = document.getElementById('content');
-              const mapDiv = document.getElementById('issue-map');
-              const title = document.createElement('h2');
-              title.textContent = 'Issue snapshots';
-
-              const table = document.createElement('table');
-              table.id = 'issue-snapshots';
-              table.style.width = 'auto';
-              table.style.marginBottom = '2em';
-              table.style.borderCollapse = 'collapse';
-
-              const hdrRow = document.createElement('tr');
-              ['col1','col2','col3','Location','Snapshot'].forEach(txt => {
-                const th = document.createElement('th');
-                th.textContent = (txt.startsWith('col') ? ( {col1:'',col2:'',col3:''}[txt] = 1, issueTableInfo.headerNames[txt] ) : txt) || txt;
-                th.style.backgroundColor = '#f5f5f5';
-                th.style.padding = '8px';
-                th.style.border = '1px solid #ccc';
-                hdrRow.appendChild(th);
-              });
-              table.appendChild(hdrRow);
-
-              zip.forEach((path, entry) => {
-                if (entry.dir || !/\.(jpe?g|png|gif)$/i.test(path)) return;
-                const issueNo = path.replace(/\.[^/.]+$/, '');
-                const info = issueTableInfo.issueInfo[issueNo];
-                if (!info) return;
-
-                const row = document.createElement('tr');
-                [info.col1, info.col2, info.col3].forEach(val => {
-                  const td = document.createElement('td');
-                  td.textContent = val;
-                  td.style.padding = '8px';
-                  td.style.border = '1px solid #ccc';
-                  row.appendChild(td);
-                });
-
-                const tdMap = document.createElement('td');
-                tdMap.style.padding = '8px';
-                tdMap.style.border = '1px solid #ccc';
-                const miniDiv = document.createElement('div');
-                miniDiv.id = `snapshot-map-${cssSafeId(issueNo)}`;
-                miniDiv.style.width = '150px';
-                miniDiv.style.height = '150px';
-                tdMap.appendChild(miniDiv);
-                row.appendChild(tdMap);
-
-                const tdImg = document.createElement('td');
-                tdImg.style.padding = '8px';
-                tdImg.style.border = '1px solid #ccc';
-
-                entry.async('blob').then(rawBlob => {
-                  let mime = 'application/octet-stream';
-                  if (/\.(jpe?g)$/i.test(path)) mime = 'image/jpeg';
-                  else if (/\.png$/i.test(path)) mime = 'image/png';
-                  else if (/\.gif$/i.test(path)) mime = 'image/gif';
-                  const blob = new Blob([rawBlob], { type: mime });
-                  const url  = URL.createObjectURL(blob);
-
-                  const link = document.createElement('a');
-                  link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-
-                  const img = document.createElement('img');
-                  img.src = url; img.style.maxWidth = '200px'; img.style.maxHeight = '200px'; img.style.cursor = 'pointer';
-                  link.appendChild(img);
-                  tdImg.appendChild(link);
-
-                  const miniMap = L.map(miniDiv, { attributionControl:false, zoomControl:false }).setView([info.lat, info.lon], 17);
-                  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
-                  const badgeIcon = L.divIcon({ className: 'issue-label', html: `<div class="issue-badge">${issueNo}</div>`, iconSize: [24,24], iconAnchor: [12,12] });
-                  L.marker([info.lat, info.lon], { icon: badgeIcon }).addTo(miniMap);
-                  const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
-                  miniMap.fitBounds(circle.getBounds(), { padding:[4,4] });
-                  miniMap.invalidateSize();
-                });
-
-                row.appendChild(tdImg);
-                table.appendChild(row);
-              });
-
-              if (mapDiv) {
-                mapDiv.insertAdjacentElement('afterend', title);
-                title.insertAdjacentElement('afterend', table);
-              } else {
-                content.appendChild(title);
-                content.appendChild(table);
-              }
-            });
-        })
-        .catch(err => {
-          console.error(err);
-          document.getElementById('content').innerHTML += `<div class="error">Failed to load ${filename}: ${err}</div>`;
-        });
+    if (rows.length === 0) {
+      card.append('div').attr('class','small').style('margin','8px 10px 12px')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
     }
 
-    function parseSamplingSheet(sheet) {
-      const raw = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      if (raw.length < 2) return;
-      const headers = raw[0].map(h => String(h).trim().toLowerCase());
-      const latIdx = headers.findIndex(h => h.includes('lat'));
-      const lonIdx = headers.findIndex(h => h.includes('lon') || h.includes('lng') || h.includes('long'));
-      if (latIdx < 0 || lonIdx < 0) return;
-      for (let i = 1; i < raw.length; i++) {
-        const row = raw[i];
-        const lat = parseFloat(row[latIdx]);
-        const lon = parseFloat(row[lonIdx]);
-        if (!isNaN(lat) && !isNaN(lon)) samplingCoords.push({ lat, lon });
-      }
+    // ===== Radar geometry (functions derived from surviving rows) =====
+    const leftAreaWidth = w;
+    const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
+    const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
+    const centerX = RADAR_PAD_LEFT + availableW / 2;
+    const rMaxCandidateW = Math.max(10, availableW/2 - FUNC_LABEL_OFFSET);
+    const rMaxCandidateH = (radarH - radarTop) - 16;
+    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH));
+    const centerY = radarTop + rMax;
+
+    const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
+
+    const functions = Array.from(new Set(rows.map(r => r.func)));
+    if (!functions.length){
+      card.append('div').attr('class','small')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
     }
 
-    function initMap() {
-      mapRef = L.map('issue-map').setView([0, 0], 2);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(mapRef);
+    const linearPortion = 0.55;
+    const rLinear = rMax * linearPortion;
+    const logMin = 10, logMax = 1000;
+    const logDen = Math.log10(logMax) - Math.log10(logMin);
+    function toR(v){
+      if (v==null || Number.isNaN(v)) return null;
+      if (v <= 0) return 0;
+      const vv = Math.min(v, logMax);
+      if (vv < logMin) return (vv / logMin) * rLinear;
+      return rLinear + ((Math.log10(vv) - Math.log10(logMin)) / logDen) * (rMax - rLinear);
+    }
 
-      const allPoints = [
-        ...issueCoords.map(c => [c.lat, c.lon]),
-        ...samplingCoords.map(c => [c.lat, c.lon]),
-      ];
-      if (allPoints.length > 0) mapRef.fitBounds(allPoints);
+    const ringGrid = [1,2,3,4,5,6,7,8,9,10,30,100,300,1000];
+    g.selectAll('.ring').data(ringGrid).enter().append('circle')
+      .attr('r', d=>toR(d)).attr('fill','none').attr('stroke','#999').attr('stroke-opacity',0.22);
+    g.selectAll('.rlabel').data(ringGrid).enter().append('text')
+      .attr('x', 6).attr('y', d=> -toR(d))
+      .attr('dominant-baseline','middle').attr('font-size', 11).attr('fill', '#666')
+      .text(d=>d);
 
-      issueCoords.forEach(c => {
-        const icon = L.divIcon({ className: 'issue-label', html: `<div class="issue-badge">${c.issueNo}</div>`, iconSize: [24,24], iconAnchor: [12,12] });
-        L.marker([c.lat, c.lon], { icon }).addTo(mapRef);
+    const axisY = -rMax * 0.70;
+    g.append('text').attr('x', -8).attr('y', axisY).attr('transform', `rotate(-90, 0, ${axisY})`)
+      .attr('text-anchor','end').attr('font-size', 11).text('Number of events');
+
+    const F = functions.length;
+    const wedge = (Math.PI*2) / F;
+    const innerFrac = 0.98;
+    const spread = wedge * innerFrac;
+    const arc = d3.arc();
+
+    // Alternating background and labels
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const end = start + wedge;
+      g.append('path').attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
+        .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
+        .attr('stroke','#000').attr('stroke-opacity',0.25);
+      const cen = (start + end) / 2;
+      g.append('text').attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
+        .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
+    });
+
+    // Plot KPIs for each function using surviving rows
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const center = start + wedge/2;
+      const items = rows.filter(r=>r.func===f);
+      const K = items.length;
+      const avail = spread * 0.96;
+      const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
+      const placed = [];
+      const minSep = wedge * 0.09;
+      const radBin = rMax * 0.12;
+      const labelAvoid = wedge * 0.18;
+
+      items.forEach((e, i)=>{
+        const v = e.events; if (v==null || Number.isNaN(v)) return;
+        let r = toR(v);
+        let ang = center + baseOffs[i];
+        const isBlack = (v === 1000);
+
+        if (isBlack && Math.abs(ang - center) < labelAvoid){
+          const dir = (ang >= center) ? 1 : -1;
+          ang = center + dir * (labelAvoid + wedge*0.02);
+        }
+        ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+        let tries = 0;
+        while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
+          const dir = (tries % 2 === 0) ? 1 : -1;
+          ang += dir * (minSep * 0.65);
+          ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+          tries++;
+        }
+        if (tries >= 120){ r = Math.min(r + 8, rMax * 0.98); }
+        placed.push({ang, r});
+
+        const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
+        const fill = colorFor(v, e.target, e.max);
+        if (!fill) return;
+
+        g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 7).attr('fill', fill)
+          .append('title').text(`${f} — ${e.kpi}: ${v}`);
+
+        const rLabel = Math.min(r + 18, rMax * 0.98);
+        const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
+        g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+          .attr('font-size', 11).attr('paint-order','stroke').attr('stroke','white').attr('stroke-width',3)
+          .text(e.kpi);
       });
+    });
 
-      samplingLayerGroup = L.layerGroup(
-        samplingCoords.map(c => L.circleMarker([c.lat, c.lon], { radius: 3, color: 'blue', fillOpacity: 0.6, weight: 1 }))
-      ).addTo(mapRef);
+    // ===== KPI summary table (HTML table version — robust) =====
+    const htmlCaption = document.createElement('div');
+    htmlCaption.className = 'small';
+    htmlCaption.style.margin = '18px 0 6px';
+    htmlCaption.textContent = 'KPI summary per 1000 km';
+    card.node().appendChild(htmlCaption);
 
-      mapRef.whenReady(() => mapRef.invalidateSize());
+    const wrapDiv = d3.select(card.node()).append('div').attr('class','kpi-table-wrap');
+    const t = wrapDiv.append('table').attr('class','summary-table');
+
+    const thead = t.append('thead').append('tr');
+    thead.append('th').text('KPI');
+    thead.append('th').text('Function');
+    thead.append('th').style('text-align','right').text('Target');
+    thead.append('th').style('text-align','right').text('Max allowed');
+    thead.append('th').style('text-align','right').text('Number of events');
+
+    const tbody = t.append('tbody');
+    rows.forEach(r=>{
+      const tr = tbody.append('tr');
+      tr.append('td').text(r.kpi);
+      tr.append('td').text(r.func);
+      tr.append('td').style('text-align','right').text(fmtCell(r.target));
+      tr.append('td').style('text-align','right').text(fmtCell(r.max));
+      tr.append('td').style('text-align','right').style('font-weight','600').text(fmtCell(r.events));
+    });
+
+    // ===== Scoring band (SVG below the table) =====
+    const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
+    const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
+    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
+
+    const barMargin = 20, boxH2 = 42;
+    const barW = w - barMargin*2;
+    const boxW = barW / 10;
+    const caption = (avgEvents==null)
+      ? 'Average per 1000km:  n/a (only "No function" or missing values)'
+      : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreText[score-1]})`;
+
+    scoreBand.append('text').attr('x', barMargin).attr('y', 16).attr('font-size', 12).text(caption);
+    const ranges = scoreRangeLabels(T);
+
+    for (let i=0;i<10;i++){
+      const x = barMargin + i*boxW;
+      const isSel = (score === i+1);
+      const g2 = scoreBand.append('g');
+      g2.append('rect')
+        .attr('x', x).attr('y', 30)
+        .attr('width', boxW).attr('height', boxH2)
+        .attr('fill', scoreColors[i])
+        .attr('stroke', isSel ? '#000' : '#111')
+        .attr('stroke-width', isSel ? 3 : 0.4)
+        .append('title').text(`Score ${i+1}: ${scoreText[i]} — ${ranges[i]}`);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750).attr('font-size', SCORE_FONTS.number).text(i+1);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14 + 16).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550).attr('font-size', SCORE_FONTS.label).text(scoreText[i]);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + boxH2 + 14).attr('text-anchor','middle')
+        .attr('font-size', SCORE_FONTS.range).text(ranges[i]);
     }
+    scoreBand.attr('height', 30 + boxH2 + 28 + 8);
 
-    function showError(message) {
-      document.getElementById('sidebar').innerHTML = `<div class="error">${message}</div>`;
-    }
-  </script>
+    // Final SVG height (for PNG export to include radar only)
+    const totalRadarHeight = centerY + rMax + 10;
+    svg.attr('height', totalRadarHeight);
+  });
+}
+
+/* ==================== Main renderer ==================== */
+function renderCharts(parsedFull){
+  const parsed = filterEntriesForMode(parsedFull);
+  const container = d3.select('#charts').html('');
+  if (!parsed || !parsed.entries || !parsed.entries.length){
+    container.append('div').attr('class','small').text('No data to render.');
+    return;
+  }
+
+  const ext = (CURRENT_MODE === MODES.EXTERNAL);
+
+  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.calendar)              renderCalendarTrio(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
+}
+
+/* ==================== Loader (CSV + release notes + weather) ==================== */
+async function loadCsvAndRender(){
+  try{
+    const res = await fetch(DATA_CSV + '?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    LAST_RAW = text;
+
+    let parsed = parseTable(text);
+
+    // Release notes (files / optional manifest)
+    const manifestSet = await loadReleaseNotesManifest();
+    const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+
+    // Weather: collect unique dates, fetch archive weather, merge
+    const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
+    const weatherByDate = await fetchWeatherForDates(dates);
+
+    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, weatherByDate };
+
+    LAST_PARSED = parsed;
+    renderCharts(LAST_PARSED);
+  }catch(err){
+    d3.select('#charts').html('');
+    alert(`Could not load "${DATA_CSV}". Make sure it sits next to this HTML and that you're serving over http(s).\n\nError: ${err.message}`);
+  }
+}
+
+/* ==================== Tabs wiring ==================== */
+function updateTabsUI(){
+  document.querySelectorAll('.tab').forEach(btn=>{
+    const on = (btn.dataset.mode === CURRENT_MODE);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click', (e)=>{
+    e.preventDefault();
+    const mode = btn.dataset.mode;
+    if (!mode || mode === CURRENT_MODE) return;
+    CURRENT_MODE = mode;
+    updateTabsUI();
+    if (LAST_PARSED) renderCharts(LAST_PARSED);
+  });
+  // a11y: keyboard toggle
+  btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
+  btn.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
+  });
+});
+
+/* ==================== Boot ==================== */
+document.addEventListener('DOMContentLoaded', ()=>{
+  updateTabsUI();
+  loadCsvAndRender();
+});
+</script>
 </body>
 </html>
-
