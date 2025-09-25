@@ -254,26 +254,74 @@
       return details;
     }
 
-    // NEW: get "Country" from Test details (col2)
-    function fetchCountryForFile(filename){
-      if (countryCache.has(filename)) return Promise.resolve(countryCache.get(filename));
-      return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then(res => {
-          if (!res.ok) throw new Error('Fetch XLSX failed for country');
-          return res.arrayBuffer();
-        })
-        .then(buf => {
-          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-          const details = extractTestDetails(wb);
-          const country = details['country'] || details['test country'] || details['location country'] || null;
-          countryCache.set(filename, country);
-          return country;
-        })
-        .catch(()=> {
-          countryCache.set(filename, null);
-          return null;
-        });
-    }
+// NEW: Read countries from a "Country" table/sheet (various formats supported).
+// Returns Promise<string[]> of unique countries for the session.
+function fetchCountriesForFile(filename){
+  if (countryCache.has(filename)) {
+    const cached = countryCache.get(filename);
+    // Backward compat: cache might hold string|null from previous runs
+    if (Array.isArray(cached)) return Promise.resolve(cached);
+    return Promise.resolve(cached ? [cached] : []);
+  }
+
+  return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+    .then(res => {
+      if (!res.ok) throw new Error('Fetch XLSX failed for country');
+      return res.arrayBuffer();
+    })
+    .then(buf => {
+      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+
+      // 1) Prefer a sheet whose name contains "country"
+      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
+      const out = new Set();
+
+      if (countrySheetName) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
+        if (rows.length) {
+          // Heuristics:
+          // A) Headered table with a column named like "Country"
+          const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
+          const colIdx = headers.findIndex(h => h.includes('country'));
+          if (colIdx >= 0) {
+            for (let r = 1; r < rows.length; r++) {
+              const v = rows[r][colIdx];
+              if (v != null && String(v).trim()) out.add(String(v).trim());
+            }
+          } else {
+            // B) Key/value pairs where first col is label
+            for (let r = 0; r < rows.length; r++) {
+              const a = rows[r][0], b = rows[r][1];
+              const aStr = String(a ?? '').trim().toLowerCase();
+              if (aStr.includes('country') && b != null && String(b).trim()) {
+                out.add(String(b).trim());
+              }
+              // C) Single-column list (no headers)
+              if (!aStr && rows[r].length === 1) {
+                const val = rows[r][0];
+                if (val != null && String(val).trim()) out.add(String(val).trim());
+              }
+            }
+          }
+        }
+      }
+
+      // 2) Fallback: still try "Test details" if no "Country" sheet found
+      if (out.size === 0) {
+        const details = extractTestDetails(wb);
+        const maybe = details['country'] || details['test country'] || details['location country'] || null;
+        if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
+      }
+
+      const arr = Array.from(out);
+      countryCache.set(filename, arr); // cache array
+      return arr;
+    })
+    .catch(() => {
+      countryCache.set(filename, []); // cache empty
+      return [];
+    });
+}
 
     // ---------- APP STATE ----------
     let issueCoords = [];
@@ -1026,3 +1074,4 @@
   </script>
 </body>
 </html>
+
