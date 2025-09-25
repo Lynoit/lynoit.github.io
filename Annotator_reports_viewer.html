@@ -30,11 +30,11 @@
     .download-button { display: inline-block; margin-right: 12px; margin-bottom: 16px; padding: 8px 12px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; font-size: 14px; }
     .download-button:hover { background: #0056b3; }
 
-    /* Overview (two charts side by side) */
+    /* Overview (four charts side by side) */
     .overview {
       max-width: 980px;
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(4, 1fr);
       gap: 20px;
       align-items: start;
     }
@@ -42,8 +42,6 @@
     .heatmap-dow { font-size: 12px; fill: #666; }
     .legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #666; margin-top: 10px; }
     .legend .box { width: 12px; height: 12px; border: 1px solid #ccd3d9; }
-
-    .country-hdr { margin: 0 0 8px 0; font-size: 16px; }
 
     /* Latest routes grid */
     .routes-wrap { margin-top: 18px; }
@@ -55,6 +53,9 @@
     .route-title a:not(.route-link):hover { text-decoration: underline; }
     .route-meta { font-size: 12px; color: #666; margin-top: 6px; }
     .route-map { width: 100%; height: 180px; border: 1px solid #aaa; border-radius: 6px; }
+
+    /* Remove the line under "Latest routes" only */
+    .routes-wrap > h2{ border-bottom: none !important; padding-bottom: 0; }
 
     /* --- Link-stylish treatment for Latest routes title links --- */
     :root{ --accent:#1f3de3; }
@@ -79,38 +80,16 @@
     .route-link:hover::after, .route-link:focus::after{ transform: translateX(3px); opacity:1; }
     .route-link:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
     /* Override: black link, no underline */
-    .route-link{
-      color:#000 !important;
-      text-decoration:none !important;
-    }
-    .route-link .u{
-      background-image:none !important; /* remove custom underline */
-      padding-bottom:0;
-    }
-    .route-link:hover,
-    .route-link:focus{
-      color:#000;                /* keep black on hover/focus */
-      text-decoration:none;
-    }
+    .route-link{ color:#000 !important; text-decoration:none !important; }
+    .route-link .u{ background-image:none !important; padding-bottom:0; }
+    .route-link:hover, .route-link:focus{ color:#000; text-decoration:none; }
     .route-title a.route-link:hover{ text-decoration:none; }
 
-    /* If a link appears on a dark overlay, still force black + no underline */
     .route-overlay .route-link{ color:#000; text-shadow:none; }
     .route-overlay .route-link .u{ background-image:none; }
 
-    /* Optional: neutral focus ring to match black link */
-    .route-link:focus-visible{
-      outline:2px solid #000;
-      outline-offset:2px;
-      border-radius:4px;
-    }
-    /* ensure no double underline from legacy rule */
+    .route-link:focus-visible{ outline:2px solid #000; outline-offset:2px; border-radius:4px; }
     .route-title a.route-link:hover{ text-decoration:none; }
-    /* Remove the line under the "Latest routes" heading only */
-.routes-wrap > h2{
-  border-bottom: none !important;
-  padding-bottom: 0;
-}
   </style>
 </head>
 <body>
@@ -121,13 +100,10 @@
   <div id="content">
     <h1>Test activity overview</h1>
     <div id="overview" class="overview">
-      <div>
-        <div id="heatmap-host"></div>
-      </div>
-
-      <div>
-        <div id="country-host"></div>
-      </div>
+      <div><div id="heatmap-host"></div></div>
+      <div><div id="country-host"></div></div>
+      <div><div id="temp-host"></div></div>
+      <div><div id="weather-host"></div></div>
 
       <div class="routes-wrap" style="grid-column: 1 / -1;">
         <h2 style="margin-top:16px;">Latest routes</h2>
@@ -149,11 +125,9 @@
     const MIN_KM_FOR_OVERVIEW = 1;
 
     // ---------- CACHES / HELPERS ----------
-    const summaryCache = new Map(); // filename -> { mileageKm, issueCount, loaded:true }
+    const summaryCache = new Map(); // filename -> { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true }
     const blobMeta = new Map();     // filename -> lastModifiedMs (strict sort)
-
-    // NEW: cache for country values
-    const countryCache = new Map(); // filename -> country string or null
+    const countryCache = new Map(); // filename -> array of countries
 
     function cssSafeId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
     function toDateOnly(d){ const t = new Date(d); t.setHours(0,0,0,0); return t; }
@@ -189,6 +163,53 @@
       return { km: Math.round(km), path };
     }
 
+    // NEW: compute mean temperature and aggregated weather (mode) from Sampling
+    function computeTempWeatherFromSampling(sheet){
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (rows.length < 2) return { meanTempC: null, weatherAgg: null };
+
+      const headers = rows[0].map(h => String(h ?? '').toLowerCase());
+      const tempIdx = headers.findIndex(h => h.includes('temp'));
+      const wxIdx   = headers.findIndex(h => h.includes('weather') || h.includes('condition'));
+
+      const temps = [];
+      const wxCounts = new Map();
+
+      const normWx = (s)=>{
+        if (s == null) return null;
+        const v = String(s).trim().toLowerCase();
+        if (!v) return null;
+        if (/thunder|storm/.test(v)) return 'Storm';
+        if (/snow|blizzard|sleet/.test(v)) return 'Snow';
+        if (/rain|drizzle|shower/.test(v)) return 'Rain';
+        if (/fog|mist|haze/.test(v)) return 'Fog';
+        if (/cloud|overcast/.test(v)) return 'Cloudy';
+        if (/clear|sun/.test(v)) return 'Clear';
+        if (/wind/.test(v)) return 'Wind';
+        return v.charAt(0).toUpperCase() + v.slice(1);
+      };
+
+      for (let i = 1; i < rows.length; i++){
+        if (tempIdx >= 0){
+          const t = parseFloat(rows[i][tempIdx]);
+          if (!isNaN(t)) temps.push(t);
+        }
+        if (wxIdx >= 0){
+          const w = normWx(rows[i][wxIdx]);
+          if (w){
+            wxCounts.set(w, (wxCounts.get(w)||0) + 1);
+          }
+        }
+      }
+
+      const meanTempC = temps.length ? Math.round( (temps.reduce((a,b)=>a+b,0) / temps.length) ) : null;
+      let weatherAgg = null;
+      if (wxCounts.size){
+        weatherAgg = Array.from(wxCounts.entries()).sort((a,b)=> b[1]-a[1])[0][0];
+      }
+      return { meanTempC, weatherAgg };
+    }
+
     function countIssuesFromWorkbook(wb) {
       const norm = s => String(s||'').toLowerCase().replace(/\s+/g,'');
       for (const name of wb.SheetNames) {
@@ -220,29 +241,31 @@
         .then(buf => {
           const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
           const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          let mileageKm = null;
+          let mileageKm = null, meanTempC = null, weatherAgg = null;
           if (samplingName) {
             const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
             mileageKm = km;
+            const tw = computeTempWeatherFromSampling(wb.Sheets[samplingName]);
+            meanTempC = tw.meanTempC;
+            weatherAgg = tw.weatherAgg;
           }
           const issueCount = countIssuesFromWorkbook(wb);
-          const summary = { mileageKm, issueCount, loaded:true };
+          const summary = { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true };
           summaryCache.set(filename, summary);
           return summary;
         })
         .catch(() => {
-          const summary = { mileageKm: null, issueCount: 0, loaded:true };
+          const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, loaded:true };
           summaryCache.set(filename, summary);
           return summary;
         });
     }
 
-    // NEW: Read "Test details" sheet (col1=label, col2=value) → map
+    // Read "Test details" sheet (col1=label, col2=value) → map
     function extractTestDetails(wb){
       const details = {};
       const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
       if (!sheetName) return details;
-
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
       for (let r = 0; r < rows.length; r++) {
         const row = rows[r];
@@ -253,67 +276,63 @@
         const key = String(keyRaw).trim().toLowerCase();
         const val = String(valRaw).trim();
         if (!key || !val) continue;
-        details[key] = val; // e.g., details['test object'] = 'Volvo ES90'
+        details[key] = val;
       }
       return details;
     }
 
-// NEW: Read countries from a "Country" table/sheet (various formats supported).
-// Returns Promise<string[]> of unique countries for the session.
-function fetchCountriesForFile(filename){
-  if (countryCache.has(filename)) {
-    const cached = countryCache.get(filename);
-    return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
-  }
-  return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-    .then(res => {
-      if (!res.ok) throw new Error('Fetch XLSX failed for country');
-      return res.arrayBuffer();
-    })
-    .then(buf => {
-      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-
-      const out = new Set();
-      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
-      if (countrySheetName) {
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
-        if (rows.length) {
-          const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
-          const colIdx = headers.findIndex(h => h.includes('country'));
-          if (colIdx >= 0) {
-            for (let r = 1; r < rows.length; r++) {
-              const v = rows[r][colIdx];
-              if (v != null && String(v).trim()) out.add(String(v).trim());
-            }
-          } else {
-            for (let r = 0; r < rows.length; r++) {
-              const a = rows[r][0], b = rows[r][1];
-              const aStr = String(a ?? '').trim().toLowerCase();
-              if (aStr.includes('country') && b != null && String(b).trim()) {
-                out.add(String(b).trim());
-              }
-              if (!aStr && rows[r].length === 1) {
-                const val = rows[r][0];
-                if (val != null && String(val).trim()) out.add(String(val).trim());
+    // --- Countries parser (from "Country" sheet or fallback Test details) ---
+    function fetchCountriesForFile(filename){
+      if (countryCache.has(filename)) {
+        const cached = countryCache.get(filename);
+        return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
+      }
+      return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+        .then(res => {
+          if (!res.ok) throw new Error('Fetch XLSX failed for country');
+          return res.arrayBuffer();
+        })
+        .then(buf => {
+          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+          const out = new Set();
+          const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
+          if (countrySheetName) {
+            const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
+            if (rows.length) {
+              const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
+              const colIdx = headers.findIndex(h => h.includes('country'));
+              if (colIdx >= 0) {
+                for (let r = 1; r < rows.length; r++) {
+                  const v = rows[r][colIdx];
+                  if (v != null && String(v).trim()) out.add(String(v).trim());
+                }
+              } else {
+                for (let r = 0; r < rows.length; r++) {
+                  const a = rows[r][0], b = rows[r][1];
+                  const aStr = String(a ?? '').trim().toLowerCase();
+                  if (aStr.includes('country') && b != null && String(b).trim()) out.add(String(b).trim());
+                  if (!aStr && rows[r].length === 1) {
+                    const val = rows[r][0];
+                    if (val != null && String(val).trim()) out.add(String(val).trim());
+                  }
+                }
               }
             }
           }
-        }
-      }
-      if (out.size === 0) {
-        const details = extractTestDetails(wb);
-        const maybe = details['country'] || details['test country'] || details['location country'] || null;
-        if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
-      }
-      const arr = Array.from(out);
-      countryCache.set(filename, arr);
-      return arr;
-    })
-    .catch(() => {
-      countryCache.set(filename, []);
-      return [];
-    });
-}
+          if (out.size === 0) {
+            const details = extractTestDetails(wb);
+            const maybe = details['country'] || details['test country'] || details['location country'] || null;
+            if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
+          }
+          const arr = Array.from(out);
+          countryCache.set(filename, arr);
+          return arr;
+        })
+        .catch(() => {
+          countryCache.set(filename, []);
+          return [];
+        });
+    }
 
     // ---------- APP STATE ----------
     let issueCoords = [];
@@ -330,12 +349,10 @@ function fetchCountriesForFile(filename){
       content.innerHTML = `
         <h1>Test activity overview</h1>
         <div id="overview" class="overview">
-          <div>
-            <div id="heatmap-host"></div>
-          </div>
-          <div>
-            <div id="country-host"></div>
-          </div>
+          <div><div id="heatmap-host"></div></div>
+          <div><div id="country-host"></div></div>
+          <div><div id="temp-host"></div></div>
+          <div><div id="weather-host"></div></div>
           <div class="routes-wrap" style="grid-column: 1 / -1;">
             <h2 style="margin-top:16px;">Latest routes</h2>
             <div id="routes-grid" class="route-grid"></div>
@@ -344,7 +361,9 @@ function fetchCountriesForFile(filename){
       `;
       if (allFiles.length){
         buildOverviewHeatmap(allFiles);
-        buildCountryMonthChart(allFiles);    // NEW
+        buildCountryMonthChart(allFiles);
+        buildTempMonthChart(allFiles);
+        buildWeatherMonthChart(allFiles);
         buildLatestRoutePreviews(allFiles);
       }
     }
@@ -376,7 +395,9 @@ function fetchCountriesForFile(filename){
 
           buildSidebar(xlsxNames);
           buildOverviewHeatmap(xlsxNames);
-          buildCountryMonthChart(xlsxNames);   // NEW
+          buildCountryMonthChart(xlsxNames);
+          buildTempMonthChart(xlsxNames);
+          buildWeatherMonthChart(xlsxNames);
           buildLatestRoutePreviews(xlsxNames); // latest first using blobMeta
         })
         .catch(err => showError('Failed to list blobs: ' + err));
@@ -452,7 +473,7 @@ function fetchCountriesForFile(filename){
       });
     }
 
-    // ---------- OVERVIEW HEATMAP ----------
+    // ---------- OVERVIEW HEATMAP (Test activity) ----------
     function buildOverviewHeatmap(files){
       const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
       const withDates = files
@@ -576,214 +597,444 @@ function fetchCountriesForFile(filename){
       host.appendChild(legend);
     }
 
-    // ---------- NEW: Countries × Month chart ----------
-  // --- replace any old "fetchCountryForFile" or "fetchCountriesForFile" with THIS ---
-function fetchCountriesForFile(filename){
-  if (countryCache.has(filename)) {
-    const cached = countryCache.get(filename);
-    return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
-  }
-  return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-    .then(res => {
-      if (!res.ok) throw new Error('Fetch XLSX failed for country');
-      return res.arrayBuffer();
-    })
-    .then(buf => {
-      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+    // ---------- Countries × Month (4 bins/month) ----------
+    function buildCountryMonthChart(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      const out = new Set();
-      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
-      if (countrySheetName) {
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
-        if (rows.length) {
-          const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
-          const colIdx = headers.findIndex(h => h.includes('country'));
-          if (colIdx >= 0) {
-            for (let r = 1; r < rows.length; r++) {
-              const v = rows[r][colIdx];
-              if (v != null && String(v).trim()) out.add(String(v).trim());
-            }
-          } else {
-            for (let r = 0; r < rows.length; r++) {
-              const a = rows[r][0], b = rows[r][1];
-              const aStr = String(a ?? '').trim().toLowerCase();
-              if (aStr.includes('country') && b != null && String(b).trim()) {
-                out.add(String(b).trim());
-              }
-              if (!aStr && rows[r].length === 1) {
-                const val = rows[r][0];
-                if (val != null && String(val).trim()) out.add(String(val).trim());
-              }
-            }
+      return Promise.all(
+        withDates.map(x =>
+          fetchSessionSummary(x.filename)
+            .then(s => ({...x, ...s}))
+            .then(r => {
+              if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+              return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+            })
+        )
+      ).then(rows => {
+        const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
+        const host = document.getElementById('country-host');
+        if (!host) return;
+
+        if (!valid.length){
+          host.innerHTML = '<div style="color:#666;">No country data found in the “Country” table.</div>';
+          return;
+        }
+
+        const counts = new Map(); // `${ym}|${wb}|${country}` -> n
+        const monthsSet = new Set();
+        const countriesSet = new Set();
+
+        valid.forEach(r => {
+          const ym  = r.dayStr.slice(0,7);
+          const day = parseInt(r.dayStr.slice(8,10), 10);
+          const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
+          monthsSet.add(ym);
+
+          const uniq = Array.from(new Set(r.countries.map(c => String(c).trim()).filter(Boolean)));
+          uniq.forEach(country => {
+            countriesSet.add(country);
+            const key = `${ym}|${wb}|${country}`;
+            counts.set(key, (counts.get(key)||0) + 1);
+          });
+        });
+
+        const months = Array.from(monthsSet).sort();
+        const countries = Array.from(countriesSet).sort((a,b) => {
+          const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
+          const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
+          if (totalB !== totalA) return totalB - totalA;
+          return a.localeCompare(b);
+        });
+
+        renderCountryMonthHeatmap({ months, countries, counts });
+      });
+    }
+
+    function renderCountryMonthHeatmap({months, countries, counts}){
+      const host = document.getElementById('country-host');
+      host.innerHTML = '';
+
+      const cell = 14, gap = 4;
+      const leftLabelsW = 110;
+      const topLabelsH  = 18;
+
+      const subColsPerMonth = 4;
+      const totalCols = months.length * subColsPerMonth;
+
+      const width  = leftLabelsW + totalCols * (cell + gap) + 8;
+      const height = topLabelsH  + countries.length * (cell + gap) + 8;
+
+      const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
+      const maxVal = Math.max(1, ...months.flatMap(m => countries.flatMap(c => [1,2,3,4].map(w => counts.get(`${m}|${w}|${c}`)||0))));
+      const bucket = v => {
+        if (v === 0) return 0;
+        const f = v / maxVal;
+        return (f < .2) ? 1 : (f < .4) ? 2 : (f < .7) ? 3 : 4;
+      };
+
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('width', width);
+      svg.setAttribute('height', height);
+
+      // Month labels
+      const gMonths = document.createElementNS(NS, 'g');
+      for (let m = 0; m < months.length; m++){
+        const d = new Date(`${months[m]}-01`);
+        const label = d.toLocaleString(undefined, { month: 'short' });
+        const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
+        const t = document.createElementNS(NS,'text');
+        t.textContent = label;
+        t.setAttribute('x', x);
+        t.setAttribute('y', 10);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gMonths.appendChild(t);
+      }
+      svg.appendChild(gMonths);
+
+      // Country labels (rows)
+      const gCountries = document.createElementNS(NS, 'g');
+      for (let r = 0; r < countries.length; r++){
+        const t = document.createElementNS(NS,'text');
+        t.textContent = countries[r];
+        t.setAttribute('x', 4);
+        t.setAttribute('y', topLabelsH + r*(cell+gap) + cell - 2);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gCountries.appendChild(t);
+      }
+      svg.appendChild(gCountries);
+
+      // Cells: 4 sub-columns per month
+      const gCells = document.createElementNS(NS, 'g');
+      for (let r = 0; r < countries.length; r++){
+        const country = countries[r];
+        for (let m = 0; m < months.length; m++){
+          for (let w = 1; w <= 4; w++){
+            const val = counts.get(`${months[m]}|${w}|${country}`) || 0;
+            const colIndex = m * 4 + (w - 1);
+            const rect = document.createElementNS(NS,'rect');
+            rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
+            rect.setAttribute('y', topLabelsH  + r*(cell+gap));
+            rect.setAttribute('width', cell);
+            rect.setAttribute('height', cell);
+            rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
+            rect.setAttribute('fill', colors[bucket(val)]);
+            rect.setAttribute('stroke', '#ccd3d9');
+            rect.setAttribute('stroke-width', '1');
+            rect.setAttribute('data-val', String(val));
+            gCells.appendChild(rect);
           }
         }
       }
-      if (out.size === 0) {
-        const details = extractTestDetails(wb);
-        const maybe = details['country'] || details['test country'] || details['location country'] || null;
-        if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
-      }
-      const arr = Array.from(out);
-      countryCache.set(filename, arr);
-      return arr;
-    })
-    .catch(() => {
-      countryCache.set(filename, []);
-      return [];
-    });
-}
+      svg.appendChild(gCells);
 
-// --- replace the whole buildCountryMonthChart with THIS ---
-function buildCountryMonthChart(files){
-  const withDates = files
-    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-    .filter(x => x.m)
-    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+      host.appendChild(svg);
 
-  return Promise.all(
-    withDates.map(x =>
-      fetchSessionSummary(x.filename)
-        .then(s => ({...x, ...s}))
-        .then(r => {
-          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-          return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
-        })
-    )
-  ).then(rows => {
-    const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
-    const host = document.getElementById('country-host');
-    if (!host) return;
-
-    if (!valid.length){
-      host.innerHTML = '<div style="color:#666;">No country data found in the “Country” table.</div>';
-      return;
+      const legend = document.createElement('div');
+      legend.className = 'legend';
+      legend.innerHTML = `Fewer
+        <span class="box" style="background:${colors[0]}"></span>
+        <span class="box" style="background:${colors[1]}"></span>
+        <span class="box" style="background:${colors[2]}"></span>
+        <span class="box" style="background:${colors[3]}"></span>
+        <span class="box" style="background:${colors[4]}"></span>
+        More`;
+      host.appendChild(legend);
     }
 
-    // Month (YYYY-MM) × weekBin(1..4) × Country
-    const counts = new Map(); // `${ym}|${wb}|${country}` -> n
-    const monthsSet = new Set();
-    const countriesSet = new Set();
+    // ---------- Temperature × Month (4 bins/month) ----------
+    function buildTempMonthChart(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-    valid.forEach(r => {
-      const ym  = r.dayStr.slice(0,7);
-      const day = parseInt(r.dayStr.slice(8,10), 10);
-      const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
-      monthsSet.add(ym);
+      return Promise.all(
+        withDates.map(x =>
+          fetchSessionSummary(x.filename)
+            .then(s => ({...x, ...s}))
+        )
+      ).then(rows => {
+        const valid = rows.filter(r =>
+          r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
+          r.issueCount > 0 && r.meanTempC != null && !isNaN(r.meanTempC)
+        );
 
-      const uniq = Array.from(new Set(r.countries.map(c => String(c).trim()).filter(Boolean)));
-      uniq.forEach(country => {
-        countriesSet.add(country);
-        const key = `${ym}|${wb}|${country}`;
-        counts.set(key, (counts.get(key)||0) + 1);
+        const host = document.getElementById('temp-host');
+        if (!host) return;
+        if (!valid.length){
+          host.innerHTML = '<div style="color:#666;">No temperature data found in Sampling.</div>';
+          return;
+        }
+
+        const counts = new Map(); // `${ym}|${wb}|${tempInt}` -> n
+        const monthsSet = new Set();
+        const tempsSet = new Set();
+
+        valid.forEach(r => {
+          const ym  = r.dayStr.slice(0,7);
+          const day = parseInt(r.dayStr.slice(8,10), 10);
+          const wb  = Math.min(4, Math.max(1, Math.ceil(day/7)));
+          monthsSet.add(ym);
+
+          const tempInt = Math.round(r.meanTempC);
+          tempsSet.add(tempInt);
+          const key = `${ym}|${wb}|${tempInt}`;
+          counts.set(key, (counts.get(key)||0) + 1);
+        });
+
+        const months = Array.from(monthsSet).sort();
+        const temps  = Array.from(tempsSet).sort((a,b)=>a-b); // numeric ascending
+        renderTempMonthHeatmap({ months, temps, counts });
       });
-    });
-
-    const months = Array.from(monthsSet).sort();
-    const countries = Array.from(countriesSet).sort((a,b) => {
-      const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
-      const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
-      if (totalB !== totalA) return totalB - totalA;
-      return a.localeCompare(b);
-    });
-
-    renderCountryMonthHeatmap({ months, countries, counts });
-  });
-}
-
-// --- replace the whole renderCountryMonthHeatmap with THIS ---
-function renderCountryMonthHeatmap({months, countries, counts}){
-  const host = document.getElementById('country-host');
-  host.innerHTML = '';
-
-  const cell = 14, gap = 4;
-  const leftLabelsW = 110;
-  const topLabelsH  = 18;
-
-  const subColsPerMonth = 4;
-  const totalCols = months.length * subColsPerMonth;
-
-  const width  = leftLabelsW + totalCols * (cell + gap) + 8;
-  const height = topLabelsH  + countries.length * (cell + gap) + 8;
-
-  const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
-  const maxVal = Math.max(1, ...months.flatMap(m => countries.flatMap(c => [1,2,3,4].map(w => counts.get(`${m}|${w}|${c}`)||0))));
-  const bucket = v => {
-    if (v === 0) return 0;
-    const f = v / maxVal;
-    return (f < .2) ? 1 : (f < .4) ? 2 : (f < .7) ? 3 : 4;
-  };
-
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('width', width);
-  svg.setAttribute('height', height);
-
-  // Month labels (match style of main chart)
-  const gMonths = document.createElementNS(NS, 'g');
-  for (let m = 0; m < months.length; m++){
-    const d = new Date(`${months[m]}-01`);
-    const label = d.toLocaleString(undefined, { month: 'short' });
-    const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
-    const t = document.createElementNS(NS,'text');
-    t.textContent = label;
-    t.setAttribute('x', x);
-    t.setAttribute('y', 10);
-    t.setAttribute('font-size','12');
-    t.setAttribute('fill','#333');
-    gMonths.appendChild(t);
-  }
-  svg.appendChild(gMonths);
-
-  // Country labels (rows)
-  const gCountries = document.createElementNS(NS, 'g');
-  for (let r = 0; r < countries.length; r++){
-    const t = document.createElementNS(NS,'text');
-    t.textContent = countries[r];
-    t.setAttribute('x', 4);
-    t.setAttribute('y', topLabelsH + r*(cell+gap) + cell - 2);
-    t.setAttribute('font-size','12');
-    t.setAttribute('fill','#333');
-    gCountries.appendChild(t);
-  }
-  svg.appendChild(gCountries);
-
-  // Cells: 4 sub-columns per month
-  const gCells = document.createElementNS(NS, 'g');
-  for (let r = 0; r < countries.length; r++){
-    const country = countries[r];
-    for (let m = 0; m < months.length; m++){
-      for (let w = 1; w <= 4; w++){
-        const val = counts.get(`${months[m]}|${w}|${country}`) || 0;
-        const colIndex = m * 4 + (w - 1);
-        const rect = document.createElementNS(NS,'rect');
-        rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
-        rect.setAttribute('y', topLabelsH  + r*(cell+gap));
-        rect.setAttribute('width', cell);
-        rect.setAttribute('height', cell);
-        rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
-        rect.setAttribute('fill', colors[bucket(val)]);
-        rect.setAttribute('stroke', '#ccd3d9');
-        rect.setAttribute('stroke-width', '1');
-        rect.setAttribute('data-val', String(val));
-        gCells.appendChild(rect);
-      }
     }
-  }
-  svg.appendChild(gCells);
 
-  host.appendChild(svg);
+    function renderTempMonthHeatmap({months, temps, counts}){
+      const host = document.getElementById('temp-host');
+      host.innerHTML = '';
 
-  const legend = document.createElement('div');
-  legend.className = 'legend';
-  legend.innerHTML = `Fewer
-    <span class="box" style="background:${colors[0]}"></span>
-    <span class="box" style="background:${colors[1]}"></span>
-    <span class="box" style="background:${colors[2]}"></span>
-    <span class="box" style="background:${colors[3]}"></span>
-    <span class="box" style="background:${colors[4]}"></span>
-    More`;
-  host.appendChild(legend);
-}
+      const cell = 14, gap = 4;
+      const leftLabelsW = 54;  // narrower labels (numbers)
+      const topLabelsH  = 18;
+
+      const subColsPerMonth = 4;
+      const totalCols = months.length * subColsPerMonth;
+
+      const width  = leftLabelsW + totalCols * (cell + gap) + 8;
+      const height = topLabelsH  + temps.length * (cell + gap) + 8;
+
+      const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
+      const maxVal = Math.max(1, ...months.flatMap(m => temps.flatMap(t => [1,2,3,4].map(w => counts.get(`${m}|${w}|${t}`)||0))));
+      const bucket = v => {
+        if (v === 0) return 0;
+        const f = v / maxVal;
+        return (f < .2) ? 1 : (f < .4) ? 2 : (f < .7) ? 3 : 4;
+      };
+
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('width', width);
+      svg.setAttribute('height', height);
+
+      // Month labels
+      const gMonths = document.createElementNS(NS, 'g');
+      for (let m = 0; m < months.length; m++){
+        const d = new Date(`${months[m]}-01`);
+        const label = d.toLocaleString(undefined, { month: 'short' });
+        const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
+        const t = document.createElementNS(NS,'text');
+        t.textContent = label;
+        t.setAttribute('x', x);
+        t.setAttribute('y', 10);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gMonths.appendChild(t);
+      }
+      svg.appendChild(gMonths);
+
+      // Temperature labels (rows)
+      const gTemps = document.createElementNS(NS, 'g');
+      for (let r = 0; r < temps.length; r++){
+        const t = document.createElementNS(NS,'text');
+        t.textContent = `${temps[r]}°`;
+        t.setAttribute('x', 4);
+        t.setAttribute('y', topLabelsH + r*(cell+gap) + cell - 2);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gTemps.appendChild(t);
+      }
+      svg.appendChild(gTemps);
+
+      // Cells
+      const gCells = document.createElementNS(NS, 'g');
+      for (let r = 0; r < temps.length; r++){
+        const tempVal = temps[r];
+        for (let m = 0; m < months.length; m++){
+          for (let w = 1; w <= 4; w++){
+            const val = counts.get(`${months[m]}|${w}|${tempVal}`) || 0;
+            const colIndex = m * 4 + (w - 1);
+            const rect = document.createElementNS(NS,'rect');
+            rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
+            rect.setAttribute('y', topLabelsH  + r*(cell+gap));
+            rect.setAttribute('width', cell);
+            rect.setAttribute('height', cell);
+            rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
+            rect.setAttribute('fill', colors[bucket(val)]);
+            rect.setAttribute('stroke', '#ccd3d9');
+            rect.setAttribute('stroke-width', '1');
+            rect.setAttribute('data-val', String(val));
+            gCells.appendChild(rect);
+          }
+        }
+      }
+      svg.appendChild(gCells);
+
+      host.appendChild(svg);
+
+      const legend = document.createElement('div');
+      legend.className = 'legend';
+      legend.innerHTML = `Fewer
+        <span class="box" style="background:${colors[0]}"></span>
+        <span class="box" style="background:${colors[1]}"></span>
+        <span class="box" style="background:${colors[2]}"></span>
+        <span class="box" style="background:${colors[3]}"></span>
+        <span class="box" style="background:${colors[4]}"></span>
+        More`;
+      host.appendChild(legend);
+    }
+
+    // ---------- Weather × Month (4 bins/month) ----------
+    function buildWeatherMonthChart(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+
+      return Promise.all(
+        withDates.map(x =>
+          fetchSessionSummary(x.filename)
+            .then(s => ({...x, ...s}))
+        )
+      ).then(rows => {
+        const valid = rows.filter(r =>
+          r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
+          r.issueCount > 0 && r.weatherAgg
+        );
+
+        const host = document.getElementById('weather-host');
+        if (!host) return;
+        if (!valid.length){
+          host.innerHTML = '<div style="color:#666;">No weather data found in Sampling.</div>';
+          return;
+        }
+
+        const counts = new Map(); // `${ym}|${wb}|${wx}` -> n
+        const monthsSet = new Set();
+        const wxSet = new Set();
+
+        valid.forEach(r => {
+          const ym  = r.dayStr.slice(0,7);
+          const day = parseInt(r.dayStr.slice(8,10), 10);
+          const wb  = Math.min(4, Math.max(1, Math.ceil(day/7)));
+          monthsSet.add(ym);
+
+          const wx = String(r.weatherAgg);
+          wxSet.add(wx);
+          const key = `${ym}|${wb}|${wx}`;
+          counts.set(key, (counts.get(key)||0) + 1);
+        });
+
+        const months = Array.from(monthsSet).sort();
+        // sort weather rows by overall frequency desc, then A–Z
+        const wxs = Array.from(wxSet).sort((a,b) => {
+          const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
+          const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
+          if (totalB !== totalA) return totalB - totalA;
+          return a.localeCompare(b);
+        });
+
+        renderWeatherMonthHeatmap({ months, wxs, counts });
+      });
+    }
+
+    function renderWeatherMonthHeatmap({months, wxs, counts}){
+      const host = document.getElementById('weather-host');
+      host.innerHTML = '';
+
+      const cell = 14, gap = 4;
+      const leftLabelsW = 90;
+      const topLabelsH  = 18;
+
+      const subColsPerMonth = 4;
+      const totalCols = months.length * subColsPerMonth;
+
+      const width  = leftLabelsW + totalCols * (cell + gap) + 8;
+      const height = topLabelsH  + wxs.length * (cell + gap) + 8;
+
+      const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
+      const maxVal = Math.max(1, ...months.flatMap(m => wxs.flatMap(w => [1,2,3,4].map(bin => counts.get(`${m}|${bin}|${w}`)||0))));
+      const bucket = v => {
+        if (v === 0) return 0;
+        const f = v / maxVal;
+        return (f < .2) ? 1 : (f < .4) ? 2 : (f < .7) ? 3 : 4;
+      };
+
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('width', width);
+      svg.setAttribute('height', height);
+
+      // Month labels
+      const gMonths = document.createElementNS(NS, 'g');
+      for (let m = 0; m < months.length; m++){
+        const d = new Date(`${months[m]}-01`);
+        const label = d.toLocaleString(undefined, { month: 'short' });
+        const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
+        const t = document.createElementNS(NS,'text');
+        t.textContent = label;
+        t.setAttribute('x', x);
+        t.setAttribute('y', 10);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gMonths.appendChild(t);
+      }
+      svg.appendChild(gMonths);
+
+      // Weather labels (rows)
+      const gWx = document.createElementNS(NS, 'g');
+      for (let r = 0; r < wxs.length; r++){
+        const t = document.createElementNS(NS,'text');
+        t.textContent = wxs[r];
+        t.setAttribute('x', 4);
+        t.setAttribute('y', topLabelsH + r*(cell+gap) + cell - 2);
+        t.setAttribute('font-size','12');
+        t.setAttribute('fill','#333');
+        gWx.appendChild(t);
+      }
+      svg.appendChild(gWx);
+
+      // Cells
+      const gCells = document.createElementNS(NS, 'g');
+      for (let r = 0; r < wxs.length; r++){
+        const wx = wxs[r];
+        for (let m = 0; m < months.length; m++){
+          for (let w = 1; w <= 4; w++){
+            const val = counts.get(`${months[m]}|${w}|${wx}`) || 0;
+            const colIndex = m * 4 + (w - 1);
+            const rect = document.createElementNS(NS,'rect');
+            rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
+            rect.setAttribute('y', topLabelsH  + r*(cell+gap));
+            rect.setAttribute('width', cell);
+            rect.setAttribute('height', cell);
+            rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
+            rect.setAttribute('fill', colors[bucket(val)]);
+            rect.setAttribute('stroke', '#ccd3d9');
+            rect.setAttribute('stroke-width', '1');
+            rect.setAttribute('data-val', String(val));
+            gCells.appendChild(rect);
+          }
+        }
+      }
+      svg.appendChild(gCells);
+
+      host.appendChild(svg);
+
+      const legend = document.createElement('div');
+      legend.className = 'legend';
+      legend.innerHTML = `Fewer
+        <span class="box" style="background:${colors[0]}"></span>
+        <span class="box" style="background:${colors[1]}"></span>
+        <span class="box" style="background:${colors[2]}"></span>
+        <span class="box" style="background:${colors[3]}"></span>
+        <span class="box" style="background:${colors[4]}"></span>
+        More`;
+      host.appendChild(legend);
+    }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
     function buildLatestRoutePreviews(files){
@@ -854,7 +1105,6 @@ function renderCountryMonthHeatmap({months, countries, counts}){
                 const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
                 if (!path || path.length < 2) return;
 
-                // Read column-2 values from "Test details"
                 const details = extractTestDetails(wb);
                 const objVal = details['test object'] || details['object'] || details['vehicle'] || null;
                 const purposeVal = details['purpose'] || details['test purpose'] || null;
@@ -864,7 +1114,8 @@ function renderCountryMonthHeatmap({months, countries, counts}){
                 if (purposeVal) leftParts.push(`Purpose: ${purposeVal}`);
                 const leftText = leftParts.length ? leftParts.join('  •  ') + '  •  ' : '';
 
-                meta.textContent = `${leftText}Mileage: ${km ?? '–'} km  •  Issues: ${item.issueCount}`;
+                const kmText = (km ?? '–');
+                meta.textContent = `${leftText}Mileage: ${kmText} km  •  Issues: ${item.issueCount}`;
 
                 const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
@@ -1136,9 +1387,3 @@ function renderCountryMonthHeatmap({months, countries, counts}){
   </script>
 </body>
 </html>
-
-
-
-
-
-
