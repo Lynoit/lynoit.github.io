@@ -587,55 +587,58 @@ function fetchCountriesForFile(filename){
 
     // ---------- NEW: Countries × Month chart ----------
     function buildCountryMonthChart(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(
-        withDates.map(x =>
-          fetchSessionSummary(x.filename)
-            .then(s => ({...x, ...s}))
-            .then(r => {
-              if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-              return fetchCountryForFile(r.filename).then(country => ({...r, country}));
-            })
-        )
-      ).then(rows => {
-        const valid = rows.filter(Boolean).filter(r => r.country && r.country.trim());
-        const host = document.getElementById('country-host');
-        if (!host) return;
+  return Promise.all(
+    withDates.map(x =>
+      fetchSessionSummary(x.filename)
+        .then(s => ({...x, ...s}))
+        .then(r => {
+          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+          return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+        })
+    )
+  ).then(rows => {
+    const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
+    const host = document.getElementById('country-host');
+    if (!host) return;
 
-        if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No country data found in “Test details”.</div>';
-          return;
-        }
-
-        // Build Month (YYYY-MM) × Country counts
-        const counts = new Map(); // key `${yyyyMM}||${country}` -> n
-        const monthsSet = new Set();
-        const countriesSet = new Set();
-
-        valid.forEach(r => {
-          const ym = r.dayStr.slice(0,7); // YYYY-MM
-          monthsSet.add(ym);
-          countriesSet.add(r.country);
-          const key = `${ym}||${r.country}`;
-          counts.set(key, (counts.get(key)||0) + 1);
-        });
-
-        const months = Array.from(monthsSet).sort(); // columns
-        // Sort countries by total frequency desc, then A–Z
-        const countries = Array.from(countriesSet).sort((a,b) => {
-          const sa = months.reduce((s,m)=> s + (counts.get(`${m}||${a}`)||0), 0);
-          const sb = months.reduce((s,m)=> s + (counts.get(`${m}||${b}`)||0), 0);
-          if (sb !== sa) return sb - sa;
-          return a.localeCompare(b);
-        });
-
-        renderCountryMonthHeatmap({months, countries, counts});
-      });
+    if (!valid.length){
+      host.innerHTML = '<div style="color:#666;">No country data found in the “Country” table.</div>';
+      return;
     }
+
+    // Build Month (YYYY-MM) × Country counts; one count per session per country
+    const counts = new Map(); // key `${yyyyMM}||${country}` -> n
+    const monthsSet = new Set();
+    const countriesSet = new Set();
+
+    valid.forEach(r => {
+      const ym = r.dayStr.slice(0,7); // YYYY-MM
+      monthsSet.add(ym);
+      // r.countries is already unique per session by our parser, but dedupe again to be safe
+      const uniq = Array.from(new Set(r.countries.map(c => String(c).trim()).filter(Boolean)));
+      uniq.forEach(country => {
+        countriesSet.add(country);
+        const key = `${ym}||${country}`;
+        counts.set(key, (counts.get(key)||0) + 1);
+      });
+    });
+
+    const months = Array.from(monthsSet).sort(); // columns
+    const countries = Array.from(countriesSet).sort((a,b) => {
+      const sa = months.reduce((s,m)=> s + (counts.get(`${m}||${a}`)||0), 0);
+      const sb = months.reduce((s,m)=> s + (counts.get(`${m}||${b}`)||0), 0);
+      if (sb !== sa) return sb - sa;
+      return a.localeCompare(b);
+    });
+
+    renderCountryMonthHeatmap({months, countries, counts});
+  });
+}
 
     function renderCountryMonthHeatmap({months, countries, counts}){
       const host = document.getElementById('country-host');
@@ -1074,4 +1077,5 @@ function fetchCountriesForFile(filename){
   </script>
 </body>
 </html>
+
 
