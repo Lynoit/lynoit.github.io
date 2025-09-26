@@ -10,8 +10,34 @@
     body { margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background: #fff; color: #000; }
     #sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 240px; background: #f5f5f5; overflow-y: auto; border-right: 1px solid #ddd; }
     #content { margin-left: 240px; padding: 20px; }
-    .day-header { padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #ddd; }
-    .day-header:hover { background: #e0e0e0; }
+/* Sidebar accordion affordance */
+.day-header{
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:10px 12px 10px 32px;           /* space for chevron */
+  font-weight:600; background:#f8f9fb;   /* subtle card look */
+  position:relative; cursor:pointer;
+  border-bottom:1px solid #ddd;
+}
+.day-header:hover{ background:#eef2f9; }
+.day-header:focus-visible{
+  outline:2px solid var(--accent, #1f3de3);
+  outline-offset:2px; border-radius:6px;
+}
+/* Chevron */
+.day-header::before{
+  content:'▶'; position:absolute; left:12px; top:50%;
+  transform:translateY(-50%); font-size:12px; color:#555;
+  transition: transform .2s ease;
+}
+.day-header[aria-expanded="true"]::before{
+  transform:translateY(-50%) rotate(90deg);
+}
+/* Count pill on the right */
+.day-count{
+  background:#e9eefc; color:#1f3de3; font-weight:700; font-size:11px;
+  padding:2px 6px; border-radius:999px; border:1px solid #cbd5ff;
+}
+
     .session-list { display: none; list-style: none; margin: 0; padding: 0; }
     .session-item { padding: 8px 32px; cursor: pointer; border-bottom: 1px solid #eee; }
     .session-item:hover { background: #f0f0f0; }
@@ -672,73 +698,95 @@ function canonicalEU(raw){
 
     // ---------- SIDEBAR ----------
     function buildSidebar(files) {
-      const sb = document.getElementById('sidebar');
-      sb.innerHTML = '';
-      const header = document.createElement('h2');
-      header.textContent = 'Test sessions';
-      header.style.padding = '16px';
-      header.style.margin = '0';
-      header.style.borderBottom = '1px solid #ddd';
-      header.style.cursor = 'pointer';
-      header.title = 'Back to overview';
-      header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
-      sb.appendChild(header);
+  const sb = document.getElementById('sidebar');
+  sb.innerHTML = '';
+  const header = document.createElement('h2');
+  header.textContent = 'Test sessions';
+  header.style.padding = '16px';
+  header.style.margin = '0';
+  header.style.borderBottom = '1px solid #ddd';
+  header.style.cursor = 'pointer';
+  header.title = 'Back to overview';
+  header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
+  sb.appendChild(header);
 
-      const groups = files.reduce((acc, f) => {
-        const m = f.match(/(\d{4}-\d{2}-\d{2})/);
-        if (!m) return acc;
-        (acc[m[1]] ||= []).push(f);
-        return acc;
-      }, {});
+  const groups = files.reduce((acc, f) => {
+    const m = f.match(/(\d{4}-\d{2}-\d{2})/);
+    if (!m) return acc;
+    (acc[m[1]] ||= []).push(f);
+    return acc;
+  }, {});
 
-      Object.keys(groups).sort().reverse().forEach(day => {
-        const hdr = document.createElement('div');
-        hdr.className = 'day-header';
-        hdr.textContent = day;
+  Object.keys(groups).sort().reverse().forEach(day => {
+    const hdr = document.createElement('div');
+    hdr.className = 'day-header';
+    hdr.setAttribute('role','button');
+    hdr.setAttribute('aria-expanded','false');
+    hdr.tabIndex = 0;
+    hdr.title = 'Show sessions';
 
-        const lst = document.createElement('ul');
-        lst.className = 'session-list';
+    // Left label
+    const label = document.createElement('span');
+    label.textContent = day;
+    hdr.appendChild(label);
 
-        groups[day].sort().forEach(f => {
-          const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
-          const li = document.createElement('li');
-          li.className = 'session-item';
-          li.onclick = () => loadFile(f);
+    // Right badge with count
+    const count = document.createElement('span');
+    count.className = 'day-count';
+    count.textContent = String(groups[day].length);
+    hdr.appendChild(count);
 
-          const title = document.createElement('div');
-          title.textContent = namePretty;
+    const lst = document.createElement('ul');
+    lst.className = 'session-list';
+    lst.style.display = 'none';
 
-          const meta = document.createElement('div');
-          meta.className = 'meta';
-          meta.id = `meta_${cssSafeId(f)}`;
-          meta.textContent = 'Loading…';
+    groups[day].sort().forEach(f => {
+      const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
+      const li = document.createElement('li');
+      li.className = 'session-item';
+      li.onclick = () => loadFile(f);
 
-          li.appendChild(title);
-          li.appendChild(meta);
-          lst.appendChild(li);
+      const title = document.createElement('div');
+      title.textContent = namePretty;
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.id = `meta_${cssSafeId(f)}`;
+      meta.textContent = 'Loading…';
+
+      li.appendChild(title);
+      li.appendChild(meta);
+      lst.appendChild(li);
+    });
+
+    let loadedThisGroup = false;
+    const toggle = () => {
+      const expand = lst.style.display !== 'block';
+      lst.style.display = expand ? 'block' : 'none';
+      hdr.setAttribute('aria-expanded', expand ? 'true' : 'false');
+      hdr.title = expand ? 'Hide sessions' : 'Show sessions';
+      if (expand && !loadedThisGroup) {
+        loadedThisGroup = true;
+        groups[day].forEach(f => {
+          fetchSessionSummary(f).then(({ mileageKm, issueCount }) => {
+            const el = document.getElementById(`meta_${cssSafeId(f)}`);
+            if (!el) return;
+            const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
+            el.textContent = `Mileage: ${mileageText}  No of issues: ${issueCount}`;
+          });
         });
+      }
+    };
 
-        let loadedThisGroup = false;
-        hdr.onclick = () => {
-          const expand = lst.style.display !== 'block';
-          lst.style.display = expand ? 'block' : 'none';
-          if (expand && !loadedThisGroup) {
-            loadedThisGroup = true;
-            groups[day].forEach(f => {
-              fetchSessionSummary(f).then(({ mileageKm, issueCount }) => {
-                const el = document.getElementById(`meta_${cssSafeId(f)}`);
-                if (!el) return;
-                const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
-                el.textContent = `Mileage: ${mileageText}  No of issues: ${issueCount}`;
-              });
-            });
-          }
-        };
+    hdr.addEventListener('click', toggle);
+    hdr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
 
-        sb.appendChild(hdr);
-        sb.appendChild(lst);
-      });
-    }
+    sb.appendChild(hdr);
+    sb.appendChild(lst);
+  });
+}
 
     // ---------- OVERVIEW HEATMAP (Test activity) ----------
     function buildOverviewHeatmap(files){
@@ -1762,6 +1810,7 @@ function canonicalEU(raw){
   </script>
 </body>
 </html>
+
 
 
 
