@@ -32,9 +32,8 @@
 
     /* Overview (four charts side by side) */
     .overview {
-      /* was: max-width: 980px; */
-      max-width: none;        /* NEW: let it expand fully */
-      width: 100%;            /* NEW */
+      max-width: none;
+      width: 100%;
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 20px;
@@ -47,26 +46,14 @@
 
     /* Latest routes grid */
     .routes-wrap { margin-top: 18px; }
-    .route-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px,1fr));
-      gap: 14px;
-      /* was: max-width: 980px; */
-      max-width: none;        /* NEW: full width */
-      width: 100%;            /* NEW */
-    }
+    .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 14px; max-width: none; width: 100%; }
     .route-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; }
     .route-title { font-size: 13px; color: #333; margin-bottom: 8px; }
     /* keep the old style for non-enhanced anchors only */
     .route-title a:not(.route-link) { color: inherit; text-decoration: none; }
     .route-title a:not(.route-link):hover { text-decoration: underline; }
     .route-meta { font-size: 12px; color: #666; margin-top: 6px; }
-    .route-map {
-      width: 100%;
-      border: 1px solid #aaa; border-radius: 6px;
-      /* was: height: 180px; */
-      height: clamp(180px, 20vw, 320px); /* NEW: responsive height scales with width */
-    }
+    .route-map { width: 100%; height: clamp(180px, 20vw, 320px); border: 1px solid #aaa; border-radius: 6px; }
 
     /* Make "Test activity overview" same size as "Latest routes" */
     #title-overview { font-size: 1.5em; }
@@ -96,7 +83,6 @@
     .route-link:hover, .route-link:focus{ color:#1430c9; }
     .route-link:hover::after, .route-link:focus::after{ transform: translateX(3px); opacity:1; }
     .route-link:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
-    /* Override: black link, no underline */
     .route-link{ color:#000 !important; text-decoration:none !important; }
     .route-link .u{ background-image:none !important; padding-bottom:0; }
     .route-link:hover, .route-link:focus{ color:#000; text-decoration:none; }
@@ -123,7 +109,7 @@
       40% { opacity:1; }
     }
 
-    /* ===== Make chart SVGs scale to container width (NEW) ===== */
+    /* ===== Make chart SVGs scale to container width ===== */
     #heatmap-host svg,
     #country-host svg,
     #temp-host svg,
@@ -131,6 +117,25 @@
       width: 100%;
       height: auto;
       display: block;
+    }
+
+    /* ===== EU Mileage Map styles (NEW) ===== */
+    .eu-mileage-map{
+      width: 100%;
+      height: clamp(300px, 40vw, 560px);
+      border: 1px solid #aaa;
+      border-radius: 6px;
+      margin-top: 8px;
+    }
+    /* white, bold numbers over red dots */
+    .leaflet-tooltip.eu-mileage-label{
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      color: #fff;
+      font-weight: 800;
+      text-shadow: 0 1px 2px rgba(0,0,0,.6);
+      pointer-events: none;
     }
   </style>
 </head>
@@ -152,6 +157,17 @@
       <div><div id="country-host"></div></div>
       <div><div id="temp-host"></div></div>
       <div><div id="weather-host"></div></div>
+
+      <!-- NEW: EU Mileage map block (spans full width, before latest routes) -->
+      <div class="eu-mileage-wrap" style="grid-column: 1 / -1;">
+        <h2 id="title-eu-mileage" data-title="Mileage vs country" data-loading="1" style="margin-top:16px;">
+          <span>Loading</span>
+          <span class="title-thinking">
+            <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+          </span>
+        </h2>
+        <div id="eu-mileage-map" class="eu-mileage-map"></div>
+      </div>
 
       <div class="routes-wrap" style="grid-column: 1 / -1;">
         <h2 id="title-latest-routes" data-title="Latest routes" data-loading="1" style="margin-top:16px;">
@@ -393,7 +409,7 @@
         if (!row || row.length < 2) continue;
         const keyRaw = row[0];
         theVal = row[1];
-        const valRaw = theVal; // kept as-is
+        const valRaw = theVal;
         if (keyRaw == null || valRaw == null) continue;
         const key = String(keyRaw).trim().toLowerCase();
         const val = String(valRaw).trim();
@@ -456,6 +472,36 @@
         });
     }
 
+    // ---------- EU Country canonical names & centroids (NEW) ----------
+    const EU_CENTROIDS = {
+      'Austria':[47.6,14.3],'Belgium':[50.6,4.7],'Bulgaria':[42.8,25.3],'Croatia':[45.1,15.4],
+      'Cyprus':[35.1,33.4],'Czechia':[49.8,15.5],'Denmark':[56.0,10.0],'Estonia':[58.7,25.0],
+      'Finland':[64.5,26.0],'France':[46.2,2.2],'Germany':[51.2,10.4],'Greece':[39.1,22.9],
+      'Hungary':[47.2,19.5],'Ireland':[53.2,-8.0],'Italy':[42.8,12.5],'Latvia':[56.9,24.6],
+      'Lithuania':[55.3,23.9],'Luxembourg':[49.8,6.1],'Malta':[35.9,14.4],'Netherlands':[52.2,5.3],
+      'Poland':[52.0,19.1],'Portugal':[39.6,-8.0],'Romania':[45.9,24.9],'Slovakia':[48.7,19.5],
+      'Slovenia':[46.1,14.8],'Spain':[40.3,-3.7],'Sweden':[62.0,15.0]
+    };
+    const EU_CANON_LOWER = {};
+    Object.keys(EU_CENTROIDS).forEach(k => EU_CANON_LOWER[k.toLowerCase()] = k);
+    const COUNTRY_ALIASES = {
+      'czech republic':'czechia','the netherlands':'netherlands','românia':'romania','deutschland':'germany',
+      'españa':'spain','espana':'spain','italia':'italy','österreich':'austria','oesterreich':'austria',
+      'magyarország':'hungary','polska':'poland','suomi':'finland','elláda':'greece','ellada':'greece',
+      'republic of ireland':'ireland'
+    };
+    function canonicalEU(raw){
+      if (!raw) return null;
+      let s = String(raw).trim();
+      s = s.replace(/\(.*?\)/g,'').trim(); // drop bracket notes
+      let k = s.toLowerCase();
+      if (COUNTRY_ALIASES[k]) k = COUNTRY_ALIASES[k];
+      if (EU_CANON_LOWER[k]) return EU_CANON_LOWER[k];
+      // try simple title-case fallback
+      const tc = k.replace(/\b\w/g, c => c.toUpperCase());
+      return EU_CENTROIDS[tc] ? tc : null;
+    }
+
     // ---------- APP STATE ----------
     let issueCoords = [];
     let samplingCoords = [];
@@ -480,6 +526,17 @@
           <div><div id="country-host"></div></div>
           <div><div id="temp-host"></div></div>
           <div><div id="weather-host"></div></div>
+
+          <div class="eu-mileage-wrap" style="grid-column: 1 / -1;">
+            <h2 id="title-eu-mileage" data-title="Mileage vs country" data-loading="1" style="margin-top:16px;">
+              <span>Loading</span>
+              <span class="title-thinking">
+                <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+              </span>
+            </h2>
+            <div id="eu-mileage-map" class="eu-mileage-map"></div>
+          </div>
+
           <div class="routes-wrap" style="grid-column: 1 / -1;">
             <h2 id="title-latest-routes" data-title="Latest routes" data-loading="1" style="margin-top:16px;">
               <span>Loading</span>
@@ -494,13 +551,16 @@
       if (allFiles.length){
         const h1 = document.getElementById('title-overview');
         const h2 = document.getElementById('title-latest-routes');
+        const hEU = document.getElementById('title-eu-mileage');
         setTitleLoading(h1, true, 'Loading');
         setTitleLoading(h2, true, 'Loading');
+        setTitleLoading(hEU, true, 'Loading');
 
         buildOverviewHeatmap(allFiles).finally(() => setTitleLoading(h1, false));
         buildCountryMonthChart(allFiles);
         buildTempMonthChart(allFiles);
         buildWeatherMonthChart(allFiles);
+        buildEUMileageMap(allFiles).finally(() => setTitleLoading(hEU, false));
         buildLatestRoutePreviews(allFiles).finally(() => setTitleLoading(h2, false));
       }
     }
@@ -534,13 +594,16 @@
 
           const h1 = document.getElementById('title-overview');
           const h2 = document.getElementById('title-latest-routes');
+          const hEU = document.getElementById('title-eu-mileage');
           setTitleLoading(h1, true, 'Loading');
           setTitleLoading(h2, true, 'Loading');
+          setTitleLoading(hEU, true, 'Loading');
 
           buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false));
           buildCountryMonthChart(xlsxNames);
           buildTempMonthChart(xlsxNames);
           buildWeatherMonthChart(xlsxNames);
+          buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false));
           buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false));
         })
         .catch(err => showError('Failed to list blobs: ' + err));
@@ -681,7 +744,6 @@
       const svg = document.createElementNS(NS, 'svg');
       svg.setAttribute('width', width);
       svg.setAttribute('height', height);
-      /* NEW: Make SVG responsive */
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
 
@@ -825,7 +887,6 @@
       const svg = document.createElementNS(NS, 'svg');
       svg.setAttribute('width', width);
       svg.setAttribute('height', height);
-      /* NEW: Make SVG responsive */
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
 
@@ -858,7 +919,7 @@
       }
       svg.appendChild(gCountries);
 
-      // Cells: 4 sub-columns per month
+      // Cells
       const gCells = document.createElementNS(NS, 'g');
       for (let r = 0; r < countries.length; r++){
         const country = countries[r];
@@ -969,7 +1030,6 @@
       const svg = document.createElementNS(NS, 'svg');
       svg.setAttribute('width', width);
       svg.setAttribute('height', height);
-      /* NEW: Make SVG responsive */
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
 
@@ -1119,7 +1179,6 @@
       const svg = document.createElementNS(NS, 'svg');
       svg.setAttribute('width', width);
       svg.setAttribute('height', height);
-      /* NEW: Make SVG responsive */
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
 
@@ -1188,6 +1247,106 @@
         <span class="box" style="background:${colors[4]}"></span>
         More`;
       host.appendChild(legend);
+    }
+
+    // ---------- EU Mileage Map (NEW) ----------
+    function buildEUMileageMap(files){
+      const withDates = files
+        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+        .filter(x => x.m)
+        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+
+      return Promise.all(withDates.map(x =>
+        fetchSessionSummary(x.filename)
+          .then(s => ({...x, ...s}))
+          .then(r => {
+            if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+            return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+          })
+      )).then(rows => {
+        const valid = rows.filter(Boolean);
+        const agg = new Map(); // country -> total mileage (km)
+
+        valid.forEach(r => {
+          const euCountries = Array.isArray(r.countries)
+            ? r.countries.map(canonicalEU).filter(Boolean)
+            : [];
+          if (!euCountries.length) return;
+
+          // Split session mileage evenly across encountered EU countries
+          const share = r.mileageKm / euCountries.length;
+          euCountries.forEach(cty => {
+            agg.set(cty, (agg.get(cty) || 0) + share);
+          });
+        });
+
+        renderEUMileageMap(agg);
+      });
+    }
+
+    function renderEUMileageMap(agg){
+      const hostId = 'eu-mileage-map';
+      const container = document.getElementById(hostId);
+      if (!container) return;
+
+      // Reset container
+      container.innerHTML = '';
+
+      // If no data, show a message and bail
+      const entries = Array.from(agg.entries()).filter(([,km]) => km > 0);
+      if (!entries.length){
+        container.outerHTML = `<div id="${hostId}" class="eu-mileage-map" style="display:flex;align-items:center;justify-content:center;color:#666;">No EU mileage data available yet.</div>`;
+        return;
+      }
+
+      const map = L.map(container, { attributionControl:true, zoomControl:true });
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      // Compute bounds from centroids we will plot
+      const latlngs = [];
+      const maxKm = Math.max(...entries.map(([,km]) => km));
+      const minR = 6, maxR = 30;
+
+      entries.forEach(([country, km]) => {
+        const [lat, lon] = EU_CENTROIDS[country] || [null, null];
+        if (lat == null || lon == null) return;
+        latlngs.push([lat, lon]);
+
+        // radius in px; area ~ mileage
+        const r = (function(){
+          if (maxKm <= 0) return minR;
+          const f = Math.sqrt(km / maxKm); // sqrt for perceptual scaling
+          return Math.round(minR + f * (maxR - minR));
+        })();
+
+        const marker = L.circleMarker([lat,lon], {
+          radius: r,
+          color: '#900',
+          weight: 1,
+          fillColor: '#d00',
+          fillOpacity: 0.7
+        }).addTo(map);
+
+        marker.bindTooltip(`${Math.round(km)} km`, {
+          permanent: true,
+          direction: 'center',
+          className: 'eu-mileage-label'
+        });
+      });
+
+      if (latlngs.length){
+        map.fitBounds(latlngs, { padding:[20,20] });
+      } else {
+        // fallback: view central EU
+        map.setView([54,15], 4);
+      }
+
+      // ensure proper sizing
+      map.whenReady(() => map.invalidateSize());
+      // also after a tick in case of CSS transitions/layout
+      setTimeout(() => map.invalidateSize(), 100);
     }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
