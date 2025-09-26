@@ -90,6 +90,21 @@
 
     .route-link:focus-visible{ outline:2px solid #000; outline-offset:2px; border-radius:4px; }
     .route-title a.route-link:hover{ text-decoration:none; }
+
+    /* ===== Typing indicator for titles (NEW) ===== */
+    .title-thinking { display:inline-flex; align-items:center; gap:6px; }
+    .title-thinking .dots { display:inline-flex; gap:4px; }
+    .title-thinking .dot {
+      width:6px; height:6px; border-radius:50%;
+      background:#888; opacity:.25;
+      animation:titleBlink 1.2s infinite both;
+    }
+    .title-thinking .dot:nth-child(2){ animation-delay:.2s; }
+    .title-thinking .dot:nth-child(3){ animation-delay:.4s; }
+    @keyframes titleBlink {
+      0%, 80%, 100% { opacity:.25; }
+      40% { opacity:1; }
+    }
   </style>
 </head>
 <body>
@@ -98,7 +113,8 @@
   </div>
 
   <div id="content">
-    <h1>Test activity overview</h1>
+    <!-- IDs added (NEW) -->
+    <h1 id="title-overview">Test activity overview</h1>
     <div id="overview" class="overview">
       <div><div id="heatmap-host"></div></div>
       <div><div id="country-host"></div></div>
@@ -106,7 +122,8 @@
       <div><div id="weather-host"></div></div>
 
       <div class="routes-wrap" style="grid-column: 1 / -1;">
-        <h2 style="margin-top:16px;">Latest routes</h2>
+        <!-- ID added (NEW) -->
+        <h2 id="title-latest-routes" style="margin-top:16px;">Latest routes</h2>
         <div id="routes-grid" class="route-grid"></div>
       </div>
     </div>
@@ -141,6 +158,27 @@
       return 2 * R * Math.asin(Math.sqrt(a));
     }
 
+    // ===== Title loading indicator helper (NEW) =====
+    function setTitleLoading(el, on, labelText = 'Thinking …') {
+      if (!el) return;
+      if (on) {
+        if (el.dataset.loading === '1') return;
+        el.dataset.loading = '1';
+        el.dataset.originalText = el.textContent;
+        el.innerHTML = `
+          <span>${labelText}</span>
+          <span class="title-thinking">
+            <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+          </span>`;
+      } else {
+        if (el.dataset.loading !== '1') return;
+        const txt = el.dataset.originalText || el.textContent;
+        el.textContent = txt;
+        delete el.dataset.loading;
+        delete el.dataset.originalText;
+      }
+    }
+
     function computeMileageAndPathFromSampling(sheet) {
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       if (rows.length < 3) return { km: null, path: [] };
@@ -163,119 +201,18 @@
       return { km: Math.round(km), path };
     }
 
-    // --- Mean Temp + Mode Weather from the "Issues" table ---
+    // --- Mean Temp + Mode Weather from the "Issue/Issues" sheet ---
     function computeTempWeatherFromIssuesSheet(sheet){
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-  if (rows.length < 2) return { meanTempC: null, weatherAgg: null };
-
-  const headers = rows[0].map(h => String(h ?? '').trim().toLowerCase());
-  const tempIdx = headers.findIndex(h => /\btemp\b/.test(h) || /temperature/.test(h));
-  const wxIdx   = headers.findIndex(h => /weather/.test(h) || /condition/.test(h));
-
-  const temps = [];
-  const wxCounts = new Map();
-
-  const normWx = (s)=>{
-    if (s == null) return null;
-    const v = String(s).trim().toLowerCase();
-    if (!v) return null;
-    if (/thunder|storm/.test(v)) return 'Storm';
-    if (/snow|blizzard|sleet/.test(v)) return 'Snow';
-    if (/rain|drizzle|shower/.test(v)) return 'Rain';
-    if (/fog|mist|haze/.test(v)) return 'Fog';
-    if (/cloud|overcast/.test(v)) return 'Cloudy';
-    if (/clear|sun/.test(v)) return 'Clear';
-    if (/wind/.test(v)) return 'Wind';
-    return v.charAt(0).toUpperCase() + v.slice(1);
-  };
-
-  // Pull number from "9.4°C", "Temp: 9,4°C", "Temperature -3C", or "Temp ... 9.4"
-  const parseTempFromValue = (val) => {
-    if (val == null) return null;
-    const s = String(val).trim();
-    if (!s) return null;
-    // Explicit °C (or C without degree)
-    let m = s.match(/(-?\d+(?:[.,]\d+)?)\s*°?\s*c\b/i);
-    if (!m) {
-      // Fallback: "temp ... 9.4" (no °C present)
-      m = s.match(/temp(?:erature)?[^0-9\-]*(-?\d+(?:[.,]\d+)?)/i);
-    }
-    if (!m) return null;
-    const num = parseFloat(m[1].replace(',', '.'));
-    return Number.isFinite(num) ? num : null;
-  };
-
-  for (let r = 1; r < rows.length; r++){
-    const row = rows[r];
-
-    // Temperature: prefer explicit Temp column
-    if (tempIdx >= 0){
-      const t = parseTempFromValue(row[tempIdx]);
-      if (t != null) temps.push(t);
-    } else {
-      // Otherwise scan cells in the row for a "Temp: 9.4°C" pattern
-      for (let c = 0; c < row.length; c++){
-        const t = parseTempFromValue(row[c]);
-        if (t != null){ temps.push(t); break; }
-      }
-    }
-
-    // Weather: prefer explicit Weather/Condition column
-    if (wxIdx >= 0){
-      const w = normWx(row[wxIdx]);
-      if (w) wxCounts.set(w, (wxCounts.get(w)||0) + 1);
-    } else {
-      // Otherwise look for "Weather: ..." in any text cell
-      for (let c = 0; c < row.length; c++){
-        const cell = row[c];
-        if (cell == null) continue;
-        const m = String(cell).match(/weather\s*:\s*([a-z][a-z\s\-]+)/i);
-        if (m){
-          const w = normWx(m[1]);
-          if (w) wxCounts.set(w, (wxCounts.get(w)||0) + 1);
-          break;
-        }
-      }
-    }
-  }
-
-  const meanTempC = temps.length
-    ? Math.round((temps.reduce((a,b)=>a+b,0) / temps.length) * 10) / 10
-    : null;
-
-  let weatherAgg = null;
-  if (wxCounts.size){
-    weatherAgg = Array.from(wxCounts.entries()).sort((a,b)=> b[1] - a[1])[0][0];
-  }
-
-  return { meanTempC, weatherAgg };
-}
-
-
-    // Try to find a sheet named like "Issues"; fallback to any non-Sampling sheet with Temp/Weather
-    function computeTempWeatherFromIssues(wb){
-      const issueSheets = wb.SheetNames.filter(n => /issue/i.test(n));
-      for (const name of issueSheets){
-        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
-        if (res.meanTempC != null || res.weatherAgg != null) return res;
-      }
-      for (const name of wb.SheetNames){
-        if (name.toLowerCase() === 'sampling') continue;
-        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
-        if (res.meanTempC != null || res.weatherAgg != null) return res;
-      }
-      return { meanTempC: null, weatherAgg: null };
-    }
-
-    // (kept from earlier; not used anymore)
-    function computeTempWeatherFromSampling(sheet){
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
       if (rows.length < 2) return { meanTempC: null, weatherAgg: null };
-      const headers = rows[0].map(h => String(h ?? '').toLowerCase());
-      const tempIdx = headers.findIndex(h => h.includes('temp'));
-      const wxIdx   = headers.findIndex(h => h.includes('weather') || h.includes('condition'));
+
+      const headers = rows[0].map(h => String(h ?? '').trim().toLowerCase());
+      const tempIdx = headers.findIndex(h => /\btemp\b/.test(h) || /temperature/.test(h));
+      const wxIdx   = headers.findIndex(h => /weather/.test(h) || /condition/.test(h));
+
       const temps = [];
       const wxCounts = new Map();
+
       const normWx = (s)=>{
         if (s == null) return null;
         const v = String(s).trim().toLowerCase();
@@ -289,24 +226,71 @@
         if (/wind/.test(v)) return 'Wind';
         return v.charAt(0).toUpperCase() + v.slice(1);
       };
-      for (let i = 1; i < rows.length; i++){
+
+      const parseTempFromValue = (val) => {
+        if (val == null) return null;
+        const s = String(val).trim();
+        if (!s) return null;
+        let m = s.match(/(-?\d+(?:[.,]\d+)?)\s*°?\s*c\b/i);
+        if (!m) m = s.match(/temp(?:erature)?[^0-9\-]*(-?\d+(?:[.,]\d+)?)/i);
+        if (!m) return null;
+        const num = parseFloat(m[1].replace(',', '.'));
+        return Number.isFinite(num) ? num : null;
+      };
+
+      for (let r = 1; r < rows.length; r++){
+        const row = rows[r];
         if (tempIdx >= 0){
-          const t = parseFloat(rows[i][tempIdx]);
-          if (!isNaN(t)) temps.push(t);
+          const t = parseTempFromValue(row[tempIdx]);
+          if (t != null) temps.push(t);
+        } else {
+          for (let c = 0; c < row.length; c++){
+            const t = parseTempFromValue(row[c]);
+            if (t != null){ temps.push(t); break; }
+          }
         }
+
         if (wxIdx >= 0){
-          const w = normWx(rows[i][wxIdx]);
-          if (w){
-            wxCounts.set(w, (wxCounts.get(w)||0) + 1);
+          const w = normWx(row[wxIdx]);
+          if (w) wxCounts.set(w, (wxCounts.get(w)||0) + 1);
+        } else {
+          for (let c = 0; c < row.length; c++){
+            const cell = row[c];
+            if (cell == null) continue;
+            const m = String(cell).match(/weather\s*:\s*([a-z][a-z\s\-]+)/i);
+            if (m){
+              const w = normWx(m[1]);
+              if (w) wxCounts.set(w, (wxCounts.get(w)||0) + 1);
+              break;
+            }
           }
         }
       }
-      const meanTempC = temps.length ? Math.round( (temps.reduce((a,b)=>a+b,0) / temps.length) ) : null;
+
+      const meanTempC = temps.length
+        ? Math.round((temps.reduce((a,b)=>a+b,0) / temps.length) * 10) / 10
+        : null;
+
       let weatherAgg = null;
       if (wxCounts.size){
-        weatherAgg = Array.from(wxCounts.entries()).sort((a,b)=> b[1]-a[1])[0][0];
+        weatherAgg = Array.from(wxCounts.entries()).sort((a,b)=> b[1] - a[1])[0][0];
       }
+
       return { meanTempC, weatherAgg };
+    }
+
+    function computeTempWeatherFromIssues(wb){
+      const issueSheets = wb.SheetNames.filter(n => /issue/i.test(n));
+      for (const name of issueSheets){
+        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
+        if (res.meanTempC != null || res.weatherAgg != null) return res;
+      }
+      for (const name of wb.SheetNames){
+        if (name.toLowerCase() === 'sampling') continue;
+        const res = computeTempWeatherFromIssuesSheet(wb.Sheets[name]);
+        if (res.meanTempC != null || res.weatherAgg != null) return res;
+      }
+      return { meanTempC: null, weatherAgg: null };
     }
 
     function countIssuesFromWorkbook(wb) {
@@ -345,7 +329,6 @@
             const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
             mileageKm = km;
           }
-          // NEW: temperature & weather from Issues table
           const tw = computeTempWeatherFromIssues(wb);
           meanTempC = tw.meanTempC;
           weatherAgg = tw.weatherAgg;
@@ -367,6 +350,7 @@
       const details = {};
       const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
       if (!sheetName) return details;
+
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
       for (let r = 0; r < rows.length; r++) {
         const row = rows[r];
@@ -448,24 +432,31 @@
     function renderOverview(){
       const content = document.getElementById('content');
       content.innerHTML = `
-        <h1>Test activity overview</h1>
+        <h1 id="title-overview">Test activity overview</h1>
         <div id="overview" class="overview">
           <div><div id="heatmap-host"></div></div>
           <div><div id="country-host"></div></div>
           <div><div id="temp-host"></div></div>
           <div><div id="weather-host"></div></div>
           <div class="routes-wrap" style="grid-column: 1 / -1;">
-            <h2 style="margin-top:16px;">Latest routes</h2>
+            <h2 id="title-latest-routes" style="margin-top:16px;">Latest routes</h2>
             <div id="routes-grid" class="route-grid"></div>
           </div>
         </div>
       `;
       if (allFiles.length){
-        buildOverviewHeatmap(allFiles);
+        // Turn indicators on (NEW)
+        const h1 = document.getElementById('title-overview');
+        const h2 = document.getElementById('title-latest-routes');
+        setTitleLoading(h1, true, 'Thinking …');
+        setTitleLoading(h2, true, 'Thinking …');
+
+        // Keep minimal delta: only tie indicators to these two builders
+        buildOverviewHeatmap(allFiles).finally(() => setTitleLoading(h1, false));
         buildCountryMonthChart(allFiles);
         buildTempMonthChart(allFiles);
         buildWeatherMonthChart(allFiles);
-        buildLatestRoutePreviews(allFiles);
+        buildLatestRoutePreviews(allFiles).finally(() => setTitleLoading(h2, false));
       }
     }
 
@@ -495,11 +486,19 @@
           allFiles = xlsxNames; // remember for overview re-render
 
           buildSidebar(xlsxNames);
-          buildOverviewHeatmap(xlsxNames);
+
+          // Turn indicators on (NEW)
+          const h1 = document.getElementById('title-overview');
+          const h2 = document.getElementById('title-latest-routes');
+          setTitleLoading(h1, true, 'Thinking …');
+          setTitleLoading(h2, true, 'Thinking …');
+
+          // Minimal delta: only these two builders control the indicators
+          buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false));
           buildCountryMonthChart(xlsxNames);
           buildTempMonthChart(xlsxNames);
           buildWeatherMonthChart(xlsxNames);
-          buildLatestRoutePreviews(xlsxNames); // latest first using blobMeta
+          buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false));
         })
         .catch(err => showError('Failed to list blobs: ' + err));
     }
@@ -582,7 +581,8 @@
         .filter(x => x.m)
         .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s})))).then(rows => {
+      // Return the Promise so caller can toggle the indicator (NEW)
+      return Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s})))).then(rows => {
         rows.forEach(r => {
           if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
           const prev = byDay.get(r.dayStr) || 0;
@@ -869,7 +869,7 @@
         const host = document.getElementById('temp-host');
         if (!host) return;
         if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No temperature data found in Issues table.</div>';
+          host.innerHTML = '<div style="color:#666;">No temperature data found in Issue/Issues table.</div>';
           return;
         }
 
@@ -890,7 +890,7 @@
         });
 
         const months = Array.from(monthsSet).sort();
-        const temps  = Array.from(tempsSet).sort((a,b)=>b-a); // highest first (top row)
+        const temps  = Array.from(tempsSet).sort((a,b)=>b-a); // highest first (y-axis reversed)
         renderTempMonthHeatmap({ months, temps, counts });
       });
     }
@@ -900,7 +900,7 @@
       host.innerHTML = '';
 
       const cell = 14, gap = 4;
-      const leftLabelsW = 54;  // narrower labels (numbers)
+      const leftLabelsW = 54;  // numbers
       const topLabelsH  = 18;
 
       const subColsPerMonth = 4;
@@ -1031,7 +1031,6 @@
         });
 
         const months = Array.from(monthsSet).sort();
-        // sort weather rows by overall frequency desc, then A–Z
         const wxs = Array.from(wxSet).sort((a,b) => {
           const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
           const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
@@ -1144,7 +1143,8 @@
         .filter(x => x.m)
         .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
+      // Return the Promise so caller can toggle the indicator (NEW)
+      return Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
         .then(rows => {
           // Filter and sort strictly by Last-Modified DESC
           const take = rows
@@ -1206,6 +1206,7 @@
                 const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
                 if (!path || path.length < 2) return;
 
+                // Read column-2 values from "Test details"
                 const details = extractTestDetails(wb);
                 const objVal = details['test object'] || details['object'] || details['vehicle'] || null;
                 const purposeVal = details['purpose'] || details['test purpose'] || null;
@@ -1488,5 +1489,3 @@
   </script>
 </body>
 </html>
-
-
