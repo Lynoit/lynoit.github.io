@@ -401,37 +401,93 @@
       }
       return 0;
     }
+    // Reads "Statistics" sheet → row/col labeled "Total test distance" (e.g. "518.6 km")
+function extractTotalDistanceKmFromStatistics(wb){
+  const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
+  if (!sheetName) return null;
 
-    function fetchSessionSummary(filename) {
-      if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
-      return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
-        .then(res => {
-          if (!res.ok) throw new Error(`Fetch XLSX failed ${res.status}`);
-          return res.arrayBuffer();
-        })
-        .then(buf => {
-          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-          const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          let mileageKm = null, meanTempC = null, weatherAgg = null;
-          if (samplingName) {
-            const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-            mileageKm = km;
-          }
-          const tw = computeTempWeatherFromIssues(wb);
-          meanTempC = tw.meanTempC;
-          weatherAgg = tw.weatherAgg;
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
+  if (!rows || !rows.length) return null;
 
-          const issueCount = countIssuesFromWorkbook(wb);
-          const summary = { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true };
-          summaryCache.set(filename, summary);
-          return summary;
-        })
-        .catch(() => {
-          const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, loaded:true };
-          summaryCache.set(filename, summary);
-          return summary;
-        });
+  const norm = v => String(v ?? '').trim();
+  const isLabel = v => /total\s*test\s*distance/i.test(String(v ?? ''));
+
+  const parseKm = v => {
+    if (v == null) return null;
+    const s = norm(v);
+    if (!s) return null;
+    // match "518.6 km" or "518,6 km" or plain number
+    let m = s.match(/(-?\d+(?:[.,]\d+)?)\s*km\b/i);
+    if (!m) m = s.match(/-?\d+(?:[.,]\d+)?/);
+    if (!m) return null;
+    const val = parseFloat(m[0].replace(',', '.'));
+    return Number.isFinite(val) ? Math.round(val) : null; // keep km as integer like before
+  };
+
+  // Try common key→value patterns
+  for (let r = 0; r < rows.length; r++){
+    const row = rows[r];
+    for (let c = 0; c < row.length; c++){
+      if (isLabel(row[c])){
+        // prefer right cell, else cell below
+        const right = (c + 1 < row.length) ? row[c+1] : null;
+        const down  = (rows[r+1]?.[c]);
+        const fromRight = parseKm(right);
+        if (fromRight != null) return fromRight;
+        const fromDown  = parseKm(down);
+        if (fromDown  != null) return fromDown;
+      }
     }
+  }
+
+  // Fallback: scan entire sheet for a lone "518.6 km"
+  for (let r = 0; r < rows.length; r++){
+    for (let c = 0; c < rows[r].length; c++){
+      const km = parseKm(rows[r][c]);
+      if (km != null) return km;
+    }
+  }
+  return null;
+}
+
+   function fetchSessionSummary(filename) {
+  if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
+  return fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`)
+    .then(res => {
+      if (!res.ok) throw new Error(`Fetch XLSX failed ${res.status}`);
+      return res.arrayBuffer();
+    })
+    .then(buf => {
+      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
+
+      // 1) Mileage from "Statistics" sheet (preferred)
+      let mileageKm = extractTotalDistanceKmFromStatistics(wb);
+
+      // 2) Fallback to Sampling path distance
+      if (mileageKm == null) {
+        const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+        if (samplingName) {
+          const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+          mileageKm = km;
+        }
+      }
+
+      // Temp/Weather (unchanged)
+      const { meanTempC, weatherAgg } = computeTempWeatherFromIssues(wb);
+
+      // Issue count (unchanged)
+      const issueCount = countIssuesFromWorkbook(wb);
+
+      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true };
+      summaryCache.set(filename, summary);
+      return summary;
+    })
+    .catch(() => {
+      const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, loaded:true };
+      summaryCache.set(filename, summary);
+      return summary;
+    });
+}
 
     // Read "Test details" sheet (col1=label, col2=value) → map
     function extractTestDetails(wb){
@@ -1810,6 +1866,7 @@ function canonicalEU(raw){
   </script>
 </body>
 </html>
+
 
 
 
