@@ -162,6 +162,23 @@
       height: auto;
       display: block;
     }
+    /* === Active badge for live sessions === */
+.active-badge{
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:2px 8px; margin-left:8px;
+  background:#e01616; color:#fff; font-weight:700; font-size:11px;
+  border-radius:999px; border:1px solid rgba(0,0,0,.15);
+  animation: activeBlink 2s steps(2, end) infinite; /* 0.5 Hz (on/off every 1s) */
+}
+@keyframes activeBlink{
+  0%{ opacity:1; }
+  50%{ opacity:0; }
+  100%{ opacity:1; }
+}
+/* Row for session title + badge */
+.session-title-row{
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+}
 
     /* ===== EU Mileage Map styles (NEW) ===== */
     .eu-mileage-map{
@@ -242,6 +259,7 @@
     const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-12-30T14:44:25Z&st=2025-05-30T05:44:25Z&spr=https&sig=QriUtSG3IFzzE3cz7vpcXpE7Ed6QDwSYSZ6YvT2kM%2B0%3D';
     const BASE_URL  = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
     const MIN_KM_FOR_OVERVIEW = 1;
+    const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
     // ---------- CACHES / HELPERS ----------
     const summaryCache = new Map(); // filename -> { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true }
@@ -772,7 +790,7 @@ function canonicalEU(raw){
     }
 
     // ---------- SIDEBAR ----------
-    function buildSidebar(files) {
+  function buildSidebar(files) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
   const header = document.createElement('h2');
@@ -821,15 +839,34 @@ function canonicalEU(raw){
       li.className = 'session-item';
       li.onclick = () => loadFile(f);
 
+      // Row: title + (optional) Active badge
+      const row = document.createElement('div');
+      row.className = 'session-title-row';
+
       const title = document.createElement('div');
       title.textContent = namePretty;
+
+      // Decide if Active (Last-Modified within last 10 minutes)
+      const lm = blobMeta.get(f) || 0;
+      const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
+
+      const badge = document.createElement('span');
+      badge.className = 'active-badge';
+      badge.textContent = 'Active';
+      // Store timestamp for periodic reevaluation
+      badge.dataset.lm = String(lm);
+      // If not currently active, hide (but keep node so it can appear if still within window on initial render)
+      if (!isActive) badge.style.display = 'none';
+
+      row.appendChild(title);
+      row.appendChild(badge);
 
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.id = `meta_${cssSafeId(f)}`;
       meta.textContent = 'Loading…';
 
-      li.appendChild(title);
+      li.appendChild(row);
       li.appendChild(meta);
       lst.appendChild(li);
     });
@@ -861,6 +898,24 @@ function canonicalEU(raw){
     sb.appendChild(hdr);
     sb.appendChild(lst);
   });
+
+  // Start/refresh periodic badge visibility check
+  ensureActiveBadgeUpdater();
+}
+
+    let _activeBadgeTimer = null;
+function ensureActiveBadgeUpdater(){
+  if (_activeBadgeTimer) return;
+  const tick = () => {
+    const now = Date.now();
+    document.querySelectorAll('.active-badge[data-lm]').forEach(el => {
+      const lm = Number(el.dataset.lm || 0);
+      const show = (now - lm) <= ACTIVE_WINDOW_MS;
+      el.style.display = show ? 'inline-flex' : 'none';
+    });
+  };
+  tick(); // initial
+  _activeBadgeTimer = setInterval(tick, 30000); // every 30s
 }
 
     // ---------- OVERVIEW HEATMAP (Test activity) ----------
@@ -1886,6 +1941,7 @@ function canonicalEU(raw){
   </script>
 </body>
 </html>
+
 
 
 
