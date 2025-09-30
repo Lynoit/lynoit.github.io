@@ -488,9 +488,9 @@ function extractTotalDistanceKmFromStatistics(wb){
   return null;
 }
 
-   function fetchSessionSummary(filename) {
+function fetchSessionSummary(filename) {
   if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
- return fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'no-store' })
+  return fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'no-store' })
     .then(res => {
       if (!res.ok) throw new Error(`Fetch XLSX failed ${res.status}`);
       return res.arrayBuffer();
@@ -498,7 +498,7 @@ function extractTotalDistanceKmFromStatistics(wb){
     .then(buf => {
       const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
 
-      // 1) Mileage from "Statistics" sheet (preferred)
+      // 1) Mileage from "Statistics" (preferred)
       let mileageKm = extractTotalDistanceKmFromStatistics(wb);
 
       // 2) Fallback to Sampling path distance
@@ -510,18 +510,26 @@ function extractTotalDistanceKmFromStatistics(wb){
         }
       }
 
-      // Temp/Weather (unchanged)
+      // Temp/Weather
       const { meanTempC, weatherAgg } = computeTempWeatherFromIssues(wb);
 
-      // Issue count (unchanged)
+      // Issue count
       const issueCount = countIssuesFromWorkbook(wb);
 
-      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, loaded:true };
+      // 🔹 NEW: pull Test purpose & Test object from “Test details”
+      let testObject = null, testPurpose = null;
+      try {
+        const details = extractTestDetails(wb);
+        testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
+        testPurpose = details['purpose'] || details['test purpose'] || null;
+      } catch (e) {}
+
+      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, testObject, testPurpose, loaded:true };
       summaryCache.set(filename, summary);
       return summary;
     })
     .catch(() => {
-      const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, loaded:true };
+      const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, testObject: null, testPurpose: null, loaded:true };
       summaryCache.set(filename, summary);
       return summary;
     });
@@ -881,11 +889,19 @@ function canonicalEU(raw){
       if (expand && !loadedThisGroup) {
         loadedThisGroup = true;
         groups[day].forEach(f => {
-          fetchSessionSummary(f).then(({ mileageKm, issueCount }) => {
-            const el = document.getElementById(`meta_${cssSafeId(f)}`);
-            if (!el) return;
-            const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
-            el.textContent = `Mileage: ${mileageText}  No of issues: ${issueCount}`;
+  fetchSessionSummary(f).then(({ mileageKm, issueCount, testObject, testPurpose }) => {
+    const el = document.getElementById(`meta_${cssSafeId(f)}`);
+    if (!el) return;
+
+    // no labels — just the values, then mileage/issues
+    const parts = [];
+    if (testPurpose) parts.push(String(testPurpose));
+    if (testObject)  parts.push(String(testObject));
+
+    const left = parts.length ? parts.join('  •  ') + '  •  ' : '';
+    const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
+
+    el.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
           });
         });
       }
@@ -1938,4 +1954,5 @@ content.appendChild(table);
   </script>
 </body>
 </html>
+
 
