@@ -217,9 +217,12 @@
 .s1{background:#c30000}.s2{background:#d62828}.s3{background:#e05d00}.s4{background:#ef8e00}.s5{background:#f4b400}
 .s6{background:#ffe24a;color:#111}.s7{background:#b8df4a}.s8{background:#33a653}.s9{background:#0f9d8c}.s10{background:#216e39}
 
-    .kpi-avg{margin:8px 0 16px;font-size:13px;color:#222}
+.kpi-avg{margin:8px 0 16px;font-size:13px;color:#222}
 .kpi-avg .v{font-weight:700}
-    
+
+    /* highlight the selected score box + small caption */
+.score-box.sel{ outline:3px solid rgba(0,0,0,.7); box-shadow: inset 0 0 0 2px rgba(255,255,255,.4); }
+.score-legend-caption{ margin:6px 0 16px; font-size:12px; color:#333; }    
   </style>
 </head>
 <body>
@@ -1759,21 +1762,98 @@ function ensureActiveBadgeUpdater(){
   return sum / vals.length; // exact mean (no rounding here)
 }
 
+    // Map rate (events per 1000 km) -> score 1..10
+function scoreFromRate(rate){
+  if (rate == null || !isFinite(rate)) return null;
+  if (rate >= 100) return 1;
+  if (rate >= 60)  return 2;
+  if (rate >= 40)  return 3;
+  if (rate >= 30)  return 4;
+  if (rate >= 20)  return 5;
+  if (rate >= 15)  return 6;
+  if (rate >= 10)  return 7;
+  if (rate >= 5)   return 8;
+  if (rate >= 1)   return 9;
+  return 10;
+}
+
+const SCORE_LABEL = {
+  1:'Worst',2:'Too bad',3:'Bad',4:'Not good',5:'Unacceptable',
+  6:'Marginal',7:'Acceptable',8:'Good',9:'Impressive',10:'Exceptional'
+};
+
+// Legend with optional selected score (highlights the box)
+function renderScoringLegend(selectedScore){
+  const rows = [
+    {n:1, cls:'s1',  lbl:'Worst',        thr:'≥ 100'},
+    {n:2, cls:'s2',  lbl:'Too bad',      thr:'≥ 60'},
+    {n:3, cls:'s3',  lbl:'Bad',          thr:'≥ 40'},
+    {n:4, cls:'s4',  lbl:'Not good',     thr:'≥ 30'},
+    {n:5, cls:'s5',  lbl:'Unacceptable', thr:'≥ 20'},
+    {n:6, cls:'s6',  lbl:'Marginal',     thr:'≥ 15'},
+    {n:7, cls:'s7',  lbl:'Acceptable',   thr:'≥ 10'},
+    {n:8, cls:'s8',  lbl:'Good',         thr:'≥ 5'},
+    {n:9, cls:'s9',  lbl:'Impressive',   thr:'≥ 1'},
+    {n:10,cls:'s10', lbl:'Exceptional',  thr:'< 1 (incl. 0)'},
+  ];
+  const boxes = rows.map(r =>
+    `<div class="score-box ${r.cls}${selectedScore===r.n?' sel':''}">
+       <strong>${r.n}</strong><small>${r.lbl}</small><span class="score-th">${r.thr}</span>
+     </div>`
+  ).join('');
+  return `<div class="score-legend">${boxes}</div>`;
+}
+
     // ---------- SESSION VIEWER ----------
-    function loadFile(filename) {
+function loadFile(filename) {
   const content = document.getElementById('content');
   content.innerHTML = '';
   issueCoords = [];
   samplingCoords = [];
   mapRef = null;
 
-  const issueTableInfo = {
-    sheetName: null,
-    headerNames: { col1: '', col2: '', col3: '' },
-    issueInfo: {}
+  // Fallbacks in case helpers weren’t added globally
+  const _scoreFromRate = (typeof scoreFromRate === 'function') ? scoreFromRate : function(rate){
+    if (rate == null || !isFinite(rate)) return null;
+    if (rate >= 100) return 1;
+    if (rate >= 60)  return 2;
+    if (rate >= 40)  return 3;
+    if (rate >= 30)  return 4;
+    if (rate >= 20)  return 5;
+    if (rate >= 15)  return 6;
+    if (rate >= 10)  return 7;
+    if (rate >= 5)   return 8;
+    if (rate >= 1)   return 9;
+    return 10;
   };
+  const _SCORE_LABEL = (typeof SCORE_LABEL === 'object' && SCORE_LABEL) ? SCORE_LABEL : {
+    1:'Worst',2:'Too bad',3:'Bad',4:'Not good',5:'Unacceptable',
+    6:'Marginal',7:'Acceptable',8:'Good',9:'Impressive',10:'Exceptional'
+  };
+  const _renderScoringLegend = (typeof renderScoringLegend === 'function')
+    ? renderScoringLegend
+    : function(selectedScore){
+        const rows = [
+          {n:1,  cls:'s1',  lbl:'Worst',        thr:'≥ 100'},
+          {n:2,  cls:'s2',  lbl:'Too bad',      thr:'≥ 60'},
+          {n:3,  cls:'s3',  lbl:'Bad',          thr:'≥ 40'},
+          {n:4,  cls:'s4',  lbl:'Not good',     thr:'≥ 30'},
+          {n:5,  cls:'s5',  lbl:'Unacceptable', thr:'≥ 20'},
+          {n:6,  cls:'s6',  lbl:'Marginal',     thr:'≥ 15'},
+          {n:7,  cls:'s7',  lbl:'Acceptable',   thr:'≥ 10'},
+          {n:8,  cls:'s8',  lbl:'Good',         thr:'≥ 5'},
+          {n:9,  cls:'s9',  lbl:'Impressive',   thr:'≥ 1'},
+          {n:10, cls:'s10', lbl:'Exceptional',  thr:'< 1 (incl. 0)'},
+        ];
+        const boxes = rows.map(r =>
+          `<div class="score-box ${r.cls}${selectedScore===r.n?' sel':''}">
+             <strong>${r.n}</strong><small>${r.lbl}</small><span class="score-th">${r.thr}</span>
+           </div>`
+        ).join('');
+        return `<div class="score-legend">${boxes}</div>`;
+      };
 
-  // Fallback helper: average of "events per 1000 km" if global helper not present
+  // Average "Events per 1000 km" from KPI sheet (robust header match)
   const getAvgEventsPer1k = (typeof extractAvgEventsPer1kFromSheet === 'function')
     ? extractAvgEventsPer1kFromSheet
     : function(sheet){
@@ -1795,9 +1875,16 @@ function ensureActiveBadgeUpdater(){
           if (n != null) vals.push(n);
         }
         if (!vals.length) return null;
-        return vals.reduce((a,b)=>a+b,0) / vals.length;
+        return vals.reduce((a,b)=>a+b,0) / vals.length; // exact mean
       };
 
+  const issueTableInfo = {
+    sheetName: null,
+    headerNames: { col1: '', col2: '', col3: '' },
+    issueInfo: {}
+  };
+
+  // Download links
   const xlsxLink = document.createElement('a');
   xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
   xlsxLink.textContent = 'Download XLSX';
@@ -1830,7 +1917,7 @@ function ensureActiveBadgeUpdater(){
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
         content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-        // If first GPS-capable sheet, harvest issues + headers
+        // First GPS-capable sheet → extract issues + headers
         if (!issueTableInfo.sheetName) {
           const tbl = document.getElementById(sheet);
           const rows = Array.from(tbl.querySelectorAll('tr'));
@@ -1864,17 +1951,25 @@ function ensureActiveBadgeUpdater(){
           }
         }
 
-        // === KPI extras: average Events/1000km + scoring legend directly below KPI table ===
+        // KPI extras: Average (1 decimal) + scoring legend highlighted by that average
         if (/kpi/i.test(sheet)) {
           const kpiTable = document.getElementById(sheet);
           if (kpiTable) {
-            const avg = getAvgEventsPer1k(wb.Sheets[sheet]);
+            const avgRaw = getAvgEventsPer1k(wb.Sheets[sheet]); // exact mean from KPI column
             const inserts = [];
-            if (avg != null) {
-              inserts.push(`<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">${avg}</span></div>`);
-            }
-            if (typeof scoringLegendHtml === 'function') {
-              inserts.push(scoringLegendHtml());
+            if (avgRaw != null) {
+              const avg1 = Math.round(avgRaw * 10) / 10; // round to 1 decimal for calculation
+              inserts.push(
+                `<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">${avg1.toFixed(1)}</span></div>`
+              );
+              const score = _scoreFromRate(avg1);
+              inserts.push(_renderScoringLegend(score));
+              inserts.push(
+                `<div class="score-legend-caption">Score: <strong>${score}</strong> — ${_SCORE_LABEL[score]} (based on avg ${avg1.toFixed(1)} events/1000 km)</div>`
+              );
+            } else {
+              // Column not found — show unselected legend as fallback
+              inserts.push(_renderScoringLegend(null));
             }
             if (inserts.length) kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
           }
@@ -1914,7 +2009,7 @@ function ensureActiveBadgeUpdater(){
       }
     })
     .then(() => {
-      // --- Issue snapshots: ALWAYS append at the very end (so it's below Phase table etc.) ---
+      // Issue snapshots LAST (below Phase and everything else)
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
       fetch(nc(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`), { cache:'no-store' })
         .then(resp => {
@@ -1923,7 +2018,6 @@ function ensureActiveBadgeUpdater(){
         })
         .then(buf => JSZip.loadAsync(buf))
         .then(zip => {
-          const content = document.getElementById('content');
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
@@ -2006,7 +2100,7 @@ function ensureActiveBadgeUpdater(){
           content.appendChild(title);
           content.appendChild(table);
         })
-        .catch(()=>{/* ZIP optional; ignore */});
+        .catch(()=>{/* optional ZIP; ignore */});
     })
     .catch(err => {
       console.error(err);
@@ -2057,6 +2151,7 @@ function ensureActiveBadgeUpdater(){
   </script>
 </body>
 </html>
+
 
 
 
