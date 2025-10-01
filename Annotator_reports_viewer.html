@@ -1842,7 +1842,7 @@ function loadFile(filename) {
   samplingCoords = [];
   mapRef = null;
 
-  // Fallbacks in case helpers weren’t added globally
+  // --- Fallback helpers (use your globals if present) ---
   const _scoreFromRate = (typeof scoreFromRate === 'function') ? scoreFromRate : function(rate){
     if (rate == null || !isFinite(rate)) return null;
     if (rate >= 100) return 1;
@@ -1875,38 +1875,37 @@ function loadFile(filename) {
           {n:9,  cls:'s9',  lbl:'Impressive',   thr:'≥ 1'},
           {n:10, cls:'s10', lbl:'Exceptional',  thr:'< 1 (incl. 0)'},
         ];
-        const boxes = rows.map(r =>
-          `<div class="score-box ${r.cls}${selectedScore===r.n?' sel':''}">
-             <strong>${r.n}</strong><small>${r.lbl}</small><span class="score-th">${r.thr}</span>
-           </div>`
-        ).join('');
-        return `<div class="score-legend">${boxes}</div>`;
+        var boxes = rows.map(function(r){
+          return '<div class="score-box ' + r.cls + (selectedScore===r.n?' sel':'') + '">' +
+                   '<strong>' + r.n + '</strong><small>' + r.lbl + '</small><span class="score-th">' + r.thr + '</span>' +
+                 '</div>';
+        }).join('');
+        return '<div class="score-legend">' + boxes + '</div>';
       };
 
-  // Average "Events per 1000 km" from KPI sheet (robust header match)
-  const getAvgEventsPer1k = (typeof extractAvgEventsPer1kFromSheet === 'function')
-    ? extractAvgEventsPer1kFromSheet
-    : function(sheet){
-        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-        if (!rows.length) return null;
-        const isTargetHeader = (h) => /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || ''));
-        const hdr = rows[0];
-        const colIdx = hdr.findIndex(isTargetHeader);
-        if (colIdx < 0) return null;
-        const toNum = (v) => {
-          if (v == null) return null;
-          const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
-          const n = parseFloat(s);
-          return Number.isFinite(n) ? n : null;
-        };
-        const vals = [];
-        for (let r = 1; r < rows.length; r++){
-          const n = toNum(rows[r][colIdx]);
-          if (n != null) vals.push(n);
-        }
-        if (!vals.length) return null;
-        return vals.reduce((a,b)=>a+b,0) / vals.length; // exact mean
-      };
+  // --- SUM of "Events per 1000 km" from KPI sheet (robust header match) ---
+  function extractSumEventsPer1kFromSheet(sheet){
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+    if (!rows.length) return null;
+    const isTargetHeader = (h) => /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || ''));
+    const hdr = rows[0];
+    const colIdx = hdr.findIndex(isTargetHeader);
+    if (colIdx < 0) return null;
+
+    const toNum = (v) => {
+      if (v == null) return null;
+      const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
+      const n = parseFloat(s);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    let sum = 0, have = false;
+    for (let r = 1; r < rows.length; r++){
+      const n = toNum(rows[r][colIdx]);
+      if (n != null){ sum += n; have = true; }
+    }
+    return have ? sum : null;
+  }
 
   const issueTableInfo = {
     sheetName: null,
@@ -1930,6 +1929,7 @@ function loadFile(filename) {
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
+  // Keep your current no-cache fetch per your request
   fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'no-store' })
     .then(res => res.arrayBuffer())
     .then(buffer => {
@@ -1945,7 +1945,7 @@ function loadFile(filename) {
         if (sheet.toLowerCase() === 'sampling') return;
 
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
-        content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
+        content.insertAdjacentHTML('beforeend', '<h2>' + sheet + '</h2>' + html);
 
         // First GPS-capable sheet → extract issues + headers
         if (!issueTableInfo.sheetName) {
@@ -1981,31 +1981,33 @@ function loadFile(filename) {
           }
         }
 
-// === KPI extras: average Events/1000km (right-aligned, 1 decimal) + scoring legend ===
-if (/kpi/i.test(sheet)) {
-  const kpiTable = document.getElementById(sheet);
-  if (kpiTable) {
-    // Pull the average text closer to the KPI table
-    kpiTable.style.marginBottom = '6px'; // <— THIS is the only layout change inside loadFile
+        // === KPI extras: SUM (1 decimal) + scoring legend highlighted by that SUM ===
+        if (/kpi/i.test(sheet)) {
+          const kpiTable = document.getElementById(sheet);
+          if (kpiTable) {
+            // tighten spacing so the metric sits closer to the KPI table
+            kpiTable.style.marginBottom = '6px';
 
-    //const avgRaw = getAvgEventsPer1k(wb.Sheets[sheet]);   // exact mean from KPI column
-    const sumRaw = getAvgEventsPer1k(wb.Sheets[sheet]); // now returns SUM
-    const inserts = [];
-
- if (sumRaw != null) {
-   const v1 = Math.round(sumRaw * 10) / 10; // 1 decimal
-   inserts.push(`<div class="kpi-avg">Sum <em>events per 1000 km</em>: <span class="v">${v1.toFixed(1)}</span></div>`);
-   const score = _scoreFromRate(v1);        // score based on SUM
-   inserts.push(_renderScoringLegend(score));
-   inserts.push(`<div class="score-legend-caption">Score: <strong>${score}</strong> — ${_SCORE_LABEL[score]} (based on sum ${v1.toFixed(1)} events/1000 km)</div>`);
- } else {
-      // Column not found → still show legend without selection
-      inserts.push(_renderScoringLegend(null));
-    }
-
-    kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
-  }
-}
+            const sumRaw = extractSumEventsPer1kFromSheet(wb.Sheets[sheet]); // exact SUM from KPI column
+            const inserts = [];
+            if (sumRaw != null) {
+              const sum1 = Math.round(sumRaw * 10) / 10; // 1 decimal for calc + display
+              inserts.push(
+                '<div class="kpi-avg">Sum <em>events per 1000 km</em>: <span class="v">' + sum1.toFixed(1) + '</span></div>'
+              );
+              const score = _scoreFromRate(sum1);
+              inserts.push(_renderScoringLegend(score));
+              inserts.push(
+                '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
+                  _SCORE_LABEL[score] + ' (based on sum ' + sum1.toFixed(1) + ' events/1000 km)</div>'
+              );
+            } else {
+              // Column not found — show legend without selection
+              inserts.push(_renderScoringLegend(null));
+            }
+            kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
+          }
+        }
 
         nonSamplingCount++;
         if (nonSamplingCount === 2 && !mapInserted) {
@@ -2036,12 +2038,12 @@ if (/kpi/i.test(sheet)) {
         const ph = document.getElementById('issue-map');
         const err = document.createElement('div');
         err.className = 'error';
-        err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
+        err.innerHTML = 'Need at least 1 issue or sampling point to plot a map (found ' + issueCoords.length + ' issues, ' + samplingCoords.length + ' sampling points).';
         ph.replaceWith(err);
       }
     })
     .then(() => {
-      // Issue snapshots LAST (below Phase and everything else)
+      // --- Issue snapshots LAST (below Phase and everything else) ---
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
       fetch(nc(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`), { cache:'no-store' })
         .then(resp => {
@@ -2089,7 +2091,7 @@ if (/kpi/i.test(sheet)) {
             tdMap.style.padding = '8px';
             tdMap.style.border = '1px solid #ccc';
             const miniDiv = document.createElement('div');
-            miniDiv.id = `snapshot-map-${cssSafeId(issueNo)}`;
+            miniDiv.id = 'snapshot-map-' + cssSafeId(issueNo);
             miniDiv.style.width = '150px';
             miniDiv.style.height = '150px';
             tdMap.appendChild(miniDiv);
@@ -2117,7 +2119,7 @@ if (/kpi/i.test(sheet)) {
 
               const miniMap = L.map(miniDiv, { attributionControl:false, zoomControl:false }).setView([info.lat, info.lon], 17);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
-              const badgeIcon = L.divIcon({ className: 'issue-label', html: `<div class="issue-badge">${issueNo}</div>`, iconSize: [24,24], iconAnchor: [12,12] });
+              const badgeIcon = L.divIcon({ className: 'issue-label', html: '<div class="issue-badge">' + issueNo + '</div>', iconSize: [24,24], iconAnchor: [12,12] });
               L.marker([info.lat, info.lon], { icon: badgeIcon }).addTo(miniMap);
               const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
               miniMap.fitBounds(circle.getBounds(), { padding:[4,4] });
@@ -2136,7 +2138,7 @@ if (/kpi/i.test(sheet)) {
     })
     .catch(err => {
       console.error(err);
-      document.getElementById('content').innerHTML += `<div class="error">Failed to load ${filename}: ${err}</div>`;
+      document.getElementById('content').innerHTML += '<div class="error">Failed to load ' + filename + ': ' + err + '</div>';
     });
 }
 
@@ -2183,6 +2185,7 @@ if (/kpi/i.test(sheet)) {
   </script>
 </body>
 </html>
+
 
 
 
