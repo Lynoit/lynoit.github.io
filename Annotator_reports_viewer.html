@@ -1883,28 +1883,46 @@ function loadFile(filename) {
         return '<div class="score-legend">' + boxes + '</div>';
       };
 
-  // --- SUM of "Events per 1000 km" from KPI sheet (robust header match) ---
-  function extractSumEventsPer1kFromSheet(sheet){
+  // --- Extract SUM and COUNT of numeric cells in "Events per 1000 km" column from KPI sheet ---
+  function extractSumAndCountEventsPer1kFromSheet(sheet){
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
     if (!rows.length) return null;
-    const isTargetHeader = (h) => /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || ''));
+    const isTargetHeader = function(h){ return /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || '')); };
     const hdr = rows[0];
     const colIdx = hdr.findIndex(isTargetHeader);
     if (colIdx < 0) return null;
 
-    const toNum = (v) => {
+    const toNum = function(v){
       if (v == null) return null;
       const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
       const n = parseFloat(s);
       return Number.isFinite(n) ? n : null;
     };
 
-    let sum = 0, have = false;
+    var sum = 0, count = 0;
     for (let r = 1; r < rows.length; r++){
       const n = toNum(rows[r][colIdx]);
-      if (n != null){ sum += n; have = true; }
+      if (n != null){ sum += n; count++; }
     }
-    return have ? sum : null;
+    return (count > 0) ? { sum, count } : null;
+  }
+
+  // --- Total KPIs from KPI_buttons.csv (count lines containing "redButton"), cached on window ---
+  function getTotalKpis(){
+    if (typeof window.__TOTAL_KPIS__ === 'number') {
+      return Promise.resolve(window.__TOTAL_KPIS__);
+    }
+    return fetch(nc(BASE_URL + '/KPI_buttons.csv?' + SAS_TOKEN), { cache:'no-store' })
+      .then(function(res){ return res.ok ? res.text() : ''; })
+      .then(function(txt){
+        if (!txt) return null;
+        // Count lines that contain "redButton" (case-sensitive as requested)
+        const lines = txt.split(/\r?\n/);
+        const count = lines.reduce(function(acc, line){ return acc + (line.indexOf('redButton') !== -1 ? 1 : 0); }, 0);
+        window.__TOTAL_KPIS__ = count;
+        return count;
+      })
+      .catch(function(){ return null; });
   }
 
   const issueTableInfo = {
@@ -1915,7 +1933,7 @@ function loadFile(filename) {
 
   // Download links
   const xlsxLink = document.createElement('a');
-  xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  xlsxLink.href = BASE_URL + '/' + filename + '?' + SAS_TOKEN;
   xlsxLink.textContent = 'Download XLSX';
   xlsxLink.className = 'download-button';
   xlsxLink.setAttribute('download', filename);
@@ -1923,25 +1941,28 @@ function loadFile(filename) {
 
   const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
   const pdfLink = document.createElement('a');
-  pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
+  pdfLink.href = BASE_URL + '/' + pdfFilename + '?' + SAS_TOKEN;
   pdfLink.textContent = 'Download PDF';
   pdfLink.className = 'download-button';
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
-  // Keep your current no-cache fetch per your request
-  fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'no-store' })
-    .then(res => res.arrayBuffer())
-    .then(buffer => {
+  // Keep current no-cache behavior
+  fetch(nc(BASE_URL + '/' + filename + '?' + SAS_TOKEN), { cache:'no-store' })
+    .then(function(res){ return res.arrayBuffer(); })
+    .then(function(buffer){
       const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
 
-      const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+      const samplingName = wb.SheetNames.find(function(n){ return n.toLowerCase() === 'sampling'; });
       if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
 
       let nonSamplingCount = 0;
       let mapInserted = false;
 
-      wb.SheetNames.forEach(sheet => {
+      // Pre-fetch total KPIs once for this render (promise)
+      const totalKpisPromise = getTotalKpis();
+
+      wb.SheetNames.forEach(function(sheet){
         if (sheet.toLowerCase() === 'sampling') return;
 
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
@@ -1952,17 +1973,17 @@ function loadFile(filename) {
           const tbl = document.getElementById(sheet);
           const rows = Array.from(tbl.querySelectorAll('tr'));
           if (rows.length > 1) {
-            const hdrs = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.textContent.trim().toLowerCase());
-            const latIdx = hdrs.findIndex(h => h.includes('lat'));
-            const lonIdx = hdrs.findIndex(h => h.includes('lon'));
+            const hdrs = Array.from(rows[0].querySelectorAll('th,td')).map(function(c){ return c.textContent.trim().toLowerCase(); });
+            const latIdx = hdrs.findIndex(function(h){ return h.includes('lat'); });
+            const lonIdx = hdrs.findIndex(function(h){ return h.includes('lon'); });
             if (latIdx >= 0 && lonIdx >= 0) {
               issueTableInfo.sheetName = sheet;
               const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
-              issueTableInfo.headerNames.col1 = rawHdrs[0]?.textContent?.trim() || '';
-              issueTableInfo.headerNames.col2 = rawHdrs[1]?.textContent?.trim() || '';
+              issueTableInfo.headerNames.col1 = (rawHdrs[0]?.textContent || '').trim();
+              issueTableInfo.headerNames.col2 = (rawHdrs[1]?.textContent || '').trim();
               issueTableInfo.headerNames.col3 = (rawHdrs[12]?.textContent || '').trim();
 
-              rows.slice(1).forEach(row => {
+              rows.slice(1).forEach(function(row){
                 const cells = Array.from(row.querySelectorAll('td'));
                 const issueNo = (cells[0]?.textContent || '').trim();
                 const col1 = issueNo;
@@ -1971,41 +1992,59 @@ function loadFile(filename) {
                 const lat = parseFloat((cells[latIdx]?.textContent || '').trim());
                 const lon = parseFloat((cells[lonIdx]?.textContent || '').trim());
                 if (!isNaN(lat) && !isNaN(lon)) {
-                  issueCoords.push({ issueNo, lat, lon });
+                  issueCoords.push({ issueNo: issueNo, lat: lat, lon: lon });
                 }
                 if (issueNo) {
-                  issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
+                  issueTableInfo.issueInfo[issueNo] = { issueNo: issueNo, col1: col1, col2: col2, col3: col3, lat: lat, lon: lon };
                 }
               });
             }
           }
         }
 
-        // === KPI extras: SUM (1 decimal) + scoring legend highlighted by that SUM ===
+        // === KPI extras: AVERAGE = (SUM of column) / (TOTAL KPIs from KPI_buttons.csv) ===
         if (/kpi/i.test(sheet)) {
           const kpiTable = document.getElementById(sheet);
           if (kpiTable) {
             // tighten spacing so the metric sits closer to the KPI table
             kpiTable.style.marginBottom = '6px';
 
-            const sumRaw = extractSumEventsPer1kFromSheet(wb.Sheets[sheet]); // exact SUM from KPI column
-            const inserts = [];
-            if (sumRaw != null) {
-              const sum1 = Math.round(sumRaw * 10) / 10; // 1 decimal for calc + display
-              inserts.push(
-                '<div class="kpi-avg">Sum <em>events per 1000 km</em>: <span class="v">' + sum1.toFixed(1) + '</span></div>'
-              );
-              const score = _scoreFromRate(sum1);
-              inserts.push(_renderScoringLegend(score));
-              inserts.push(
-                '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
-                  _SCORE_LABEL[score] + ' (based on sum ' + sum1.toFixed(1) + ' events/1000 km)</div>'
-              );
-            } else {
-              // Column not found — show legend without selection
-              inserts.push(_renderScoringLegend(null));
-            }
-            kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
+            // Do KPI calc once total KPIs are known
+            totalKpisPromise.then(function(totalKpis){
+              const res = extractSumAndCountEventsPer1kFromSheet(wb.Sheets[sheet]);
+              const inserts = [];
+
+              if (res) {
+                const sum = res.sum;
+                // divide by totalKpis (from KPI_buttons.csv). If not available, fall back to per-sheet average (sum / count).
+                let avg = null;
+                if (typeof totalKpis === 'number' && totalKpis > 0) {
+                  avg = sum / totalKpis;
+                } else if (res.count > 0) {
+                  avg = sum / res.count; // graceful fallback
+                }
+
+                if (avg != null) {
+                  const avg1 = Math.round(avg * 10) / 10; // 1 decimal for calc + display
+                  inserts.push(
+                    '<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">' + avg1.toFixed(1) + '</span></div>'
+                  );
+                  const score = _scoreFromRate(avg1);
+                  inserts.push(_renderScoringLegend(score));
+                  inserts.push(
+                    '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
+                      _SCORE_LABEL[score] + ' (based on avg ' + avg1.toFixed(1) + ' events/1000 km)</div>'
+                  );
+                } else {
+                  inserts.push(_renderScoringLegend(null));
+                }
+              } else {
+                // Column not found — show legend without selection
+                inserts.push(_renderScoringLegend(null));
+              }
+
+              if (inserts.length) kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
+            });
           }
         }
 
@@ -2016,13 +2055,13 @@ function loadFile(filename) {
           mapDiv.style.width = '100%';
           mapDiv.style.height = '400px';
           mapDiv.style.margin = '20px 0';
-          mapDiv.style.border = '1px solid #aaa';
+          mapDiv.style.border = '1px solid ' + '#aaa';
           content.appendChild(mapDiv);
           mapInserted = true;
         }
       });
     })
-    .then(() => {
+    .then(function(){
       if (!document.getElementById('issue-map')) {
         const mapDiv = document.createElement('div');
         mapDiv.id = 'issue-map';
@@ -2042,16 +2081,16 @@ function loadFile(filename) {
         ph.replaceWith(err);
       }
     })
-    .then(() => {
+    .then(function(){
       // --- Issue snapshots LAST (below Phase and everything else) ---
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
-      fetch(nc(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`), { cache:'no-store' })
-        .then(resp => {
+      fetch(nc(BASE_URL + '/' + zipFilename + '?' + SAS_TOKEN), { cache:'no-store' })
+        .then(function(resp){
           if (!resp.ok) return Promise.reject('ZIP not found');
           return resp.arrayBuffer();
         })
-        .then(buf => JSZip.loadAsync(buf))
-        .then(zip => {
+        .then(function(buf){ return JSZip.loadAsync(buf); })
+        .then(function(zip){
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
@@ -2062,7 +2101,7 @@ function loadFile(filename) {
           table.style.borderCollapse = 'collapse';
 
           const hdrRow = document.createElement('tr');
-          ['col1','col2','col3','Location','Snapshot'].forEach(txt => {
+          ['col1','col2','col3','Location','Snapshot'].forEach(function(txt){
             const th = document.createElement('th');
             th.textContent = (txt.startsWith('col') ? ( {col1:'',col2:'',col3:''}[txt] = 1, issueTableInfo.headerNames[txt] ) : txt) || txt;
             th.style.backgroundColor = '#f5f5f5';
@@ -2072,14 +2111,14 @@ function loadFile(filename) {
           });
           table.appendChild(hdrRow);
 
-          zip.forEach((path, entry) => {
+          zip.forEach(function(path, entry){
             if (entry.dir || !/\.(jpe?g|png|gif)$/i.test(path)) return;
             const issueNo = path.replace(/\.[^/.]+$/, '');
             const info = issueTableInfo.issueInfo[issueNo];
             if (!info) return;
 
             const row = document.createElement('tr');
-            [info.col1, info.col2, info.col3].forEach(val => {
+            [info.col1, info.col2, info.col3].forEach(function(val){
               const td = document.createElement('td');
               td.textContent = val;
               td.style.padding = '8px';
@@ -2101,8 +2140,8 @@ function loadFile(filename) {
             tdImg.style.padding = '8px';
             tdImg.style.border = '1px solid #ccc';
 
-            entry.async('blob').then(rawBlob => {
-              let mime = 'application/octet-stream';
+            entry.async('blob').then(function(rawBlob){
+              var mime = 'application/octet-stream';
               if (/\.(jpe?g)$/i.test(path)) mime = 'image/jpeg';
               else if (/\.png$/i.test(path)) mime = 'image/png';
               else if (/\.gif$/i.test(path)) mime = 'image/gif';
@@ -2134,9 +2173,9 @@ function loadFile(filename) {
           content.appendChild(title);
           content.appendChild(table);
         })
-        .catch(()=>{/* optional ZIP; ignore */});
+        .catch(function(){ /* optional ZIP; ignore */ });
     })
-    .catch(err => {
+    .catch(function(err){
       console.error(err);
       document.getElementById('content').innerHTML += '<div class="error">Failed to load ' + filename + ': ' + err + '</div>';
     });
@@ -2185,6 +2224,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
