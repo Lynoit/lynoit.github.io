@@ -1875,16 +1875,15 @@ function loadFile(filename) {
           {n:9,  cls:'s9',  lbl:'Impressive',   thr:'≥ 1'},
           {n:10, cls:'s10', lbl:'Exceptional',  thr:'< 1 (incl. 0)'},
         ];
-        var boxes = rows.map(function(r){
+        return '<div class="score-legend">' + rows.map(function(r){
           return '<div class="score-box ' + r.cls + (selectedScore===r.n?' sel':'') + '">' +
                    '<strong>' + r.n + '</strong><small>' + r.lbl + '</small><span class="score-th">' + r.thr + '</span>' +
                  '</div>';
-        }).join('');
-        return '<div class="score-legend">' + boxes + '</div>';
+        }).join('') + '</div>';
       };
 
-  // --- Extract SUM and COUNT of numeric cells in "Events per 1000 km" column from KPI sheet ---
-  function extractSumAndCountEventsPer1kFromSheet(sheet){
+  // --- Extract SUM of numeric cells in "Events per 1000 km" column from KPI sheet ---
+  function extractSumEventsPer1kFromSheet(sheet){
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
     if (!rows.length) return null;
     const isTargetHeader = function(h){ return /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || '')); };
@@ -1899,12 +1898,12 @@ function loadFile(filename) {
       return Number.isFinite(n) ? n : null;
     };
 
-    var sum = 0, count = 0;
+    var sum = 0, have = false;
     for (let r = 1; r < rows.length; r++){
       const n = toNum(rows[r][colIdx]);
-      if (n != null){ sum += n; count++; }
+      if (n != null){ sum += n; have = true; }
     }
-    return (count > 0) ? { sum, count } : null;
+    return have ? sum : null;
   }
 
   // --- Total KPIs from KPI_buttons.csv (count lines containing "redButton"), cached on window ---
@@ -1916,7 +1915,6 @@ function loadFile(filename) {
       .then(function(res){ return res.ok ? res.text() : ''; })
       .then(function(txt){
         if (!txt) return null;
-        // Count lines that contain "redButton" (case-sensitive as requested)
         const lines = txt.split(/\r?\n/);
         const count = lines.reduce(function(acc, line){ return acc + (line.indexOf('redButton') !== -1 ? 1 : 0); }, 0);
         window.__TOTAL_KPIS__ = count;
@@ -1947,7 +1945,7 @@ function loadFile(filename) {
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
-  // Keep current no-cache behavior
+  // Keep your current no-cache fetch
   fetch(nc(BASE_URL + '/' + filename + '?' + SAS_TOKEN), { cache:'no-store' })
     .then(function(res){ return res.arrayBuffer(); })
     .then(function(buffer){
@@ -2002,47 +2000,33 @@ function loadFile(filename) {
           }
         }
 
-        // === KPI extras: AVERAGE = (SUM of column) / (TOTAL KPIs from KPI_buttons.csv) ===
+        // === KPI extras: AVERAGE = SUM(column) / TOTAL_KPIS(from KPI_buttons.csv) ===
         if (/kpi/i.test(sheet)) {
           const kpiTable = document.getElementById(sheet);
           if (kpiTable) {
             // tighten spacing so the metric sits closer to the KPI table
             kpiTable.style.marginBottom = '6px';
 
-            // Do KPI calc once total KPIs are known
             totalKpisPromise.then(function(totalKpis){
-              const res = extractSumAndCountEventsPer1kFromSheet(wb.Sheets[sheet]);
               const inserts = [];
-
-              if (res) {
-                const sum = res.sum;
-                // divide by totalKpis (from KPI_buttons.csv). If not available, fall back to per-sheet average (sum / count).
-                let avg = null;
-                if (typeof totalKpis === 'number' && totalKpis > 0) {
-                  avg = sum / totalKpis;
-                } else if (res.count > 0) {
-                  avg = sum / res.count; // graceful fallback
-                }
-
-                if (avg != null) {
-                  const avg1 = Math.round(avg * 10) / 10; // 1 decimal for calc + display
-                  inserts.push(
-                    '<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">' + avg1.toFixed(1) + '</span></div>'
-                  );
-                  const score = _scoreFromRate(avg1);
-                  inserts.push(_renderScoringLegend(score));
-                  inserts.push(
-                    '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
-                      _SCORE_LABEL[score] + ' (based on avg ' + avg1.toFixed(1) + ' events/1000 km)</div>'
-                  );
-                } else {
-                  inserts.push(_renderScoringLegend(null));
-                }
+              const sum = extractSumEventsPer1kFromSheet(wb.Sheets[sheet]); // sum of KPI table column
+              if (sum != null && typeof totalKpis === 'number' && totalKpis > 0) {
+                const avg = sum / totalKpis;
+                const avg1 = Math.round(avg * 10) / 10; // 1 decimal for calc + display
+                inserts.push(
+                  '<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">' + avg1.toFixed(1) + '</span></div>'
+                );
+                const score = _scoreFromRate(avg1);
+                inserts.push(_renderScoringLegend(score));
+                inserts.push(
+                  '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
+                    _SCORE_LABEL[score] + ' (sum ÷ total KPIs = ' + sum.toFixed(1) + ' ÷ ' + totalKpis + ')</div>'
+                );
               } else {
-                // Column not found — show legend without selection
+                // No KPI_buttons.csv found or zero redButton lines → show legend without selection
                 inserts.push(_renderScoringLegend(null));
+                inserts.push('<div class="score-legend-caption">Total KPIs unavailable — cannot compute average.</div>');
               }
-
               if (inserts.length) kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
             });
           }
@@ -2055,7 +2039,7 @@ function loadFile(filename) {
           mapDiv.style.width = '100%';
           mapDiv.style.height = '400px';
           mapDiv.style.margin = '20px 0';
-          mapDiv.style.border = '1px solid ' + '#aaa';
+          mapDiv.style.border = '1px solid #aaa';
           content.appendChild(mapDiv);
           mapInserted = true;
         }
@@ -2224,6 +2208,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
