@@ -1906,22 +1906,36 @@ function loadFile(filename) {
     return have ? sum : null;
   }
 
-  // --- Total KPIs from KPI_buttons.csv (count lines containing "redButton"), cached on window ---
-  function getTotalKpis(){
-    if (typeof window.__TOTAL_KPIS__ === 'number') {
-      return Promise.resolve(window.__TOTAL_KPIS__);
-    }
-    return fetch(nc(BASE_URL + '/KPI_buttons.csv?' + SAS_TOKEN), { cache:'no-store' })
-      .then(function(res){ return res.ok ? res.text() : ''; })
-      .then(function(txt){
-        if (!txt) return null;
-        const lines = txt.split(/\r?\n/);
-        const count = lines.reduce(function(acc, line){ return acc + (line.indexOf('redButton') !== -1 ? 1 : 0); }, 0);
-        window.__TOTAL_KPIS__ = count;
-        return count;
-      })
-      .catch(function(){ return null; });
+// Count total KPIs from KPI_buttons.csv:
+// - First try the file next to the app (relative path)
+// - If that fails, fall back to the Azure container path
+// Returns a Promise<number|null>. Caches the result in window.__TOTAL_KPIS__.
+function getTotalKpis(){
+  if (typeof window.__TOTAL_KPIS__ === 'number') {
+    return Promise.resolve(window.__TOTAL_KPIS__);
   }
+
+  const relUrl   = 'KPI_buttons.csv';
+  const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
+
+  const fetchAndCount = (url) =>
+    fetch(nc(url), { cache: 'no-store' })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then(txt => {
+        const lines = txt.split(/\r?\n/);
+        const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
+        window.__TOTAL_KPIS__ = count;  // memoize for this session
+        return count;
+      });
+
+  // Try relative file first; if it 404s, try Azure; otherwise return null
+  return fetchAndCount(relUrl)
+    .catch(() => fetchAndCount(azureUrl))
+    .catch(() => null);
+}
 
   const issueTableInfo = {
     sheetName: null,
@@ -2208,6 +2222,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
