@@ -148,6 +148,10 @@ const WMO_TEXT = {
   95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
 };
 
+// === NEW: for averaging by total number of KPIs (from KPI_buttons.csv) ===
+const KPI_BUTTONS_CSV = 'KPI_buttons.csv';
+let TOTAL_KPI_COUNT = null;  // will be filled by reading KPI_buttons.csv
+
 /* Unified font sizes for score-boxes */
 const SCORE_FONTS = { number:13, label:11, range:10 };
 
@@ -364,6 +368,21 @@ async function loadReleaseNotesManifest(){
     return new Set(list.map(s => String(s).toLowerCase()));
   }catch{ return null; }
 }
+
+// === NEW: read KPI_buttons.csv and count lines that contain "redButton" ===
+async function loadTotalKpiCount(){
+  try{
+    const res = await fetch(KPI_BUTTONS_CSV + '?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    // Count *lines* that contain "redButton" (case-sensitive per your spec)
+    return text.replace(/\r/g,'').split('\n').filter(l => l.includes('redButton')).length;
+  }catch(e){
+    console.warn('Could not load KPI_buttons.csv to count KPIs:', e);
+    return null; // will fallback to "measured count" if null
+  }
+}
+  
 async function loadReleaseNotesFromFiles(swCols, manifestSet){
   if (RN_FETCH_MODE === 'off') return {};
   const out = {};
@@ -483,11 +502,23 @@ function renderSummary(container, parsed){
 
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
-    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v != null && !Number.isNaN(v));
-    const avg = vals.length ? d3.mean(vals.map(v => Math.min(v, 1000))) : null;
+
+    // Collect measured values (per KPI) for this software
+    const vals = parsed.entries
+      .map(e => e.values[swLabel])
+      .filter(v => v != null && !Number.isNaN(v));
+
+    // Sum measured values (cap at 1000 like before)
+    const sumVals = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
+
+    // Divide by TOTAL_KPI_COUNT when available; otherwise by measured count
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : vals.length;
+
+    const avg = denom ? (sumVals / denom) : null;
     const score = avg == null ? null : scoreFromAvg(avg, T);
     const note = (parsed.releaseNotes?.[swLabel] || '').trim();
     const wx = (sw.date && parsed.weatherByDate) ? parsed.weatherByDate[sw.date] : null;
+
     return {
       sw: swLabel,
       date: sw.date,
@@ -501,6 +532,7 @@ function renderSummary(container, parsed){
 
   const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
+  // Sort: best score first; then by lowest avg
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
     if (sa !== sb) return sb - sa;
@@ -517,12 +549,13 @@ function renderSummary(container, parsed){
   const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
+  // Table
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
   theadRow.append('th').attr('class','col-date').text('Test date');
   theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg, 10–14)');
-  theadRow.append('th').attr('class','col-avg').text('Average events per 1000 km');
+  theadRow.append('th').attr('class','col-avg').text('Average per 1000 km (÷ total KPIs)');
   theadRow.append('th').attr('class','col-score').text('Score');
   theadRow.append('th').attr('class','col-rating').text('Rating');
   if (hasAnyNotes) theadRow.append('th').attr('class','col-note').text('Release Note');
@@ -559,7 +592,7 @@ function renderSummary(container, parsed){
 
   // Bars
   if (chartData.length){
-    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average events per 1000 km (bar color = score)');
+    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average per 1000 km (bar color = score)');
 
     const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
@@ -1095,7 +1128,9 @@ function renderSoftwareCards(container, parsed){
     // ===== Scoring band (SVG below the table) =====
     const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
     const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
-    const avgEvents = valuesForAvg.length ? d3.mean(valuesForAvg.map(v => Math.min(v, 1000))) : null;
+const sumVals = valuesForAvg.length ? d3.sum(valuesForAvg.map(v => Math.min(v, 1000))) : 0;
+const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : valuesForAvg.length;
+const avgEvents = denom ? (sumVals / denom) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
     const barMargin = 20, boxH2 = 42;
@@ -1161,6 +1196,7 @@ async function loadCsvAndRender(){
     const text = await res.text();
     LAST_RAW = text;
 
+    // Parse the main KPI table
     let parsed = parseTable(text);
 
     // Release notes (files / optional manifest)
@@ -1171,7 +1207,15 @@ async function loadCsvAndRender(){
     const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
     const weatherByDate = await fetchWeatherForDates(dates);
 
-    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, weatherByDate };
+    // === NEW: load total KPI count from KPI_buttons.csv (lines containing "redButton") ===
+    TOTAL_KPI_COUNT = await loadTotalKpiCount();
+
+    // Merge everything into the parsed object
+    parsed = { 
+      ...parsed, 
+      releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, 
+      weatherByDate 
+    };
 
     LAST_PARSED = parsed;
     renderCharts(LAST_PARSED);
