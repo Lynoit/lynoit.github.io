@@ -650,8 +650,7 @@ function renderSummary(container, parsed){
     g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
   }
 
-  // ===== NEW: CC-only vertical bars by test date =====
-  // Identify which labels are CC (based on sw.base)
+  // ===== CC-only vertical bars by test date (+ trend line) =====
   const ccLabelSet = new Set((parsed.software || [])
     .filter(sw => /^CC\b/i.test(sw.base))
     .map(sw => sw.label));
@@ -663,9 +662,8 @@ function renderSummary(container, parsed){
       .style('margin','8px 0 4px')
       .text('CC — Average per 1000 km by test date (bar color = score)');
 
-    // Group CC rows by date (to place multiple CC builds that share a date side-by-side)
     const byDate = d3.group(ccRows, d => d.date);
-    const dates = Array.from(byDate.keys()).sort();                  // chronological
+    const dates = Array.from(byDate.keys()).sort();   // chronological
     const groups = dates.map(d => byDate.get(d));
     const maxGroup = Math.max(...groups.map(g => g.length));
 
@@ -691,12 +689,11 @@ function renderSummary(container, parsed){
       .paddingInner(0.2)
       .paddingOuter(0.05);
 
-    const x1 = d3.scaleBand()                           // inner band for multiple CC builds per date
+    const x1 = d3.scaleBand()
       .domain(d3.range(maxGroup))
       .range([0, x0.bandwidth()])
       .padding(0.12);
 
-    // Flatten data with index within its date group
     const flat = [];
     dates.forEach(d => {
       const arr = byDate.get(d);
@@ -728,54 +725,51 @@ function renderSummary(container, parsed){
       .attr('fill-opacity', 0.9)
       .append('title')
       .text(d => `${d._date} — ${d.sw}\nScore ${d.score}: ${d.text}\n${d.avg.toFixed(1)} /1000km`);
+
+    // --- Trend line over date means (OLS) ---
+    const datePoints = dates.map(d => {
+      const arr = byDate.get(d);
+      const m = d3.mean(arr, r => Math.min(1000, r.avg));
+      return { dateStr: d, date: new Date(d), value: m };
+    }).filter(p => p.value != null);
+
+    if (datePoints.length >= 2){
+      const xTime = d3.scaleTime()
+        .domain(d3.extent(datePoints, p => p.date))
+        .range([leftPadV, cw2 - rightPadV]);
+
+      const xs = datePoints.map(p => p.date.getTime());
+      const ys = datePoints.map(p => p.value);
+      const reg = linearRegression(xs, ys);
+
+      if (reg){
+        const [t0, t1] = xTime.domain();
+        const trendData = [
+          { date: t0, y: reg.a + reg.b * t0.getTime() },
+          { date: t1, y: reg.a + reg.b * t1.getTime() }
+        ];
+
+        g2.append('path')
+          .datum(trendData)
+          .attr('fill','none')
+          .attr('stroke','#222')
+          .attr('stroke-width',2)
+          .attr('stroke-dasharray','6,4')
+          .attr('d', d3.line()
+            .x(d => xTime(d.date))
+            .y(d => y(d.y))
+          );
+
+        g2.append('text')
+          .attr('x', xTime(t1) - 6)
+          .attr('y', y(trendData[1].y) - 6)
+          .attr('text-anchor','end')
+          .attr('font-size', 11)
+          .attr('fill', '#333')
+          .text('Trend');
+      }
+    }
   }
-
-  // --- NEW: OLS trend line over date means ---
-const datePoints = dates.map(d => {
-  const arr = byDate.get(d);
-  const m = d3.mean(arr, r => Math.min(1000, r.avg));
-  return { dateStr: d, date: new Date(d), value: m };
-}).filter(p => p.value != null);
-
-if (datePoints.length >= 2){
-  // time scale aligned to the same left/right padding as the bars
-  const xTime = d3.scaleTime()
-    .domain(d3.extent(datePoints, p => p.date))
-    .range([leftPadV, cw2 - rightPadV]);
-
-  // linear regression on (time,value)
-  const xs = datePoints.map(p => p.date.getTime());
-  const ys = datePoints.map(p => p.value);
-  const reg = linearRegression(xs, ys);
-
-  if (reg){
-    const [t0, t1] = xTime.domain();
-    const trendData = [
-      { date: t0, y: reg.a + reg.b * t0.getTime() },
-      { date: t1, y: reg.a + reg.b * t1.getTime() }
-    ];
-
-    g2.append('path')
-      .datum(trendData)
-      .attr('fill','none')
-      .attr('stroke','#222')
-      .attr('stroke-width',2)
-      .attr('stroke-dasharray','6,4')
-      .attr('d', d3.line()
-        .x(d => xTime(d.date))
-        .y(d => y(d.y))
-      );
-
-    // optional tiny label
-    g2.append('text')
-      .attr('x', xTime(t1) - 6)
-      .attr('y', y(trendData[1].y) - 6)
-      .attr('text-anchor','end')
-      .attr('font-size', 11)
-      .attr('fill', '#333')
-      .text('Trend');
-  }
-}
 
   // ===== Scoring legend =====
   const ranges = scoreRangeLabels(getThresholds());
