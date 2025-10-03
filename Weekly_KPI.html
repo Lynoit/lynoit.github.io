@@ -315,6 +315,22 @@ function parseTable(text){
   return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
 }
 
+//  simple linear regression y = a + b*x ===
+function linearRegression(xs, ys){
+  const n = xs.length;
+  if (n < 2) return null;
+  const meanX = d3.mean(xs), meanY = d3.mean(ys);
+  let num = 0, den = 0;
+  for (let i=0;i<n;i++){
+    const dx = xs[i]-meanX;
+    num += dx * (ys[i]-meanY);
+    den += dx * dx;
+  }
+  const b = den ? num/den : 0;               // slope
+  const a = meanY - b*meanX;                 // intercept
+  return { a, b };
+}
+  
 /* ==================== Modal ==================== */
 function openReleaseNoteModal(title, noteText){
   const backdrop = document.getElementById('modalBackdrop');
@@ -713,6 +729,53 @@ function renderSummary(container, parsed){
       .append('title')
       .text(d => `${d._date} — ${d.sw}\nScore ${d.score}: ${d.text}\n${d.avg.toFixed(1)} /1000km`);
   }
+
+  // --- NEW: OLS trend line over date means ---
+const datePoints = dates.map(d => {
+  const arr = byDate.get(d);
+  const m = d3.mean(arr, r => Math.min(1000, r.avg));
+  return { dateStr: d, date: new Date(d), value: m };
+}).filter(p => p.value != null);
+
+if (datePoints.length >= 2){
+  // time scale aligned to the same left/right padding as the bars
+  const xTime = d3.scaleTime()
+    .domain(d3.extent(datePoints, p => p.date))
+    .range([leftPadV, cw2 - rightPadV]);
+
+  // linear regression on (time,value)
+  const xs = datePoints.map(p => p.date.getTime());
+  const ys = datePoints.map(p => p.value);
+  const reg = linearRegression(xs, ys);
+
+  if (reg){
+    const [t0, t1] = xTime.domain();
+    const trendData = [
+      { date: t0, y: reg.a + reg.b * t0.getTime() },
+      { date: t1, y: reg.a + reg.b * t1.getTime() }
+    ];
+
+    g2.append('path')
+      .datum(trendData)
+      .attr('fill','none')
+      .attr('stroke','#222')
+      .attr('stroke-width',2)
+      .attr('stroke-dasharray','6,4')
+      .attr('d', d3.line()
+        .x(d => xTime(d.date))
+        .y(d => y(d.y))
+      );
+
+    // optional tiny label
+    g2.append('text')
+      .attr('x', xTime(t1) - 6)
+      .attr('y', y(trendData[1].y) - 6)
+      .attr('text-anchor','end')
+      .attr('font-size', 11)
+      .attr('fill', '#333')
+      .text('Trend');
+  }
+}
 
   // ===== Scoring legend =====
   const ranges = scoreRangeLabels(getThresholds());
