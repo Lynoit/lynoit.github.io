@@ -314,22 +314,6 @@ function parseTable(text){
 
   return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
 }
-
-//  simple linear regression y = a + b*x ===
-function linearRegression(xs, ys){
-  const n = xs.length;
-  if (n < 2) return null;
-  const meanX = d3.mean(xs), meanY = d3.mean(ys);
-  let num = 0, den = 0;
-  for (let i=0;i<n;i++){
-    const dx = xs[i]-meanX;
-    num += dx * (ys[i]-meanY);
-    den += dx * dx;
-  }
-  const b = den ? num/den : 0;               // slope
-  const a = meanY - b*meanX;                 // intercept
-  return { a, b };
-}
   
 /* ==================== Modal ==================== */
 function openReleaseNoteModal(title, noteText){
@@ -545,6 +529,7 @@ function renderSummary(container, parsed){
 
   const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
+  // Sort: best score first; then by lowest avg
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
     if (sa !== sb) return sb - sa;
@@ -558,7 +543,9 @@ function renderSummary(container, parsed){
   if (!rows.length) return;
 
   const card = container.append('div').attr('class', 'chart-card summary-card');
-  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL)
+    ? 'Summary Weekly KPI — External (whitelisted)'
+    : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
   // ===== Summary table =====
@@ -604,14 +591,17 @@ function renderSummary(container, parsed){
 
   // ===== Horizontal bars (all softwares) =====
   if (chartData.length){
-    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average per 1000 km by score (bar color = score)');
+    card.append('div').attr('class','small').style('margin','8px 0 4px')
+      .text('Average per 1000 km (bar color = score)');
 
     const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
     const measureTextWidth = (texts, fontSize=12, fontWeight=400)=>{
-      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+      const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0)
+        .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
       let max = 0;
       texts.forEach(t=>{
-        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node();
+        const node = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight)
+          .text(t==null ? '' : String(t)).node();
         max = Math.max(max, node.getComputedTextLength());
       });
       tmp.remove(); return max;
@@ -623,7 +613,11 @@ function renderSummary(container, parsed){
     const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, labelW + 14));
     const rightPad = 16, topPad = 8, barH = 22, gap = 6;
 
-    const svg = card.append('svg').style('display','block').style('margin','0 auto 6px').attr('width', cw).attr('height', topPad + chartData.length * (barH + gap) + 34);
+    const svg = card.append('svg')
+      .style('display','block').style('margin','0 auto 6px')
+      .attr('width', cw)
+      .attr('height', topPad + chartData.length * (barH + gap) + 34);
+
     const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
 
     const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
@@ -650,7 +644,7 @@ function renderSummary(container, parsed){
     g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
   }
 
-  // ===== CC-only vertical bars by test date (+ trend line) =====
+  // ===== CC-only vertical bars by test date (+ running-mean trend line) =====
   const ccLabelSet = new Set((parsed.software || [])
     .filter(sw => /^CC\b/i.test(sw.base))
     .map(sw => sw.label));
@@ -694,6 +688,7 @@ function renderSummary(container, parsed){
       .range([0, x0.bandwidth()])
       .padding(0.12);
 
+    // Flatten data for drawing
     const flat = [];
     dates.forEach(d => {
       const arr = byDate.get(d);
@@ -726,48 +721,47 @@ function renderSummary(container, parsed){
       .append('title')
       .text(d => `${d._date} — ${d.sw}\nScore ${d.score}: ${d.text}\n${d.avg.toFixed(1)} /1000km`);
 
-    // --- Trend line over date means (OLS) ---
-    const datePoints = dates.map(d => {
+    // --- Running mean trend line (mean of historical date means) ---
+    const dateMeans = dates.map(d => {
       const arr = byDate.get(d);
       const m = d3.mean(arr, r => Math.min(1000, r.avg));
-      return { dateStr: d, date: new Date(d), value: m };
-    }).filter(p => p.value != null);
+      return { dateStr: d, date: new Date(d), mean: m };
+    }).filter(p => p.mean != null);
 
-    if (datePoints.length >= 2){
+    if (dateMeans.length >= 2){
+      // cumulative mean over time
+      let runSum = 0;
+      const running = dateMeans.map((p, i) => {
+        runSum += p.mean;
+        return { date: p.date, y: runSum / (i + 1) };
+      });
+
+      // time scale aligned to same left/right padding as bars
       const xTime = d3.scaleTime()
-        .domain(d3.extent(datePoints, p => p.date))
+        .domain(d3.extent(running, d => d.date))
         .range([leftPadV, cw2 - rightPadV]);
 
-      const xs = datePoints.map(p => p.date.getTime());
-      const ys = datePoints.map(p => p.value);
-      const reg = linearRegression(xs, ys);
+      // draw the line
+      g2.append('path')
+        .datum(running)
+        .attr('fill','none')
+        .attr('stroke','#222')
+        .attr('stroke-width',2)
+        .attr('stroke-dasharray','6,4')
+        .attr('d', d3.line()
+          .x(d => xTime(d.date))
+          .y(d => y(d.y))
+        );
 
-      if (reg){
-        const [t0, t1] = xTime.domain();
-        const trendData = [
-          { date: t0, y: reg.a + reg.b * t0.getTime() },
-          { date: t1, y: reg.a + reg.b * t1.getTime() }
-        ];
-
-        g2.append('path')
-          .datum(trendData)
-          .attr('fill','none')
-          .attr('stroke','#222')
-          .attr('stroke-width',2)
-          .attr('stroke-dasharray','6,4')
-          .attr('d', d3.line()
-            .x(d => xTime(d.date))
-            .y(d => y(d.y))
-          );
-
-        g2.append('text')
-          .attr('x', xTime(t1) - 6)
-          .attr('y', y(trendData[1].y) - 6)
-          .attr('text-anchor','end')
-          .attr('font-size', 11)
-          .attr('fill', '#333')
-          .text('Trend');
-      }
+      // optional small endpoint label
+      const last = running[running.length - 1];
+      g2.append('text')
+        .attr('x', xTime(last.date) - 6)
+        .attr('y', y(last.y) - 6)
+        .attr('text-anchor','end')
+        .attr('font-size', 11)
+        .attr('fill', '#333')
+        .text('Running mean');
     }
   }
 
