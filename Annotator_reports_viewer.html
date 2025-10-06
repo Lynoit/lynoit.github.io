@@ -312,6 +312,20 @@
     const blobMeta = new Map();     // filename -> lastModifiedMs (strict sort)
     const countryCache = new Map(); // filename -> array of countries
 
+    // Parse each workbook at most once per session
+const workbookCache = new Map(); // filename -> Promise<{ wb, buf }>
+function loadWorkbook(filename) {
+  if (workbookCache.has(filename)) return workbookCache.get(filename);
+  const p = (async () => {
+    const res = await fetch(`${BASE_URL}/${filename}?${SAS_TOKEN}`, { cache: 'default' });
+    const buf = await res.arrayBuffer();
+    const wb  = XLSX.read(new Uint8Array(buf), { type:'array' });
+    return { wb, buf };
+  })();
+  workbookCache.set(filename, p);
+  return p;
+}
+
     function cssSafeId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
     function toDateOnly(d){ const t = new Date(d); t.setHours(0,0,0,0); return t; }
 
@@ -533,16 +547,12 @@ function extractTotalDistanceKmFromStatistics(wb){
   return null;
 }
 
+// Uses loadWorkbook(filename) → Promise<{ wb, buf }>
 function fetchSessionSummary(filename) {
   if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
-  return fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'default' })
-    .then(res => {
-      if (!res.ok) throw new Error(`Fetch XLSX failed ${res.status}`);
-      return res.arrayBuffer();
-    })
-    .then(buf => {
-      const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
 
+  return loadWorkbook(filename)
+    .then(({ wb }) => {
       // 1) Mileage from "Statistics" (preferred)
       let mileageKm = extractTotalDistanceKmFromStatistics(wb);
 
@@ -561,22 +571,24 @@ function fetchSessionSummary(filename) {
       // Issue count
       const issueCount = countIssuesFromWorkbook(wb);
 
-      // 🔹 NEW: pull Test purpose & Test object from “Test details”
+      // Test purpose & object from “Test details”
       let testObject = null, testPurpose = null;
       try {
         const details = extractTestDetails(wb);
         testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
         testPurpose = details['purpose'] || details['test purpose'] || null;
-      } catch (e) {}
+      } catch (_) {
+        // ignore
+      }
 
-      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, testObject, testPurpose, loaded:true };
+      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, testObject, testPurpose, loaded: true };
       summaryCache.set(filename, summary);
       return summary;
     })
-    .catch(() => {
-      const summary = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, testObject: null, testPurpose: null, loaded:true };
-      summaryCache.set(filename, summary);
-      return summary;
+    .catch(err => {
+      const fallback = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, testObject: null, testPurpose: null, loaded: true, error: String(err || '') };
+      summaryCache.set(filename, fallback);
+      return fallback;
     });
 }
 
@@ -603,57 +615,66 @@ function fetchSessionSummary(filename) {
     }
 
     // --- Countries parser (from "Country" sheet or fallback Test details) ---
-    function fetchCountriesForFile(filename){
-      if (countryCache.has(filename)) {
-        const cached = countryCache.get(filename);
-        return Array.isArray(cached) ? Promise.resolve(cached) : Promise.resolve(cached ? [cached] : []);
-      }
-      return fetch(nc(`${BASE_URL}/${filename}?${SAS_TOKEN}`), { cache:'default' })
-        .then(res => {
-          if (!res.ok) throw new Error('Fetch XLSX failed for country');
-          return res.arrayBuffer();
-        })
-        .then(buf => {
-          const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-          const out = new Set();
-          const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
-          if (countrySheetName) {
-            const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
-            if (rows.length) {
-              const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
-              const colIdx = headers.findIndex(h => h.includes('country'));
-              if (colIdx >= 0) {
-                for (let r = 1; r < rows.length; r++) {
-                  const v = rows[r][colIdx];
-                  if (v != null && String(v).trim()) out.add(String(v).trim());
-                }
-              } else {
-                for (let r = 0; r < rows.length; r++) {
-                  const a = rows[r][0], b = rows[r][1];
-                  const aStr = String(a ?? '').trim().toLowerCase();
-                  if (aStr.includes('country') && b != null && String(b).trim()) out.add(String(b).trim());
-                  if (!aStr && rows[r].length === 1) {
-                    const val = rows[r][0];
-                    if (val != null && String(val).trim()) out.add(String(val).trim());
-                  }
-                }
+// Uses loadWorkbook(filename) → Promise<{ wb, buf }>
+function fetchCountriesForFile(filename){
+  if (countryCache.has(filename)) {
+    const cached = countryCache.get(filename);
+    return Promise.resolve(Array.isArray(cached) ? cached : (cached ? [cached] : []));
+  }
+
+  return loadWorkbook(filename)
+    .then(({ wb }) => {
+      const out = new Set();
+
+      // Prefer a sheet that looks like "Country"
+      const countrySheetName = wb.SheetNames.find(n => /country/i.test(n));
+      if (countrySheetName) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[countrySheetName], { header: 1, blankrows: false });
+        if (rows.length) {
+          const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
+          const colIdx = headers.findIndex(h => h.includes('country'));
+          if (colIdx >= 0) {
+            for (let r = 1; r < rows.length; r++) {
+              const v = rows[r][colIdx];
+              if (v != null && String(v).trim()) out.add(String(v).trim());
+            }
+          } else {
+            // Fallback: try simple key/value style or single-column lists
+            for (let r = 0; r < rows.length; r++) {
+              const a = rows[r][0], b = rows[r][1];
+              const aStr = String(a ?? '').trim().toLowerCase();
+              if (aStr.includes('country') && b != null && String(b).trim()) out.add(String(b).trim());
+              if (!aStr && rows[r].length === 1) {
+                const val = rows[r][0];
+                if (val != null && String(val).trim()) out.add(String(val).trim());
               }
             }
           }
-          if (out.size === 0) {
-            const details = extractTestDetails(wb);
-            const maybe = details['country'] || details['test country'] || details['location country'] || null;
-            if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
-          }
-          const arr = Array.from(out);
-          countryCache.set(filename, arr);
-          return arr;
-        })
-        .catch(() => {
-          countryCache.set(filename, []);
-          return [];
-        });
-    }
+        }
+      }
+
+      // If still empty, fall back to "Test details"
+      if (out.size === 0) {
+        const details = extractTestDetails(wb);
+        const maybe = details['country'] || details['test country'] || details['location country'] || null;
+        if (maybe && String(maybe).trim()) out.add(String(maybe).trim());
+      }
+
+      // Normalize to English when possible (e.g., "Sverige" -> "Sweden"),
+      // but keep original label if we don't have a mapping.
+      const normalized = Array.from(out)
+        .map(s => String(s).trim())
+        .filter(Boolean)
+        .map(s => (typeof canonicalEU === 'function' ? (canonicalEU(s) || s) : s));
+
+      countryCache.set(filename, normalized);
+      return normalized;
+    })
+    .catch(() => {
+      countryCache.set(filename, []);
+      return [];
+    });
+}
 
 // ---------- Europe country canonical names & centroids (EXPANDED) ----------
 const EU_CENTROIDS = {
@@ -1654,95 +1675,91 @@ function ensureActiveBadgeUpdater(){
     }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
-    function buildLatestRoutePreviews(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+function buildLatestRoutePreviews(files){
+  const withDates = files
+    .map(f => ({ filename: f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.filename, dayStr: x.m[1] }));
 
-      return Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s}))))
-        .then(rows => {
-          // Filter and sort strictly by Last-Modified DESC
-          const take = rows
-            .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
-  .sort((a,b) =>
-  b.dayStr.localeCompare(a.dayStr) ||                        // primary: YYYY-MM-DD DESC
-  ((blobMeta.get(b.filename) ?? 0) - (blobMeta.get(a.filename) ?? 0)) ||
-  b.filename.localeCompare(a.filename)
-)
-            .slice(0,10);
+  return Promise.all(
+    withDates.map(x => fetchSessionSummary(x.filename).then(s => ({ ...x, ...s })))
+  ).then(rows => {
+    // Filter and sort strictly by date + last-modified
+    const take = rows
+      .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
+      .sort((a, b) => {
+        const d = b.dayStr.localeCompare(a.dayStr);                 // YYYY-MM-DD DESC
+        if (d) return d;
+        const lmDiff = (blobMeta.get(b.filename) || 0) - (blobMeta.get(a.filename) || 0); // Last-Modified DESC
+        if (lmDiff) return lmDiff;
+        return b.filename.localeCompare(a.filename);                // tie-break
+      })
+      .slice(0, 10);
 
-          const grid = document.getElementById('routes-grid');
-          grid.innerHTML = '';
-          if (take.length === 0) return;
+    const grid = document.getElementById('routes-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    if (!take.length) return;
 
-          // 1) Create and append all cards in the sorted order (placeholders)
-          const slots = take.map(item => {
-            const card = document.createElement('div');
-            card.className = 'route-card';
+    // 1) Place all cards (with summary data, no workbook parsing yet)
+    const slots = take.map(item => {
+      const card = document.createElement('div');
+      card.className = 'route-card';
 
-            const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
-            const title = document.createElement('div');
-            title.className = 'route-title';
+      const niceName = item.filename.replace(`${item.dayStr}_`, '').replace('.xlsx','');
 
-            // title as link to open the drive (styled)
-            const link = document.createElement('a');
-            link.className = 'route-link';
-            link.href = '#';
-            link.innerHTML = `<span class="u">${item.dayStr} — ${niceName}</span>`;
-            link.addEventListener('click', (e)=>{ e.preventDefault(); loadFile(item.filename); });
-            title.appendChild(link);
-            card.appendChild(title);
+      const title = document.createElement('div');
+      title.className = 'route-title';
+      const link = document.createElement('a');
+      link.className = 'route-link';
+      link.href = '#';
+      link.innerHTML = `<span class="u">${item.dayStr} — ${niceName}</span>`;
+      link.addEventListener('click', (e)=>{ e.preventDefault(); loadFile(item.filename); });
+      title.appendChild(link);
+      card.appendChild(title);
 
-            const mapDiv = document.createElement('div');
-            mapDiv.className = 'route-map';
-            mapDiv.id = `route_${cssSafeId(item.filename)}`;
-            card.appendChild(mapDiv);
+      const mapDiv = document.createElement('div');
+      mapDiv.className = 'route-map';
+      mapDiv.id = `route_${cssSafeId(item.filename)}`;
+      card.appendChild(mapDiv);
 
-            const meta = document.createElement('div');
-            meta.className = 'route-meta';
-            meta.textContent = `Mileage: … km  •  Issues: ${item.issueCount}`;
-            card.appendChild(meta);
+      const meta = document.createElement('div');
+      meta.className = 'route-meta';
 
-            grid.appendChild(card);
-            return { item, mapDiv, meta };
-          });
+      // Build left-side details from summary (no extra XLSX parsing)
+      const leftParts = [];
+      if (item.testObject)  leftParts.push(`Test object: ${item.testObject}`);
+      if (item.testPurpose) leftParts.push(`Purpose: ${item.testPurpose}`);
+      const leftText = leftParts.length ? leftParts.join('  •  ') + '  •  ' : '';
 
-          // 2) Fill each card asynchronously (order of appending is preserved)
-          slots.forEach(({ item, mapDiv, meta }) => {
-            fetch(`${BASE_URL}/${item.filename}?${SAS_TOKEN}`)
-              .then(res => res.arrayBuffer())
-              .then(buf => {
-                const wb = XLSX.read(new Uint8Array(buf), { type:'array' });
-                const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-                if (!samplingName) return;
+      const kmText = (item.mileageKm ?? '–');
+      meta.textContent = `${leftText}Mileage: ${kmText} km  •  Issues: ${item.issueCount}`;
+      card.appendChild(meta);
 
-                const { km, path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-                if (!path || path.length < 2) return;
+      grid.appendChild(card);
+      return { item, mapDiv, meta };
+    });
 
-                // Read column-2 values from "Test details"
-                const details = extractTestDetails(wb);
-                const objVal = details['test object'] || details['object'] || details['vehicle'] || null;
-                const purposeVal = details['purpose'] || details['test purpose'] || null;
+    // 2) For each card, draw the mini route map using the cached workbook
+    slots.forEach(({ item, mapDiv }) => {
+      loadWorkbook(item.filename)
+        .then(({ wb }) => {
+          const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+          if (!samplingName) return;
 
-                const leftParts = [];
-                if (objVal) leftParts.push(`Test object: ${objVal}`);
-                if (purposeVal) leftParts.push(`Purpose: ${purposeVal}`);
-                const leftText = leftParts.length ? leftParts.join('  •  ') + '  •  ' : '';
+          const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+          if (!path || path.length < 2) return;
 
-                const kmText = (km ?? '–');
-                meta.textContent = `${leftText}Mileage: ${kmText} km  •  Issues: ${item.issueCount}`;
-
-                const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
-                const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
-                mini.fitBounds(line.getBounds(), { padding:[8,8] });
-                mini.whenReady(()=>mini.invalidateSize());
-              })
-              .catch(()=>{ /* ignore individual failures */ });
-          });
-        });
-    }
+          const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+          const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
+          mini.fitBounds(line.getBounds(), { padding:[8,8] });
+          mini.whenReady(() => mini.invalidateSize());
+        })
+        .catch(() => { /* ignore individual failures for a single card */ });
+    });
+  });
+}
 
     function scoringLegendHtml(){
   return `
@@ -1834,7 +1851,7 @@ function renderScoringLegend(selectedScore){
   return `<div class="score-legend">${boxes}</div>`;
 }
 
-    // ---------- SESSION VIEWER ----------
+// ---------- SESSION VIEWER ----------
 function loadFile(filename) {
   const content = document.getElementById('content');
   content.innerHTML = '';
@@ -1842,18 +1859,18 @@ function loadFile(filename) {
   samplingCoords = [];
   mapRef = null;
 
-  // --- Fallback helpers (use your globals if present) ---
+  // Fallbacks if globals aren't defined
   const _scoreFromRate = (typeof scoreFromRate === 'function') ? scoreFromRate : function(rate){
     if (rate == null || !isFinite(rate)) return null;
     if (rate >= 100) return 1;
-    if (rate >= 60)  return 2;
-    if (rate >= 40)  return 3;
-    if (rate >= 30)  return 4;
-    if (rate >= 20)  return 5;
-    if (rate >= 15)  return 6;
-    if (rate >= 10)  return 7;
-    if (rate >= 5)   return 8;
-    if (rate >= 1)   return 9;
+    if (rate >= 50)  return 2;
+    if (rate >= 20)  return 3;
+    if (rate >= 10)  return 4;
+    if (rate >= 5)   return 5;
+    if (rate >= 2)   return 6;
+    if (rate >= 1.5) return 7;
+    if (rate >= 0.5) return 8;
+    if (rate >= 0)   return 9;
     return 10;
   };
   const _SCORE_LABEL = (typeof SCORE_LABEL === 'object' && SCORE_LABEL) ? SCORE_LABEL : {
@@ -1882,23 +1899,23 @@ function loadFile(filename) {
         }).join('') + '</div>';
       };
 
-  // --- Extract SUM of numeric cells in "Events per 1000 km" column from KPI sheet ---
+  // Local helper: SUM of "Events per 1000 km" column from a KPI sheet
   function extractSumEventsPer1kFromSheet(sheet){
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
     if (!rows.length) return null;
-    const isTargetHeader = function(h){ return /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || '')); };
+    const isTargetHeader = h => /events?\s*(?:per|\/)\s*1000\s*km/i.test(String(h || ''));
     const hdr = rows[0];
     const colIdx = hdr.findIndex(isTargetHeader);
     if (colIdx < 0) return null;
 
-    const toNum = function(v){
+    const toNum = v => {
       if (v == null) return null;
       const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
       const n = parseFloat(s);
       return Number.isFinite(n) ? n : null;
     };
 
-    var sum = 0, have = false;
+    let sum = 0, have = false;
     for (let r = 1; r < rows.length; r++){
       const n = toNum(rows[r][colIdx]);
       if (n != null){ sum += n; have = true; }
@@ -1906,36 +1923,26 @@ function loadFile(filename) {
     return have ? sum : null;
   }
 
-// Count total KPIs from KPI_buttons.csv:
-// - First try the file next to the app (relative path)
-// - If that fails, fall back to the Azure container path
-// Returns a Promise<number|null>. Caches the result in window.__TOTAL_KPIS__.
-function getTotalKpis(){
-  if (typeof window.__TOTAL_KPIS__ === 'number') {
-    return Promise.resolve(window.__TOTAL_KPIS__);
+  // Total KPIs via KPI_buttons.csv (cached in window.__TOTAL_KPIS__)
+  function getTotalKpis(){
+    if (typeof window.__TOTAL_KPIS__ === 'number') {
+      return Promise.resolve(window.__TOTAL_KPIS__);
+    }
+    const relUrl   = 'KPI_buttons.csv';
+    const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
+
+    const fetchAndCount = (url) =>
+      fetch(url, { cache: 'default' })
+        .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.text(); })
+        .then(txt => {
+          const lines = txt.split(/\r?\n/);
+          const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
+          window.__TOTAL_KPIS__ = count;
+          return count;
+        });
+
+    return fetchAndCount(relUrl).catch(() => fetchAndCount(azureUrl)).catch(() => null);
   }
-
-  const relUrl   = 'KPI_buttons.csv';
-  const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
-
-  const fetchAndCount = (url) =>
-    fetch(nc(url), { cache: 'default' })
-      .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.text();
-      })
-      .then(txt => {
-        const lines = txt.split(/\r?\n/);
-        const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
-        window.__TOTAL_KPIS__ = count;  // memoize for this session
-        return count;
-      });
-
-  // Try relative file first; if it 404s, try Azure; otherwise return null
-  return fetchAndCount(relUrl)
-    .catch(() => fetchAndCount(azureUrl))
-    .catch(() => null);
-}
 
   const issueTableInfo = {
     sheetName: null,
@@ -1945,7 +1952,7 @@ function getTotalKpis(){
 
   // Download links
   const xlsxLink = document.createElement('a');
-  xlsxLink.href = BASE_URL + '/' + filename + '?' + SAS_TOKEN;
+  xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
   xlsxLink.textContent = 'Download XLSX';
   xlsxLink.className = 'download-button';
   xlsxLink.setAttribute('download', filename);
@@ -1953,41 +1960,38 @@ function getTotalKpis(){
 
   const pdfFilename = filename.replace(/\.xlsx$/i, '.pdf');
   const pdfLink = document.createElement('a');
-  pdfLink.href = BASE_URL + '/' + pdfFilename + '?' + SAS_TOKEN;
+  pdfLink.href = `${BASE_URL}/${pdfFilename}?${SAS_TOKEN}`;
   pdfLink.textContent = 'Download PDF';
   pdfLink.className = 'download-button';
   pdfLink.setAttribute('download', pdfFilename);
   content.appendChild(pdfLink);
 
-  // Keep your current no-cache fetch
-  fetch(nc(BASE_URL + '/' + filename + '?' + SAS_TOKEN), { cache:'default' })
-    .then(function(res){ return res.arrayBuffer(); })
-    .then(function(buffer){
-      const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-
-      const samplingName = wb.SheetNames.find(function(n){ return n.toLowerCase() === 'sampling'; });
+  // === Use cached workbook ===
+  loadWorkbook(filename)
+    .then(({ wb /*, buf*/ }) => {
+      const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
       if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
 
       let nonSamplingCount = 0;
       let mapInserted = false;
 
-      // Pre-fetch total KPIs once for this render (promise)
+      // Pre-fetch total KPIs once
       const totalKpisPromise = getTotalKpis();
 
-      wb.SheetNames.forEach(function(sheet){
+      wb.SheetNames.forEach(sheet => {
         if (sheet.toLowerCase() === 'sampling') return;
 
         const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
-        content.insertAdjacentHTML('beforeend', '<h2>' + sheet + '</h2>' + html);
+        content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-        // First GPS-capable sheet → extract issues + headers
+        // First sheet with lat/lon → collect issues + headers
         if (!issueTableInfo.sheetName) {
           const tbl = document.getElementById(sheet);
           const rows = Array.from(tbl.querySelectorAll('tr'));
           if (rows.length > 1) {
-            const hdrs = Array.from(rows[0].querySelectorAll('th,td')).map(function(c){ return c.textContent.trim().toLowerCase(); });
-            const latIdx = hdrs.findIndex(function(h){ return h.includes('lat'); });
-            const lonIdx = hdrs.findIndex(function(h){ return h.includes('lon'); });
+            const hdrs = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.textContent.trim().toLowerCase());
+            const latIdx = hdrs.findIndex(h => h.includes('lat'));
+            const lonIdx = hdrs.findIndex(h => h.includes('lon'));
             if (latIdx >= 0 && lonIdx >= 0) {
               issueTableInfo.sheetName = sheet;
               const rawHdrs = Array.from(rows[0].querySelectorAll('th,td'));
@@ -1995,7 +1999,7 @@ function getTotalKpis(){
               issueTableInfo.headerNames.col2 = (rawHdrs[1]?.textContent || '').trim();
               issueTableInfo.headerNames.col3 = (rawHdrs[12]?.textContent || '').trim();
 
-              rows.slice(1).forEach(function(row){
+              rows.slice(1).forEach(row => {
                 const cells = Array.from(row.querySelectorAll('td'));
                 const issueNo = (cells[0]?.textContent || '').trim();
                 const col1 = issueNo;
@@ -2004,40 +2008,37 @@ function getTotalKpis(){
                 const lat = parseFloat((cells[latIdx]?.textContent || '').trim());
                 const lon = parseFloat((cells[lonIdx]?.textContent || '').trim());
                 if (!isNaN(lat) && !isNaN(lon)) {
-                  issueCoords.push({ issueNo: issueNo, lat: lat, lon: lon });
+                  issueCoords.push({ issueNo, lat, lon });
                 }
                 if (issueNo) {
-                  issueTableInfo.issueInfo[issueNo] = { issueNo: issueNo, col1: col1, col2: col2, col3: col3, lat: lat, lon: lon };
+                  issueTableInfo.issueInfo[issueNo] = { issueNo, col1, col2, col3, lat, lon };
                 }
               });
             }
           }
         }
 
-        // === KPI extras: AVERAGE = SUM(column) / TOTAL_KPIS(from KPI_buttons.csv) ===
+        // KPI sheet → compute average from SUM / total KPIs (1 decimal) + legend
         if (/kpi/i.test(sheet)) {
           const kpiTable = document.getElementById(sheet);
           if (kpiTable) {
-            // tighten spacing so the metric sits closer to the KPI table
-            kpiTable.style.marginBottom = '6px';
+            kpiTable.style.marginBottom = '6px'; // tighter gap
 
-            totalKpisPromise.then(function(totalKpis){
+            totalKpisPromise.then(totalKpis => {
               const inserts = [];
-              const sum = extractSumEventsPer1kFromSheet(wb.Sheets[sheet]); // sum of KPI table column
+              const sum = extractSumEventsPer1kFromSheet(wb.Sheets[sheet]);
               if (sum != null && typeof totalKpis === 'number' && totalKpis > 0) {
                 const avg = sum / totalKpis;
-                const avg1 = Math.round(avg * 10) / 10; // 1 decimal for calc + display
+                const avg1 = Math.round(avg * 10) / 10; // numeric 1-dec
                 inserts.push(
-                  '<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">' + avg1.toFixed(1) + '</span></div>'
+                  `<div class="kpi-avg">Average <em>events per 1000 km</em>: <span class="v">${avg1.toFixed(1)}</span></div>`
                 );
                 const score = _scoreFromRate(avg1);
                 inserts.push(_renderScoringLegend(score));
                 inserts.push(
-                  '<div class="score-legend-caption">Score: <strong>' + score + '</strong> — ' +
-                    _SCORE_LABEL[score] + ' (sum ÷ total KPIs = ' + sum.toFixed(1) + ' ÷ ' + totalKpis + ')</div>'
+                  `<div class="score-legend-caption">Score: <strong>${score}</strong> — ${_SCORE_LABEL[score]} (sum ÷ total KPIs = ${sum.toFixed(1)} ÷ ${totalKpis})</div>`
                 );
               } else {
-                // No KPI_buttons.csv found or zero redButton lines → show legend without selection
                 inserts.push(_renderScoringLegend(null));
                 inserts.push('<div class="score-legend-caption">Total KPIs unavailable — cannot compute average.</div>');
               }
@@ -2059,7 +2060,7 @@ function getTotalKpis(){
         }
       });
     })
-    .then(function(){
+    .then(() => {
       if (!document.getElementById('issue-map')) {
         const mapDiv = document.createElement('div');
         mapDiv.id = 'issue-map';
@@ -2075,20 +2076,20 @@ function getTotalKpis(){
         const ph = document.getElementById('issue-map');
         const err = document.createElement('div');
         err.className = 'error';
-        err.innerHTML = 'Need at least 1 issue or sampling point to plot a map (found ' + issueCoords.length + ' issues, ' + samplingCoords.length + ' sampling points).';
+        err.innerHTML = `Need at least 1 issue or sampling point to plot a map (found ${issueCoords.length} issues, ${samplingCoords.length} sampling points).`;
         ph.replaceWith(err);
       }
     })
-    .then(function(){
-      // --- Issue snapshots LAST (below Phase and everything else) ---
+    .then(() => {
+      // Issue snapshots LAST (below everything)
       const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
-      fetch(nc(BASE_URL + '/' + zipFilename + '?' + SAS_TOKEN), { cache:'default' })
-        .then(function(resp){
-          if (!resp.ok) return Promise.reject('ZIP not found');
+      return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`, { cache:'default' })
+        .then(resp => {
+          if (!resp.ok) throw new Error('ZIP not found');
           return resp.arrayBuffer();
         })
-        .then(function(buf){ return JSZip.loadAsync(buf); })
-        .then(function(zip){
+        .then(buf => JSZip.loadAsync(buf))
+        .then(zip => {
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
@@ -2099,7 +2100,7 @@ function getTotalKpis(){
           table.style.borderCollapse = 'collapse';
 
           const hdrRow = document.createElement('tr');
-          ['col1','col2','col3','Location','Snapshot'].forEach(function(txt){
+          ['col1','col2','col3','Location','Snapshot'].forEach(txt => {
             const th = document.createElement('th');
             th.textContent = (txt.startsWith('col') ? ( {col1:'',col2:'',col3:''}[txt] = 1, issueTableInfo.headerNames[txt] ) : txt) || txt;
             th.style.backgroundColor = '#f5f5f5';
@@ -2109,14 +2110,14 @@ function getTotalKpis(){
           });
           table.appendChild(hdrRow);
 
-          zip.forEach(function(path, entry){
+          zip.forEach((path, entry) => {
             if (entry.dir || !/\.(jpe?g|png|gif)$/i.test(path)) return;
             const issueNo = path.replace(/\.[^/.]+$/, '');
             const info = issueTableInfo.issueInfo[issueNo];
             if (!info) return;
 
             const row = document.createElement('tr');
-            [info.col1, info.col2, info.col3].forEach(function(val){
+            [info.col1, info.col2, info.col3].forEach(val => {
               const td = document.createElement('td');
               td.textContent = val;
               td.style.padding = '8px';
@@ -2128,7 +2129,7 @@ function getTotalKpis(){
             tdMap.style.padding = '8px';
             tdMap.style.border = '1px solid #ccc';
             const miniDiv = document.createElement('div');
-            miniDiv.id = 'snapshot-map-' + cssSafeId(issueNo);
+            miniDiv.id = `snapshot-map-${cssSafeId(issueNo)}`;
             miniDiv.style.width = '150px';
             miniDiv.style.height = '150px';
             tdMap.appendChild(miniDiv);
@@ -2138,8 +2139,8 @@ function getTotalKpis(){
             tdImg.style.padding = '8px';
             tdImg.style.border = '1px solid #ccc';
 
-            entry.async('blob').then(function(rawBlob){
-              var mime = 'application/octet-stream';
+            entry.async('blob').then(rawBlob => {
+              let mime = 'application/octet-stream';
               if (/\.(jpe?g)$/i.test(path)) mime = 'image/jpeg';
               else if (/\.png$/i.test(path)) mime = 'image/png';
               else if (/\.gif$/i.test(path)) mime = 'image/gif';
@@ -2156,7 +2157,7 @@ function getTotalKpis(){
 
               const miniMap = L.map(miniDiv, { attributionControl:false, zoomControl:false }).setView([info.lat, info.lon], 17);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
-              const badgeIcon = L.divIcon({ className: 'issue-label', html: '<div class="issue-badge">' + issueNo + '</div>', iconSize: [24,24], iconAnchor: [12,12] });
+              const badgeIcon = L.divIcon({ className: 'issue-label', html: `<div class="issue-badge">${issueNo}</div>`, iconSize: [24,24], iconAnchor: [12,12] });
               L.marker([info.lat, info.lon], { icon: badgeIcon }).addTo(miniMap);
               const circle = L.circle([info.lat, info.lon], { radius: 100 }).addTo(miniMap);
               miniMap.fitBounds(circle.getBounds(), { padding:[4,4] });
@@ -2167,15 +2168,14 @@ function getTotalKpis(){
             table.appendChild(row);
           });
 
-          // Append at the very end
           content.appendChild(title);
           content.appendChild(table);
         })
-        .catch(function(){ /* optional ZIP; ignore */ });
+        .catch(() => { /* optional ZIP; ignore */ });
     })
-    .catch(function(err){
+    .catch(err => {
       console.error(err);
-      document.getElementById('content').innerHTML += '<div class="error">Failed to load ' + filename + ': ' + err + '</div>';
+      document.getElementById('content').innerHTML += `<div class="error">Failed to load ${filename}: ${err}</div>`;
     });
 }
 
@@ -2222,3 +2222,4 @@ function getTotalKpis(){
   </script>
 </body>
 </html>
+
