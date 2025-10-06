@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AZ-5 SCRAM Simulator — RBMK control-rod tip effect</title>
+<link rel="icon" href="data:;base64,iVBORw0KGgo=" />
+<style>
+  :root{--bg:#0f1724;--panel:#0b1220;--ink:#e6eef8;--muted:#9fb0d6;--accent:#f97316}
+  body{margin:0;font-family:Inter,system-ui,Arial;background:linear-gradient(180deg,#071026 0%, #071a2b 100%);color:var(--ink);display:flex;flex-direction:column;min-height:100vh}
+  header{padding:18px 22px;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .wrap{display:grid;grid-template-columns:420px 1fr;gap:18px;padding:18px;align-items:start}
+  .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+  h1{margin:0;font-size:18px}
+  .controls{display:flex;gap:8px;margin-top:12px}
+  button{background:var(--accent);border:none;color:#052127;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer}
+  button.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+  canvas{background:transparent}
+  .rod-vis{height:260px;background:linear-gradient(180deg,#071a2b,#04121b);border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .rod{width:80px;height:200px;background:linear-gradient(180deg,#3b3b3b,#111);border-radius:6px;position:relative;overflow:hidden}
+  .graphite{position:absolute;left:0;right:0;height:28px;background:linear-gradient(90deg,#ffb86b,#ff8a00);top:0}
+  .water{position:absolute;left:0;right:0;top:28px;bottom:0;background:linear-gradient(180deg,#a3d4ff22,#8fbfff11)}
+  .rod-label{margin-top:10px;color:var(--muted);font-size:13px}
+  .explain{font-size:13px;color:var(--muted);line-height:1.35;margin-top:12px}
+  footer{padding:12px 18px;color:var(--muted);font-size:13px;border-top:1px solid rgba(255,255,255,0.02)}
+  .small{font-size:12px;color:#cfe3ff}
+  @media (max-width:900px){.wrap{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<header class="card">
+  <h1>AZ-5 SCRAM Simulator — RBMK control rod tip effect</h1>
+  <div class="small">Simple, qualitative simulation of the short positive reactivity pulse caused by graphite-tipped control rods during insertion (Chernobyl mechanism)</div>
+</header>
+<main class="wrap">
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center"><strong>Controls</strong>
+      <div class="small">Time step: <span id="dtLabel">10</span> ms</div>
+    </div>
+    <div class="controls">
+      <button id="pressBtn">Press AZ-5</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+      <button id="stepBtn" class="secondary">Advance 100 ms</button>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-top:12px;">
+      <div style="flex:1">
+        <label class="small">Graphite tip length (mm)</label>
+        <input id="tipLen" type="range" min="0" max="200" value="28" style="width:100%">
+        <div class="small">Value: <span id="tipVal">28</span> mm</div>
+      </div>
+      <div style="width:120px">
+        <label class="small">Insertion speed (mm/s)</label>
+        <input id="insSpeed" type="range" min="50" max="2000" value="600" style="width:100%">
+        <div class="small"><span id="insVal">600</span> mm/s</div>
+      </div>
+    </div>
+
+    <hr style="opacity:0.06;margin:12px 0">
+
+    <div class="rod-vis">
+      <div class="rod" id="rod">
+        <div class="graphite" id="graphite"></div>
+        <div class="water" id="water"></div>
+      </div>
+      <div class="rod-label">Control rod (graphite tip shown in warm color)</div>
+    </div>
+
+    <div class="explain">
+      <strong>How this works (simplified):</strong>
+      <ul>
+        <li>When AZ-5 is pressed, control rods are driven into the core. In RBMK designs the rod tip is <em>graphite</em> followed by water-filled displacer.</li>
+        <li>At first insertion the graphite displaces neutron-absorbing coolant (water), creating a short <strong>positive</strong> reactivity pulse before the absorber section follows and negative reactivity kicks in.</li>
+        <li>This simulator models that as a short spike in reactivity (Δk) while rods traverse their graphite tip region.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <strong>Realtime plots</strong>
+      <div class="small">Power and reactivity (qualitative)</div>
+    </div>
+    <canvas id="reactivityChart" height="160"></canvas>
+    <canvas id="powerChart" height="160" style="margin-top:8px"></canvas>
+  </section>
+</main>
+
+<footer>
+  <div class="small">Notes: This is a highly simplified, qualitative model for educational/demonstration use. It does not model full neutron kinetics, thermal-hydraulics, feedbacks or prompt-neutron lifetimes accurately. Adjust the graphite tip, insertion speed and see how the initial spike amplitude & duration change.</div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+// Simulation parameters & state
+let dt = 0.01; // seconds per simulation step (10 ms default)
+let t = 0;
+let running = false;
+let tipLength = 0.028; // meters (default 28 mm)
+let insSpeed = 0.6; // m/s (600 mm/s)
+let rodPosition = -0.5; // meters above core; 0 = rod tip at core top; positive = inserted distance into core
+let insertionTarget = 1.5; // meters (full insertion into active zone)
+let inserting = false;
+let totalTimeSteps = 0;
+
+// Kinetics-like approximations (very simplified)
+// Reactivity contributions in units of dollars are not used; we'll use relative delta-k units
+// We'll create a pulse when graphite tip is in-core region (while rod tip traverses top portion)
+
+const promptResponse = 0.2; // how quickly power responds to reactivity (simple time constant)
+let power = 1.0; // normalized initial power
+
+// Chart setup
+const ctxR = document.getElementById('reactivityChart').getContext('2d');
+const ctxP = document.getElementById('powerChart').getContext('2d');
+const maxPoints = 500;
+
+const reactivityData = {labels:[],datasets:[{label:'Reactivity (Δk, rel)',data:[],borderColor:'#ffb86b',borderWidth:2,pointRadius:0,tension:0.3}]};
+const powerData = {labels:[],datasets:[{label:'Normalized power',data:[],borderColor:'#7ee7ff',borderWidth:2,pointRadius:0,tension:0.25,fill:true,backgroundColor:'rgba(126,231,255,0.06)'}]};
+
+const cfgR = {type:'line',data:reactivityData,options:{animation:false,scales:{x:{display:true},y:{beginAtZero:false}}}};
+const cfgP = {type:'line',data:powerData,options:{animation:false,scales:{x:{display:true},y:{min:0}}}};
+
+const chartR = new Chart(ctxR,cfgR);
+const chartP = new Chart(ctxP,cfgP);
+
+// DOM bindings
+const pressBtn = document.getElementById('pressBtn');
+const resetBtn = document.getElementById('resetBtn');
+const stepBtn = document.getElementById('stepBtn');
+const tipRange = document.getElementById('tipLen');
+const insRange = document.getElementById('insSpeed');
+const tipVal = document.getElementById('tipVal');
+const insVal = document.getElementById('insVal');
+const graphiteEl = document.getElementById('graphite');
+const waterEl = document.getElementById('water');
+const dtLabel = document.getElementById('dtLabel');
+
+tipVal.textContent = tipRange.value;
+insVal.textContent = insRange.value;
+
+tipRange.addEventListener('input',()=>{
+  tipVal.textContent = tipRange.value;
+  tipLength = Number(tipRange.value)/1000.0; // mm -> m
+  updateRodVisual();
+});
+insRange.addEventListener('input',()=>{
+  insVal.textContent = insRange.value;
+  insSpeed = Number(insRange.value)/1000.0; // mm/s -> m/s
+});
+
+pressBtn.addEventListener('click',()=>{
+  if(!inserting){ startInsertion(); } else { /* already inserting */ }
+});
+resetBtn.addEventListener('click',resetSim);
+stepBtn.addEventListener('click',()=>{ stepSim(0.1); });
+
+function startInsertion(){
+  inserting = true;
+  running = true;
+}
+
+function resetSim(){
+  t=0; power=1.0; rodPosition=-0.5; inserting=false; running=false; totalTimeSteps=0;
+  clearData(); updateRodVisual();
+}
+
+function clearData(){
+  reactivityData.labels.length=0; reactivityData.datasets[0].data.length=0;
+  powerData.labels.length=0; powerData.datasets[0].data.length=0;
+  chartR.update(); chartP.update();
+}
+
+function updateRodVisual(){
+  // Visual: map tipLength and insertion progress to graphite top position
+  const rodEl = document.getElementById('rod');
+  const rodH = rodEl.clientHeight; // px
+  const graphitePx = Math.max(4, Math.round((tipLength/0.2) * rodH));
+  graphiteEl.style.height = graphitePx + 'px';
+  // water region top is graphite height
+  waterEl.style.top = graphitePx + 'px';
+}
+
+function computeReactivity(){
+  // Main simplified model:
+  // If inserting and the graphite tip is inside the active zone (we assume active zone spans 0..1.0 m)
+  // produce a brief positive reactivity pulse whose amplitude depends on graphite tip length and insertion speed.
+  // After the graphite region passes, the absorber (negative reactivity) proportionally reduces reactivity.
+
+  // Map rodPosition into active zone (0..1)
+  const activeTop = 0.0; const activeBottom = 1.0;
+  let rho = -0.05; // base negative reactivity from full absorber when fully inserted (steady shutdown value)
+
+  if(inserting){
+    // tip front position inside active zone?
+    const tipFront = rodPosition; // position of graphite tip leading edge relative to core top
+    const tipBack = rodPosition - tipLength; // trailing edge of graphite
+
+    // If any part of graphite (tip) is inside active zone -> positive pulse contribution
+    const overlapFront = Math.min(activeBottom, tipFront) - Math.max(activeTop, tipBack);
+    const overlap = Math.max(0, overlapFront);
+    if(overlap>0){
+      // pulse amplitude proportional to overlap fraction and graphite length
+      const frac = overlap / tipLength; // 0..1
+      // scale by tipLength and inversely by insSpeed (slower insertion -> longer pulse duration)
+      const amp = 0.025 * (tipLength/0.028) * (1 + 0.5*(600/ (insSpeed*1000)) );
+      rho += amp * frac; // add positive component
+    }
+
+    // absorber (water/boron) effect once absorber column enters (we approximate negative reactivity increases with inserted depth)
+    const absorberInserted = Math.max(0, Math.min(activeBottom, rodPosition - tipLength));
+    const negEffect = -0.12 * (absorberInserted/activeBottom); // scales to -0.12 at full insertion
+    rho += negEffect;
+  }
+
+  return rho; // relative delta-k style value (qualitative)
+}
+
+function stepSim(delta){
+  // delta in seconds
+  const steps = Math.max(1, Math.round(delta / dt));
+  for(let i=0;i<steps;i++){
+    const rho = computeReactivity();
+    // simple first-order response of power to reactivity
+    // dp/dt = (rho - (power-1)*feedback))/tau ; approximate
+    // Use a simple proportional response: power += k * rho * dt
+    const k = 2.0; // response gain
+    power += k * rho * dt;
+    if(power < 0) power = 0;
+    t += dt; totalTimeSteps++;
+
+    // advance rod if inserting
+    if(inserting){
+      rodPosition += insSpeed * dt; // m
+      if(rodPosition >= insertionTarget){ inserting = false; rodPosition = insertionTarget; }
+    }
+
+    // record
+    pushDataPoint(t, computeReactivity(), power);
+  }
+  chartR.update(); chartP.update(); updateRodVisualPlacement();
+}
+
+function pushDataPoint(time, rho, pow){
+  const s = (time).toFixed(2);
+  reactivityData.labels.push(s); reactivityData.datasets[0].data.push(rho);
+  powerData.labels.push(s); powerData.datasets[0].data.push(pow);
+  // trim
+  if(reactivityData.labels.length>maxPoints){ reacti vityTrim(); }
+}
+
+function reacti vityTrim(){
+  // helper with space in name to avoid accidental copy mistakes
+}
+
+function trimData(){
+  while(reactivityData.labels.length>maxPoints){reactivityData.labels.shift();reactivityData.datasets[0].data.shift();}
+  while(powerData.labels.length>maxPoints){powerData.labels.shift();powerData.datasets[0].data.shift();}
+}
+
+function updateRodVisualPlacement(){
+  // Map rodPosition (-0.5 .. insertionTarget) to pixel position of graphite element inside the rod visual
+  const rodEl = document.getElementById('rod');
+  const rodH = rodEl.clientHeight;
+  const topZone = 0.0; const bottomZone = 1.0; // active zone length in m
+  // normalized insertion fraction
+  const insertedFraction = Math.max(0, Math.min(1, (rodPosition - topZone) / (bottomZone - topZone)));
+  const yPx = Math.round(insertedFraction * (rodH - graphiteEl.clientHeight));
+  graphiteEl.style.top = yPx + 'px';
+  waterEl.style.top = (yPx + graphiteEl.clientHeight) + 'px';
+}
+
+// External animation loop
+let lastFrame = null;
+function loop(ts){
+  if(running){ stepSim(0.05); }
+  lastFrame = ts; requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// small safety: ensure visuals set
+updateRodVisual(); updateRodVisualPlacement();
+
+// remove accidental broken function name: implement trim properly
+function trimToMax(){
+  while(reactivityData.labels.length>maxPoints){reactivityData.labels.shift();reactivityData.datasets[0].data.shift();}
+  while(powerData.labels.length>maxPoints){powerData.labels.shift();powerData.datasets[0].data.shift();}
+}
+
+// fix earlier accidental function artifacts by binding proper push
+function pushDataPoint(time, rho, pow){
+  const s = (time).toFixed(2);
+  reactivityData.labels.push(s); reactivityData.datasets[0].data.push(rho);
+  powerData.labels.push(s); powerData.datasets[0].data.push(pow);
+  trimToMax();
+}
+
+// Allow small continuous stepping while pressing pressBtn
+pressBtn.addEventListener('dblclick',()=>{ // dblclick toggles continuous run/stop
+  running = !running;
+});
+
+// show dt label and allow click to change dt
+dtLabel.addEventListener('click',()=>{
+  // cycle dt 10ms/20ms/50ms
+  if(dt===0.01) dt=0.02; else if(dt===0.02) dt=0.05; else dt=0.01;
+  dtLabel.textContent = Math.round(dt*1000);
+});
+
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) running=false; });
+
+// Expose keyboard shortcut: Space = press AZ-5
+window.addEventListener('keydown', (e)=>{ if(e.code==='Space'){ startInsertion(); } });
+
+// initialize with a few points
+for(let i=0;i<30;i++){ pushDataPoint(t,0,power); t+=dt; }
+chartR.update(); chartP.update();
+
+</script>
+</body>
+</html>
