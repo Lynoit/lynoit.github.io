@@ -858,7 +858,7 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
 
   // Fallback denominator per software if TOTAL_KPI_COUNT isn't available
   const measuredCountBySW = new Map(swLabels.map(l => [l, 0]));
-  parsed.entries.forEach(e => {
+  (parsed.entries || []).forEach(e => {
     swLabels.forEach(l => {
       const v = e.values[l];
       if (v != null && !Number.isNaN(v)) measuredCountBySW.set(l, measuredCountBySW.get(l) + 1);
@@ -866,13 +866,15 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
   });
 
   // Unique functions and KPI rows (keep original order)
-  const functions = Array.from(new Set(parsed.entries.map(e => e.func)));
-  const kpiRows  = parsed.entries.map(e => ({ func: e.func, kpi: e.kpi }));
+  const functions = Array.from(new Set((parsed.entries || []).map(e => e.func)));
+  const kpiRows  = (parsed.entries || []).map(e => ({ func: e.func, kpi: e.kpi }));
+  const cols = swLabels.length, rows = kpiRows.length;
+  if (!rows) return;
 
   // Sum of events per (function, software)
   const sumByFuncSW = new Map(); // key = `${func}||${swLabel}`
   functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
-  parsed.entries.forEach(e => {
+  (parsed.entries || []).forEach(e => {
     const f = e.func;
     swLabels.forEach(l => {
       const v = e.values[l];
@@ -888,7 +890,9 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     const inner = new Map();
     swLabels.forEach(l => {
       const sum = sumByFuncSW.get(`${f}||${l}`) || 0;
-      const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : (measuredCountBySW.get(l) || 0);
+      const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0)
+        ? TOTAL_KPI_COUNT
+        : (measuredCountBySW.get(l) || 0);
       const avg = denom ? (sum / denom) : null;
       const sc  = (avg == null) ? null : scoreFromAvg(avg, T);
       inner.set(l, { avg, score: sc });
@@ -896,54 +900,57 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     funcScore.set(f, inner);
   });
 
-  // ======= Calendar-style SVG =======
+  // ======= Calendar-style layout =======
   const cell = 12, gap = 2;
-  const topPad = 22;         // space above the grid
-  const maxTopLabel = measureTextWidthCal(swLabels, 11, 600); // width if horizontal
-  const colLabH = maxTopLabel + 12; // vertical height needed when rotated
+  const topPad = 22;
+
+  // Left KPI labels width
   const leftLabels = kpiRows.map(r => `${r.func} — ${r.kpi}`);
   const leftPad = Math.max(140, measureTextWidthCal(leftLabels, 11, 600) + 14);
-  const cols = swLabels.length, rows = kpiRows.length;
 
-  const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+  // Top software labels height (vertical labels -> need max label "height")
+  const maxTopLabel = measureTextWidthCal(swLabels, 11, 600); // width in px when horizontal = height when vertical
+  const colLabH = maxTopLabel + 16;                           // headroom above grid
+
   const gridW = leftPad + cols*(cell+gap) + 6;
-  const cw = Math.max(Math.min(gridW, 1200), Math.min(1000, cardW)); // don’t explode width
   const gridH = topPad + colLabH + rows*(cell+gap) + 6;
 
   const wrap = card.append('div').attr('class', 'chart-card').style('grid-column','1 / -1');
   wrap.append('div').attr('class','cal-title').text('Function score per software (calendar style)');
 
-  const svg = wrap.append('svg')
-    .attr('width', cw)
+  // allow horizontal scroll when many columns
+  const scroller = wrap.append('div').style('overflow','auto');
+  const svg = scroller.append('svg')
+    .attr('width', gridW)
     .attr('height', gridH)
     .style('display','block')
     .style('margin','0 auto 10px');
 
-// Column (software) labels on top, vertical and ABOVE the grid
-const gTop = svg.append('g');
+  // ---- Column (software) labels on top, vertical and centered over each column ----
+  const gTop = svg.append('g');
+  const labelBaseline = topPad + colLabH - 6; // baseline just above the first row of cells
 
-// baseline where the first row of cells starts
-const labelBaseline = topPad + colLabH - 50;
+  swLabels.forEach((lab, c) => {
+    // exact center of cell column c
+    const colLeft = leftPad + c * (cell + gap);
+    const cx = colLeft + cell / 2;
 
-swLabels.forEach((lab, c) => {
-  const x = leftPad + c*(cell+gap) + cell/2;
+    // rotate around column center so label stays centered over the column
+    const gl = gTop.append('g')
+      .attr('transform', `translate(${cx}, ${labelBaseline}) rotate(-90)`);
 
-  // rotate around a point just above the grid, so text sits above cells
-  const gl = gTop.append('g')
-    .attr('transform', `translate(${x},${labelBaseline}) rotate(-90)`);
+    gl.append('text')
+      .attr('x', 0)
+      .attr('y', 0)
+      .attr('text-anchor', 'end')               // bottom of vertical text sits on baseline
+      .attr('dominant-baseline', 'alphabetic')  // use the text bottom as baseline
+      .attr('font-size', 11)
+      .attr('fill', '#111')
+      .text(lab)
+      .append('title').text(lab);
+  });
 
-  gl.append('text')
-    .attr('x', 0)
-    .attr('y', 0)
-    .attr('text-anchor', 'end')              // bottom of vertical text at the baseline
-    .attr('dominant-baseline', 'alphabetic') // use bottom baseline
-    .attr('font-size', 11)
-    .attr('fill', '#333')
-    .text(lab)
-    .append('title').text(lab);
-});
-
-  // Left KPI labels (like calendar left labels)
+  // ---- Left KPI labels
   const gLeft = svg.append('g');
   kpiRows.forEach((r, ri) => {
     const y = topPad + colLabH + ri*(cell+gap) + cell*0.75;
@@ -959,7 +966,7 @@ swLabels.forEach((lab, c) => {
       .append('title').text(label);
   });
 
-  // Grid cells
+  // ---- Grid cells
   const gGrid = svg.append('g');
   for (let ri = 0; ri < rows; ri++) {
     const { func, kpi } = kpiRows[ri];
@@ -967,7 +974,7 @@ swLabels.forEach((lab, c) => {
       const sw = swLabels[ci];
       const fs = (funcScore.get(func) || new Map()).get(sw) || { avg:null, score:null };
       const sc = fs.score;
-      const fill = (sc ? scoreColors[sc-1] : '#f1f3f8');
+      const fill = sc ? scoreColors[sc-1] : '#f1f3f8';
       const x = leftPad + ci*(cell+gap);
       const y = topPad + colLabH + ri*(cell+gap);
 
