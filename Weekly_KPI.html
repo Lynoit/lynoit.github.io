@@ -821,8 +821,8 @@ g2.append('text')
   }
   legend.attr('height', 20 + boxH + 28 + 6);
 
-  // ---- KPI × Software heatmap (colored by per-function score) ----
-renderFunctionKpiHeatmapSummaryCard(card, parsed);  
+// ---- KPI × Software heatmap in calendar style ----
+renderFunctionKpiCalendarHeatmap(card, parsed);
 }
 
 /* ==================== Calendar trio helpers ==================== */
@@ -848,14 +848,15 @@ function weatherCategoryForWMO(code){
   return 'Clear/Clouds';
 }
 
-function renderFunctionKpiHeatmapSummaryCard(card, parsed){
+// Calendar-style heatmap: Y = all KPIs; X = software; cell color = function score for that software
+function renderFunctionKpiCalendarHeatmap(card, parsed){
   const T = getThresholds();
   const softwares = parsed.software || [];
   if (!softwares.length) return;
 
   const swLabels = softwares.map(sw => sw.label);
 
-  // Count measured KPIs per software (fallback denom when TOTAL_KPI_COUNT is unavailable)
+  // Fallback denominator per software if TOTAL_KPI_COUNT isn't available
   const measuredCountBySW = new Map(swLabels.map(l => [l, 0]));
   parsed.entries.forEach(e => {
     swLabels.forEach(l => {
@@ -864,26 +865,25 @@ function renderFunctionKpiHeatmapSummaryCard(card, parsed){
     });
   });
 
-  // Unique functions, and ordered KPI rows (function — KPI)
+  // Unique functions and KPI rows (keep original order)
   const functions = Array.from(new Set(parsed.entries.map(e => e.func)));
-  const kpiRows = parsed.entries.map(e => ({ func: e.func, kpi: e.kpi }));
+  const kpiRows  = parsed.entries.map(e => ({ func: e.func, kpi: e.kpi }));
 
-  // Sum events per (function, software)
-  const sumByFuncSW = new Map(); // key = func + "||" + swLabel
+  // Sum of events per (function, software)
+  const sumByFuncSW = new Map(); // key = `${func}||${swLabel}`
   functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
   parsed.entries.forEach(e => {
     const f = e.func;
     swLabels.forEach(l => {
       const v = e.values[l];
-      if (v != null && !Number.isNaN(v)){
-        const key = `${f}||${l}`;
-        sumByFuncSW.set(key, (sumByFuncSW.get(key) || 0) + Math.min(1000, v));
+      if (v != null && !Number.isNaN(v)) {
+        sumByFuncSW.set(`${f}||${l}`, (sumByFuncSW.get(`${f}||${l}`) || 0) + Math.min(1000, v));
       }
     });
   });
 
-  // Compute per-function averages & scores (per software)
-  const funcScore = new Map(); // func -> (sw -> {avg, score})
+  // Per-function avg & score per software
+  const funcScore = new Map(); // func -> Map(swLabel -> {avg, score})
   functions.forEach(f => {
     const inner = new Map();
     swLabels.forEach(l => {
@@ -896,58 +896,80 @@ function renderFunctionKpiHeatmapSummaryCard(card, parsed){
     funcScore.set(f, inner);
   });
 
-  // ---- Render table (heatmap cells colored by function score) ----
-  const wrap = card.append('div').attr('class','matrix-wrap').style('margin-top','10px');
-  wrap.append('div')
-    .attr('class','matrix-title')
-    .text('Function score per software — applied to each KPI row (color = score)');
+  // ======= Calendar-style SVG =======
+  const cell = 12, gap = 2;
+  const topPad = 22;         // space above the grid
+  const colLabH = 48;        // height for the rotated software labels
+  const leftLabels = kpiRows.map(r => `${r.func} — ${r.kpi}`);
+  const leftPad = Math.max(140, measureTextWidthCal(leftLabels, 11, 600) + 14);
+  const cols = swLabels.length, rows = kpiRows.length;
 
-  const tbl = wrap.append('table').attr('class','matrix-table');
-  const thead = tbl.append('thead').append('tr');
-  thead.append('th').text('KPI'); // rows are KPIs (function — KPI)
-  swLabels.forEach(l => thead.append('th').attr('class','software').text(l));
+  const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+  const gridW = leftPad + cols*(cell+gap) + 6;
+  const cw = Math.max(Math.min(gridW, 1200), Math.min(1000, cardW)); // don’t explode width
+  const gridH = topPad + colLabH + rows*(cell+gap) + 6;
 
-  const tbody = tbl.append('tbody');
+  const wrap = card.append('div').attr('class', 'chart-card').style('grid-column','1 / -1');
+  wrap.append('div').attr('class','cal-title').text('Function score per software (calendar style)');
 
-  // Optional: a faint function header row before each function’s KPIs for readability
-  let lastFunc = null;
+  const svg = wrap.append('svg')
+    .attr('width', cw)
+    .attr('height', gridH)
+    .style('display','block')
+    .style('margin','0 auto 10px');
 
-  kpiRows.forEach(({func, kpi}) => {
-    if (func !== lastFunc){
-      const trH = tbody.append('tr');
-      trH.append('td')
-        .attr('colspan', 1 + swLabels.length)
-        .style('background', '#f6f7fb')
-        .style('font-weight', 700)
-        .style('color', '#333')
-        .style('border-bottom', '1px solid #eef1fb')
-        .text(func);
-      lastFunc = func;
-    }
-
-    const tr = tbody.append('tr');
-    tr.append('td').text(`${func} — ${kpi}`);
-
-    swLabels.forEach(l => {
-      const fs = (funcScore.get(func) || new Map()).get(l) || {avg:null, score:null};
-      const sc = fs.score;
-      const avg = fs.avg;
-
-      const bg = (sc ? scoreColors[sc-1] : '#f1f3f8') + (sc ? '22' : ''); // light tint
-      const bd = sc ? `${scoreColors[sc-1]}55` : '#eef1fb';
-
-      const td = tr.append('td')
-        .style('text-align', 'center')
-        .style('min-width', '28px')
-        .style('height', '22px')
-        .style('background', bg)
-        .style('border', `1px solid ${bd}`);
-
-      // Tooltip shows details; cell itself is color-only (no text)
-      td.append('title')
-        .text(`${func} — ${kpi}\n${l}\nAvg/1000km: ${avg==null?'n/a':avg.toFixed(1)}\nScore: ${sc==null?'n/a':sc} — ${sc==null?'':scoreText[sc-1]}`);
-    });
+  // Column (software) labels on top, rotated like calendar month headers
+  const gTop = svg.append('g');
+  swLabels.forEach((lab, c) => {
+    const x = leftPad + c*(cell+gap) + cell/2;
+    gTop.append('text')
+      .attr('x', x)
+      .attr('y', topPad + 6)
+      .attr('transform', `rotate(35, ${x}, ${topPad+6})`)
+      .attr('text-anchor','start')
+      .attr('font-size', 11)
+      .attr('fill', '#333')
+      .text(lab);
   });
+
+  // Left KPI labels (like calendar left labels)
+  const gLeft = svg.append('g');
+  kpiRows.forEach((r, ri) => {
+    const y = topPad + colLabH + ri*(cell+gap) + cell*0.75;
+    const label = `${r.func} — ${r.kpi}`;
+    gLeft.append('text')
+      .attr('x', leftPad - 8)
+      .attr('y', y)
+      .attr('font-size', 11)
+      .attr('font-weight', 600)
+      .attr('fill', '#666')
+      .attr('text-anchor','end')
+      .text(label.length > 60 ? (label.slice(0,60) + '…') : label)
+      .append('title').text(label);
+  });
+
+  // Grid cells
+  const gGrid = svg.append('g');
+  for (let ri = 0; ri < rows; ri++) {
+    const { func, kpi } = kpiRows[ri];
+    for (let ci = 0; ci < cols; ci++) {
+      const sw = swLabels[ci];
+      const fs = (funcScore.get(func) || new Map()).get(sw) || { avg:null, score:null };
+      const sc = fs.score;
+      const fill = (sc ? scoreColors[sc-1] : '#f1f3f8');
+      const x = leftPad + ci*(cell+gap);
+      const y = topPad + colLabH + ri*(cell+gap);
+
+      gGrid.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill)
+        .attr('fill-opacity', sc ? 0.95 : 1)
+        .attr('stroke', '#fff').attr('stroke-width', 0.8)
+        .append('title')
+        .text(`${func} — ${kpi}\n${sw}\nAvg/1000km: ${fs.avg==null ? 'n/a' : fs.avg.toFixed(1)}\nScore: ${sc==null?'n/a':sc}${sc==null?'':' — ' + scoreText[sc-1]}`);
+    }
+  }
 }
 
 /* ==================== Calendar trio (Activity, Temperature, Weather) ==================== */
