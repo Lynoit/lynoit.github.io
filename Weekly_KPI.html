@@ -820,6 +820,9 @@ g2.append('text')
     g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[i]);
   }
   legend.attr('height', 20 + boxH + 28 + 6);
+
+  // ---- KPI × Software heatmap (colored by per-function score) ----
+renderFunctionKpiHeatmapSummaryCard(card, parsed);  
 }
 
 /* ==================== Calendar trio helpers ==================== */
@@ -843,6 +846,108 @@ function weatherCategoryForWMO(code){
   if ((code>=61 && code<=65) || (code>=71 && code<=77) || (code>=80 && code<=82)) return 'Rain/Snow';
   if (code===45 || code===48 || (code>=51 && code<=57)) return 'Fog/Drizzle';
   return 'Clear/Clouds';
+}
+
+function renderFunctionKpiHeatmapSummaryCard(card, parsed){
+  const T = getThresholds();
+  const softwares = parsed.software || [];
+  if (!softwares.length) return;
+
+  const swLabels = softwares.map(sw => sw.label);
+
+  // Count measured KPIs per software (fallback denom when TOTAL_KPI_COUNT is unavailable)
+  const measuredCountBySW = new Map(swLabels.map(l => [l, 0]));
+  parsed.entries.forEach(e => {
+    swLabels.forEach(l => {
+      const v = e.values[l];
+      if (v != null && !Number.isNaN(v)) measuredCountBySW.set(l, measuredCountBySW.get(l) + 1);
+    });
+  });
+
+  // Unique functions, and ordered KPI rows (function — KPI)
+  const functions = Array.from(new Set(parsed.entries.map(e => e.func)));
+  const kpiRows = parsed.entries.map(e => ({ func: e.func, kpi: e.kpi }));
+
+  // Sum events per (function, software)
+  const sumByFuncSW = new Map(); // key = func + "||" + swLabel
+  functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
+  parsed.entries.forEach(e => {
+    const f = e.func;
+    swLabels.forEach(l => {
+      const v = e.values[l];
+      if (v != null && !Number.isNaN(v)){
+        const key = `${f}||${l}`;
+        sumByFuncSW.set(key, (sumByFuncSW.get(key) || 0) + Math.min(1000, v));
+      }
+    });
+  });
+
+  // Compute per-function averages & scores (per software)
+  const funcScore = new Map(); // func -> (sw -> {avg, score})
+  functions.forEach(f => {
+    const inner = new Map();
+    swLabels.forEach(l => {
+      const sum = sumByFuncSW.get(`${f}||${l}`) || 0;
+      const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : (measuredCountBySW.get(l) || 0);
+      const avg = denom ? (sum / denom) : null;
+      const sc  = (avg == null) ? null : scoreFromAvg(avg, T);
+      inner.set(l, { avg, score: sc });
+    });
+    funcScore.set(f, inner);
+  });
+
+  // ---- Render table (heatmap cells colored by function score) ----
+  const wrap = card.append('div').attr('class','matrix-wrap').style('margin-top','10px');
+  wrap.append('div')
+    .attr('class','matrix-title')
+    .text('Function score per software — applied to each KPI row (color = score)');
+
+  const tbl = wrap.append('table').attr('class','matrix-table');
+  const thead = tbl.append('thead').append('tr');
+  thead.append('th').text('KPI'); // rows are KPIs (function — KPI)
+  swLabels.forEach(l => thead.append('th').attr('class','software').text(l));
+
+  const tbody = tbl.append('tbody');
+
+  // Optional: a faint function header row before each function’s KPIs for readability
+  let lastFunc = null;
+
+  kpiRows.forEach(({func, kpi}) => {
+    if (func !== lastFunc){
+      const trH = tbody.append('tr');
+      trH.append('td')
+        .attr('colspan', 1 + swLabels.length)
+        .style('background', '#f6f7fb')
+        .style('font-weight', 700)
+        .style('color', '#333')
+        .style('border-bottom', '1px solid #eef1fb')
+        .text(func);
+      lastFunc = func;
+    }
+
+    const tr = tbody.append('tr');
+    tr.append('td').text(`${func} — ${kpi}`);
+
+    swLabels.forEach(l => {
+      const fs = (funcScore.get(func) || new Map()).get(l) || {avg:null, score:null};
+      const sc = fs.score;
+      const avg = fs.avg;
+
+      const bg = (sc ? scoreColors[sc-1] : '#f1f3f8') + (sc ? '22' : ''); // light tint
+      const bd = sc ? `${scoreColors[sc-1]}55` : '#eef1fb';
+
+      const td = tr.append('td')
+        .style('text-align', 'center')
+        .style('min-width', '28px')
+        .style('height', '22px')
+        .style('background', bg)
+        .style('border', `1px solid ${bd}`);
+
+      // Tooltip shows details; cell itself is color-only (no text)
+      td.append('title')
+        .text(`${func} — ${kpi}\n${l}\nAvg/1000km: ${avg==null?'n/a':avg.toFixed(1)}\nScore: ${sc==null?'n/a':sc} — ${sc==null?'':scoreText[sc-1]}`);
+    });
+  });
 }
 
 /* ==================== Calendar trio (Activity, Temperature, Weather) ==================== */
