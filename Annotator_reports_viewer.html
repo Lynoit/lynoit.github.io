@@ -719,6 +719,7 @@ Object.keys(EU_CENTROIDS).forEach(k => EU_CANON_LOWER[k.toLowerCase()] = k);
 const COUNTRY_ALIASES = {
   'czech republic':'czechia',
   'the netherlands':'netherlands',
+  'sverige': 'sweden',
 
   'românia':'romania','republic of moldova':'moldova',
   'deutschland':'germany','österreich':'austria','oesterreich':'austria',
@@ -1129,59 +1130,71 @@ function ensureActiveBadgeUpdater(){
 
     // ---------- Countries × Month (4 bins/month) ----------
     function buildCountryMonthChart(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(
-        withDates.map(x =>
-          fetchSessionSummary(x.filename)
-            .then(s => ({...x, ...s}))
-            .then(r => {
-              if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-              return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
-            })
-        )
-      ).then(rows => {
-        const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
-        const host = document.getElementById('country-host');
-        if (!host) return;
+  const cleanTitleCase = (s) => {
+    const t = String(s || '').trim()
+      .replace(/\(.*?\)/g, '')        // drop bracket comments e.g. "Sweden (SE)"
+      .replace(/\s+/g, ' ');
+    return t.replace(/\b\w/g, c => c.toUpperCase());
+  };
 
-        if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No country data found in the “Country” table.</div>';
-          return;
-        }
+  return Promise.all(
+    withDates.map(x =>
+      fetchSessionSummary(x.filename)
+        .then(s => ({...x, ...s}))
+        .then(r => {
+          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+          return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+        })
+    )
+  ).then(rows => {
+    const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
+    const host = document.getElementById('country-host');
+    if (!host) return;
 
-        const counts = new Map(); // `${ym}|${wb}|${country}` -> n
-        const monthsSet = new Set();
-        const countriesSet = new Set();
-
-        valid.forEach(r => {
-          const ym  = r.dayStr.slice(0,7);
-          const day = parseInt(r.dayStr.slice(8,10), 10);
-          const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
-          monthsSet.add(ym);
-
-          const uniq = Array.from(new Set(r.countries.map(c => String(c).trim()).filter(Boolean)));
-          uniq.forEach(country => {
-            countriesSet.add(country);
-            const key = `${ym}|${wb}|${country}`;
-            counts.set(key, (counts.get(key)||0) + 1);
-          });
-        });
-
-        const months = Array.from(monthsSet).sort();
-        const countries = Array.from(countriesSet).sort((a,b) => {
-          const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
-          const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
-          if (totalB !== totalA) return totalB - totalA;
-          return a.localeCompare(b);
-        });
-
-        renderCountryMonthHeatmap({ months, countries, counts });
-      });
+    if (!valid.length){
+      host.innerHTML = '<div style="color:#666;">No country data found in the “Country” table.</div>';
+      return;
     }
+
+    const counts = new Map(); // `${ym}|${wb}|${country}` -> n
+    const monthsSet = new Set();
+    const countriesSet = new Set();
+
+    valid.forEach(r => {
+      const ym  = r.dayStr.slice(0,7);
+      const day = parseInt(r.dayStr.slice(8,10), 10);
+      const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
+      monthsSet.add(ym);
+
+      // 🔹 Normalize each country:
+      const normed = r.countries
+        .map(c => canonicalEU(c) || cleanTitleCase(c)) // EU → English; others → cleaned title case
+        .filter(Boolean);
+
+      const uniq = Array.from(new Set(normed));
+      uniq.forEach(country => {
+        countriesSet.add(country);
+        const key = `${ym}|${wb}|${country}`;
+        counts.set(key, (counts.get(key)||0) + 1);
+      });
+    });
+
+    const months = Array.from(monthsSet).sort();
+    const countries = Array.from(countriesSet).sort((a,b) => {
+      const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
+      const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
+      if (totalB !== totalA) return totalB - totalA;
+      return a.localeCompare(b);
+    });
+
+    renderCountryMonthHeatmap({ months, countries, counts });
+  });
+}
 
     function renderCountryMonthHeatmap({months, countries, counts}){
       const host = document.getElementById('country-host');
@@ -2222,4 +2235,5 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
