@@ -236,37 +236,44 @@ function normalizeHeader(h){
   return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
 }
 
-// Read KPI_buttons.csv and return total "redButton" KPIs and counts per function.
-// Tries to detect the function column automatically: group|function|func|system|category|module
+// Read KPI_buttons.csv and return:
+//   total = sum of per-function redButton KPIs (excluding "No Function")
+//   map   = { FunctionName -> count } (excluding "No Function")
+// Tries to detect function & kpi-name columns.
 async function loadKpiCountsByFunction(path='KPI_buttons.csv'){
   const txt = await readTextOrNull(path);
-  if (!txt) return { total: null, map: null };
+  if (!txt) return { total:null, map:null };
 
   const delim = detectDelimiter(txt);
   const rows = txt.replace(/\r/g,'').split('\n').filter(Boolean).map(r => r.split(delim));
-  if (!rows.length) return { total: null, map: null };
+  if (!rows.length) return { total:null, map:null };
 
   const headers = rows.shift().map(h => h.trim().toLowerCase());
-  const idxCss = headers.findIndex(h => h.includes('css') || h.includes('class'));
-  const candFuncCols = ['group','function','func','system','category','module','kpi_group','kpi group'];
-  const idxFunc = candFuncCols.map(n => headers.indexOf(n)).find(i => i >= 0);
+
+  const idxCss  = headers.findIndex(h => h.includes('css') || h.includes('class'));
+  const idxFunc = ['group','function','func','system','category','module','kpi_group','kpi group']
+                    .map(n => headers.indexOf(n)).find(i => i >= 0);
+  const idxKpi  = ['kpi','kpi_name','kpi name','name','title','label','description']
+                    .map(n => headers.indexOf(n)).find(i => i >= 0);
 
   let total = 0;
   const map = {};
 
   for (const cells of rows){
-    const css = (cells[idxCss] || '').toLowerCase();
-    if (!css.includes('redbutton')) continue;        // only count KPIs that matter
-    let funcRaw = idxFunc >= 0 ? (cells[idxFunc] || '').trim() : '';
-    // Merge TSI variants (e.g. "TSI Speed", "TSI Signs") into "TSI"
-    const func = /^tsi\b/i.test(funcRaw) ? 'TSI' : (funcRaw || 'UNKNOWN');
+    const css = ((idxCss>=0?cells[idxCss]:'') || '').toLowerCase();
+    if (!css.includes('redbutton')) continue;          // only count KPIs with a red button
+
+    const kpiName = ((idxKpi>=0?cells[idxKpi]:'') || '').trim();
+    if (/no function/i.test(kpiName)) continue;        // EXCLUDE "No Function" from denominator
+
+    let funcRaw = (idxFunc>=0?cells[idxFunc]:'')?.trim() || 'UNKNOWN';
+    const func = /^tsi\b/i.test(funcRaw) ? 'TSI' : funcRaw;  // merge TSI variants
 
     map[func] = (map[func] || 0) + 1;
     total++;
   }
   return { total, map };
 }
-
   
 /* ==================== Parse table (dates + inline "Release note") ==================== */
 function parseTable(text){
@@ -939,51 +946,51 @@ function weatherCategoryForWMO(code){
   return 'Clear/Clouds';
 }
 
-// Calendar-style heatmap: Y = all KPIs; X = software;
-// Cell color = score of (sum of KPIs for that function & software) / GLOBAL KPI COUNT,
-// same denominator as “Average per 1000 km”.
+// Calendar-style heatmap: Y = KPIs (excluding "No Function"); X = software.
+// Cell color = score of ( SUM_KPIs_in_function(events) / COUNT_KPIs_in_function_from_KPI_buttons ),
+// with hard black when any "No Function" KPI > 0 for (function, software).
 function renderFunctionKpiCalendarHeatmap(card, parsed){
   const T = getThresholds();
   const softwares = parsed.software || [];
   if (!softwares.length) return;
 
   const swLabels = softwares.map(sw => sw.label);
+  const entries  = parsed.entries || [];
 
-  // ===== Black-out mask from any "No function" KPI > 0 =====
+  // ---- Black override when any "No Function" KPI > 0 for (func, sw) ----
   const noFuncRe = /no function/i;
-  const noFuncMask = new Set(); // key `${func}||${swLabel}`
-  (parsed.entries || []).forEach(e => {
+  const noFuncMask = new Set(); // key `${func}||${sw}`
+  entries.forEach(e => {
     if (!noFuncRe.test(e.kpi || '')) return;
     swLabels.forEach(l => {
       const v = e.values[l];
-      if (v != null && !Number.isNaN(v) && v > 0) {
-        noFuncMask.add(`${e.func}||${l}`);
-      }
+      if (v != null && !Number.isNaN(v) && v > 0) noFuncMask.add(`${e.func}||${l}`);
     });
   });
 
-  // ===== Rows to display (hide "No Function" KPIs in the UI) =====
-  const entriesDisplay = (parsed.entries || []).filter(e =>
-    !noFuncRe.test(e.kpi || '') && !noFuncRe.test(e.func || '')
-  );
+  // ---- KPI rows to display (hide "No Function" rows in the UI) ----
+  const entriesDisplay = entries.filter(e => !noFuncRe.test(e.kpi || '') && !noFuncRe.test(e.func || ''));
   if (!entriesDisplay.length) return;
-
   const kpiRows = entriesDisplay.map(e => ({ func: e.func, kpi: e.kpi }));
 
-  // Unique functions
-  const functions = Array.from(new Set((parsed.entries || []).map(e => e.func)));
+  // ---- Unique functions from the table ----
+  const functions = Array.from(new Set(entries.map(e => e.func)));
 
-  // ===== GLOBAL denominator (like the summary): TOTAL_KPI_COUNT from KPI_buttons.csv =====
-  // Fallback: use total KPI rows in the weekly table.
-  const GLOBAL_DENOM =
-    (typeof window !== 'undefined' && window.TOTAL_KPI_COUNT && window.TOTAL_KPI_COUNT > 0)
-      ? window.TOTAL_KPI_COUNT
-      : (parsed.entries || []).length;
+  // ---- Per-function denominators from KPI_buttons.csv (preferred), excl "No Function"; fallback to table count excl "No Function"
+  const KPI_COUNT_BY_FUNC = (typeof window !== 'undefined' && window.KPI_COUNT_BY_FUNC) || null;
+  const denomByFunc = new Map();
+  functions.forEach(f => {
+    const d = KPI_COUNT_BY_FUNC && KPI_COUNT_BY_FUNC[f] != null
+      ? KPI_COUNT_BY_FUNC[f]
+      : entries.filter(e => e.func === f && !noFuncRe.test(e.kpi || '')).length;
+    denomByFunc.set(f, d || 0);
+  });
 
-  // Sum of events per (function, software), including “No function” KPIs
-  const sumByFuncSW = new Map(); // key = `${func}||${swLabel}`
+  // ---- Sum events per (function, software), excluding "No Function" KPIs from the sum ----
+  const sumByFuncSW = new Map(); // `${func}||${sw}` -> number
   functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
-  (parsed.entries || []).forEach(e => {
+  entries.forEach(e => {
+    if (noFuncRe.test(e.kpi || '')) return; // exclude from sum
     const f = e.func;
     swLabels.forEach(l => {
       const v = e.values[l];
@@ -994,27 +1001,28 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     });
   });
 
-  // Per-function avg & score per software with GLOBAL denominator
-  const funcScore = new Map(); // func -> Map(swLabel -> {avg, score})
+  // ---- Compute per-function avg & score per software ----
+  const funcScore = new Map(); // func -> Map(sw -> {avg,score})
   functions.forEach(f => {
+    const denom = denomByFunc.get(f) || 0;
     const inner = new Map();
     swLabels.forEach(l => {
       const sum = sumByFuncSW.get(`${f}||${l}`) || 0;
-      const avg = GLOBAL_DENOM ? (sum / GLOBAL_DENOM) : null;
+      const avg = denom ? (sum / denom) : null;
       const sc  = (avg == null) ? null : scoreFromAvg(avg, T);
       inner.set(l, { avg, score: sc });
     });
     funcScore.set(f, inner);
   });
 
-  // =================== Draw (calendar style) ===================
+  // =================== Draw ===================
   const cell = 12, gap = 2;
   const topPad = 22;
 
   const leftLabels = kpiRows.map(r => `${r.func} — ${r.kpi}`);
   const leftPad = Math.max(140, measureTextWidthCal(leftLabels, 11, 600) + 14);
 
-  const maxTopLabel = measureTextWidthCal(swLabels, 11, 600); // width when horiz ≈ height when vertical
+  const maxTopLabel = measureTextWidthCal(swLabels, 11, 600);
   const colLabH = maxTopLabel + 16;
 
   const cols = swLabels.length, rows = kpiRows.length;
@@ -1044,6 +1052,59 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
       .text(label.length > 60 ? (label.slice(0,60) + '…') : label)
       .append('title').text(label);
   });
+
+  // Cells
+  const gGrid = svg.append('g');
+  for (let ri = 0; ri < rows; ri++) {
+    const { func, kpi } = kpiRows[ri];
+    for (let ci = 0; ci < cols; ci++) {
+      const sw = swLabels[ci];
+      const fs = (funcScore.get(func) || new Map()).get(sw) || { avg:null, score:null };
+      const sc = fs.score;
+
+      const forceBlack = noFuncMask.has(`${func}||${sw}`);
+      const fill = forceBlack ? '#000' : (sc ? scoreColors[sc-1] : '#f1f3f8');
+
+      const x = leftPad + ci*(cell+gap);
+      const y = topPad + colLabH + ri*(cell+gap);
+
+      gGrid.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill)
+        .attr('fill-opacity', forceBlack ? 1 : (sc ? 0.95 : 1))
+        .attr('stroke', '#fff').attr('stroke-width', 0.8)
+        .append('title')
+        .text(`${func} — ${kpi}\n${sw}\n` +
+              (forceBlack ? 'NO FUNCTION (forced black)\n' : '') +
+              `Avg/1000km: ${fs.avg==null ? 'n/a' : fs.avg.toFixed(1)}\n` +
+              `Score: ${sc==null?'n/a':sc}${sc==null?'':' — ' + scoreText[sc-1]}`);
+    }
+  }
+
+  // Vertical software labels aligned to the left edge of each column
+  const gTop = svg.append('g');
+  const gridTopY = topPad + colLabH;
+  const LABEL_X_NUDGE = -2, LABEL_Y_NUDGE = -8;
+  const labelBaseline = gridTopY + LABEL_Y_NUDGE;
+
+  swLabels.forEach((lab, c) => {
+    const colLeft = leftPad + c*(cell+gap);
+    const anchorX = colLeft + LABEL_X_NUDGE;
+
+    const gl = gTop.append('g')
+      .attr('transform', `translate(${anchorX}, ${labelBaseline}) rotate(-90)`);
+
+    gl.append('text')
+      .attr('x', 0).attr('y', 0)
+      .attr('text-anchor', 'start')
+      .attr('dominant-baseline', 'hanging')
+      .attr('font-size', 11)
+      .attr('fill', '#111')
+      .text(lab)
+      .append('title').text(lab);
+  });
+}
 
   // Grid cells
   const gGrid = svg.append('g');
