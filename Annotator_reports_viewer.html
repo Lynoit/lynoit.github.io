@@ -163,6 +163,14 @@
       height: auto;
       display: block;
     }
+
+ /* KPI badge (uses same s1..s10 colors as score boxes) */
+.kpi-badge{
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:2px 8px; margin-left:8px;
+  border-radius:999px; font-size:11px; font-weight:700;
+  border:1px solid rgba(0,0,0,.15);
+}
     /* === Active badge for live sessions === */
 .active-badge{
   display:inline-flex; align-items:center; justify-content:center;
@@ -548,48 +556,60 @@ function extractTotalDistanceKmFromStatistics(wb){
 }
 
 // Uses loadWorkbook(filename) → Promise<{ wb, buf }>
-function fetchSessionSummary(filename) {
-  if (summaryCache.has(filename)) return Promise.resolve(summaryCache.get(filename));
+async function fetchSessionSummary(filename) {
+  if (summaryCache.has(filename)) return summaryCache.get(filename);
 
-  return loadWorkbook(filename)
-    .then(({ wb }) => {
-      // 1) Mileage from "Statistics" (preferred)
-      let mileageKm = extractTotalDistanceKmFromStatistics(wb);
+  const { wb } = await loadWorkbook(filename);
 
-      // 2) Fallback to Sampling path distance
-      if (mileageKm == null) {
-        const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-        if (samplingName) {
-          const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-          mileageKm = km;
+  // 1) Mileage (Statistics preferred, Sampling fallback)
+  let mileageKm = extractTotalDistanceKmFromStatistics(wb);
+  if (mileageKm == null) {
+    const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+    if (samplingName) {
+      const { km } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+      mileageKm = km;
+    }
+  }
+
+  // 2) Temp/Weather + issue count
+  const { meanTempC, weatherAgg } = computeTempWeatherFromIssues(wb);
+  const issueCount = countIssuesFromWorkbook(wb);
+
+  // 3) Test details
+  let testObject = null, testPurpose = null;
+  try {
+    const details = extractTestDetails(wb);
+    testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
+    testPurpose = details['purpose'] || details['test purpose'] || null;
+  } catch {}
+
+  // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
+  let kpiScore = null, kpiAvgPer1k = null;
+  try {
+    const totalKpis = await getTotalKpis();
+    if (typeof totalKpis === 'number' && totalKpis > 0) {
+      const kpiSheetName = wb.SheetNames.find(n => /kpi/i.test(n));
+      if (kpiSheetName && typeof extractAvgEventsPer1kFromSheet === 'function') {
+        // NOTE: your extractAvgEventsPer1kFromSheet returns the SUM (by design)
+        const sum = extractAvgEventsPer1kFromSheet(wb.Sheets[kpiSheetName]);
+        if (sum != null) {
+          const avg = sum / totalKpis;
+          kpiAvgPer1k = Math.round(avg * 10) / 10;   // 1 decimal
+          kpiScore    = scoreFromRate(kpiAvgPer1k);  // 1..10
         }
       }
+    }
+  } catch {}
 
-      // Temp/Weather
-      const { meanTempC, weatherAgg } = computeTempWeatherFromIssues(wb);
+  const summary = {
+    mileageKm, issueCount, meanTempC, weatherAgg,
+    testObject, testPurpose,
+    kpiScore, kpiAvgPer1k,
+    loaded: true
+  };
 
-      // Issue count
-      const issueCount = countIssuesFromWorkbook(wb);
-
-      // Test purpose & object from “Test details”
-      let testObject = null, testPurpose = null;
-      try {
-        const details = extractTestDetails(wb);
-        testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
-        testPurpose = details['purpose'] || details['test purpose'] || null;
-      } catch (_) {
-        // ignore
-      }
-
-      const summary = { mileageKm, issueCount, meanTempC, weatherAgg, testObject, testPurpose, loaded: true };
-      summaryCache.set(filename, summary);
-      return summary;
-    })
-    .catch(err => {
-      const fallback = { mileageKm: null, issueCount: 0, meanTempC: null, weatherAgg: null, testObject: null, testPurpose: null, loaded: true, error: String(err || '') };
-      summaryCache.set(filename, fallback);
-      return fallback;
-    });
+  summaryCache.set(filename, summary);
+  return summary;
 }
 
     // Read "Test details" sheet (col1=label, col2=value) → map
@@ -895,12 +915,10 @@ function canonicalEU(raw){
     hdr.tabIndex = 0;
     hdr.title = 'Show sessions';
 
-    // Left label
     const label = document.createElement('span');
     label.textContent = day;
     hdr.appendChild(label);
 
-    // Right badge with count
     const count = document.createElement('span');
     count.className = 'day-count';
     count.textContent = String(groups[day].length);
@@ -916,27 +934,30 @@ function canonicalEU(raw){
       li.className = 'session-item';
       li.onclick = () => loadFile(f);
 
-      // Row: title + (optional) Active badge
       const row = document.createElement('div');
       row.className = 'session-title-row';
 
       const title = document.createElement('div');
       title.textContent = namePretty;
 
-      // Decide if Active (Last-Modified within last 10 minutes)
+      // KPI badge (hidden until we calculate)
+      const kpiBadge = document.createElement('span');
+      kpiBadge.className = 'kpi-badge';
+      kpiBadge.id = `kpi_${cssSafeId(f)}`;
+      kpiBadge.style.display = 'none'; // will show when we have a score
+
+      // Active badge (kept as-is)
       const lm = blobMeta.get(f) || 0;
       const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
-
-      const badge = document.createElement('span');
-      badge.className = 'active-badge';
-      badge.textContent = 'Active';
-      // Store timestamp for periodic reevaluation
-      badge.dataset.lm = String(lm);
-      // If not currently active, hide (but keep node so it can appear if still within window on initial render)
-      if (!isActive) badge.style.display = 'none';
+      const activeBadge = document.createElement('span');
+      activeBadge.className = 'active-badge';
+      activeBadge.textContent = 'Active';
+      activeBadge.dataset.lm = String(lm);
+      if (!isActive) activeBadge.style.display = 'none';
 
       row.appendChild(title);
-      row.appendChild(badge);
+      row.appendChild(kpiBadge);   // ← KPI badge first
+      row.appendChild(activeBadge);
 
       const meta = document.createElement('div');
       meta.className = 'meta';
@@ -957,19 +978,29 @@ function canonicalEU(raw){
       if (expand && !loadedThisGroup) {
         loadedThisGroup = true;
         groups[day].forEach(f => {
-  fetchSessionSummary(f).then(({ mileageKm, issueCount, testObject, testPurpose }) => {
-    const el = document.getElementById(`meta_${cssSafeId(f)}`);
-    if (!el) return;
+          fetchSessionSummary(f).then(({ mileageKm, issueCount, testObject, testPurpose, kpiScore }) => {
+            // Fill meta line
+            const el = document.getElementById(`meta_${cssSafeId(f)}`);
+            if (el) {
+              const parts = [];
+              if (testPurpose) parts.push(String(testPurpose));
+              if (testObject)  parts.push(String(testObject));
+              const left = parts.length ? parts.join('  •  ') + '  •  ' : '';
+              const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
+              el.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
+            }
 
-    // no labels — just the values, then mileage/issues
-    const parts = [];
-    if (testPurpose) parts.push(String(testPurpose));
-    if (testObject)  parts.push(String(testObject));
-
-    const left = parts.length ? parts.join('  •  ') + '  •  ' : '';
-    const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
-
-    el.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
+            // Fill KPI badge if we have a score
+            const kb = document.getElementById(`kpi_${cssSafeId(f)}`);
+            if (kb) {
+              if (typeof kpiScore === 'number' && kpiScore >= 1 && kpiScore <= 10) {
+                kb.textContent = `KPI ${kpiScore}`;
+                kb.className = `kpi-badge s${kpiScore}`;   // color from .s1..s10
+                kb.style.display = 'inline-flex';
+              } else {
+                kb.style.display = 'none';
+              }
+            }
           });
         });
       }
@@ -984,7 +1015,6 @@ function canonicalEU(raw){
     sb.appendChild(lst);
   });
 
-  // Start/refresh periodic badge visibility check
   ensureActiveBadgeUpdater();
 }
 
@@ -1875,6 +1905,33 @@ function renderScoringLegend(selectedScore){
   return `<div class="score-legend">${boxes}</div>`;
 }
 
+// Count total KPIs from KPI_buttons.csv (cached after first load)
+function getTotalKpis(){
+  if (typeof window.__TOTAL_KPIS__ === 'number') {
+    return Promise.resolve(window.__TOTAL_KPIS__);
+  }
+
+  const relUrl   = 'KPI_buttons.csv';
+  const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
+
+  const fetchAndCount = (url) =>
+    fetch(nc(url), { cache: 'default' })   // cacheable, it's the same for all sessions
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then(txt => {
+        const lines = txt.split(/\r?\n/);
+        const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
+        window.__TOTAL_KPIS__ = count;
+        return count;
+      });
+
+  return fetchAndCount(relUrl)
+    .catch(() => fetchAndCount(azureUrl))
+    .catch(() => null);
+}
+
 // ---------- SESSION VIEWER ----------
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -1945,27 +2002,6 @@ function loadFile(filename) {
       if (n != null){ sum += n; have = true; }
     }
     return have ? sum : null;
-  }
-
-  // Total KPIs via KPI_buttons.csv (cached in window.__TOTAL_KPIS__)
-  function getTotalKpis(){
-    if (typeof window.__TOTAL_KPIS__ === 'number') {
-      return Promise.resolve(window.__TOTAL_KPIS__);
-    }
-    const relUrl   = 'KPI_buttons.csv';
-    const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
-
-    const fetchAndCount = (url) =>
-      fetch(url, { cache: 'default' })
-        .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.text(); })
-        .then(txt => {
-          const lines = txt.split(/\r?\n/);
-          const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
-          window.__TOTAL_KPIS__ = count;
-          return count;
-        });
-
-    return fetchAndCount(relUrl).catch(() => fetchAndCount(azureUrl)).catch(() => null);
   }
 
   const issueTableInfo = {
@@ -2246,6 +2282,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
