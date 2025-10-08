@@ -236,6 +236,38 @@ function normalizeHeader(h){
   return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
 }
 
+// Read KPI_buttons.csv and return total "redButton" KPIs and counts per function.
+// Tries to detect the function column automatically: group|function|func|system|category|module
+async function loadKpiCountsByFunction(path='KPI_buttons.csv'){
+  const txt = await readTextOrNull(path);
+  if (!txt) return { total: null, map: null };
+
+  const delim = detectDelimiter(txt);
+  const rows = txt.replace(/\r/g,'').split('\n').filter(Boolean).map(r => r.split(delim));
+  if (!rows.length) return { total: null, map: null };
+
+  const headers = rows.shift().map(h => h.trim().toLowerCase());
+  const idxCss = headers.findIndex(h => h.includes('css') || h.includes('class'));
+  const candFuncCols = ['group','function','func','system','category','module','kpi_group','kpi group'];
+  const idxFunc = candFuncCols.map(n => headers.indexOf(n)).find(i => i >= 0);
+
+  let total = 0;
+  const map = {};
+
+  for (const cells of rows){
+    const css = (cells[idxCss] || '').toLowerCase();
+    if (!css.includes('redbutton')) continue;        // only count KPIs that matter
+    let funcRaw = idxFunc >= 0 ? (cells[idxFunc] || '').trim() : '';
+    // Merge TSI variants (e.g. "TSI Speed", "TSI Signs") into "TSI"
+    const func = /^tsi\b/i.test(funcRaw) ? 'TSI' : (funcRaw || 'UNKNOWN');
+
+    map[func] = (map[func] || 0) + 1;
+    total++;
+  }
+  return { total, map };
+}
+
+  
 /* ==================== Parse table (dates + inline "Release note") ==================== */
 function parseTable(text){
   const tryParse = (d)=> text
@@ -1614,6 +1646,10 @@ async function loadCsvAndRender(){
 
     // === NEW: load total KPI count from KPI_buttons.csv (lines containing "redButton") ===
     TOTAL_KPI_COUNT = await loadTotalKpiCount();
+
+    const kpiCounts = await loadKpiCountsByFunction('KPI_buttons.csv');
+    window.TOTAL_KPI_COUNT   = kpiCounts.total;   // still useful elsewhere
+    window.KPI_COUNT_BY_FUNC = kpiCounts.map;     // <-- the important one
 
     // Merge everything into the parsed object
     parsed = { 
