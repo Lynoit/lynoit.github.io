@@ -848,7 +848,7 @@ function weatherCategoryForWMO(code){
   return 'Clear/Clouds';
 }
 
-// Calendar-style heatmap: Y = all KPIs; X = software; cell color = function score for that software
+// Calendar-style heatmap: Y = all KPIs; X = software; cell color = per-function score for that software
 function renderFunctionKpiCalendarHeatmap(card, parsed){
   const T = getThresholds();
   const softwares = parsed.software || [];
@@ -856,28 +856,26 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
 
   const swLabels = softwares.map(sw => sw.label);
 
-  // --- FILTER: drop any Function/KPI that contains "No Function" (case-insensitive)
+  // --- FILTER: drop any Function/KPI that contains "No Function"
   const noFuncRe = /no function/i;
   const entriesFiltered = (parsed.entries || []).filter(e =>
     !noFuncRe.test(e.func || '') && !noFuncRe.test(e.kpi || '')
   );
-
-  // Fallback denominator per software if TOTAL_KPI_COUNT isn't available
-  const measuredCountBySW = new Map(swLabels.map(l => [l, 0]));
-  entriesFiltered.forEach(e => {
-    swLabels.forEach(l => {
-      const v = e.values[l];
-      if (v != null && !Number.isNaN(v)) measuredCountBySW.set(l, measuredCountBySW.get(l) + 1);
-    });
-  });
+  if (!entriesFiltered.length) return;
 
   // Unique functions and KPI rows (keep original order)
   const functions = Array.from(new Set(entriesFiltered.map(e => e.func)));
   const kpiRows  = entriesFiltered.map(e => ({ func: e.func, kpi: e.kpi }));
-  const cols = swLabels.length, rows = kpiRows.length;
-  if (!rows) return;
 
-  // Sum of events per (function, software)
+  // ---- Build per-function KPI counts (DENOMINATOR)
+  const kpisByFunc = new Map(); // func -> Set of KPI names
+  entriesFiltered.forEach(e => {
+    if (!kpisByFunc.has(e.func)) kpisByFunc.set(e.func, new Set());
+    kpisByFunc.get(e.func).add(e.kpi);
+  });
+  const denomByFunc = new Map(Array.from(kpisByFunc.entries()).map(([f, set]) => [f, set.size]));
+
+  // ---- Sum of events per (function, software)
   const sumByFuncSW = new Map(); // key = `${func}||${swLabel}`
   functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
   entriesFiltered.forEach(e => {
@@ -885,21 +883,20 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     swLabels.forEach(l => {
       const v = e.values[l];
       if (v != null && !Number.isNaN(v)) {
-        sumByFuncSW.set(`${f}||${l}`, (sumByFuncSW.get(`${f}||${l}`) || 0) + Math.min(1000, v));
+        const key = `${f}||${l}`;
+        sumByFuncSW.set(key, (sumByFuncSW.get(key) || 0) + Math.min(1000, v));
       }
     });
   });
 
-  // Per-function avg & score per software
+  // ---- Per-function avg & score per software
   const funcScore = new Map(); // func -> Map(swLabel -> {avg, score})
   functions.forEach(f => {
+    const denom = denomByFunc.get(f) || 0;          // number of KPIs in this function
     const inner = new Map();
     swLabels.forEach(l => {
       const sum = sumByFuncSW.get(`${f}||${l}`) || 0;
-      const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0)
-        ? TOTAL_KPI_COUNT
-        : (measuredCountBySW.get(l) || 0);
-      const avg = denom ? (sum / denom) : null;
+      const avg = denom ? (sum / denom) : null;     // <-- key fix: function-specific denominator
       const sc  = (avg == null) ? null : scoreFromAvg(avg, T);
       inner.set(l, { avg, score: sc });
     });
@@ -918,11 +915,12 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
   const maxTopLabel = measureTextWidthCal(swLabels, 11, 600); // width when horizontal ≈ height when vertical
   const colLabH = maxTopLabel + 16;                           // headroom above grid
 
+  const cols = swLabels.length, rows = kpiRows.length;
   const gridW = leftPad + cols*(cell+gap) + 6;
   const gridH = topPad + colLabH + rows*(cell+gap) + 6;
 
   const wrap = card.append('div').attr('class', 'chart-card').style('grid-column','1 / -1');
-  // (title removed)
+  // (no title)
 
   // allow horizontal scroll when many columns
   const scroller = wrap.append('div').style('overflow','auto');
@@ -971,30 +969,28 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     }
   }
 
-  // ---- Column (software) labels on top, vertical and **aligned to left edge** of each column
-  const gTop = svg.append('g'); // appended last -> on top of cells
-  const gridTopY = topPad + colLabH;         // y where the first row of cells begins
+  // ---- Column (software) labels on top, vertical and aligned to LEFT edge of each column (draw last)
+  const gTop = svg.append('g');
+  const gridTopY = topPad + colLabH;
 
-  // Fine-tune offsets (negative = up/left, positive = down/right)
-  const LABEL_X_NUDGE = -2;   // small left/right tweak
-  const LABEL_Y_NUDGE = -8;   // small up/down tweak
+  // tiny nudges to fine-tune placement
+  const LABEL_X_NUDGE = -2;     // left/right tweak
+  const LABEL_Y_NUDGE = -8;     // up/down tweak
 
   const labelBaseline = gridTopY + LABEL_Y_NUDGE;
 
   swLabels.forEach((lab, c) => {
-    // LEFT EDGE of column c (align to boxes, not center)
-    const colLeft = leftPad + c*(cell+gap);
+    const colLeft = leftPad + c*(cell+gap);   // LEFT edge of column
     const anchorX = colLeft + LABEL_X_NUDGE;
 
-    // rotate around the left edge so the label aligns to the column's left boundary
     const gl = gTop.append('g')
       .attr('transform', `translate(${anchorX}, ${labelBaseline}) rotate(-90)`);
 
     gl.append('text')
       .attr('x', 0)
       .attr('y', 0)
-      .attr('text-anchor', 'start')           // align to left edge (after rotation)
-      .attr('dominant-baseline', 'hanging')   // top of vertical text sits at the baseline
+      .attr('text-anchor', 'start')           // align with left edge of column
+      .attr('dominant-baseline', 'hanging')   // top of vertical text on the baseline
       .attr('font-size', 11)
       .attr('fill', '#111')
       .text(lab)
