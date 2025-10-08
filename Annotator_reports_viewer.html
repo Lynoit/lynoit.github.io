@@ -1437,56 +1437,66 @@ function ensureActiveBadgeUpdater(){
 
     // ---------- Weather × Month (4 bins/month) ----------
     function buildWeatherMonthChart(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(
-        withDates.map(x =>
-          fetchSessionSummary(x.filename)
-            .then(s => ({...x, ...s}))
-        )
-      ).then(rows => {
-        const valid = rows.filter(r =>
-          r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
-          r.issueCount > 0 && r.weatherAgg
-        );
+  // Treat these as placeholders → ignore in chart
+  const isPlaceholderWx = (w) => {
+    if (!w) return true;
+    const s = String(w).trim();
+    return s === '' || /^weather$/i.test(s) || /^conditions?$/i.test(s) || /^n\/?a$/i.test(s) || /^unknown$/i.test(s);
+  };
 
-        const host = document.getElementById('weather-host');
-        if (!host) return;
-        if (!valid.length){
-          host.innerHTML = '<div style="color:#666;">No weather data found in Issues table.</div>';
-          return;
-        }
+  return Promise.all(
+    withDates.map(x =>
+      fetchSessionSummary(x.filename)
+        .then(s => ({...x, ...s}))
+    )
+  ).then(rows => {
+    const valid = rows.filter(r =>
+      r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
+      r.issueCount > 0 && r.weatherAgg
+    );
 
-        const counts = new Map(); // `${ym}|${wb}|${wx}` -> n
-        const monthsSet = new Set();
-        const wxSet = new Set();
+    const host = document.getElementById('weather-host');
+    if (!host) return;
 
-        valid.forEach(r => {
-          const ym  = r.dayStr.slice(0,7);
-          const day = parseInt(r.dayStr.slice(8,10), 10);
-          const wb  = Math.min(4, Math.max(1, Math.ceil(day/7)));
-          monthsSet.add(ym);
+    const counts = new Map(); // `${ym}|${wb}|${wx}` -> n
+    const monthsSet = new Set();
+    const wxSet = new Set();
 
-          const wx = String(r.weatherAgg);
-          wxSet.add(wx);
-          const key = `${ym}|${wb}|${wx}`;
-          counts.set(key, (counts.get(key)||0) + 1);
-        });
+    valid.forEach(r => {
+      const wx = String(r.weatherAgg).trim();
+      if (isPlaceholderWx(wx)) return; // 🔹 skip "Weather" etc.
 
-        const months = Array.from(monthsSet).sort();
-        const wxs = Array.from(wxSet).sort((a,b) => {
-          const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
-          const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
-          if (totalB !== totalA) return totalB - totalA;
-          return a.localeCompare(b);
-        });
+      const ym  = r.dayStr.slice(0,7);
+      const day = parseInt(r.dayStr.slice(8,10), 10);
+      const wb  = Math.min(4, Math.max(1, Math.ceil(day/7)));
+      monthsSet.add(ym);
+      wxSet.add(wx);
 
-        renderWeatherMonthHeatmap({ months, wxs, counts });
-      });
+      const key = `${ym}|${wb}|${wx}`;
+      counts.set(key, (counts.get(key)||0) + 1);
+    });
+
+    const months = Array.from(monthsSet).sort();
+    const wxs = Array.from(wxSet).sort((a,b) => {
+      const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
+      const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
+      if (totalB !== totalA) return totalB - totalA;
+      return a.localeCompare(b);
+    });
+
+    if (!wxs.length){
+      host.innerHTML = '<div style="color:#666;">No weather data found (placeholders ignored).</div>';
+      return;
     }
+
+    renderWeatherMonthHeatmap({ months, wxs, counts });
+  });
+}
 
     function renderWeatherMonthHeatmap({months, wxs, counts}){
       const host = document.getElementById('weather-host');
@@ -2235,4 +2245,5 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
