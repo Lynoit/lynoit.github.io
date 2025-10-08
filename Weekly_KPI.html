@@ -104,11 +104,11 @@ if (urlMode && (urlMode.toLowerCase() in MODES)) CURRENT_MODE = urlMode.toLowerC
 
 // Which cards are shown when mode = EXTERNAL (hard-coded)
 const EXTERNAL_CARD_VISIBILITY = {
-  summary: false,              // Summary Weekly KPI
-  calendar: false,             // Activity & weather statistics (calendar trio)
-  ccMatrix: true,            // KPI × Software matrix (CC-only)
-  nonCCPlusLatestCC: true,    // KPI × Software matrix (Non-CC + latest CC)
-  softwareCards: false         // Per-software cards
+  summary: false,
+  calendar: false,
+  ccMatrix: true,
+  nonCCPlusLatestCC: true,
+  softwareCards: false
 };
 
 const EXTERNAL_WHITELIST = [
@@ -124,8 +124,8 @@ const EXTERNAL_WHITELIST = [
 function normKey(s){
   return String(s || '')
     .toLowerCase()
-    .replace(/[\u2013\u2014-]/g, '—')   // en/em/ASCII hyphen -> em dash
-    .replace(/\s+/g, ' ')               // collapse spaces
+    .replace(/[\u2013\u2014-]/g, '—')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
@@ -133,7 +133,7 @@ const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
 /* Weather (Open-Meteo archive, hourly aggregated 10–14 local) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
 const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
-const H_START = 10, H_END = 14; // inclusive hours (local time)
+const H_START = 10, H_END = 14;
 const WMO_TEXT = {
   0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',
   45:'Fog',48:'Depositing rime fog',
@@ -148,11 +148,11 @@ const WMO_TEXT = {
   95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'
 };
 
-// === NEW: for averaging by total number of KPIs (from KPI_buttons.csv) ===
+// === KPI buttons CSV (for counts/denominators) ===
 const KPI_BUTTONS_CSV = 'KPI_buttons.csv';
-let TOTAL_KPI_COUNT = null;  // will be filled by reading KPI_buttons.csv
+let TOTAL_KPI_COUNT = null;  // filled from KPI_buttons.csv (EXCLUDES "No Function")
 
-/* Unified font sizes for score-boxes */
+/* Font sizes for legend */
 const SCORE_FONTS = { number:13, label:11, range:10 };
 
 /* ==================== Helpers & Scoring ==================== */
@@ -169,11 +169,7 @@ const fmtCell = v =>
   : String(parseFloat(v.toFixed(2))).replace(/\.00$/,''));
 
 function parseThresholds(str){
-  const arr = (str||'')
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s !== '')
-    .map(Number);
+  const arr = (str||'').split(',').map(s => s.trim()).filter(Boolean).map(Number);
   if (arr.length !== 10 || arr.some(n=>Number.isNaN(n))) return null;
   for (let i=1;i<arr.length;i++){ if (arr[i] > arr[i-1]) return null; }
   return arr;
@@ -236,10 +232,15 @@ function normalizeHeader(h){
   return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
 }
 
-// Read KPI_buttons.csv and return:
-//   total = sum of per-function redButton KPIs (excluding "No Function")
-//   map   = { FunctionName -> count } (excluding "No Function")
-// Tries to detect function & kpi-name columns.
+/* NEW: normalize function keys so denominators match even if names vary */
+function normFuncKey(s){
+  const k = String(s||'').toLowerCase().replace(/[^a-z]/g,''); // letters only
+  if (k.startsWith('tsi')) return 'tsi'; // TSI Speed/Signs/etc -> TSI
+  if (k === 'elka') return 'lka';        // ELKA group appears as LKA in weekly sheet
+  return k;
+}
+
+/* Read KPI_buttons.csv -> per-function redButton counts, EXCLUDING "No Function" KPIs */
 async function loadKpiCountsByFunction(path='KPI_buttons.csv'){
   const txt = await readTextOrNull(path);
   if (!txt) return { total:null, map:null };
@@ -261,24 +262,22 @@ async function loadKpiCountsByFunction(path='KPI_buttons.csv'){
 
   for (const cells of rows){
     const css = ((idxCss>=0?cells[idxCss]:'') || '').toLowerCase();
-    if (!css.includes('redbutton')) continue;          // only count KPIs with a red button
+    if (!css.includes('redbutton')) continue;   // only redButton KPIs
 
     const kpiName = ((idxKpi>=0?cells[idxKpi]:'') || '').trim();
-    if (/no function/i.test(kpiName)) continue;        // EXCLUDE "No Function" from denominator
+    if (/no function/i.test(kpiName)) continue; // exclude "No Function" from denom
 
-    let funcRaw = (idxFunc>=0?cells[idxFunc]:'')?.trim() || 'UNKNOWN';
-    const func = /^tsi\b/i.test(funcRaw) ? 'TSI' : funcRaw;  // merge TSI variants
-
-    map[func] = (map[func] || 0) + 1;
+    const funcRaw = ((idxFunc>=0?cells[idxFunc]:'') || '').trim() || 'UNKNOWN';
+    map[funcRaw] = (map[funcRaw] || 0) + 1;
     total++;
   }
   return { total, map };
 }
-  
+
 /* ==================== Parse table (dates + inline "Release note") ==================== */
 function parseTable(text){
   const tryParse = (d)=> text
-    .replace(/^\uFEFF/, '') // strip BOM
+    .replace(/^\uFEFF/, '')
     .split(/\r?\n/)
     .filter(r => r.trim().length > 0)
     .map(r => r.split(d));
@@ -353,7 +352,7 @@ function parseTable(text){
 
   return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
 }
-  
+
 /* ==================== Modal ==================== */
 function openReleaseNoteModal(title, noteText){
   const backdrop = document.getElementById('modalBackdrop');
@@ -407,21 +406,6 @@ async function loadReleaseNotesManifest(){
     return new Set(list.map(s => String(s).toLowerCase()));
   }catch{ return null; }
 }
-
-// === NEW: read KPI_buttons.csv and count lines that contain "redButton" ===
-async function loadTotalKpiCount(){
-  try{
-    const res = await fetch(KPI_BUTTONS_CSV + '?t=' + Date.now(), {cache:'no-store'});
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    // Count *lines* that contain "redButton" (case-sensitive per your spec)
-    return text.replace(/\r/g,'').split('\n').filter(l => l.includes('redButton')).length;
-  }catch(e){
-    console.warn('Could not load KPI_buttons.csv to count KPIs:', e);
-    return null; // will fallback to "measured count" if null
-  }
-}
-  
 async function loadReleaseNotesFromFiles(swCols, manifestSet){
   if (RN_FETCH_MODE === 'off') return {};
   const out = {};
@@ -539,7 +523,7 @@ function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
-  // Build rows with avg = (sum of KPI values) / (TOTAL_KPI_COUNT or measured count)
+  // Build rows with avg = (sum of KPI values) / (TOTAL_KPI_COUNT)
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
 
@@ -760,45 +744,45 @@ function renderSummary(container, parsed){
       .append('title')
       .text(d => `${d._date} — ${d.sw}\nScore ${d.score}: ${d.text}\n${d.avg.toFixed(1)} /1000km`);
 
-    // Value labels on each bar
-g2.selectAll('.ccval').data(flat).enter().append('text')
-  .attr('class','ccval')
-  .attr('x', d => x0(d._date) + x1(d._idx) + x1.bandwidth()/2)
-  .attr('y', d => {
-    const v = Math.min(1000, d.avg ?? 0);
-    const top = y(v);
-    const h = y(0) - top;            // bar height in px
-    return (h > 16) ? top + 12 : top - 4;   // inside if tall, else above
-  })
-  .attr('text-anchor','middle')
-  .attr('font-size', 11)
-  .attr('font-weight', 600)
-  .attr('fill', '#111') 
-  .text(d => {
-    const v = d.avg;
-    return (v != null && !Number.isNaN(v)) ? Math.min(1000, v).toFixed(1) : '—';
-  });
+    // Value labels
+    g2.selectAll('.ccval').data(flat).enter().append('text')
+      .attr('class','ccval')
+      .attr('x', d => x0(d._date) + x1(d._idx) + x1.bandwidth()/2)
+      .attr('y', d => {
+        const v = Math.min(1000, d.avg ?? 0);
+        const top = y(v);
+        const h = y(0) - top;
+        return (h > 16) ? top + 12 : top - 4;
+      })
+      .attr('text-anchor','middle')
+      .attr('font-size', 11)
+      .attr('font-weight', 600)
+      .attr('fill', '#111')
+      .text(d => {
+        const v = d.avg;
+        return (v != null && !Number.isNaN(v)) ? Math.min(1000, v).toFixed(1) : '—';
+      });
 
-    // Software labels below the number (always black text)
-g2.selectAll('.ccsoft').data(flat).enter().append('text')
-  .attr('class','ccsoft')
-  .attr('x', d => x0(d._date) + x1(d._idx) + x1.bandwidth()/2)
-  .attr('y', d => {
-    const v = Math.min(1000, d.avg ?? 0);
-    const top = y(v), h = y(0) - top;
-    const yNum = (h > 16) ? top + 12 : top - 4;  // same anchor as the value
-    return Math.max(10, yNum + 12);              // 12px below the value; clamp a bit
-  })
-  .attr('text-anchor','middle')
-  .attr('font-size', 10)
-  .attr('fill', '#111')
-  .text(d => {
-    const s = d.sw || '';
-    return s.length > 22 ? s.slice(0,22) + '…' : s; // keep tidy; full in title
-  })
-  .append('title').text(d => d.sw || '');
+    // Software labels (below the number)
+    g2.selectAll('.ccsoft').data(flat).enter().append('text')
+      .attr('class','ccsoft')
+      .attr('x', d => x0(d._date) + x1(d._idx) + x1.bandwidth()/2)
+      .attr('y', d => {
+        const v = Math.min(1000, d.avg ?? 0);
+        const top = y(v), h = y(0) - top;
+        const yNum = (h > 16) ? top + 12 : top - 4;
+        return Math.max(10, yNum + 12);
+      })
+      .attr('text-anchor','middle')
+      .attr('font-size', 10)
+      .attr('fill', '#111')
+      .text(d => {
+        const s = d.sw || '';
+        return s.length > 22 ? s.slice(0,22) + '…' : s;
+      })
+      .append('title').text(d => d.sw || '');
 
-    // --- Running mean trend line (mean of historical date means) ---
+    // Running mean of date means
     const dateMeans = dates.map(d => {
       const arr = byDate.get(d);
       const m = d3.mean(arr, r => Math.min(1000, r.avg));
@@ -806,19 +790,16 @@ g2.selectAll('.ccsoft').data(flat).enter().append('text')
     }).filter(p => p.mean != null);
 
     if (dateMeans.length >= 2){
-      // cumulative mean over time
       let runSum = 0;
       const running = dateMeans.map((p, i) => {
         runSum += p.mean;
         return { date: p.date, y: runSum / (i + 1) };
       });
 
-      // time scale aligned to same left/right padding as bars
       const xTime = d3.scaleTime()
         .domain(d3.extent(running, d => d.date))
         .range([leftPadV, cw2 - rightPadV]);
 
-      // draw the line
       g2.append('path')
         .datum(running)
         .attr('fill','none')
@@ -830,97 +811,63 @@ g2.selectAll('.ccsoft').data(flat).enter().append('text')
           .y(d => y(d.y))
         );
 
-// optional small endpoint label with value
-const last = running[running.length - 1];
-const lastVal = (last && Number.isFinite(last.y)) ? last.y.toFixed(1) : '—';
-g2.append('text')
-  .attr('x', xTime(last.date) - 6)
-  .attr('y', y(last.y) - 6)
-  .attr('text-anchor','end')
-  .attr('font-size', 11)
-  .attr('fill', '#333')
-  .text(`Running average:  ${lastVal}`);
+      const last = running[running.length - 1];
+      const lastVal = (last && Number.isFinite(last.y)) ? last.y.toFixed(1) : '—';
+      g2.append('text')
+        .attr('x', xTime(last.date) - 6)
+        .attr('y', y(last.y) - 6)
+        .attr('text-anchor','end')
+        .attr('font-size', 11)
+        .attr('fill', '#333')
+        .text(`Running average:  ${lastVal}`);
     }
   }
 
- // ===== Scoring legend  =====
-{
-  const ranges = scoreRangeLabels(getThresholds());   // 10 range strings for scores 1..10
-  const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
-  const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
-  const bandMargin = 20, boxH = 42;
+  // ===== Scoring legend (with 0 = No function) =====
+  {
+    const ranges = scoreRangeLabels(getThresholds());
+    const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
+    const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
+    const bandMargin = 20, boxH = 42;
 
-  const boxCount = 11;                                // now 0..10
-  const barW = legCw - bandMargin*2, boxW = barW / boxCount;
+    const boxCount = 11;                                // 0..10
+    const barW = legCw - bandMargin*2, boxW = barW / boxCount;
 
-  legend.append('text')
-    .attr('x', 12).attr('y', 12)
-    .attr('font-size', 12).attr('fill', '#555')
-    .text('Scoring legend (1 = worst, 10 = best)');   // keep caption as requested
+    legend.append('text')
+      .attr('x', 12).attr('y', 12)
+      .attr('font-size', 12).attr('fill', '#555')
+      .text('Scoring legend (1 = worst, 10 = best)');
 
-  for (let i = 0; i < boxCount; i++){
-    const x = bandMargin + i*boxW;
-    const g = legend.append('g');
+    for (let i = 0; i < boxCount; i++){
+      const x = bandMargin + i*boxW;
+      const g = legend.append('g');
 
-    if (i === 0){
-      // Special "0 — No function" box (black)
-      g.append('rect')
-        .attr('x', x).attr('y', 20)
-        .attr('width', boxW).attr('height', boxH)
-        .attr('fill', '#000').attr('stroke', '#111').attr('stroke-width', 0.6);
-
-      g.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-weight', 800)
-        .attr('font-size', SCORE_FONTS.number)
-        .attr('fill', '#fff')
-        .text('0');
-
-      g.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14 + 16)
-        .attr('text-anchor','middle')
-        .attr('font-size', SCORE_FONTS.label)
-        .attr('font-weight', 700)
-        .attr('fill', '#fff')
-        .text('No function');
-
-      // bottom line intentionally left blank for the 0 box
-    } else {
-      const idx = i - 1; // map legend slot 1..10 -> arrays
-      g.append('rect')
-        .attr('x', x).attr('y', 20)
-        .attr('width', boxW).attr('height', boxH)
-        .attr('fill', scoreColors[idx])
-        .attr('stroke', '#111').attr('stroke-width', 0.4)
-        .append('title').text(`Score ${i}: ${scoreText[idx]} — ${ranges[idx]}`);
-
-      g.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14)
-        .attr('text-anchor','middle')
-        .attr('font-weight', 800)
-        .attr('font-size', SCORE_FONTS.number)
-        .text(i);
-
-      g.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + 14 + 16)
-        .attr('text-anchor','middle')
-        .attr('font-size', SCORE_FONTS.label)
-        .text(scoreText[idx]);
-
-      g.append('text')
-        .attr('x', x + boxW/2).attr('y', 20 + boxH + 14)
-        .attr('text-anchor','middle')
-        .attr('font-size', SCORE_FONTS.range)
-        .text(ranges[idx]);
+      if (i === 0){
+        // Special "0 — No function"
+        g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH)
+          .attr('fill', '#000').attr('stroke', '#111').attr('stroke-width', 0.6);
+        g.append('text').attr('x', x + boxW/2).attr('y', 34).attr('text-anchor','middle')
+          .attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).attr('fill', '#fff').text('0');
+        g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle')
+          .attr('font-size', SCORE_FONTS.label).attr('font-weight', 700).attr('fill', '#fff').text('No function');
+      } else {
+        const idx = i - 1;
+        g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH)
+          .attr('fill', scoreColors[idx]).attr('stroke', '#111').attr('stroke-width', 0.4)
+          .append('title').text(`Score ${i}: ${scoreText[idx]} — ${ranges[idx]}`);
+        g.append('text').attr('x', x + boxW/2).attr('y', 34).attr('text-anchor','middle')
+          .attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i);
+        g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle')
+          .attr('font-size', SCORE_FONTS.label).text(scoreText[idx]);
+        g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle')
+          .attr('font-size', SCORE_FONTS.range).text(ranges[idx]);
+      }
     }
+    legend.attr('height', 20 + boxH + 28 + 6);
   }
 
-  legend.attr('height', 20 + boxH + 28 + 6);
-}
-
-// ---- KPI × Software heatmap in calendar style ----
-renderFunctionKpiCalendarHeatmap(card, parsed);
+  // ---- Function × KPI heatmap (calendar style) ----
+  renderFunctionKpiCalendarHeatmap(card, parsed);
 }
 
 /* ==================== Calendar trio helpers ==================== */
@@ -946,6 +893,11 @@ function weatherCategoryForWMO(code){
   return 'Clear/Clouds';
 }
 
+/* Calendar-style heatmap:
+   - Y = KPIs (excluding "No Function")
+   - X = software
+   - Cell color = per-function score: (sum of that function's KPI events) / (count of that function's KPIs from KPI_buttons.csv)
+   - Force BLACK if any "No Function" KPI > 0 for that (function, software). */
 function renderFunctionKpiCalendarHeatmap(card, parsed){
   const T = getThresholds();
   const softwares = parsed.software || [];
@@ -954,7 +906,7 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
   const swLabels = softwares.map(sw => sw.label);
   const entries  = parsed.entries || [];
 
-  // Black override when any "No Function" KPI > 0 for (func, sw)
+  // Force-black mask for (func, sw) where any "No function" KPI > 0
   const noFuncRe = /no function/i;
   const noFuncMask = new Set(); // key `${func}||${sw}`
   entries.forEach(e => {
@@ -965,29 +917,35 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     });
   });
 
-  // Display rows exclude "No Function"
+  // KPI rows to display (hide "No Function" rows)
   const entriesDisplay = entries.filter(e => !noFuncRe.test(e.kpi || '') && !noFuncRe.test(e.func || ''));
   if (!entriesDisplay.length) return;
   const kpiRows = entriesDisplay.map(e => ({ func: e.func, kpi: e.kpi }));
 
-  // Functions present
+  // Unique functions present in weekly table
   const functions = Array.from(new Set(entries.map(e => e.func)));
 
-  // Denominators per function (prefer KPI_buttons.csv, else count in table excluding "No Function")
-  const KPI_COUNT_BY_FUNC = (typeof window !== 'undefined' && window.KPI_COUNT_BY_FUNC) || null;
+  // Per-function denominators from KPI_buttons.csv (map stored on window), normalized
+  const RAW_FUNC_COUNTS = (typeof window !== 'undefined' && window.KPI_COUNT_BY_FUNC) || {};
+  const countsByNorm = {};
+  Object.entries(RAW_FUNC_COUNTS).forEach(([k,v])=>{
+    const nk = normFuncKey(k);
+    countsByNorm[nk] = (countsByNorm[nk] || 0) + (v||0);
+  });
+
   const denomByFunc = new Map();
   functions.forEach(f => {
-    const d = KPI_COUNT_BY_FUNC && KPI_COUNT_BY_FUNC[f] != null
-      ? KPI_COUNT_BY_FUNC[f]
-      : entries.filter(e => e.func === f && !noFuncRe.test(e.kpi || '')).length;
+    const nk = normFuncKey(f);
+    const fallback = entries.filter(e => e.func === f && !noFuncRe.test(e.kpi || '')).length;
+    const d = (countsByNorm[nk] != null ? countsByNorm[nk] : fallback);
     denomByFunc.set(f, d || 0);
   });
 
-  // Sum events per (function, software), excluding "No Function"
-  const sumByFuncSW = new Map();
+  // Sum of events per (function, software), excluding "No Function" KPIs from the sum
+  const sumByFuncSW = new Map(); // `${func}||${sw}` -> number
   functions.forEach(f => swLabels.forEach(l => sumByFuncSW.set(`${f}||${l}`, 0)));
   entries.forEach(e => {
-    if (noFuncRe.test(e.kpi || '')) return;
+    if (noFuncRe.test(e.kpi || '')) return; // exclude from sum
     const f = e.func;
     swLabels.forEach(l => {
       const v = e.values[l];
@@ -998,8 +956,8 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     });
   });
 
-  // Avg & score per (function, software)
-  const funcScore = new Map();
+  // Compute per-function avg & score per software
+  const funcScore = new Map(); // func -> Map(sw -> {avg,score})
   functions.forEach(f => {
     const denom = denomByFunc.get(f) || 0;
     const inner = new Map();
@@ -1012,10 +970,13 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
     funcScore.set(f, inner);
   });
 
-  // Layout
-  const cell = 12, gap = 2, topPad = 22;
+  // =================== Draw ===================
+  const cell = 12, gap = 2;
+  const topPad = 22;
+
   const leftLabels = kpiRows.map(r => `${r.func} — ${r.kpi}`);
   const leftPad = Math.max(140, measureTextWidthCal(leftLabels, 11, 600) + 14);
+
   const maxTopLabel = measureTextWidthCal(swLabels, 11, 600);
   const colLabH = maxTopLabel + 16;
 
@@ -1026,17 +987,22 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
   const wrap = card.append('div').attr('class', 'chart-card').style('grid-column','1 / -1');
   const scroller = wrap.append('div').style('overflow','auto');
   const svg = scroller.append('svg')
-    .attr('width', gridW).attr('height', gridH)
-    .style('display','block').style('margin','0 auto 10px');
+    .attr('width', gridW)
+    .attr('height', gridH)
+    .style('display','block')
+    .style('margin','0 auto 10px');
 
-  // Left labels
+  // Left KPI labels
   const gLeft = svg.append('g');
   kpiRows.forEach((r, ri) => {
     const y = topPad + colLabH + ri*(cell+gap) + cell*0.75;
     const label = `${r.func} — ${r.kpi}`;
     gLeft.append('text')
-      .attr('x', leftPad - 8).attr('y', y)
-      .attr('font-size', 11).attr('font-weight', 600).attr('fill', '#666')
+      .attr('x', leftPad - 8)
+      .attr('y', y)
+      .attr('font-size', 11)
+      .attr('font-weight', 600)
+      .attr('fill', '#666')
       .attr('text-anchor','end')
       .text(label.length > 60 ? (label.slice(0,60) + '…') : label)
       .append('title').text(label);
@@ -1058,8 +1024,10 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
       const y = topPad + colLabH + ri*(cell+gap);
 
       gGrid.append('rect')
-        .attr('x', x).attr('y', y).attr('width', cell).attr('height', cell)
-        .attr('fill', fill).attr('fill-opacity', forceBlack ? 1 : (sc ? 0.95 : 1))
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill)
+        .attr('fill-opacity', forceBlack ? 1 : (sc ? 0.95 : 1))
         .attr('stroke', '#fff').attr('stroke-width', 0.8)
         .append('title')
         .text(`${func} — ${kpi}\n${sw}\n` +
@@ -1086,12 +1054,13 @@ function renderFunctionKpiCalendarHeatmap(card, parsed){
       .attr('x', 0).attr('y', 0)
       .attr('text-anchor', 'start')
       .attr('dominant-baseline', 'hanging')
-      .attr('font-size', 11).attr('fill', '#111')
+      .attr('font-size', 11)
+      .attr('fill', '#111')
       .text(lab)
       .append('title').text(lab);
   });
 }
-  
+
 /* ==================== Calendar trio (Activity, Temperature, Weather) ==================== */
 function renderCalendarTrio(container, parsed){
   const sw = parsed.software || [];
@@ -1383,7 +1352,7 @@ function renderSoftwareCards(container, parsed){
       img.src = url;
     });
 
-    // Build surviving rows first (prevents empty KPI table later)
+    // Build surviving rows first
     const rows = parsed.entries
       .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
       .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
@@ -1397,7 +1366,7 @@ function renderSoftwareCards(container, parsed){
       return;
     }
 
-    // ===== Radar geometry (functions derived from surviving rows) =====
+    // ===== Radar geometry =====
     const leftAreaWidth = w;
     const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
     const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
@@ -1462,7 +1431,7 @@ function renderSoftwareCards(container, parsed){
         .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
     });
 
-    // Plot KPIs for each function using surviving rows
+    // Plot KPIs
     functions.forEach((f, idx)=>{
       const start = -Math.PI/2 + idx*wedge;
       const center = start + wedge/2;
@@ -1511,7 +1480,7 @@ function renderSoftwareCards(container, parsed){
       });
     });
 
-    // ===== KPI summary table (HTML table version — robust) =====
+    // ===== KPI summary table =====
     const htmlCaption = document.createElement('div');
     htmlCaption.className = 'small';
     htmlCaption.style.margin = '18px 0 6px';
@@ -1538,12 +1507,12 @@ function renderSoftwareCards(container, parsed){
       tr.append('td').style('text-align','right').style('font-weight','600').text(fmtCell(r.events));
     });
 
-    // ===== Scoring band (SVG below the table) =====
+    // ===== Scoring band =====
     const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
     const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
-const sumVals = valuesForAvg.length ? d3.sum(valuesForAvg.map(v => Math.min(v, 1000))) : 0;
-const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : valuesForAvg.length;
-const avgEvents = denom ? (sumVals / denom) : null;
+    const sumVals = valuesForAvg.length ? d3.sum(valuesForAvg.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : valuesForAvg.length;
+    const avgEvents = denom ? (sumVals / denom) : null;
     const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
 
     const barMargin = 20, boxH2 = 42;
@@ -1576,7 +1545,7 @@ const avgEvents = denom ? (sumVals / denom) : null;
     }
     scoreBand.attr('height', 30 + boxH2 + 28 + 8);
 
-    // Final SVG height (for PNG export to include radar only)
+    // Final SVG height (PNG export includes radar only)
     const RADAR_BOTTOM_PADDING = 20;
     const totalRadarHeight = centerY + rMax + RADAR_BOTTOM_PADDING;
     svg.attr('height', totalRadarHeight);
@@ -1616,22 +1585,21 @@ async function loadCsvAndRender(){
     const manifestSet = await loadReleaseNotesManifest();
     const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
 
-    // Weather: collect unique dates, fetch archive weather, merge
+    // Weather
     const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
     const weatherByDate = await fetchWeatherForDates(dates);
 
-    // === NEW: load total KPI count from KPI_buttons.csv (lines containing "redButton") ===
-    TOTAL_KPI_COUNT = await loadTotalKpiCount();
+    // Per-function counts from KPI_buttons.csv (EXCLUDES "No Function")
+    const kpiCounts = await loadKpiCountsByFunction(KPI_BUTTONS_CSV);
+    TOTAL_KPI_COUNT          = kpiCounts.total;   // use cleaned total everywhere
+    window.TOTAL_KPI_COUNT   = kpiCounts.total;
+    window.KPI_COUNT_BY_FUNC = kpiCounts.map;
 
-    const kpiCounts = await loadKpiCountsByFunction('KPI_buttons.csv');
-    window.TOTAL_KPI_COUNT   = kpiCounts.total;   // still useful elsewhere
-    window.KPI_COUNT_BY_FUNC = kpiCounts.map;     // <-- the important one
-
-    // Merge everything into the parsed object
-    parsed = { 
-      ...parsed, 
-      releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, 
-      weatherByDate 
+    // Merge & render
+    parsed = {
+      ...parsed,
+      releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes },
+      weatherByDate
     };
 
     LAST_PARSED = parsed;
@@ -1659,7 +1627,6 @@ document.querySelectorAll('.tab').forEach(btn=>{
     updateTabsUI();
     if (LAST_PARSED) renderCharts(LAST_PARSED);
   });
-  // a11y: keyboard toggle
   btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
   btn.addEventListener('keydown', (e)=>{
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); }
