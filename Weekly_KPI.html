@@ -510,12 +510,12 @@ function renderCCMatrix(container, parsed){
   renderCCMatrixHeatmap(card, kpiNames, ccSoftwares.map(s=>s.label), matrixVals);
 }
 
-/* ======= UPDATED: CC Heatmap with "No Function" mask & row filtering ======= */
+/* ======= CC Heatmap (from matrix table) with "No Function" mask + compact legend ======= */
 function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
-  const T = getThresholds();               // thresholds array
+  const T = getThresholds();               // thresholds array (length 10)
   const cell = 12, gap = 2, topPad = 22;
 
-  // Split "Function — KPI"
+  // --- split "Function — KPI"
   const splitLabel = (lbl)=>{
     if (!lbl) return { func:'', kpi:'' };
     if (lbl.includes('—')) {
@@ -533,8 +533,8 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
   const kpiByRow  = rowLabels.map(l => splitLabel(l).kpi);
   const isNoFuncRow = kpiByRow.map(k => /no function/i.test(k));
 
-  // Build black mask from "No Function" rows: if any such row has value > 0 for a SW,
-  // black out all KPIs of that (function, software).
+  // --- Build black mask: if any "No Function" row has value > 0 for a column,
+  // black out ALL KPIs for that (function, software).
   const blackMask = new Set(); // key `${func}||${sw}`
   for (let r = 0; r < rowLabels.length; r++){
     if (!isNoFuncRow[r]) continue;
@@ -546,7 +546,7 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
     }
   }
 
-  // Filter out "No Function" rows from drawing (still used for mask above)
+  // --- Filter out "No Function" rows (but keep their effect via the mask)
   const keepIdx = [];
   for (let r = 0; r < rowLabels.length; r++) if (!isNoFuncRow[r]) keepIdx.push(r);
   if (!keepIdx.length) return;
@@ -555,7 +555,7 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
   const funcsFiltered      = keepIdx.map(i => funcByRow[i]);
   const matrixFiltered     = keepIdx.map(i => matrixVals[i]);
 
-  // Layout
+  // --- Layout
   const leftPad = Math.max(140, measureTextWidthCal(rowsLabelsFiltered, 11, 600) + 14);
   const colLabH = measureTextWidthCal(colLabels, 11, 600) + 16;
   const cols    = colLabels.length;
@@ -570,7 +570,7 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
     .attr('width', gridW).attr('height', gridH)
     .style('display','block').style('margin','0 auto 10px');
 
-  // Left KPI labels
+  // --- Left KPI labels
   const gLeft = svg.append('g');
   rowsLabelsFiltered.forEach((lab, r) => {
     const y = topPad + colLabH + r*(cell+gap) + cell*0.75;
@@ -582,12 +582,12 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
       .append('title').text(lab);
   });
 
-  // Cells: direct value -> score; forced black if masked; null -> light grey
+  // --- Cells: direct value -> score; masked -> black; null -> light grey
   const gGrid = svg.append('g');
   for (let r = 0; r < rows; r++){
     const func = funcsFiltered[r];
     for (let c = 0; c < cols; c++){
-      const sw = colLabels[c];
+      const sw  = colLabels[c];
       const raw = matrixFiltered?.[r]?.[c];
 
       const forceBlack = blackMask.has(`${func}||${sw}`);
@@ -598,11 +598,11 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
       } else if (raw == null || Number.isNaN(raw)){
         // keep defaults
       } else if (raw >= 1000){
-        // keep existing sentinel behavior if present in your data
+        // sentinel behavior if present in your data
         fill = '#000'; alpha = 1; tip = `Value: ${fmtCell(raw)}\n(Forced black)`;
       } else {
-        const score = scoreFromAvg(Math.min(1000, raw), T); // no division by total KPIs
-        fill = scoreColors[(score || 10) - 1];
+        const score = scoreFromAvg(Math.min(1000, raw), T); // no division by #KPIs
+        fill = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'][(score || 10) - 1];
         alpha = 0.95;
         tip = `Value: ${fmtCell(raw)}\nScore ${score}`;
       }
@@ -619,9 +619,10 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
     }
   }
 
-  // Top labels
+  // --- Top (rotated) software labels; nudged slightly to the RIGHT
   const gTop = svg.append('g');
-  const LABEL_X_NUDGE = 1, LABEL_Y_NUDGE = -8;
+  const LABEL_X_NUDGE = 3;     // positive = right
+  const LABEL_Y_NUDGE = -8;
   const labelBaseline = topPad + colLabH + LABEL_Y_NUDGE;
   colLabels.forEach((lab, c) => {
     const colLeft = leftPad + c*(cell+gap);
@@ -636,95 +637,105 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
       .append('title').text(lab);
   });
 
-/* ===== Mini legend (no spacing between boxes) ===== */
-{
-  const ranges  = scoreRangeLabels(T);
-  const legendW = Math.max(900, gridW + 140);
+  // --- Mini legend (compact, no gaps between boxes, readable text)
+  {
+    const ranges  = scoreRangeLabels(T);
+    const legendW = Math.max(720, gridW);          // give it some breath
+    const leg     = scroller.append('svg')
+      .attr('width', legendW)
+      .style('display','block')
+      .style('margin','8px auto 12px');
 
-  const leg = scroller.append('svg')
-    .attr('width', legendW)
-    .style('display','block')
-    .style('margin','8px auto 12px')
-    .attr('shape-rendering', 'crispEdges'); // optional
+    const marginX = 16;
+    const nBoxes  = 11;                            // 0..10
+    const boxW    = (legendW - marginX*2) / nBoxes;
+    const boxH    = 24;
+    const yBoxes  = 26;                            // top of the color boxes
 
-  const marginX = 16;
-  const nBoxes  = 11;                        // 0..10
-  const boxW    = (legendW - marginX*2) / nBoxes; // <-- no gap
-  const boxH    = 24;
-  const yBoxes  = 26;
+    // Caption
+    leg.append('text')
+      .attr('x', marginX)
+      .attr('y', 14)
+      .attr('font-size', 12)
+      .attr('fill', '#555')
+      .text('Score colors (0 = No function, 1 = worst … 10 = best)');
 
-  // Caption
-  leg.append('text')
-    .attr('x', marginX)
-    .attr('y', 14)
-    .attr('font-size', 12)
-    .attr('fill', '#555')
-    .text('Score colors (0 = No function, 1 = worst … 10 = best)');
+    // Contrast helper
+    const textColorForFill = (hex) => {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      if (!m) return '#111';
+      const r = parseInt(m[1],16)/255, g = parseInt(m[2],16)/255, b = parseInt(m[3],16)/255;
+      const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+      return lum < 0.45 ? '#fff' : '#111';
+    };
 
-  const textColorForFill = (hex) => {
-    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-    if (!m) return '#111';
-    const r = parseInt(m[1],16)/255, g = parseInt(m[2],16)/255, b = parseInt(m[3],16)/255;
-    const lum = 0.2126*r + 0.7152*g + 0.0722*b;
-    return lum < 0.45 ? '#fff' : '#111';
-  };
+    // Helper to print one or two lines centered under a box
+    const drawUnderText = (xc, baseY, str) => {
+      const m = str.match(/^(.+?)\s*(\(.+\))?$/);
+      const line1 = m ? m[1] : str;
+      const line2 = (m && m[2]) ? m[2] : null;
 
-  const drawUnderText = (xc, baseY, str) => {
-    const m = str.match(/^(.+?)\s*(\(.+\))?$/);
-    const line1 = m ? m[1] : str;
-    const line2 = (m && m[2]) ? m[2] : null;
+      leg.append('text')
+        .attr('x', xc).attr('y', baseY)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 11)
+        .text(line1);
 
-    leg.append('text').attr('x', xc).attr('y', baseY)
-      .attr('text-anchor', 'middle').attr('font-size', 11).text(line1);
+      if (line2) {
+        leg.append('text')
+          .attr('x', xc).attr('y', baseY + 12)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', 11)
+          .text(line2);
+        return 2;
+      }
+      return 1;
+    };
 
-    if (line2) leg.append('text').attr('x', xc).attr('y', baseY + 12)
-      .attr('text-anchor', 'middle').attr('font-size', 11).text(line2);
+    let maxLines = 1;
 
-    return line2 ? 2 : 1;
-  };
-
-  // Box 0: black "No function"
-  const x0 = marginX;
-  leg.append('rect')
-    .attr('x', x0).attr('y', yBoxes)
-    .attr('width', boxW).attr('height', boxH)
-    .attr('fill', '#000')                     // no stroke
-    .attr('stroke', 'none');
-
-  leg.append('text')
-    .attr('x', x0 + boxW/2).attr('y', yBoxes + boxH/2 + 4)
-    .attr('text-anchor', 'middle').attr('font-size', 12)
-    .attr('font-weight', 800).attr('fill', '#fff').text('0');
-
-  let maxLines = drawUnderText(x0 + boxW/2, yBoxes + boxH + 14, 'No function');
-
-  // Boxes 1..10 (no gap, no stroke)
-  for (let i = 0; i < 10; i++) {
-    const left = marginX + (i+1) * boxW;      // <-- no gap between boxes
-    const fill = scoreColors[i];
-    const xc   = left + boxW/2;
-
+    // Box 0: black "No function"
+    const x0 = marginX;
     leg.append('rect')
-      .attr('x', left).attr('y', yBoxes)
+      .attr('x', x0).attr('y', yBoxes)
       .attr('width', boxW).attr('height', boxH)
-      .attr('fill', fill)
-      .attr('stroke', 'none');
+      .attr('fill', '#000').attr('stroke', '#ddd');
 
     leg.append('text')
-      .attr('x', xc).attr('y', yBoxes + boxH/2 + 4)
+      .attr('x', x0 + boxW/2).attr('y', yBoxes + boxH/2 + 4)
       .attr('text-anchor', 'middle')
-      .attr('font-size', 12).attr('font-weight', 800)
-      .attr('fill', textColorForFill(fill))
-      .text(i+1);
+      .attr('font-size', 12).attr('font-weight', 800).attr('fill', '#fff')
+      .text('0');
 
-    maxLines = Math.max(maxLines, drawUnderText(xc, yBoxes + boxH + 14, ranges[i]));
+    maxLines = Math.max(maxLines, drawUnderText(x0 + boxW/2, yBoxes + boxH + 14, 'No function'));
+
+    // Boxes 1..10 (contiguous, no gaps)
+    const palette = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+    for (let i = 0; i < 10; i++) {
+      const left = marginX + (i+1) * boxW;         // no gap
+      const fill = palette[i];
+      const xc   = left + boxW/2;
+
+      leg.append('rect')
+        .attr('x', left).attr('y', yBoxes)
+        .attr('width', boxW).attr('height', boxH)
+        .attr('fill', fill).attr('stroke', '#ddd');
+
+      leg.append('text')
+        .attr('x', xc).attr('y', yBoxes + boxH/2 + 4)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 12).attr('font-weight', 800)
+        .attr('fill', textColorForFill(fill))
+        .text(i+1);
+
+      maxLines = Math.max(maxLines, drawUnderText(xc, yBoxes + boxH + 14, ranges[i]));
+    }
+
+    // Final height (room for 1–2 lines under boxes)
+    const extra = maxLines === 2 ? 12 : 0;
+    leg.attr('height', yBoxes + boxH + 14 + 12 + extra + 8);
   }
-
-  const extra = maxLines === 2 ? 12 : 0;
-  leg.attr('height', yBoxes + boxH + 14 + 12 + extra + 8);
 }
-
-  }
 
 /* ==================== Non-CC + latest CC (unchanged) ==================== */
 function renderNonCCPlusLatestCCMatrix(container, parsed){
