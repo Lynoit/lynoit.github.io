@@ -150,6 +150,19 @@ function detectDelimiter(text){ const lines=text.split(/\r?\n/).filter(Boolean);
 function splitFuncKpi(s){ if(!s) return {func:'',kpi:''}; for(const sep of ['—','–',' - ']){ const parts=s.split(sep); if(parts.length>=2) return {func:parts[0].trim(),kpi:parts.slice(1).join(sep).trim()}; } const idx=s.indexOf('-'); if(idx>0) return {func:s.slice(0,idx).trim(),kpi:s.slice(idx+1).trim()}; const sp=s.split(' '); return {func:sp[0]||'',kpi:s}; }
 function normalizeHeader(h){ if(!h) return ''; return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim(); }
 
+// add next to GREEN/YELLOW/RED
+const BLACK = '#000';
+
+// used by the radar dots
+function colorFor(v, tgt, max){
+  if (v == null || Number.isNaN(v)) return null;
+  if (v === 1000) return BLACK;      // sentinel -> black
+  if (tgt == null || max == null) return '#888';
+  if (v <= tgt) return GREEN;        // good
+  if (v < (max + 1)) return YELLOW;  // marginal
+  return RED;                        // bad
+}
+  
 function getThresholds(){
   if (Array.isArray(SCORE_THRESHOLDS) && SCORE_THRESHOLDS.length===10) return SCORE_THRESHOLDS;
   const parse=(str)=>{const arr=(str||'').split(',').map(s=>s.trim()).filter(Boolean).map(Number); if(arr.length!==10||arr.some(Number.isNaN)) return null; for(let i=1;i<arr.length;i++){ if(arr[i]>arr[i-1]) return null;} return arr;};
@@ -791,9 +804,248 @@ function renderNonCCPlusLatestCCMatrix(container, parsed){
   });
 }
 
-/* ==================== Per-software cards (unchanged) ==================== */
+/* ==================== Per-software cards ==================== */
 function renderSoftwareCards(container, parsed){
-  // ... (left as-is; not relevant to the new heatmap logic)
+  const T = getThresholds();
+  const scoreLabels = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+
+  (parsed.software||[]).forEach(sw=>{
+    const swLabel = sw.label;
+
+    // Any value for this SW after (possible) external filtering?
+    const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
+    if (!hasAny) return;
+
+    const card = container.append('div').attr('class','chart-card');
+    const w = 680;
+
+    // Title SVG (radar sits inside same SVG)
+    const radarH = 540;
+    const TITLE_Y = 26, TITLE_TO_RADAR_GAP = 50, RADAR_PAD_LEFT = 30, MIN_SIDE_MARGIN = 8, FUNC_LABEL_OFFSET = 16;
+
+    const svg = card.append('svg').attr('width', w);
+
+    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
+    svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
+
+    // Download PNG
+    card.append('button').attr('class','download').text('Download PNG').on('click',()=>{
+      const s = new XMLSerializer().serializeToString(svg.node());
+      const url = URL.createObjectURL(new Blob([s], {type:'image/svg+xml'}));
+      const vb = svg.node().viewBox && svg.node().viewBox.baseVal;
+      const bbox = svg.node().getBBox ? svg.node().getBBox() : null;
+      const W = (vb && vb.width)  || (svg.node().width?.baseVal?.value)  || Math.ceil((bbox?.width  || 800));
+      const H = (vb && vb.height) || (svg.node().height?.baseVal?.value) || Math.ceil((bbox?.height || 600));
+      const img = new Image();
+      img.onload = ()=>{
+        const canvas = document.createElement('canvas'); canvas.width=W; canvas.height=H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+        ctx.drawImage(img,0,0);
+        const a=document.createElement('a'); a.download = `${swLabel.replaceAll(' ','_')}.png`; a.href = canvas.toDataURL('image/png'); a.click();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    });
+
+    // Build rows for this software
+    const rows = parsed.entries
+      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
+      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
+
+    if (rows.length === 0) {
+      card.append('div').attr('class','small').style('margin','8px 10px 12px')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
+    }
+
+    // ===== Radar geometry
+    const leftAreaWidth = w;
+    const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
+    const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
+    const centerX = RADAR_PAD_LEFT + availableW / 2;
+    const rMaxCandidateW = Math.max(10, availableW/2 - FUNC_LABEL_OFFSET);
+    const rMaxCandidateH = (radarH - radarTop) - 16;
+    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH));
+    const centerY = radarTop + rMax;
+
+    const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
+
+    const functions = Array.from(new Set(rows.map(r => r.func)));
+    if (!functions.length){
+      card.append('div').attr('class','small')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
+    }
+
+    const linearPortion = 0.55;
+    const rLinear = rMax * linearPortion;
+    const logMin = 10, logMax = 1000;
+    const logDen = Math.log10(logMax) - Math.log10(logMin);
+    function toR(v){
+      if (v==null || Number.isNaN(v)) return null;
+      if (v <= 0) return 0;
+      const vv = Math.min(v, logMax);
+      if (vv < logMin) return (vv / logMin) * rLinear;
+      return rLinear + ((Math.log10(vv) - Math.log10(logMin)) / logDen) * (rMax - rLinear);
+    }
+
+    const ringGrid = [1,2,3,4,5,6,7,8,9,10,30,100,300,1000];
+    g.selectAll('.ring').data(ringGrid).enter().append('circle')
+      .attr('r', d=>toR(d)).attr('fill','none').attr('stroke','#999').attr('stroke-opacity',0.22);
+    g.selectAll('.rlabel').data(ringGrid).enter().append('text')
+      .attr('x', 6).attr('y', d=> -toR(d))
+      .attr('dominant-baseline','middle').attr('font-size', 11).attr('fill', '#666')
+      .text(d=>d);
+
+    const axisY = -rMax * 0.70;
+    g.append('text').attr('x', -8).attr('y', axisY).attr('transform', `rotate(-90, 0, ${axisY})`)
+      .attr('text-anchor','end').attr('font-size', 11).text('Number of events');
+
+    const F = functions.length;
+    const wedge = (Math.PI*2) / F;
+    const innerFrac = 0.98;
+    const spread = wedge * innerFrac;
+    const arc = d3.arc();
+
+    // Alternating background and labels
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const end = start + wedge;
+      g.append('path').attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
+        .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
+        .attr('stroke','#000').attr('stroke-opacity',0.25);
+      const cen = (start + end) / 2;
+      g.append('text').attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
+        .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
+    });
+
+    // Plot KPI points
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const center = start + wedge/2;
+      const items = rows.filter(r=>r.func===f);
+      const K = items.length;
+      const avail = spread * 0.96;
+      const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
+      const placed = [];
+      const minSep = wedge * 0.09;
+      const radBin = rMax * 0.12;
+      const labelAvoid = wedge * 0.18;
+
+      items.forEach((e, i)=>{
+        const v = e.events; if (v==null || Number.isNaN(v)) return;
+        let r = toR(v);
+        let ang = center + baseOffs[i];
+        const isBlack = (v === 1000);
+
+        if (isBlack && Math.abs(ang - center) < labelAvoid){
+          const dir = (ang >= center) ? 1 : -1;
+          ang = center + dir * (labelAvoid + wedge*0.02);
+        }
+        ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+        let tries = 0;
+        while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
+          const dir = (tries % 2 === 0) ? 1 : -1;
+          ang += dir * (minSep * 0.65);
+          ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+          tries++;
+        }
+        if (tries >= 120){ r = Math.min(r + 8, rMax * 0.98); }
+        placed.push({ang, r});
+
+        const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
+        const fill = colorFor(v, e.target, e.max);
+        if (!fill) return;
+
+        g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 7).attr('fill', fill)
+          .append('title').text(`${f} — ${e.kpi}: ${v}`);
+
+        const rLabel = Math.min(r + 18, rMax * 0.98);
+        const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
+        g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+          .attr('font-size', 11).attr('paint-order','stroke').attr('stroke','white').attr('stroke-width',3)
+          .text(e.kpi);
+      });
+    });
+
+    // ===== KPI summary table (HTML)
+    const htmlCaption = document.createElement('div');
+    htmlCaption.className = 'small';
+    htmlCaption.style.margin = '18px 0 6px';
+    htmlCaption.textContent = 'KPI summary per 1000 km';
+    card.node().appendChild(htmlCaption);
+
+    const wrapDiv = d3.select(card.node()).append('div').attr('class','kpi-table-wrap');
+    const t = wrapDiv.append('table').attr('class','summary-table');
+
+    const thead = t.append('thead').append('tr');
+    thead.append('th').text('KPI');
+    thead.append('th').text('Function');
+    thead.append('th').style('text-align','right').text('Target');
+    thead.append('th').style('text-align','right').text('Max allowed');
+    thead.append('th').style('text-align','right').text('Number of events');
+
+    const tbody = t.append('tbody');
+    rows.forEach(r=>{
+      const tr = tbody.append('tr');
+      tr.append('td').text(r.kpi);
+      tr.append('td').text(r.func);
+      tr.append('td').style('text-align','right').text(fmtCell(r.target));
+      tr.append('td').style('text-align','right').text(fmtCell(r.max));
+      tr.append('td').style('text-align','right').style('font-weight','600').text(fmtCell(r.events));
+    });
+
+    // ===== Scoring band (SVG below the table)
+    const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
+    const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
+    const sumVals = valuesForAvg.length ? d3.sum(valuesForAvg.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : valuesForAvg.length;
+    const avgEvents = denom ? (sumVals / denom) : null;
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
+
+    const barMargin = 20, boxH2 = 42;
+    const barW = w - barMargin*2;
+    const boxW = barW / 10;
+    const caption = (avgEvents==null)
+      ? 'Average per 1000km:  n/a (only "No function" or missing values)'
+      : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreLabels[score-1]})`;
+
+    scoreBand.append('text').attr('x', barMargin).attr('y', 16).attr('font-size', 12).text(caption);
+    const ranges = scoreRangeLabels(T);
+
+    for (let i=0;i<10;i++){
+      const x = barMargin + i*boxW;
+      const isSel = (score === i+1);
+      const g2 = scoreBand.append('g');
+      g2.append('rect')
+        .attr('x', x).attr('y', 30)
+        .attr('width', boxW).attr('height', boxH2)
+        .attr('fill', ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'][i])
+        .attr('stroke', isSel ? '#000' : '#111')
+        .attr('stroke-width', isSel ? 3 : 0.4)
+        .append('title').text(`Score ${i+1}: ${scoreLabels[i]} — ${ranges[i]}`);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750).attr('font-size', 13).text(i+1);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14 + 16).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550).attr('font-size', 11).text(scoreLabels[i]);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + boxH2 + 14).attr('text-anchor','middle')
+        .attr('font-size', 10).text(ranges[i]);
+    }
+    scoreBand.attr('height', 30 + boxH2 + 28 + 8);
+
+    // Set radar-only SVG height (so PNG export captures radar neatly)
+    const RADAR_BOTTOM_PADDING = 20;
+    const totalRadarHeight = centerY + rMax + RADAR_BOTTOM_PADDING;
+    svg.attr('height', totalRadarHeight);
+  });
 }
 
 /* ==================== Main renderer ==================== */
