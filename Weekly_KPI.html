@@ -750,6 +750,157 @@ function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
   }
 }
 
+// Heatmap for the Non-CC + latest CC table (black mask + hide "No Function" rows)
+function renderNonCCMatrixHeatmap(card, rowLabels, colKeys, colLabels, matrixVals){
+  const T = getThresholds();
+  const cell = 12, gap = 2, topPad = 22;
+
+  // split "Function — KPI"
+  const splitLabel = lbl => {
+    if (!lbl) return {func:'', kpi:''};
+    if (lbl.includes('—')) { const p = lbl.split('—'); return {func:p[0].trim(), kpi:p.slice(1).join('—').trim()}; }
+    const i1 = lbl.indexOf('–'); if (i1>0) return {func:lbl.slice(0,i1).trim(), kpi:lbl.slice(i1+1).trim()};
+    const i2 = lbl.indexOf('-'); if (i2>0) return {func:lbl.slice(0,i2).trim(), kpi:lbl.slice(i2+1).trim()};
+    return {func:lbl.trim(), kpi:''};
+  };
+
+  const funcByRow = rowLabels.map(l => splitLabel(l).func);
+  const kpiByRow  = rowLabels.map(l => splitLabel(l).kpi);
+  const isNoFuncRow = kpiByRow.map(k => /no function/i.test(k));
+
+  // Build black mask: if any "No Function" row >0 for (func, sw), black out all KPIs for that pair
+  const blackMask = new Set(); // key `${func}||${swKey}`
+  for (let r=0; r<rowLabels.length; r++){
+    if (!isNoFuncRow[r]) continue;
+    for (let c=0; c<colKeys.length; c++){
+      const v = matrixVals?.[r]?.[c];
+      if (v != null && !Number.isNaN(v) && v > 0){
+        blackMask.add(`${funcByRow[r]}||${colKeys[c]}`);
+      }
+    }
+  }
+
+  // Filter out the "No Function" rows from drawing
+  const keepIdx = [];
+  for (let r=0; r<rowLabels.length; r++) if (!isNoFuncRow[r]) keepIdx.push(r);
+  if (!keepIdx.length) return;
+
+  const rowsLabelsFiltered = keepIdx.map(i => rowLabels[i]);
+  const funcsFiltered      = keepIdx.map(i => funcByRow[i]);
+  const matrixFiltered     = keepIdx.map(i => matrixVals[i]);
+
+  // Layout
+  const leftPad = Math.max(140, measureTextWidthCal(rowsLabelsFiltered, 11, 600) + 14);
+  const colLabH = measureTextWidthCal(colLabels, 11, 600) + 16;
+  const cols    = colKeys.length, rows = rowsLabelsFiltered.length;
+  const gridW   = leftPad + cols*(cell+gap) + 6;
+  const gridH   = topPad + colLabH + rows*(cell+gap) + 6;
+
+  const wrap = card.append('div').attr('class','chart-card').style('grid-column','1 / -1');
+  const scroller = wrap.append('div').style('overflow','auto');
+
+  const svg = scroller.append('svg')
+    .attr('width', gridW).attr('height', gridH)
+    .style('display','block').style('margin','0 auto 10px');
+
+  // Left KPI labels
+  const gLeft = svg.append('g');
+  rowsLabelsFiltered.forEach((lab, r) => {
+    const y = topPad + colLabH + r*(cell+gap) + cell*0.75;
+    gLeft.append('text')
+      .attr('x', leftPad - 8).attr('y', y)
+      .attr('font-size', 11).attr('font-weight', 600).attr('fill', '#666')
+      .attr('text-anchor','end')
+      .text(lab.length > 60 ? lab.slice(0,60) + '…' : lab)
+      .append('title').text(lab);
+  });
+
+  // Cells
+  const gGrid = svg.append('g');
+  for (let r=0; r<rows; r++){
+    const func = funcsFiltered[r];
+    for (let c=0; c<cols; c++){
+      const swKey = colKeys[c];
+      const raw = matrixFiltered?.[r]?.[c];
+
+      const forceBlack = blackMask.has(`${func}||${swKey}`);
+      let fill = '#f1f3f8', alpha = 1, tip = `Value: ${fmtCell(raw)}\nScore: n/a`;
+
+      if (forceBlack){
+        fill = '#000'; alpha = 1; tip = `Value: ${fmtCell(raw)}\nNO FUNCTION (forced black)`;
+      } else if (raw == null || Number.isNaN(raw)){
+        // keep defaults
+      } else if (raw >= 1000){
+        fill = '#000'; alpha = 1; tip = `Value: ${fmtCell(raw)}\n(Forced black)`;
+      } else {
+        const score = scoreFromAvg(Math.min(1000, raw), T); // direct value → score
+        fill = scoreColors[(score || 10) - 1];
+        alpha = 0.95;
+        tip = `Value: ${fmtCell(raw)}\nScore ${score}`;
+      }
+
+      const x = leftPad + c*(cell+gap);
+      const y = topPad + colLabH + r*(cell+gap);
+
+      gGrid.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill).attr('fill-opacity', alpha)
+        .attr('stroke', '#fff').attr('stroke-width', 0.8)
+        .append('title').text(`${rowsLabelsFiltered[r]}\n${colLabels[c]}\n${tip}`);
+    }
+  }
+
+  // Top software labels (nudge slightly right)
+  const gTop = svg.append('g');
+  const LABEL_X_NUDGE = 4, LABEL_Y_NUDGE = -8;
+  const labelBaseline = topPad + colLabH + LABEL_Y_NUDGE;
+  colLabels.forEach((lab, c) => {
+    const colLeft = leftPad + c*(cell+gap);
+    const anchorX = colLeft + LABEL_X_NUDGE;
+    const gl = gTop.append('g').attr('transform', `translate(${anchorX}, ${labelBaseline}) rotate(-90)`);
+    gl.append('text')
+      .attr('x', 0).attr('y', 0)
+      .attr('text-anchor', 'start').attr('dominant-baseline', 'hanging')
+      .attr('font-size', 11).attr('fill', '#111')
+      .text(lab)
+      .append('title').text(lab);
+  });
+
+  // Compact legend (0..10 boxes, no gaps)
+  const ranges = scoreRangeLabels(T);
+  const legendW = Math.max(900, gridW + 140);
+  const leg = scroller.append('svg')
+    .attr('width', legendW)
+    .style('display','block')
+    .style('margin','8px auto 12px');
+
+  const marginX = 16, gapX = 0, nBoxes = 11;
+  const boxW = Math.floor((legendW - marginX*2 - gapX*(nBoxes-1)) / nBoxes);
+  const boxH = 24, yBoxes = 26;
+
+  leg.append('text')
+    .attr('x', marginX).attr('y', 14)
+    .attr('font-size', 12).attr('fill', '#555')
+    .text('Score colors (0 = No function, 1 = worst … 10 = best)');
+
+  // 0: black "No function"
+  leg.append('rect').attr('x', marginX).attr('y', yBoxes).attr('width', boxW).attr('height', boxH).attr('fill','#000').attr('stroke','#ddd');
+  leg.append('text').attr('x', marginX + boxW/2).attr('y', yBoxes + boxH/2 + 4).attr('text-anchor','middle').attr('font-size',12).attr('font-weight',800).attr('fill','#fff').text('0');
+  leg.append('text').attr('x', marginX + boxW/2).attr('y', yBoxes + boxH + 14).attr('text-anchor','middle').attr('font-size',11).text('No function');
+
+  // 1..10
+  for (let i=0; i<10; i++){
+    const left = marginX + (i+1)*(boxW + gapX);
+    const xc = left + boxW/2;
+    const fill = scoreColors[i];
+    leg.append('rect').attr('x', left).attr('y', yBoxes).attr('width', boxW).attr('height', boxH).attr('fill', fill).attr('stroke','#ddd');
+    leg.append('text').attr('x', xc).attr('y', yBoxes + boxH/2 + 4).attr('text-anchor','middle').attr('font-size',12).attr('font-weight',800).attr('fill', '#111').text(i+1);
+    leg.append('text').attr('x', xc).attr('y', yBoxes + boxH + 14).attr('text-anchor','middle').attr('font-size',11).text(ranges[i]);
+  }
+  leg.attr('height', yBoxes + boxH + 14 + 12 + 8);
+}
+  
 /* ==================== Non-CC + latest CC (unchanged) ==================== */
 function renderNonCCPlusLatestCCMatrix(container, parsed){
   const allSoft = parsed.software || [];
@@ -802,6 +953,18 @@ function renderNonCCPlusLatestCCMatrix(container, parsed){
       td.text(fmtCell(v));
     });
   });
+
+  // Build the data arrays for the heatmap (from the table’s data)
+const colKeys    = cols.map(sw => sw.label);                                   // keys for values/mask
+const colLabels  = cols.map(sw => sw._latest ? `${sw.label} (latest CC)` : sw.label); // pretty labels
+const matrixVals = kpiNames.map(name => {
+  const e = entryByName.get(name);
+  return colKeys.map(k => (e ? e.values[k] : null));
+});
+
+// Render heatmap under the Non-CC + latest CC table
+renderNonCCMatrixHeatmap(card, kpiNames, colKeys, colLabels, matrixVals);
+
 }
 
 /* ==================== Per-software cards ==================== */
