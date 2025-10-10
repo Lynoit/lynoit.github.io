@@ -59,7 +59,8 @@
       <div class="row">
         <label class="tog"><input id="ignoreInternal" type="checkbox" checked /> Prefer external / ignore internal</label>
         <div class="well hint" id="preperm">
-          <b>Step 1:</b> Tap <button id="prepBtn">Grant camera access</button> once to reveal device names (labels). You can immediately stop after.
+          <b>Step 1:</b> Tap <button id="prepBtn">Grant camera access</button> to reveal device labels.
+          <div style="margin-top:8px"><b>Step 1b (Android USB permission, optional):</b> If externals don't show up, tap <button id="usbBtn">Grant USB (WebUSB)</button> to allow UVC devices (class 0x0E). Then rescan.</div>
         </div>
         <div class="row cols-2">
           <div>
@@ -151,6 +152,7 @@
       fitB: document.getElementById('fitB'), fillB: document.getElementById('fillB'),
       ignoreInternal: document.getElementById('ignoreInternal'),
       prepBtn: document.getElementById('prepBtn'),
+      usbBtn: document.getElementById('usbBtn'),
       preperm: document.getElementById('preperm'),
       log: document.getElementById('log'),
       canvas: document.getElementById('hiddenCanvas')
@@ -160,8 +162,8 @@
     let recA = null, recB = null;
     let chunksA = [], chunksB = [];
 
-    const INTERNAL_HINTS = /(front|back|rear|facing|internal|camera\s?\d|wide|ultra|tele)/i;
-    const EXTERNAL_HINTS = /(usb|uvc|webcam|logitech|c9\d\d|brio|elgato|aver|external)/i;
+    const INTERNAL_HINTS = /(front|back|rear|facing|internal|selfie|wide|ultra|tele|portrait)/i;
+    const EXTERNAL_HINTS = /(usb|uvc|webcam|logitech|brio|elgato|aver|external|hdmi|capture)/i;
 
     function log(msg, link){
       const div = document.createElement('div');
@@ -207,13 +209,15 @@
       const preferExternal = els.ignoreInternal.checked;
       let vids = devices.filter(d=>d.kind === 'videoinput');
       if(!preferExternal) return vids;
-      // Keep strong matches to "external"; drop obvious internal when labels are available
+      // Prefer explicit USB/UVC labels
       const labeled = vids.filter(d=>d.label);
-      if(labeled.length){
-        const externals = labeled.filter(d=> EXTERNAL_HINTS.test(d.label) || !INTERNAL_HINTS.test(d.label) );
-        // But ensure we don't exclude too much: if fewer than 2 remain, fall back to all
-        return externals.length ? externals : vids;
-      }
+      let externals = labeled.filter(d=> EXTERNAL_HINTS.test(d.label));
+      // Drop obvious internal cams
+      externals = externals.concat(labeled.filter(d=> !INTERNAL_HINTS.test(d.label) && !EXTERNAL_HINTS.test(d.label))).filter((v,i,a)=> a.indexOf(v)===i);
+      // If nothing matched and no labels yet, return all (user must grant permissions)
+      if(externals.length === 0) return labeled.length? [] : vids;
+      return externals;
+    }
       // No labels (pre-permission). Keep all; UI will guide user to grant once.
       return vids;
     }
@@ -224,14 +228,21 @@
         const vidInputs = deviceFilter(devices);
         fillSelect(els.camA, vidInputs, 'A');
         fillSelect(els.camB, vidInputs, 'B');
-        // Restore last selection if available
         const lastA = localStorage.getItem('camA');
         const lastB = localStorage.getItem('camB');
         if(lastA) selectById(els.camA, lastA);
         if(lastB) selectById(els.camB, lastB);
         if(vidInputs.length === 0){
-          log(`<span style="color:var(--warn)">No cameras found.</span> Connect USB webcams via OTG/USB‑C hub and tap <b>Rescan Devices</b>.`);
+          log(`<span style="color:var(--warn)">No cameras found.</span> Connect USB webcams via OTG/USB‑C hub and tap <b>Grant USB (WebUSB)</b> then <b>Rescan Devices</b>.`);
+        } else {
+          // Show a quick debug summary
+          const list = vidInputs.map(v=> (v.label||'')+` [${v.deviceId.slice(0,6)}]`).join(' • ');
+          log(`Video inputs: ${list||'unlabeled (grant access)'}`);
         }
+      }catch(e){
+        log(`<span style="color:var(--bad)">Device enumeration failed:</span> ${e.message}`);
+      }
+    }
       }catch(e){
         log(`<span style="color:var(--bad)">Device enumeration failed:</span> ${e.message}`);
       }
@@ -341,6 +352,14 @@
 
     // --- Event wiring ---
     els.prepBtn.addEventListener('click', grantOnce);
+    els.usbBtn.addEventListener('click', async ()=>{
+      if(!('usb' in navigator)){ log('WebUSB not supported on this browser.'); return; }
+      try{
+        // UVC class = 0x0e; allow any subclass/protocol
+        const dev = await navigator.usb.requestDevice({ filters:[{ classCode: 0x0e }] });
+        if(dev){ log(`USB permission granted for: ${dev.productName||'UVC device'}. Now tap Rescan Devices.`); }
+      }catch(e){ log(`USB permission dismissed or failed: ${e.message}`); }
+    });
     els.refreshBtn.addEventListener('click', refreshDevices);
     els.startBtn.addEventListener('click', startStreams);
     els.stopBtn.addEventListener('click', stopStreams);
