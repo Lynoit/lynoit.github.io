@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dual USB Webcam Viewer — Android</title>
+  <meta name="description" content="View and record two external USB webcams side-by-side on Android tablets. Ignores internal cameras." />
+  <style>
+    :root{
+      --bg:#0f1220; --panel:#151a2e; --ink:#e9ecff; --muted:#a6add6; --accent:#5aa7ff; --ok:#18a558; --bad:#ff5252; --warn:#f0b429;
+      --radius:16px; --gap:14px; --shadow:0 10px 30px rgba(0,0,0,.35);
+    }
+    html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    .wrap{display:grid;grid-template-columns:320px 1fr;gap:var(--gap);padding:var(--gap)}
+    @media (max-width:1000px){.wrap{grid-template-columns:1fr}}
+    .card{background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .side{padding:var(--gap);display:flex;flex-direction:column;gap:var(--gap)}
+    h1{margin:0;font-size:20px;letter-spacing:.2px}
+    .hint{font-size:13px;color:var(--muted)}
+    label{font-size:13px;color:var(--muted)}
+    select,button,input[type="checkbox"]{font-size:16px}
+    select,button{background:#0d142b;color:var(--ink);border:1px solid #2a335c;border-radius:12px;padding:10px 12px}
+    button{cursor:pointer}
+    button.primary{background:var(--accent);border-color:transparent;color:#071224}
+    button.good{background:var(--ok);border-color:transparent;color:#06130b}
+    button.bad{background:var(--bad);border-color:transparent}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .row{display:grid;gap:10px}
+    .row.cols-2{grid-template-columns:1fr 1fr}
+    .tog{display:flex;align-items:center;gap:10px}
+    .well{background:#0d142b;border:1px dashed #2a335c;border-radius:12px;padding:10px}
+
+    .stage{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)}
+    @media (max-width:900px){.stage{grid-template-columns:1fr}}
+    .pane{position:relative;overflow:hidden;border-radius:var(--radius);background:#000}
+    video{width:100%;height:100%;object-fit:contain;background:#000}
+    .badge{position:absolute;left:10px;top:10px;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);padding:6px 10px;border-radius:12px;border:1px solid #2a335c;font-size:12px}
+    .corner{position:absolute;right:10px;bottom:10px;display:flex;gap:8px}
+    .corner button{padding:6px 10px;border-radius:10px}
+
+    .status{display:flex;align-items:center;gap:8px;font-size:14px}
+    .dot{width:10px;height:10px;border-radius:50%;background:#666}
+    .dot.on{background:var(--ok)}
+    .dot.rec{background:var(--bad)}
+    .log{height:160px;overflow:auto;font-family:ui-monospace, SFMono-Regular, Menlo, Consolas,"Liberation Mono",monospace;background:#0b1022;border-radius:12px;padding:10px;border:1px solid #2a335c}
+    .kbd{font-family:ui-monospace,monospace;background:#0b1022;border:1px solid #2a335c;border-radius:6px;padding:0 6px}
+    a{color:var(--accent)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <aside class="card side">
+      <div>
+        <h1>Dual USB Webcam Viewer — Android</h1>
+        <p class="hint">Connect two UVC webcams via USB‑C hub. This tool enumerates <b>external</b> cameras and ignores internal ones.
+          Requires HTTPS and a user gesture. Tested in Chrome on Android.</p>
+      </div>
+
+      <div class="row">
+        <label class="tog"><input id="ignoreInternal" type="checkbox" checked /> Prefer external / ignore internal</label>
+        <div class="well hint" id="preperm">
+          <b>Step 1:</b> Tap <button id="prepBtn">Grant camera access</button> once to reveal device names (labels). You can immediately stop after.
+        </div>
+        <div class="row cols-2">
+          <div>
+            <label for="camA">Camera A</label>
+            <select id="camA"></select>
+          </div>
+          <div>
+            <label for="camB">Camera B</label>
+            <select id="camB"></select>
+          </div>
+        </div>
+        <div class="row cols-2">
+          <button id="startBtn" class="primary">Start Streams</button>
+          <button id="stopBtn" class="bad" disabled>Stop Streams</button>
+        </div>
+        <div class="row cols-2">
+          <button id="swapBtn">Swap A ↔ B</button>
+          <button id="refreshBtn">Rescan Devices</button>
+        </div>
+        <div class="row cols-2">
+          <button id="snapA">Snapshot A</button>
+          <button id="snapB">Snapshot B</button>
+        </div>
+        <div class="row cols-2">
+          <button id="recA" class="good" disabled>Record A</button>
+          <button id="recB" class="good" disabled>Record B</button>
+        </div>
+        <div class="status"><span class="dot" id="dotA"></span> A status · <span id="stA">idle</span></div>
+        <div class="status"><span class="dot" id="dotB"></span> B status · <span id="stB">idle</span></div>
+
+        <div class="well hint">
+          <div><b>Tips</b></div>
+          <ul>
+            <li>Use a powered USB‑C hub if cameras draw >500mA.</li>
+            <li>If labels are blank, tap <span class="kbd">Grant camera access</span> above.</li>
+            <li>For best stability, set Android <i>Default USB configuration</i> to <i>USB controlled by This device</i>.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div>
+        <div class="hint">Downloads appear here (snapshots & recordings):</div>
+        <div class="log" id="log"></div>
+      </div>
+    </aside>
+
+    <main class="stage">
+      <section class="pane card">
+        <div class="badge">A</div>
+        <video id="vidA" playsinline autoplay muted></video>
+        <div class="corner">
+          <button id="fitA">Fit</button>
+          <button id="fillA">Fill</button>
+        </div>
+      </section>
+      <section class="pane card">
+        <div class="badge">B</div>
+        <video id="vidB" playsinline autoplay muted></video>
+        <div class="corner">
+          <button id="fitB">Fit</button>
+          <button id="fillB">Fill</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <canvas id="hiddenCanvas" style="display:none"></canvas>
+
+  <script>
+    // --- State ---
+    const els = {
+      camA: document.getElementById('camA'),
+      camB: document.getElementById('camB'),
+      startBtn: document.getElementById('startBtn'),
+      stopBtn: document.getElementById('stopBtn'),
+      swapBtn: document.getElementById('swapBtn'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      recA: document.getElementById('recA'),
+      recB: document.getElementById('recB'),
+      snapA: document.getElementById('snapA'),
+      snapB: document.getElementById('snapB'),
+      dotA: document.getElementById('dotA'),
+      dotB: document.getElementById('dotB'),
+      stA: document.getElementById('stA'),
+      stB: document.getElementById('stB'),
+      vidA: document.getElementById('vidA'),
+      vidB: document.getElementById('vidB'),
+      fitA: document.getElementById('fitA'), fillA: document.getElementById('fillA'),
+      fitB: document.getElementById('fitB'), fillB: document.getElementById('fillB'),
+      ignoreInternal: document.getElementById('ignoreInternal'),
+      prepBtn: document.getElementById('prepBtn'),
+      preperm: document.getElementById('preperm'),
+      log: document.getElementById('log'),
+      canvas: document.getElementById('hiddenCanvas')
+    };
+
+    let streamA = null, streamB = null;
+    let recA = null, recB = null;
+    let chunksA = [], chunksB = [];
+
+    const INTERNAL_HINTS = /(front|back|rear|facing|internal|camera\s?\d|wide|ultra|tele)/i;
+    const EXTERNAL_HINTS = /(usb|uvc|webcam|logitech|c9\d\d|brio|elgato|aver|external)/i;
+
+    function log(msg, link){
+      const div = document.createElement('div');
+      const t = new Date().toLocaleTimeString();
+      div.innerHTML = `<span class="hint">[${t}]</span> ${msg}`;
+      if(link){
+        const a = document.createElement('a');
+        a.href = link.href; a.download = link.download; a.textContent = ` ↘ ${link.name}`;
+        a.style.marginLeft = '6px';
+        div.appendChild(a);
+      }
+      els.log.prepend(div);
+    }
+
+    function saveBlob(blob, base){
+      const name = `${base}_${new Date().toISOString().replace(/[:.]/g,'-')}.webm`;
+      const url = URL.createObjectURL(blob);
+      log(`Saved recording`, {href:url, download:name, name});
+      const a = document.createElement('a');
+      a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 10000);
+    }
+
+    function saveImage(dataURL, base){
+      const name = `${base}_${new Date().toISOString().replace(/[:.]/g,'-')}.png`;
+      log(`Saved snapshot`, {href:dataURL, download:name, name});
+      const a = document.createElement('a');
+      a.href = dataURL; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    }
+
+    async function grantOnce(){
+      try{
+        const tmp = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+        tmp.getTracks().forEach(t=>t.stop());
+        els.preperm.style.display = 'none';
+        await refreshDevices();
+      }catch(e){
+        log(`<span style="color:var(--bad)">Permission error:</span> ${e.message}`);
+      }
+    }
+
+    function deviceFilter(devices){
+      const preferExternal = els.ignoreInternal.checked;
+      let vids = devices.filter(d=>d.kind === 'videoinput');
+      if(!preferExternal) return vids;
+      // Keep strong matches to "external"; drop obvious internal when labels are available
+      const labeled = vids.filter(d=>d.label);
+      if(labeled.length){
+        const externals = labeled.filter(d=> EXTERNAL_HINTS.test(d.label) || !INTERNAL_HINTS.test(d.label) );
+        // But ensure we don't exclude too much: if fewer than 2 remain, fall back to all
+        return externals.length ? externals : vids;
+      }
+      // No labels (pre-permission). Keep all; UI will guide user to grant once.
+      return vids;
+    }
+
+    async function refreshDevices(){
+      try{
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const vidInputs = deviceFilter(devices);
+        fillSelect(els.camA, vidInputs, 'A');
+        fillSelect(els.camB, vidInputs, 'B');
+        // Restore last selection if available
+        const lastA = localStorage.getItem('camA');
+        const lastB = localStorage.getItem('camB');
+        if(lastA) selectById(els.camA, lastA);
+        if(lastB) selectById(els.camB, lastB);
+        if(vidInputs.length === 0){
+          log(`<span style="color:var(--warn)">No cameras found.</span> Connect USB webcams via OTG/USB‑C hub and tap <b>Rescan Devices</b>.`);
+        }
+      }catch(e){
+        log(`<span style="color:var(--bad)">Device enumeration failed:</span> ${e.message}`);
+      }
+    }
+
+    function selectById(sel, id){
+      for(const o of sel.options){ if(o.value === id){ sel.value = id; break; } }
+    }
+
+    function fillSelect(sel, devices, tag){
+      const cur = sel.value;
+      sel.innerHTML = '';
+      for(const d of devices){
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `Camera ${tag} (${d.deviceId.slice(0,6)}…)`;
+        sel.appendChild(opt);
+      }
+      if([...sel.options].length === 0){
+        const opt = document.createElement('option');
+        opt.value = ''; opt.textContent = '— no cameras —'; sel.appendChild(opt);
+      }
+      if(cur) selectById(sel, cur);
+    }
+
+    async function startStreams(){
+      await stopStreams();
+      const idA = els.camA.value; const idB = els.camB.value;
+      if(!idA || !idB){ log('Select two cameras first.'); return; }
+      localStorage.setItem('camA', idA); localStorage.setItem('camB', idB);
+
+      const baseConstraints = { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30} };
+      try{
+        streamA = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...baseConstraints, deviceId:{exact:idA} } });
+        els.vidA.srcObject = streamA; els.dotA.classList.add('on'); els.stA.textContent = 'streaming';
+      }catch(e){ log(`<span style="color:var(--bad)">Failed to start A:</span> ${e.message}`); }
+
+      try{
+        streamB = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...baseConstraints, deviceId:{exact:idB} } });
+        els.vidB.srcObject = streamB; els.dotB.classList.add('on'); els.stB.textContent = 'streaming';
+      }catch(e){ log(`<span style="color:var(--bad)">Failed to start B:</span> ${e.message}`); }
+
+      els.startBtn.disabled = true; els.stopBtn.disabled = false;
+      els.recA.disabled = !canRecord(streamA);
+      els.recB.disabled = !canRecord(streamB);
+    }
+
+    async function stopStreams(){
+      function stop(stream, dot, st){
+        if(stream){ stream.getTracks().forEach(t=>t.stop()); }
+        dot.classList.remove('on','rec'); st.textContent = 'idle';
+      }
+      stop(streamA, els.dotA, els.stA); stop(streamB, els.dotB, els.stB);
+      streamA = streamB = null; els.vidA.srcObject = null; els.vidB.srcObject = null;
+      els.startBtn.disabled = false; els.stopBtn.disabled = true; els.recA.disabled = true; els.recB.disabled = true;
+      if(recA){ try{recA.stop();}catch{} recA=null; }
+      if(recB){ try{recB.stop();}catch{} recB=null; }
+    }
+
+    function canRecord(stream){
+      if(!stream || typeof MediaRecorder === 'undefined') return false;
+      const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' :
+                   MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+      return !!mime;
+    }
+
+    function toggleRecord(which){
+      if(which==='A'){
+        if(recA){ recA.stop(); return; }
+        if(!streamA) return;
+        chunksA = [];
+        recA = new MediaRecorder(streamA, { mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp9')? 'video/webm;codecs=vp9':'video/webm;codecs=vp8' });
+        recA.ondataavailable = e=>{ if(e.data.size) chunksA.push(e.data); };
+        recA.onstop = ()=>{ els.dotA.classList.remove('rec'); saveBlob(new Blob(chunksA,{type:'video/webm'}),'CameraA'); };
+        recA.start(); els.dotA.classList.add('rec'); log('Recording A…');
+      } else {
+        if(recB){ recB.stop(); return; }
+        if(!streamB) return;
+        chunksB = [];
+        recB = new MediaRecorder(streamB, { mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp9')? 'video/webm;codecs=vp9':'video/webm;codecs=vp8' });
+        recB.ondataavailable = e=>{ if(e.data.size) chunksB.push(e.data); };
+        recB.onstop = ()=>{ els.dotB.classList.remove('rec'); saveBlob(new Blob(chunksB,{type:'video/webm'}),'CameraB'); };
+        recB.start(); els.dotB.classList.add('rec'); log('Recording B…');
+      }
+    }
+
+    function snapshot(which){
+      const video = (which==='A') ? els.vidA : els.vidB;
+      if(!video || !video.videoWidth){ log('No video to snapshot.'); return; }
+      const c = els.canvas; const w = video.videoWidth, h = video.videoHeight;
+      c.width = w; c.height = h; const g = c.getContext('2d');
+      g.drawImage(video,0,0,w,h);
+      const data = c.toDataURL('image/png');
+      saveImage(data, which==='A'?'CamA':'CamB');
+    }
+
+    function swap(){
+      const a = els.camA.value, b = els.camB.value;
+      els.camA.value = b; els.camB.value = a;
+      if(streamA || streamB){ startStreams(); }
+    }
+
+    function setFit(which, mode){
+      const v = which==='A' ? els.vidA : els.vidB;
+      v.style.objectFit = (mode==='fill') ? 'cover' : 'contain';
+    }
+
+    // --- Event wiring ---
+    els.prepBtn.addEventListener('click', grantOnce);
+    els.refreshBtn.addEventListener('click', refreshDevices);
+    els.startBtn.addEventListener('click', startStreams);
+    els.stopBtn.addEventListener('click', stopStreams);
+    els.swapBtn.addEventListener('click', swap);
+    els.recA.addEventListener('click', ()=>toggleRecord('A'));
+    els.recB.addEventListener('click', ()=>toggleRecord('B'));
+    els.snapA.addEventListener('click', ()=>snapshot('A'));
+    els.snapB.addEventListener('click', ()=>snapshot('B'));
+    els.fitA.addEventListener('click', ()=>setFit('A','fit'));
+    els.fillA.addEventListener('click', ()=>setFit('A','fill'));
+    els.fitB.addEventListener('click', ()=>setFit('B','fit'));
+    els.fillB.addEventListener('click', ()=>setFit('B','fill'));
+    els.ignoreInternal.addEventListener('change', refreshDevices);
+
+    navigator.mediaDevices.addEventListener?.('devicechange', ()=>{
+      log('Device change detected. Rescanning…');
+      refreshDevices();
+    });
+
+    // Initial population
+    (async ()=>{
+      await refreshDevices();
+      // Auto-hide pre-permission panel if labels already present
+      try{
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        if(devs.some(d=>d.kind==='videoinput' && d.label)){
+          els.preperm.style.display='none';
+        }
+      }catch{}
+    })();
+
+    // PWA-ish: keep screen awake during streaming (Android)
+    let wakeLock = null;
+    async function requestWake(){
+      try{ if('wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); } }
+      catch{}
+    }
+    document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && (streamA||streamB)) requestWake(); });
+    els.startBtn.addEventListener('click', requestWake);
+  </script>
+</body>
+</html>
