@@ -274,6 +274,18 @@
       if(!idA || !idB){ log('Select two cameras first.'); return; }
       localStorage.setItem('camA', idA); localStorage.setItem('camB', idB);
 
+      try{ streamA = await openStreamForDevice(idA, 'A'); attachStream(els.vidA, streamA, 'A'); }
+      catch(e){ log(`<span style="color:var(--bad)">Failed to start A:</span> ${e.message}`); }
+
+      try{ streamB = await openStreamForDevice(idB, 'B'); attachStream(els.vidB, streamB, 'B'); }
+      catch(e){ log(`<span style="color:var(--bad)">Failed to start B:</span> ${e.message}`); }
+
+      els.startBtn.disabled = true; els.stopBtn.disabled = false;
+      els.recA.disabled = !canRecord(streamA);
+      els.recB.disabled = !canRecord(streamB);
+    }
+      localStorage.setItem('camA', idA); localStorage.setItem('camB', idB);
+
       const baseConstraints = { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30} };
       try{
         streamA = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...baseConstraints, deviceId:{exact:idA} } });
@@ -304,14 +316,30 @@
 
     function canRecord(stream){
       if(!stream || typeof MediaRecorder === 'undefined') return false;
-      const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' :
-                   MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
-      return !!mime;
+      return MediaRecorder.isTypeSupported('video/webm;codecs=vp9') || MediaRecorder.isTypeSupported('video/webm;codecs=vp8') || MediaRecorder.isTypeSupported('video/webm');
     }
 
     function toggleRecord(which){
       if(which==='A'){
         if(recA){ recA.stop(); return; }
+        if(!streamA) return;
+        chunksA = [];
+        const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')? 'video/webm;codecs=vp9' : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')? 'video/webm;codecs=vp8' : 'video/webm');
+        recA = new MediaRecorder(streamA, { mimeType: mime });
+        recA.ondataavailable = e=>{ if(e.data.size) chunksA.push(e.data); };
+        recA.onstop = ()=>{ els.dotA.classList.remove('rec'); saveBlob(new Blob(chunksA,{type:'video/webm'}),'CameraA'); };
+        recA.start(); els.dotA.classList.add('rec'); log('Recording A…');
+      } else {
+        if(recB){ recB.stop(); return; }
+        if(!streamB) return;
+        chunksB = [];
+        const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')? 'video/webm;codecs=vp9' : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')? 'video/webm;codecs=vp8' : 'video/webm');
+        recB = new MediaRecorder(streamB, { mimeType: mime });
+        recB.ondataavailable = e=>{ if(e.data.size) chunksB.push(e.data); };
+        recB.onstop = ()=>{ els.dotB.classList.remove('rec'); saveBlob(new Blob(chunksB,{type:'video/webm'}),'CameraB'); };
+        recB.start(); els.dotB.classList.add('rec'); log('Recording B…');
+      }
+    }
         if(!streamA) return;
         chunksA = [];
         recA = new MediaRecorder(streamA, { mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp9')? 'video/webm;codecs=vp9':'video/webm;codecs=vp8' });
@@ -332,6 +360,12 @@
     function snapshot(which){
       const video = (which==='A') ? els.vidA : els.vidB;
       if(!video || !video.videoWidth){ log('No video to snapshot.'); return; }
+      const c = els.canvas; const w = video.videoWidth || 640, h = video.videoHeight || 480;
+      c.width = w; c.height = h; const g = c.getContext('2d');
+      g.drawImage(video,0,0,w,h);
+      const data = c.toDataURL('image/png');
+      saveImage(data, which==='A'?'CamA':'CamB');
+    }
       const c = els.canvas; const w = video.videoWidth, h = video.videoHeight;
       c.width = w; c.height = h; const g = c.getContext('2d');
       g.drawImage(video,0,0,w,h);
@@ -348,6 +382,51 @@
     function setFit(which, mode){
       const v = which==='A' ? els.vidA : els.vidB;
       v.style.objectFit = (mode==='fill') ? 'cover' : 'contain';
+    }
+
+    // Helpers to open and attach streams with fallback resolutions
+    async function openStreamForDevice(deviceId, tag){
+      const tryModes = [
+        {width:1280, height:720, frameRate:30},
+        {width:640, height:480, frameRate:30},
+        {width:1920, height:1080, frameRate:30},
+        {width:800, height:600, frameRate:25},
+        {width:1024, height:576, frameRate:25},
+        {width:640, height:360, frameRate:15}
+      ];
+      let lastErr = null;
+      for(const m of tryModes){
+        try{
+          const constraints = { audio:false, video:{ deviceId:{ exact: deviceId }, width:{ ideal:m.width }, height:{ ideal:m.height }, frameRate:{ ideal:m.frameRate } } };
+          const s = await navigator.mediaDevices.getUserMedia(constraints);
+          const vTrack = s.getVideoTracks()[0];
+          const set = vTrack.getSettings?.() || {}; // log negotiated settings
+          log(`A/V(${tag}) opened ${set.width||'?'}×${set.height||'?'}@${set.frameRate||'?'}fps`);
+          return s;
+        }catch(e){ lastErr = e; }
+      }
+      throw lastErr || new Error('Unable to open device ' + deviceId);
+    }
+
+    async function attachStream(videoEl, stream, tag){
+      try{
+        videoEl.srcObject = stream;
+        // Ensure autoplay kicks in on Android
+        videoEl.muted = true; videoEl.playsInline = true; videoEl.autoplay = true;
+        await videoEl.play().catch(()=>{});
+        // Post-check: if black after 2s, retry lower mode automatically
+        setTimeout(async ()=>{
+          if(!videoEl.videoWidth){
+            log(`Video ${tag} appears black; retrying with lower resolution…`);
+            try{
+              const id = (stream.getVideoTracks()[0].getSettings?.().deviceId) || (stream.getVideoTracks()[0].getConstraints?.().deviceId?.exact);
+              stream.getTracks().forEach(t=>t.stop());
+              const fallback = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ deviceId:{ exact:id }, width:{ ideal:640 }, height:{ ideal:480 }, frameRate:{ ideal:15 } } });
+              videoEl.srcObject = fallback; await videoEl.play().catch(()=>{});
+            }catch(e){ log(`<span style="color:var(--bad)">Retry failed:</span> ${e.message}`); }
+          }
+        }, 2000);
+      }catch(e){ log(`<span style="color:var(--bad)">Attach error (${tag}):</span> ${e.message}`); }
     }
 
     // --- Event wiring ---
