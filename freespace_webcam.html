@@ -3,75 +3,62 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Webcam Free-Space Viewer (ml5 DeepLab)</title>
+<title>Webcam Free-Space Viewer (Classical CV)</title>
 <style>
-  :root{
-    --bg:#0b0c0f; --ink:#f5f7fb; --muted:#9aa4b2; --accent:#4ade80; --warn:#f59e0b;
-    --panel:#141821; --card:#1b2130; --grid:#2a3342;
-  }
+  :root{ --bg:#0b0c0f; --ink:#f5f7fb; --muted:#9aa4b2; --accent:#4ade80; --warn:#f59e0b; --panel:#141821; --card:#1b2130; --grid:#2a3342;}
   body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,Segoe UI,Roboto,Arial,sans-serif}
   header{padding:14px 16px;border-bottom:1px solid #1f2633;background:var(--panel);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-  header h1{font-size:16px;margin:0 10px 0 0;font-weight:600;letter-spacing:.2px}
+  header h1{font-size:16px;margin:0 10px 0 0;font-weight:600}
   .row{display:flex;gap:16px;flex-wrap:wrap;padding:16px}
   .col{background:var(--card);border:1px solid #253043;border-radius:14px; padding:12px}
-  .col video,.col canvas{border-radius:12px;background:#000;display:block}
   .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-  select,button,input[type="range"]{background:#121723;color:var(--ink);border:1px solid #2b3648;border-radius:10px;padding:8px}
-  button{cursor:pointer}
+  select,button,input[type="range"],input[type="number"]{background:#121723;color:var(--ink);border:1px solid #2b3648;border-radius:10px;padding:8px}
   label{color:var(--muted)}
-  .stat{font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2b3648;background:#121723;color:var(--muted);font-size:12px}
   .gridBar{height:10px;background:var(--grid);border-radius:6px;overflow:hidden}
   .gridBar>span{display:block;height:100%;background:var(--accent)}
-  .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2b3648;background:#121723;color:var(--muted);font-size:12px}
-  details{margin-top:8px}
+  .stat{font-variant-numeric:tabular-nums}
   .hint{color:var(--muted);font-size:12px}
-  .err{color:#ffb4b4}
+  canvas{border-radius:12px;background:#000;display:block}
+  .dot{position:absolute;width:10px;height:10px;border-radius:50%;border:2px solid #fff;pointer-events:none}
 </style>
 </head>
 <body>
 <header>
   <h1>Webcam Free-Space Viewer</h1>
   <div class="controls">
-    <label>Camera
-      <select id="cameraSelect"></select>
-    </label>
+    <label>Camera <select id="cameraSelect"></select></label>
     <button id="startBtn">Start</button>
     <button id="stopBtn" disabled>Stop</button>
-    <span class="badge" id="modelBadge">Model: loading…</span>
     <span class="badge" id="fpsBadge">FPS: --</span>
   </div>
   <div class="controls">
-    <label>Opacity
-      <input type="range" id="opacity" min="0" max="1" step="0.05" value="0.5">
-    </label>
-    <label>Include:
-      <input type="checkbox" id="incRoad" checked> road
-      <input type="checkbox" id="incSidewalk" checked> sidewalk
-      <input type="checkbox" id="incParking" checked> parking
-    </label>
-    <label>Resolution
-      <select id="resSelect">
-        <option value="256">256</option>
-        <option value="321">321</option>
-        <option value="513" selected>513</option>
-      </select>
-    </label>
+    <label>Mask opacity <input type="range" id="opacity" min="0" max="1" step="0.05" value="0.5"></label>
+    <label>Near-field % <input type="range" id="nearPct" min="10" max="60" value="35"></label>
+    <label>Morph (px) <input type="range" id="morph" min="0" max="10" value="3"></label>
+    <label>Edges <input type="checkbox" id="useEdges" checked></label>
+  </div>
+  <div class="controls">
+    <label>H min <input type="range" id="hmin" min="0" max="360" value="0"></label>
+    <label>H max <input type="range" id="hmax" min="0" max="360" value="60"></label>
+    <label>S min <input type="range" id="smin" min="0" max="100" value="0"></label>
+    <label>S max <input type="range" id="smax" min="0" max="100" value="40"></label>
+    <label>V min <input type="range" id="vmin" min="0" max="100" value="15"></label>
+    <label>V max <input type="range" id="vmax" min="0" max="100" value="85"></label>
   </div>
 </header>
 
 <div class="row">
-  <div class="col" style="flex:1;min-width:320px">
+  <div class="col" style="flex:1;min-width:320px;position:relative">
     <canvas id="view" width="960" height="540"></canvas>
-    <div id="status" class="hint" style="margin-top:8px"></div>
-    <div class="hint" style="margin-top:6px">
-      Tip: For an <strong>external USB/UVC webcam</strong> on Android, you usually need an OTG adapter and recent Chrome/Android. Pick it from the Camera dropdown once detected.
-    </div>
+    <div class="hint" style="margin-top:8px" id="status"></div>
+    <div class="hint">Tip: tune HSV to match your road/asphalt; enable edges to carve obstacles; adjust morph to fill gaps.</div>
   </div>
 
   <div class="col" style="width:340px">
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
       <div style="width:10px;height:10px;background:var(--accent);border-radius:2px"></div>
-      <div>Free-space coverage per horizontal sector (near field)</div>
+      <div>Free-space coverage (near field)</div>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center">
       <div>Left</div><div class="stat" id="leftPct">--%</div>
@@ -82,322 +69,380 @@
       <div class="gridBar"><span id="rightBar" style="width:0%"></span></div><div></div>
     </div>
 
-    <details>
-      <summary>How it works</summary>
-      <ul>
-        <li>Runs <b>DeepLab (Cityscapes via ml5.js)</b> in TF.js to segment each frame.</li>
-        <li>Pixels labeled as road/sidewalk/parking → marked as <b>free-space</b>.</li>
-        <li>Overlay mask blended over live video.</li>
-        <li>Near-field band (bottom 35% of image) split into Left/Center/Right to estimate coverage.</li>
-      </ul>
-    </details>
-    <details>
-      <summary>Troubleshooting</summary>
-      <ul>
-        <li>Use HTTPS or <code>localhost</code> for camera access.</li>
-        <li>Pick the right device in the Camera dropdown.</li>
-        <li>Lower “Resolution” if FPS is low.</li>
-      </ul>
-    </details>
+    <hr style="border:none;border-top:1px solid #2b3648;margin:12px 0">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <div style="width:10px;height:10px;background:#7aa2ff;border-radius:2px"></div>
+      <div>Bird’s-eye occupancy (optional)</div>
+    </div>
+    <div class="hint">Click 4 ground points (clockwise) to calibrate homography.</div>
+    <div class="controls" style="margin-top:8px">
+      <button id="resetH" title="Clear calibration">Reset calibration</button>
+      <label>Grid W <input type="number" id="gridW" min="10" max="200" value="60"></label>
+      <label>Grid H <input type="number" id="gridH" min="10" max="200" value="80"></label>
+    </div>
+    <canvas id="bev" width="240" height="320" style="margin-top:8px"></canvas>
   </div>
 </div>
 
 <video id="video" autoplay playsinline muted style="display:none"></video>
 
-<!-- 1) Robust multi-CDN loader for TF.js + ml5.js -->
-<script>
-  function loadScript(src){
-    return new Promise((resolve, reject)=>{
-      const s = document.createElement('script');
-      s.src = src;
-      s.async = false;
-      s.crossOrigin = 'anonymous';
-      s.onload = resolve;
-      s.onerror = ()=>reject(new Error('Failed to load: '+src));
-      document.head.appendChild(s);
-    });
-  }
-  async function loadFromAny(urls){
-    let lastErr;
-    for (const u of urls){
-      try { await loadScript(u); return true; }
-      catch(e){ lastErr = e; console.warn('[loader]', e.message); }
-    }
-    if (lastErr) throw lastErr;
-  }
-  (async ()=>{
-    const statusEl = document.getElementById('status');
-    try{
-      statusEl.textContent = 'Loading TensorFlow.js…';
-      await loadFromAny([
-        'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
-        'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
-        'https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.22.0/tf.min.js'
-      ]);
-      statusEl.textContent = 'Loading ml5.js…';
-      await loadFromAny([
-        'https://cdn.jsdelivr.net/npm/ml5@0.12.2/dist/ml5.min.js',
-        'https://unpkg.com/ml5@0.12.2/dist/ml5.min.js',
-        'https://cdnjs.cloudflare.com/ajax/libs/ml5/0.12.2/ml5.min.js'
-      ]);
-      statusEl.textContent = 'Libraries loaded.';
-    } catch(err){
-      statusEl.innerHTML = '<span class="err">Error loading libraries: '+String(err.message)+'</span>';
-      console.error(err);
-    }
-  })();
-</script>
-
-<!-- 2) Main app logic (uses ml5.deeplab 'cityscapes') -->
 <script>
 (async function(){
-  // Wait until ml5 & tf exist
-  async function waitForLibs(timeoutMs=15000){
-    const t0 = performance.now();
-    while (performance.now() - t0 < timeoutMs){
-      if (window.ml5 && window.tf) return;
-      await new Promise(r=>setTimeout(r,50));
-    }
-    throw new Error('ml5/tf not available');
-  }
-  try { await waitForLibs(); } catch(e){
-    const s = document.getElementById('status');
-    s.innerHTML = '<span class="err">Libraries failed to initialize. Reload this page over HTTPS/localhost.</span>';
-    console.error(e);
-    return;
-  }
-
+  // Elements
   const video = document.getElementById('video');
   const canvas = document.getElementById('view');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const ctx = canvas.getContext('2d', { willReadFrequently:true });
+  const bev = document.getElementById('bev');
+  const bctx = bev.getContext('2d', { willReadFrequently:true });
 
   const cameraSelect = document.getElementById('cameraSelect');
   const startBtn = document.getElementById('startBtn');
   const stopBtn  = document.getElementById('stopBtn');
-  const modelBadge = document.getElementById('modelBadge');
   const fpsBadge = document.getElementById('fpsBadge');
   const statusEl = document.getElementById('status');
 
   const opacity = document.getElementById('opacity');
-  const incRoad = document.getElementById('incRoad');
-  const incSidewalk = document.getElementById('incSidewalk');
-  const incParking = document.getElementById('incParking');
-  const resSelect = document.getElementById('resSelect');
+  const nearPct = document.getElementById('nearPct');
+  const morph = document.getElementById('morph');
+  const useEdges = document.getElementById('useEdges');
 
-  const leftPctEl = document.getElementById('leftPct');
-  const centerPctEl = document.getElementById('centerPct');
-  const rightPctEl = document.getElementById('rightPct');
-  const leftBar = document.getElementById('leftBar');
-  const centerBar = document.getElementById('centerBar');
-  const rightBar = document.getElementById('rightBar');
+  const hmin = document.getElementById('hmin');
+  const hmax = document.getElementById('hmax');
+  const smin = document.getElementById('smin');
+  const smax = document.getElementById('smax');
+  const vmin = document.getElementById('vmin');
+  const vmax = document.getElementById('vmax');
 
-  let stream = null;
-  let running = false;
-  let deeplabModel = null;
-  let lastFrameT = performance.now();
-  let frameCount = 0;
+  const leftPctEl=document.getElementById('leftPct'), centerPctEl=document.getElementById('centerPct'), rightPctEl=document.getElementById('rightPct');
+  const leftBar=document.getElementById('leftBar'), centerBar=document.getElementById('centerBar'), rightBar=document.getElementById('rightBar');
 
-  // Camera list
-  async function listCameras() {
-    try {
-      await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-        .then(s => s.getTracks().forEach(t => t.stop()));
-    } catch(e) { /* ignore */ }
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const cams = devices.filter(d => d.kind === 'videoinput');
-    cameraSelect.innerHTML = '';
-    for (const d of cams) {
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = d.label || `Camera ${cameraSelect.length+1}`;
-      cameraSelect.appendChild(opt);
+  const resetH = document.getElementById('resetH');
+  const gridW = document.getElementById('gridW');
+  const gridH = document.getElementById('gridH');
+
+  // Camera listing
+  async function listCameras(){
+    try{ await navigator.mediaDevices.getUserMedia({video:true}).then(s=>s.getTracks().forEach(t=>t.stop())); }catch(e){}
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const cams = devs.filter(d=>d.kind==='videoinput');
+    cameraSelect.innerHTML='';
+    for(const d of cams){
+      const o=document.createElement('option'); o.value=d.deviceId; o.textContent=d.label||`Camera ${cameraSelect.length+1}`; cameraSelect.appendChild(o);
     }
-    if (!cams.length) statusEl.innerHTML = '<span class="err">No cameras found. Use HTTPS or grant permission.</span>';
+    if(!cams.length) statusEl.textContent='No cameras found — use HTTPS/localhost and grant permission.';
   }
   await listCameras();
   navigator.mediaDevices.addEventListener?.('devicechange', listCameras);
 
-  // Load ml5 DeepLab (Cityscapes)
-  async function loadMl5DeepLab(){
-    return new Promise((resolve, reject)=>{
-      try{
-        const model = ml5.deeplab('cityscapes', ()=>resolve(model));
-      } catch(e){ reject(e); }
-    });
-  }
-  try{
-    modelBadge.textContent = 'Model: loading DeepLab (Cityscapes)…';
-    deeplabModel = await loadMl5DeepLab();
-    modelBadge.textContent = 'Model: DeepLab (Cityscapes) loaded';
-  } catch(e){
-    modelBadge.textContent = 'Model: failed to load';
-    statusEl.innerHTML = '<span class="err">Could not load ml5 DeepLab model.</span>';
-    console.error(e);
-    return;
-  }
+  let stream=null, running=false, lastT=performance.now(), frames=0;
 
-  // Legend → indices for free classes
-  let FREE_LABELS = new Set([/* will be discovered dynamically */]);
-  function updateFreeLabelsFromLegend(legend) {
-    if (!legend) return;
-    const desired = ['road','sidewalk','parking','path','floor','pavement','ground','street','lane'];
-    const set = new Set();
-    legend.forEach((name, idx)=>{
-      const n = String(name||'').toLowerCase();
-      if (desired.some(d=>n.includes(d))) set.add(idx);
-    });
-    if (set.size) FREE_LABELS = set;
-  }
-
-  function segmentOnce(videoEl, desiredSize){
-    // ml5 DeepLab doesn’t take a target size param; we’ll downscale via a temp canvas if needed.
-    // For simplicity, pass the video; model handles internal resizing.
-    return new Promise((resolve, reject)=>{
-      deeplabModel.segment(videoEl, (err, result)=>{
-        if (err) return reject(err);
-        resolve(result); // { segmentationMap, legend, width, height }
-      });
-    });
-  }
-
-  async function start() {
+  async function start(){
     stop();
     const deviceId = cameraSelect.value || undefined;
-    const constraints = {
-      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
-      audio: false
-    };
-    try {
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (e) {
-      statusEl.innerHTML = '<span class="err">Could not start camera: '+e.message+'</span>';
-      return;
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ video: deviceId?{deviceId:{exact:deviceId}}:{facingMode:'environment'}, audio:false });
+    }catch(e){
+      statusEl.textContent='Could not start camera: '+e.message; return;
     }
-    video.srcObject = stream;
-    await video.play();
-
+    video.srcObject=stream; await video.play();
     canvas.width = video.videoWidth || 960;
-    canvas.height = video.videoHeight || 540;
-
-    running = true;
-    stopBtn.disabled = false;
-    startBtn.disabled = true;
-    statusEl.textContent = '';
+    canvas.height= video.videoHeight|| 540;
+    running=true; startBtn.disabled=true; stopBtn.disabled=false; statusEl.textContent='';
     loop();
   }
-
-  function stop() {
-    running = false;
-    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-    stopBtn.disabled = true;
-    startBtn.disabled = false;
+  function stop(){
+    running=false; if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+    startBtn.disabled=false; stopBtn.disabled=true;
   }
-  stopBtn.addEventListener('click', stop);
   startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
 
-  // Main loop
-  async function loop() {
-    const overlayOpacity = parseFloat(opacity.value);
-
-    while (running) {
-      // Draw video
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Segment (ml5)
-      let seg;
-      try {
-        seg = await segmentOnce(video);
-      } catch(err){
-        statusEl.innerHTML = '<span class="err">Segmentation error: '+String(err.message)+'</span>';
-        console.error(err);
-        await new Promise(r=>setTimeout(r,100));
-        continue;
+  // ---------- Color + edges pipeline ----------
+  function rgb2hsv(r,g,b){
+    r/=255; g/=255; b/=255;
+    const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+    let h=0, s=max? d/max:0, v=max;
+    if(d!==0){
+      switch(max){
+        case r: h=((g-b)/d + (g<b?6:0)); break;
+        case g: h=((b-r)/d + 2); break;
+        case b: h=((r-g)/d + 4); break;
       }
-      // seg: { segmentationMap, legend, width, height }
-      updateFreeLabelsFromLegend(seg.legend);
+      h*=60;
+    }
+    return [h, s*100, v*100];
+  }
 
-      // Build mask
-      const sw = seg.width, sh = seg.height;
-      const map = seg.segmentationMap;
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = sw; maskCanvas.height = sh;
-      const mctx = maskCanvas.getContext('2d');
-      const imgData = mctx.createImageData(sw, sh);
-
-      const includeRoad = incRoad.checked;
-      const includeSidewalk = incSidewalk.checked;
-      const includeParking = incParking.checked;
-      const nameFor = (idx)=> seg.legend?.[idx]?.toLowerCase?.() || '';
-      const includeIdx = (idx)=>{
-        const nm = nameFor(idx);
-        if (nm.includes('road') || nm.includes('street') || nm.includes('lane')) return includeRoad;
-        if (nm.includes('sidewalk') || nm.includes('pavement')) return includeSidewalk;
-        if (nm.includes('parking')) return includeParking;
-        return FREE_LABELS.has(idx);
-      };
-
-      let p = 0;
-      for (let i=0; i<map.length; i++){
-        const idx = map[i];
-        const on = includeIdx(idx);
-        imgData.data[p++] = 0;            // R
-        imgData.data[p++] = on ? 255 : 0; // G
-        imgData.data[p++] = 0;            // B
-        imgData.data[p++] = on ? 140 : 0; // A
+  function canny(gray, w, h, t1=40, t2=120){
+    // Lightweight Sobel + magnitude threshold (not a full Canny, but good enough)
+    const out = new Uint8ClampedArray(w*h);
+    const idx=(x,y)=>y*w+x;
+    for(let y=1;y<h-1;y++){
+      for(let x=1;x<w-1;x++){
+        const p00=gray[idx(x-1,y-1)], p10=gray[idx(x,y-1)], p20=gray[idx(x+1,y-1)];
+        const p01=gray[idx(x-1,y)],   p21=gray[idx(x+1,y)];
+        const p02=gray[idx(x-1,y+1)], p12=gray[idx(x,y+1)], p22=gray[idx(x+1,y+1)];
+        const gx=(p20+2*p21+p22)-(p00+2*p01+p02);
+        const gy=(p02+2*p12+p22)-(p00+2*p10+p20);
+        const mag=Math.hypot(gx,gy);
+        out[idx(x,y)] = mag>t2?255 : mag>t1?128 : 0;
       }
-      mctx.putImageData(imgData, 0, 0);
+    }
+    return out;
+  }
 
-      // Draw overlay scaled
-      ctx.save();
-      ctx.globalAlpha = overlayOpacity;
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
-      ctx.restore();
+  function dilate(bin, w,h, r){
+    if(r<=0) return bin;
+    const out=new Uint8ClampedArray(w*h);
+    const idx=(x,y)=>y*w+x;
+    for(let y=0;y<h;y++){
+      for(let x=0;x<w;x++){
+        let on=0;
+        for(let dy=-r;dy<=r && !on;dy++){
+          const yy=y+dy; if(yy<0||yy>=h) continue;
+          for(let dx=-r;dx<=r;dx++){
+            const xx=x+dx; if(xx<0||xx>=w) continue;
+            if(bin[idx(xx,yy)]){ on=1; break;}
+          }
+        }
+        out[idx(x,y)]=on?255:0;
+      }
+    }
+    return out;
+  }
+  function erode(bin,w,h,r){
+    if(r<=0) return bin;
+    const out=new Uint8ClampedArray(w*h);
+    const idx=(x,y)=>y*w+x;
+    for(let y=0;y<h;y++){
+      for(let x=0;x<w;x++){
+        let all=1;
+        for(let dy=-r;dy<=r && all;dy++){
+          const yy=y+dy; if(yy<0||yy>=h){ all=0; break;}
+          for(let dx=-r;dx<=r;dx++){
+            const xx=x+dx; if(xx<0||xx>=w){ all=0; break;}
+            if(!bin[idx(xx,yy)]){ all=0; break;}
+          }
+        }
+        out[idx(x,y)]=all?255:0;
+      }
+    }
+    return out;
+  }
 
-      // Near-field coverage (bottom 35%)
-      const nearY0 = Math.floor(canvas.height * 0.65);
-      const nearH  = canvas.height - nearY0;
-      const sample = ctx.getImageData(0, nearY0, canvas.width, nearH).data;
-      let left=0, center=0, right=0, leftTot=0, centerTot=0, rightTot=0;
-      const thirds = Math.floor(canvas.width/3);
-      for (let y=0; y<nearH; y++) {
-        for (let x=0; x<canvas.width; x++) {
-          const idx4 = (y*canvas.width + x)*4;
-          const g = sample[idx4+1], a = sample[idx4+3];
-          const free = (g>0 && a>0);
-          const b = (x < thirds) ? 0 : (x < 2*thirds) ? 1 : 2;
-          if (b===0){ leftTot++; if (free) left++; }
-          else if (b===1){ centerTot++; if (free) center++; }
-          else { rightTot++; if (free) right++; }
+  // ---------- Homography (optional) ----------
+  let calibPts=[]; // 4 image points clockwise
+  canvas.addEventListener('click', (e)=>{
+    const rect=canvas.getBoundingClientRect();
+    const x = (e.clientX-rect.left)*canvas.width/rect.width;
+    const y = (e.clientY-rect.top )*canvas.height/rect.height;
+    if(calibPts.length<4){ calibPts.push([x,y]); }
+    else { calibPts=[ [x,y] ]; }
+  });
+  resetH.addEventListener('click', ()=>{ calibPts=[]; });
+
+  function computeHomography(imgPts, W,H){
+    // Map imgPts → rectangle [0,W]x[0,H] in the same order
+    const dst = [[0,0],[W,0],[W,H],[0,H]];
+    // Solve using Direct Linear Transform (DLT)
+    const A=[];
+    for(let i=0;i<4;i++){
+      const [x,y]=imgPts[i], [u,v]=dst[i];
+      A.push([-x,-y,-1, 0,0,0, x*u, y*u, u]);
+      A.push([0,0,0, -x,-y,-1, x*v, y*v, v]);
+    }
+    // Solve Ah=0 via simplistic Gaussian elimination on ATA (small system)
+    function matT(A){ const m=A.length,n=A[0].length; const T=Array.from({length:n},()=>Array(m).fill(0)); for(let i=0;i<m;i++) for(let j=0;j<n;j++) T[j][i]=A[i][j]; return T;}
+    function matMul(X,Y){ const m=X.length,n=Y[0].length,k=Y.length; const R=Array.from({length:m},()=>Array(n).fill(0)); for(let i=0;i<m;i++)for(let j=0;j<n;j++){let s=0;for(let t=0;t<k;t++) s+=X[i][t]*Y[t][j]; R[i][j]=s;} return R;}
+    function eigSmallSym(M){ // power iteration for smallest eigenvector of symmetric M (use inverse power via shift)
+      const n=M.length; let v=Array(n).fill(0).map((_,i)=>i===0?1:0);
+      for(let it=0; it<80; it++){
+        // solve (M+λI)w = v by Jacobi (few sweeps) – crude but fine here
+        const w=Array(n).fill(0);
+        const lam=1e-3;
+        for(let s=0;s<8;s++){
+          for(let i=0;i<n;i++){
+            let sum=v[i];
+            for(let j=0;j<n;j++) if(j!==i) sum -= M[i][j]*w[j];
+            w[i]=sum/(M[i][i]+lam);
+          }
+        }
+        // normalize
+        const norm=Math.hypot(...w); for(let i=0;i<n;i++) w[i]/=norm||1;
+        v=w;
+      }
+      return v;
+    }
+    const AT=matT(A), ATA=matMul(AT,A);
+    const h=eigSmallSym(ATA); // 9-vector
+    const Hm=[[h[0],h[1],h[2]],[h[3],h[4],h[5]],[h[6],h[7],h[8]||1]];
+    return Hm;
+  }
+  function warpToBEV(mask, w,h, H, W,Hout){
+    // Nearest-neighbor inverse mapping
+    const out=new Uint8ClampedArray(W*Hout);
+    const det= H[0][0]*(H[1][1]*H[2][2]-H[1][2]*H[2][1]) - H[0][1]*(H[1][0]*H[2][2]-H[1][2]*H[2][0]) + H[0][2]*(H[1][0]*H[2][1]-H[1][1]*H[2][0]);
+    if(!det) return out;
+    // Compute inverse
+    const inv=[[0,0,0],[0,0,0],[0,0,0]];
+    inv[0][0]=(H[1][1]*H[2][2]-H[1][2]*H[2][1])/det;
+    inv[0][1]=(H[0][2]*H[2][1]-H[0][1]*H[2][2])/det;
+    inv[0][2]=(H[0][1]*H[1][2]-H[0][2]*H[1][1])/det;
+    inv[1][0]=(H[1][2]*H[2][0]-H[1][0]*H[2][2])/det;
+    inv[1][1]=(H[0][0]*H[2][2]-H[0][2]*H[2][0])/det;
+    inv[1][2]=(H[0][2]*H[1][0]-H[0][0]*H[1][2])/det;
+    inv[2][0]=(H[1][0]*H[2][1]-H[1][1]*H[2][0])/det;
+    inv[2][1]=(H[0][1]*H[2][0]-H[0][0]*H[2][1])/det;
+    inv[2][2]=(H[0][0]*H[1][1]-H[0][1]*H[1][0])/det;
+
+    const idx=(x,y)=>y*w+x;
+    for(let v=0; v<Hout; v++){
+      for(let u=0; u<W; u++){
+        const xh = inv[0][0]*u + inv[0][1]*v + inv[0][2];
+        const yh = inv[1][0]*u + inv[1][1]*v + inv[1][2];
+        const zh = inv[2][0]*u + inv[2][1]*v + inv[2][2];
+        const x = Math.round(xh/zh), y = Math.round(yh/zh);
+        if(x>=0 && x<w && y>=0 && y<h){
+          out[v*W+u] = mask[idx(x,y)];
+        } else out[v*W+u]=0;
+      }
+    }
+    return out;
+  }
+
+  // ---------- Main loop ----------
+  async function loop(){
+    const W=canvas.width, H=canvas.height;
+    while(running){
+      const t0=performance.now();
+
+      // 1) draw the current frame
+      ctx.drawImage(video,0,0,W,H);
+      const frame = ctx.getImageData(0,0,W,H);
+      const data = frame.data;
+
+      // 2) HSV threshold
+      const Hmin=+hmin.value, Hmax=+hmax.value, Smin=+smin.value, Smax=+smax.value, Vmin=+vmin.value, Vmax=+vmax.value;
+      const mask = new Uint8ClampedArray(W*H);
+      const gray = new Uint8ClampedArray(W*H);
+
+      for(let i=0,p=0; i<data.length; i+=4, p++){
+        const r=data[i], g=data[i+1], b=data[i+2];
+        const [hh,ss,vv]=rgb2hsv(r,g,b);
+        const hOk = Hmin<=Hmax ? (hh>=Hmin && hh<=Hmax) : (hh>=Hmin || hh<=Hmax); // handle wrap
+        const sOk = ss>=Smin && ss<=Smax;
+        const vOk = vv>=Vmin && vv<=Vmax;
+        if(hOk && sOk && vOk) mask[p]=255;
+        gray[p] = (r*0.299 + g*0.587 + b*0.114)|0;
+      }
+
+      // 3) edges to carve obstacles
+      if(useEdges.checked){
+        const edges=canny(gray,W,H,40,120);
+        for(let p=0;p<mask.length;p++){
+          if(edges[p]===255) mask[p]=0; // remove strong edges from free-space
         }
       }
-      const lp = leftTot? Math.round(100*left/leftTot):0;
-      const cp = centerTot? Math.round(100*center/centerTot):0;
-      const rp = rightTot? Math.round(100*right/rightTot):0;
-      leftPctEl.textContent = lp + '%';
-      centerPctEl.textContent = cp + '%';
-      rightPctEl.textContent = rp + '%';
-      leftBar.style.width = lp + '%';
-      centerBar.style.width = cp + '%';
-      rightBar.style.width = rp + '%';
+
+      // 4) morphology (close small gaps → dilate then erode)
+      const r= (+morph.value)|0;
+      const dil = dilate(mask,W,H,Math.max(0,Math.floor(r/2)));
+      const ero = erode(dil,W,H,Math.max(0,r - Math.floor(r/2)));
+
+      // 5) overlay mask
+      const op = parseFloat(opacity.value);
+      ctx.save();
+      ctx.globalAlpha=op;
+      const maskImg = ctx.createImageData(W,H);
+      for(let p=0,q=0;p<ero.length;p++,q+=4){
+        if(ero[p]){
+          maskImg.data[q]=0; maskImg.data[q+1]=255; maskImg.data[q+2]=0; maskImg.data[q+3]=140;
+        }
+      }
+      ctx.putImageData(maskImg,0,0);
+      ctx.restore();
+
+      // 6) near-field coverage (bottom nearPct%)
+      const near = +nearPct.value/100;
+      const y0 = Math.floor(H*(1-near));
+      const roi = ctx.getImageData(0,y0,W,H-y0).data;
+      let L=0,C=0,R=0, Lt=0,Ct=0,Rt=0;
+      const third = Math.floor(W/3);
+      for(let y=0;y<H-y0;y++){
+        for(let x=0;x<W;x++){
+          const idx4=(y*W+x)*4;
+          const g=roi[idx4+1], a=roi[idx4+3];
+          const free=(g>0 && a>0);
+          const bucket = x<third?0 : (x<2*third?1:2);
+          if(bucket===0){ Lt++; if(free)L++; }
+          else if(bucket===1){ Ct++; if(free)C++; }
+          else { Rt++; if(free)R++; }
+        }
+      }
+      const lp = Lt?Math.round(100*L/Lt):0;
+      const cp = Ct?Math.round(100*C/Ct):0;
+      const rp = Rt?Math.round(100*R/Rt):0;
+      leftPctEl.textContent=lp+'%'; centerPctEl.textContent=cp+'%'; rightPctEl.textContent=rp+'%';
+      leftBar.style.width=lp+'%'; centerBar.style.width=cp+'%'; rightBar.style.width=rp+'%';
+
+      // draw near-field band line
+      ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(W,y0); ctx.stroke();
+
+      // 7) Optional BEV warp if 4 points exist
+      bctx.clearRect(0,0,bev.width, bev.height);
+      if(calibPts.length===4){
+        // visualize points
+        ctx.fillStyle='rgba(122,162,255,0.9)';
+        calibPts.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.fill(); });
+
+        const gw= Math.max(10, Math.min(200, +gridW.value|0));
+        const gh= Math.max(10, Math.min(200, +gridH.value|0));
+        const Hm = computeHomography(calibPts, gw, gh);
+        // build binary mask array from current overlay (green channel + alpha)
+        const mdat = ctx.getImageData(0,0,W,H).data;
+        const bin = new Uint8ClampedArray(W*H);
+        for(let y=0;y<H;y++){
+          for(let x=0;x<W;x++){
+            const k=(y*W+x)*4;
+            bin[y*W+x] = (mdat[k+1]>0 && mdat[k+3]>0)?255:0;
+          }
+        }
+        const warped = warpToBEV(bin, W,H, Hm, gw, gh);
+        // render occupancy
+        const cellW = Math.floor(bev.width/gw), cellH = Math.floor(bev.height/gh);
+        for(let v=0; v<gh; v++){
+          for(let u=0; u<gw; u++){
+            const val = warped[v*gw+u];
+            if(val){
+              bctx.fillStyle='rgba(74,222,128,0.9)';
+              bctx.fillRect(u*cellW, v*cellH, cellW, cellH);
+            } else {
+              bctx.fillStyle='rgba(42,51,66,0.9)';
+              bctx.fillRect(u*cellW, v*cellH, cellW, cellH);
+            }
+          }
+        }
+        // grid lines
+        bctx.strokeStyle='rgba(255,255,255,0.08)'; bctx.lineWidth=1;
+        for(let x=0;x<=gw;x++){ bctx.beginPath(); bctx.moveTo(x*cellW,0); bctx.lineTo(x*cellW, gh*cellH); bctx.stroke();}
+        for(let y=0;y<=gh;y++){ bctx.beginPath(); bctx.moveTo(0,y*cellH); bctx.lineTo(gw*cellW, y*cellH); bctx.stroke();}
+      } else {
+        bctx.fillStyle='rgba(255,255,255,0.2)';
+        bctx.fillText('Click 4 ground points on the video', 12, 20);
+      }
 
       // FPS
-      frameCount++;
-      const now = performance.now();
-      const dt = now - lastFrameT;
-      if (dt >= 1000) {
-        const fps = Math.round(1000 * frameCount / dt);
-        fpsBadge.textContent = 'FPS: ' + fps;
-        frameCount = 0; lastFrameT = now;
-      }
+      frames++; const now=performance.now(); const dt=now-lastT;
+      if(dt>1000){ const fps=Math.round(frames*1000/dt); fpsBadge.textContent='FPS: '+fps; frames=0; lastT=now; }
 
       await new Promise(requestAnimationFrame);
     }
   }
 
-  // Keep UI reactive
-  resSelect.addEventListener('change', ()=>{ /* ml5 handles size internally */ });
-  [opacity,incRoad,incSidewalk,incParking].forEach(el=>el.addEventListener('input',()=>{}));
+  // Reactive (no-ops; loop reads live)
+  [opacity,nearPct,morph,useEdges,hmin,hmax,smin,smax,vmin,vmax,gridW,gridH]
+    .forEach(el=>el.addEventListener('input',()=>{}));
+
 })();
 </script>
 </body>
