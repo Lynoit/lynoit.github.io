@@ -25,6 +25,7 @@
   .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2b3648;background:#121723;color:var(--muted);font-size:12px}
   details{margin-top:8px}
   .hint{color:var(--muted);font-size:12px}
+  .err{color:#ffb4b4}
 </style>
 </head>
 <body>
@@ -61,8 +62,9 @@
 <div class="row">
   <div class="col" style="flex:1;min-width:320px">
     <canvas id="view" width="960" height="540"></canvas>
-    <div class="hint" style="margin-top:8px">
-      Tip: If you use an <strong>external USB/UVC webcam</strong> on Android, you may need an OTG adapter and some devices only expose it to the browser on newer Android/Chrome versions.
+    <div id="status" class="hint" style="margin-top:8px"></div>
+    <div class="hint" style="margin-top:6px">
+      Tip: For an <strong>external USB/UVC webcam</strong> on Android, you usually need an OTG adapter and recent Chrome/Android. Pick it from the Camera dropdown once detected.
     </div>
   </div>
 
@@ -83,7 +85,7 @@
     <details>
       <summary>How it works</summary>
       <ul>
-        <li>Runs <b>DeepLab (Cityscapes)</b> in TF.js to segment each frame.</li>
+        <li>Runs <b>DeepLab (ADE20K)</b> in TF.js to segment each frame.</li>
         <li>Pixels labeled as road/sidewalk/parking → marked as <b>free-space</b>.</li>
         <li>Overlay mask blended over live video.</li>
         <li>Near-field band (bottom 35% of image) split into Left/Center/Right to estimate coverage.</li>
@@ -92,9 +94,9 @@
     <details>
       <summary>Troubleshooting</summary>
       <ul>
-        <li>Chrome: use HTTPS or <code>localhost</code> for camera access.</li>
-        <li>External cameras: use the camera dropdown to pick the UVC device.</li>
-        <li>Performance: lower “Resolution” for faster FPS.</li>
+        <li>Use HTTPS or <code>localhost</code> for camera access.</li>
+        <li>Pick the right device in the Camera dropdown.</li>
+        <li>Lower “Resolution” if FPS is low.</li>
       </ul>
     </details>
   </div>
@@ -102,12 +104,56 @@
 
 <video id="video" autoplay playsinline muted style="display:none"></video>
 
-<!-- TFJS + DeepLab (Cityscapes) -->
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@1.4.0/dist/deeplab.min.js"></script>
+<!-- 1) Load libraries FIRST, then run app code -->
+<script>
+  // Utility to load scripts in order and wait for them.
+  function loadScript(src){
+    return new Promise((resolve, reject)=>{
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = false;
+      s.onload = resolve;
+      s.onerror = ()=>reject(new Error('Failed to load: '+src));
+      document.head.appendChild(s);
+    });
+  }
+  (async ()=>{
+    const statusEl = document.getElementById('status');
+    try {
+      statusEl.textContent = 'Loading TensorFlow.js…';
+      await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+      statusEl.textContent = 'Loading DeepLab model code…';
+      await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@1.4.0/dist/deeplab.min.js');
+      statusEl.textContent = 'Libraries loaded.';
+    } catch(err){
+      statusEl.innerHTML = '<span class="err">Error loading libraries: '+String(err.message)+'</span>';
+      console.error(err);
+    }
+  })();
+</script>
 
+<!-- 2) Main app logic (runs AFTER libs are present) -->
 <script>
 (async function(){
+  // Wait until deeplab is available (defensive, avoids "deeplab is not defined")
+  function waitForDeeplab(timeoutMs=10000){
+    const start = performance.now();
+    return new Promise((resolve, reject)=>{
+      (function tick(){
+        if (window.deeplab && window.tf) return resolve();
+        if (performance.now() - start > timeoutMs) return reject(new Error('deeplab not available'));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+  try { await waitForDeeplab(); }
+  catch(e){
+    const s = document.getElementById('status');
+    s.innerHTML = '<span class="err">DeepLab failed to initialize. Check network/HTTPS and reload.</span>';
+    console.error(e);
+    return;
+  }
+
   const video = document.getElementById('video');
   const canvas = document.getElementById('view');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -117,6 +163,7 @@
   const stopBtn  = document.getElementById('stopBtn');
   const modelBadge = document.getElementById('modelBadge');
   const fpsBadge = document.getElementById('fpsBadge');
+  const statusEl = document.getElementById('status');
 
   const opacity = document.getElementById('opacity');
   const incRoad = document.getElementById('incRoad');
@@ -140,7 +187,7 @@
   // Populate camera list
   async function listCameras() {
     try {
-      // Prompt for any cam once to get device labels
+      // Prompt once so device labels are available
       await navigator.mediaDevices.getUserMedia({ video: true, audio: false }).then(s => s.getTracks().forEach(t => t.stop()));
     } catch(e) { /* ignore */ }
 
@@ -153,38 +200,31 @@
       opt.textContent = d.label || `Camera ${cameraSelect.length+1}`;
       cameraSelect.appendChild(opt);
     }
+    if (!cams.length) statusEl.innerHTML = '<span class="err">No cameras found. Use HTTPS or grant permission.</span>';
   }
-
   await listCameras();
   navigator.mediaDevices.addEventListener?.('devicechange', listCameras);
 
-  // Load model
-  modelBadge.textContent = 'Model: loading DeepLab (Cityscapes)…';
-  deeplabModel = await deeplab.load({ base: 'pascal', quantizationBytes: 2 });
-  // Switch to Cityscapes labels/color map if available via model config
-  // The npm @tensorflow-models/deeplab exposes 'cityscapes' as 'ade20k'/'pascal' variants historically.
-  // We'll use the default colorMap; we only care about class indices anyway.
-  modelBadge.textContent = 'Model: DeepLab (Pascal) loaded';
-
-  // PASCAL label indices (approximate mapping; road=12 in Cityscapes; in Pascal, "road" class doesn’t exist).
-  // To keep it robust across variants, we detect common "free" categories by name from the model if available.
-  // Fallback: assume 'person' index 15 etc and treat no classes as free until we can map.
-  // Better: use model.predict(..., quantization) which returns legend; deeplab.getColormap() etc not public.
-  // Practical approach: use ADE20K model for broader classes:
+  // Load model (ADE20K has road/sidewalk/parking)
   try {
-    // try load ADE20K variant which includes road/sidewalk/parking
     modelBadge.textContent = 'Model: loading DeepLab (ADE20K)…';
     deeplabModel = await deeplab.load({ base: 'ade20k', quantizationBytes: 2 });
     modelBadge.textContent = 'Model: DeepLab (ADE20K) loaded';
   } catch(e) {
-    console.warn('ADE20K load failed, sticking with Pascal.', e);
-    modelBadge.textContent += ' (fallback)';
+    console.warn('ADE20K load failed, trying Pascal as fallback', e);
+    try {
+      deeplabModel = await deeplab.load({ base: 'pascal', quantizationBytes: 2 });
+      modelBadge.textContent = 'Model: DeepLab (Pascal) loaded (limited classes)';
+    } catch(e2) {
+      modelBadge.textContent = 'Model: failed to load';
+      statusEl.innerHTML = '<span class="err">Could not load any DeepLab model. Check network and reload.</span>';
+      console.error(e2);
+      return;
+    }
   }
 
-  // Known ADE20K indices for common drivable areas (as used in many forks; may vary slightly):
-  // road: 12, sidewalk: 13, parking: 132 (varies). We’ll detect by label strings from segmentation.legend if present.
-  let FREE_LABELS = new Set([12, 13, 132]); // will update after first prediction if legend available
-
+  // dynamic set of indices for "free" classes; updated after first prediction if legend present
+  let FREE_LABELS = new Set([12,13,132]); // fallback guesses
   function updateFreeLabelsFromLegend(legend) {
     if (!Array.isArray(legend)) return;
     const desired = ['road','sidewalk','parking','path','floor','pavement','ground','street','lane'];
@@ -206,7 +246,7 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (e) {
-      alert('Could not start camera: ' + e.message);
+      statusEl.innerHTML = '<span class="err">Could not start camera: '+e.message+'</span>';
       return;
     }
     video.srcObject = stream;
@@ -221,7 +261,7 @@
     running = true;
     stopBtn.disabled = false;
     startBtn.disabled = true;
-
+    statusEl.textContent = '';
     loop();
   }
 
@@ -249,35 +289,42 @@
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       // Run segmentation at lower res for speed
-      const seg = await deeplabModel.segment(video, desiredSize);
-      // seg has {legend, height, width, segmentationMap}
+      let seg;
+      try {
+        seg = await deeplabModel.segment(video, desiredSize);
+      } catch(err){
+        statusEl.innerHTML = '<span class="err">Segmentation error: '+String(err.message)+'</span>';
+        console.error(err);
+        await new Promise(r=>setTimeout(r, 100));
+        continue;
+      }
+      // seg: {legend, height, width, segmentationMap}
       updateFreeLabelsFromLegend(seg.legend);
 
-      // Build mask
-      const {width: sw, height: sh, segmentationMap} = seg;
-      // Create an offscreen mask image
-      const maskCanvas = new OffscreenCanvas(sw, sh);
+      // Build mask (use a regular offscreen canvas for compatibility)
+      const sw = seg.width, sh = seg.height;
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = sw; maskCanvas.height = sh;
       const mctx = maskCanvas.getContext('2d');
       const imgData = mctx.createImageData(sw, sh);
       const includeRoad = incRoad.checked;
       const includeSidewalk = incSidewalk.checked;
       const includeParking = incParking.checked;
 
-      // Determine which indices to include based on legend names if possible
       const nameFor = (idx)=> seg.legend?.[idx]?.toLowerCase?.() || '';
       const includeIdx = (idx)=>{
         const nm = nameFor(idx);
         if (nm.includes('road') || nm.includes('street') || nm.includes('lane')) return includeRoad;
         if (nm.includes('sidewalk') || nm.includes('pavement')) return includeSidewalk;
         if (nm.includes('parking')) return includeParking;
-        // fallback to set
-        if (FREE_LABELS.has(idx)) return true;
-        return false;
+        // fallback by index set
+        return FREE_LABELS.has(idx);
       };
 
       let p = 0;
-      for (let i = 0; i < segmentationMap.length; i++) {
-        const idx = segmentationMap[i];
+      const map = seg.segmentationMap;
+      for (let i = 0; i < map.length; i++) {
+        const idx = map[i];
         const on = includeIdx(idx);
         imgData.data[p++] = 0;            // R
         imgData.data[p++] = on ? 255 : 0; // G
@@ -297,7 +344,6 @@
       const nearY0 = Math.floor(canvas.height * 0.65);
       const nearH  = canvas.height - nearY0;
       const sample = ctx.getImageData(0, nearY0, canvas.width, nearH).data;
-      // Count green alpha pixels as free
       let left=0, center=0, right=0, leftTot=0, centerTot=0, rightTot=0;
       const thirds = Math.floor(canvas.width/3);
       for (let y=0; y<nearH; y++) {
@@ -326,24 +372,18 @@
       const now = performance.now();
       const dt = now - lastFrameT;
       if (dt >= 1000) {
-        fps = Math.round(1000 * frameCount / dt);
+        const fps = Math.round(1000 * frameCount / dt);
         fpsBadge.textContent = 'FPS: ' + fps;
         frameCount = 0; lastFrameT = now;
       }
 
-      // Yield to browser
-      const spent = performance.now() - t0;
-      // Smooth a bit; no fixed delay, but let RAF schedule next tick
       await new Promise(requestAnimationFrame);
     }
   }
 
-  // Small UX niceties
-  resSelect.addEventListener('change', ()=>{
-    // no-op: loop reads it live
-  });
+  // Keep UI reactive
+  resSelect.addEventListener('change', ()=>{ /* loop reads live */ });
   [opacity,incRoad,incSidewalk,incParking].forEach(el=>el.addEventListener('input',()=>{}));
-
 })();
 </script>
 </body>
