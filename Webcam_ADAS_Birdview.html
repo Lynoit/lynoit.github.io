@@ -20,9 +20,21 @@
   .row { display:grid; grid-template-columns: 1.2fr 0.8fr; gap:12px; padding:12px; }
   .panel { border:1px solid #ddd; border-radius:10px; overflow:hidden; background:#fff; }
   .panel header { border-bottom:1px solid #eee; padding:8px 12px; font-weight:600; font-size:14px; }
-  .panel .body { position:relative; background:#000; }
-  #video { display:none; }
-  canvas { display:block; width:100%; height:auto; background:#000; }
+  .panel .body { position:relative; background:#000; aspect-ratio:16/9; }
+  /* >>> change: show the raw camera feed and hide the processing canvas */
+  #video {
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    display:block;     /* visible */
+  }
+  #view {
+    display:none;      /* hidden processing canvas */
+  }
+  /* <<< change end */
+  canvas { display:block; width:100%; height:100%; background:transparent; }
   #overlay { position:absolute; inset:0; pointer-events:none; }
   #controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-left:auto; }
   label { font-size:12px; color:#333; }
@@ -64,7 +76,7 @@
   <section class="panel">
     <header>Camera view (overlay: boxes, distances, lanes)</header>
     <div class="body" id="camBody">
-      <video id="video" playsinline></video>
+      <video id="video" playsinline muted></video>
       <canvas id="view"></canvas>
       <canvas id="overlay"></canvas>
       <!-- draggable ROI handles (clockwise TL, TR, BR, BL) -->
@@ -136,7 +148,7 @@ const COLORS = {
   text: '#fff'
 };
 
-const CLASSES_KEEP = new Set(['person','bicycle','car','motorcycle','bus','truck']); // we’ll map
+const CLASSES_KEEP = new Set(['person','bicycle','car','motorcycle','bus','truck']);
 
 function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
@@ -177,12 +189,12 @@ function sizeCanvases() {
   view.width = w; view.height = h;
   overlay.width = w; overlay.height = h;
   bird.width = Math.min(720, w); bird.height = Math.min(900, Math.round(w * 1.1));
-  positionHandlesDefault(w,h); // sets handles if not moved
+  positionHandlesDefault(w,h);
 }
 
 /* ------------------------ Calibration handles & homography ------------------------ */
 const handles = {
-  hTL: {x: 0.3, y: 0.55}, // normalized positions default
+  hTL: {x: 0.3, y: 0.55},
   hTR: {x: 0.7, y: 0.55},
   hBR: {x: 0.9, y: 0.95},
   hBL: {x: 0.1, y: 0.95},
@@ -196,7 +208,6 @@ const elHandles = {
 let dragging = null;
 
 function positionHandlesDefault(w,h){
-  // Keep existing if user already dragged (we attach flag)
   if (positionHandlesDefault.userMoved) return;
   for (const k of Object.keys(handles)) {
     const p = handles[k];
@@ -242,11 +253,8 @@ let H_img2bird = null; // 3x3
 let scaleMetersPerPx = null;
 
 function computeHomographyAndScale(edgeMaskMat) {
-  // From 4 points (TL, TR, BR, BL) in image, create destination rectangle in bird canvas:
   const tl = getHandleXY('hTL'), tr = getHandleXY('hTR'), br = getHandleXY('hBR'), bl = getHandleXY('hBL');
 
-  // Destination: map to bird canvas bottom-centered strip (ego at bottom center).
-  // We make a tall rectangle: width in pixels equals distance between bottom handles; height = bird.height * 0.95
   const dstW = bird.width * 0.9;
   const dstH = bird.height * 0.95;
 
@@ -255,10 +263,10 @@ function computeHomographyAndScale(edgeMaskMat) {
   const dstHalfW = dstW/2;
 
   const dst = cv.matFromArray(4,1,cv.CV_32FC2, [
-    dstCx - dstHalfW, dstBottom - dstH,   // TL
-    dstCx + dstHalfW, dstBottom - dstH,   // TR
-    dstCx + dstHalfW, dstBottom,          // BR
-    dstCx - dstHalfW, dstBottom           // BL
+    dstCx - dstHalfW, dstBottom - dstH,
+    dstCx + dstHalfW, dstBottom - dstH,
+    dstCx + dstHalfW, dstBottom,
+    dstCx - dstHalfW, dstBottom
   ]);
   const src = cv.matFromArray(4,1,cv.CV_32FC2, [
     tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y
@@ -268,14 +276,11 @@ function computeHomographyAndScale(edgeMaskMat) {
   H_img2bird = H;
   src.delete(); dst.delete();
 
-  // Scale meters-per-pixel using lane width: find lane line separation at bottom of ROI (in image), warp that to bird space.
   const laneWidthMeters = parseFloat(laneWidthInput.value) || 3.5;
-  // If we have an edge mask, estimate lane lines positions at bottom row (simple approach)
   let pxSep = null;
   if (edgeMaskMat) {
     const y = Math.min(overlay.height-2, Math.round((getHandleXY('hBR').y + getHandleXY('hBL').y)/2));
     const row = edgeMaskMat.roi(new cv.Rect(0, y, overlay.width, 1));
-    // scan from center to left/right for first strong edge
     const data = row.data;
     let left = null, right = null;
     const mid = Math.round(overlay.width/2);
@@ -283,7 +288,6 @@ function computeHomographyAndScale(edgeMaskMat) {
     for (let x = mid; x < overlay.width; x++) if (data[x] > 0) { right = x; break; }
     row.delete();
     if (left != null && right != null && right > left) {
-      // warp those two points to bird to get pixel separation in bird canvas
       const p1 = warpPoint(left, y, H_img2bird);
       const p2 = warpPoint(right, y, H_img2bird);
       pxSep = Math.hypot(p2.x - p1.x, p2.y - p1.y);
@@ -292,7 +296,6 @@ function computeHomographyAndScale(edgeMaskMat) {
   if (pxSep && pxSep > 5) {
     scaleMetersPerPx = laneWidthMeters / pxSep;
   } else {
-    // fallback: assume dstW equals ~ 3.5 m (one lane); so px→m:
     scaleMetersPerPx = laneWidthMeters / dstW;
   }
   statCalEl.textContent = 'yes';
@@ -321,23 +324,22 @@ function ensureMats(w,h){
 
 /* ------------------------ Detection & tracking ------------------------ */
 let detLastTS = 0, visLastTS = 0, detFps=0, visFps=0;
-let predictions = []; // last detections
-let trackers = {}; // id -> {cls, last:{x,y,t}, vx, vy, speedKmh}
+let predictions = [];
+let trackers = {};
 let nextId = 1;
 
 function classColor(c){
   if (c==='person') return COLORS.boxVulnerable;
   if (c==='bicycle' || c==='motorcycle') return COLORS.boxCycle;
-  return COLORS.boxVehicle; // car, bus, truck
+  return COLORS.boxVehicle;
 }
 
-function updateTrackers(objects){ // objects: [{x,y,cls}]
+function updateTrackers(objects){
   const now = performance.now()/1000;
-  // Greedy nearest neighbor assignment
   const used = new Set();
   const updates = [];
   for (const obj of objects) {
-    let bestId = null, bestD = 1.5; // meters threshold
+    let bestId = null, bestD = 1.5;
     for (const [id, tr] of Object.entries(trackers)) {
       if (used.has(id)) continue;
       const d = Math.hypot(obj.x - tr.last.x, obj.y - tr.last.y);
@@ -349,7 +351,7 @@ function updateTrackers(objects){ // objects: [{x,y,cls}]
       const dt = Math.max(0.01, obj.t - tr.last.t);
       tr.vx = (obj.x - tr.last.x)/dt;
       tr.vy = (obj.y - tr.last.y)/dt;
-      const speed = Math.hypot(tr.vx, tr.vy); // m/s
+      const speed = Math.hypot(tr.vx, tr.vy);
       tr.speedKmh = speed * 3.6;
       tr.last = obj;
       updates.push({id:bestId, ...obj, speedKmh:tr.speedKmh});
@@ -360,7 +362,6 @@ function updateTrackers(objects){ // objects: [{x,y,cls}]
       updates.push({id, ...obj, speedKmh:0});
     }
   }
-  // Decay stale
   for (const [id, tr] of Object.entries(trackers)) {
     if (now - tr.last.t > 1.5) delete trackers[id];
   }
@@ -374,7 +375,7 @@ async function loop() {
   const w = view.width, h = view.height;
   if (!w || !h) { requestAnimationFrame(loop); return; }
 
-  // Draw RGB frame
+  // Draw RGB frame into hidden processing canvas
   ctxV.drawImage(video, 0, 0, w, h);
 
   // Lane detection (OpenCV)
@@ -386,22 +387,19 @@ async function loop() {
     cv.GaussianBlur(laneTmp.gray, laneTmp.blur, new cv.Size(5,5), 0, 0, cv.BORDER_DEFAULT);
     cv.Canny(laneTmp.blur, laneTmp.edges, 80, 160, 3, false);
 
-    // Draw lanes overlay (transparent)
+    // Draw lanes overlay
     ctxO.clearRect(0,0,w,h);
     ctxO.save(); ctxO.lineWidth = 3; ctxO.strokeStyle = COLORS.lane;
-    // Limit to ROI polygon
     const {x:tlx,y:tly}=getHandleXY('hTL'), {x:trx,y:try_}=getHandleXY('hTR');
     const {x:brx,y:bry}=getHandleXY('hBR'), {x:blx,y:bly}=getHandleXY('hBL');
     ctxO.beginPath();
     ctxO.moveTo(tlx,tly); ctxO.lineTo(trx,try_); ctxO.lineTo(brx,bry); ctxO.lineTo(blx,bly); ctxO.closePath();
     ctxO.clip();
 
-    // Probabilistic Hough for line segments
     const lines = new cv.Mat();
     cv.HoughLinesP(laneTmp.edges, lines, 1, Math.PI/180, 60, 30, 10);
     for (let i=0; i<lines.rows; i++){
       const [x1,y1,x2,y2] = lines.intPtr(i);
-      // Only draw if inside ROI roughly
       if (pointInQuad(x1,y1,tlx,tly,trx,try_,brx,bry,blx,bly) && pointInQuad(x2,y2,tlx,tly,trx,try_,brx,bry,blx,bly)) {
         ctxO.beginPath();
         ctxO.moveTo(x1,y1); ctxO.lineTo(x2,y2); ctxO.stroke();
@@ -410,7 +408,6 @@ async function loop() {
     lines.delete();
     ctxO.restore();
 
-    // Update homography+scale using current edge map
     computeHomographyAndScale(laneTmp.edges);
   }
 
@@ -418,18 +415,16 @@ async function loop() {
   let detStart=null, detEnd=null;
   if (model && (frameCount++ % detStride === 0)) {
     detStart = performance.now();
-    const dets = await model.detect(view); // returns boxes in [x,y,w,h], class, score
+    const dets = await model.detect(view);
     detEnd = performance.now();
     predictions = dets.filter(d => d.score > 0.5 && CLASSES_KEEP.has(d.class));
     const dt = (detEnd - detLastTS)/1000; detLastTS = detEnd;
-    if (dt > 0) detFps = 1/dt;
-    fpsDetEl.textContent = detFps.toFixed(1);
+    if (dt > 0) fpsDetEl.textContent = (1/dt).toFixed(1);
   }
 
-  // Draw boxes + labels with distances
+  // Draw boxes + labels with distances onto overlay over the raw video
   const nowS = performance.now()/1000;
   const birdObjects = [];
-  ctxO.save();
   for (const p of predictions) {
     const [x, y, wBox, hBox] = p.bbox;
     const cls = p.class;
@@ -437,40 +432,34 @@ async function loop() {
     ctxO.lineWidth = 2; ctxO.strokeStyle = color; ctxO.fillStyle = COLORS.textBg;
     ctxO.strokeRect(x, y, wBox, hBox);
 
-    // bottom center point (contact with road)
     const bx = x + wBox/2, by = y + hBox;
     let distanceM = null, birdPt = null;
     if (H_img2bird && scaleMetersPerPx) {
       birdPt = warpPoint(bx, by, H_img2bird);
-      // ego at bottom center -> distance = vertical delta in meters (use Euclidean)
       distanceM = Math.hypot((birdPt.x - bird.width/2)*scaleMetersPerPx, (bird.height - 10 - birdPt.y)*scaleMetersPerPx);
     }
     const label = distanceM!=null ? `${cls} • ${distanceM.toFixed(1)} m` : `${cls}`;
-    // label background
     const tw = ctxO.measureText(label).width + 8;
     ctxO.fillRect(x, y-18, tw, 16);
     ctxO.fillStyle = COLORS.text;
     ctxO.font = '12px system-ui, Segoe UI, Roboto';
     ctxO.fillText(label, x+4, y-6);
 
-    // record for tracking in bird coords
     if (birdPt) {
       birdObjects.push({
         cls,
-        x: (birdPt.x - bird.width/2) * scaleMetersPerPx, // meters lateral (+right)
-        y: (bird.height - 10 - birdPt.y) * scaleMetersPerPx, // meters forward
+        x: (birdPt.x - bird.width/2) * scaleMetersPerPx,
+        y: (bird.height - 10 - birdPt.y) * scaleMetersPerPx,
         t: nowS
       });
     }
   }
-  ctxO.restore();
 
   // Birdview render
   ctxB.clearRect(0,0,bird.width,bird.height);
-  // Ground
   ctxB.fillStyle = '#0b1020';
   ctxB.fillRect(0,0,bird.width,bird.height);
-  // Lane area (warp ROI outline into bird canvas to draw)
+
   if (H_img2bird) {
     ctxB.save();
     ctxB.globalAlpha = 0.35;
@@ -482,14 +471,13 @@ async function loop() {
     ctxB.closePath(); ctxB.fill();
     ctxB.restore();
   }
-  // Ego triangle
+
   ctxB.save();
   ctxB.translate(bird.width/2, bird.height - 4);
   ctxB.fillStyle = '#94a3b8';
   ctxB.beginPath(); ctxB.moveTo(0,0); ctxB.lineTo(-10,-24); ctxB.lineTo(10,-24); ctxB.closePath(); ctxB.fill();
   ctxB.restore();
 
-  // Grid and scale
   if (scaleMetersPerPx) {
     ctxB.save();
     ctxB.strokeStyle = 'rgba(255,255,255,0.08)';
@@ -502,7 +490,6 @@ async function loop() {
     ctxB.restore();
   }
 
-  // Update trackers and draw birds
   const tracks = updateTrackers(birdObjects);
   statObjsEl.textContent = String(tracks.length);
 
@@ -512,24 +499,20 @@ async function loop() {
     const c = classColor(o.cls);
     ctxB.save();
     ctxB.translate(bx, by);
-    // Direction arrow from velocity if any
+
     if (o.speedKmh && isFinite(o.speedKmh)) {
-      const vx = o.x - (trackers[o.id]?.last?.x ?? o.x);
-      const vy = o.y - (trackers[o.id]?.last?.y ?? o.y);
-      // draw small heading line (use last vx,vy from trackers)
       const tr = trackers[o.id];
       const pvx = tr?.vx ?? 0, pvy = tr?.vy ?? 0;
       const lenPx = 18;
-      const ang = Math.atan2(-(pvy/scaleMetersPerPx), (pvx/scaleMetersPerPx)); // y up
+      const ang = Math.atan2(-(pvy/scaleMetersPerPx), (pvx/scaleMetersPerPx));
       ctxB.rotate(ang);
       ctxB.strokeStyle = c; ctxB.lineWidth = 3;
       ctxB.beginPath(); ctxB.moveTo(0,0); ctxB.lineTo(lenPx,0); ctxB.stroke();
-      // arrow head
       ctxB.beginPath(); ctxB.moveTo(lenPx,0); ctxB.lineTo(lenPx-6,3.5); ctxB.lineTo(lenPx-6,-3.5); ctxB.closePath(); ctxB.fillStyle = c; ctxB.fill();
       ctxB.setTransform(1,0,0,1,0,0);
       ctxB.translate(bx, by);
     }
-    // object marker
+
     ctxB.fillStyle = c;
     ctxB.beginPath(); ctxB.arc(0,0,6,0,Math.PI*2); ctxB.fill();
 
@@ -543,16 +526,13 @@ async function loop() {
     ctxB.restore();
   }
 
-  // FPS (visual)
   const dtVis = (ts - visLastTS)/1000; visLastTS = ts;
-  if (dtVis > 0) visFps = 1/dtVis;
-  fpsVisEl.textContent = visFps.toFixed(1);
+  if (dtVis > 0) fpsVisEl.textContent = (1/dtVis).toFixed(1);
 
   requestAnimationFrame(loop);
 }
 
 function pointInQuad(x,y, x1,y1,x2,y2,x3,y3,x4,y4) {
-  // split quad into two triangles
   return pointInTri(x,y,x1,y1,x2,y2,x3,y3) || pointInTri(x,y,x1,y1,x3,y3,x4,y4);
 }
 function pointInTri(px,py, x1,y1,x2,y2,x3,y3){
@@ -566,34 +546,33 @@ function pointInTri(px,py, x1,y1,x2,y2,x3,y3){
 
 /* ------------------------ Init: models + camera ------------------------ */
 async function init() {
-  // Permissions
-  await startStream(); // default
-  await listCameras();
+  try {
+    await startStream(); // request default camera
+    await listCameras();
+    video.addEventListener('loadedmetadata', sizeCanvases);
 
-  // Resize on metadata
-  video.addEventListener('loadedmetadata', sizeCanvases);
+    statusEl.textContent = 'loading coco-ssd…';
+    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    statusEl.textContent = 'loading opencv…';
 
-  // Load COCO-SSD
-  statusEl.textContent = 'loading coco-ssd…';
-  model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-  statusEl.textContent = 'loading opencv…';
-
-  // Wait for OpenCV
-  if (cv && cv['onRuntimeInitialized']) {
-    cv['onRuntimeInitialized'] = () => {
+    if (cv && cv['onRuntimeInitialized']) {
+      cv['onRuntimeInitialized'] = () => {
+        cvReady = true;
+        statusEl.textContent = 'ready';
+        requestAnimationFrame(loop);
+      };
+    } else {
       cvReady = true;
       statusEl.textContent = 'ready';
       requestAnimationFrame(loop);
-    };
-  } else {
-    // Fallback if already ready
-    cvReady = true;
-    statusEl.textContent = 'ready';
-    requestAnimationFrame(loop);
+    }
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = 'camera error (permissions?)';
   }
 }
 
-laneWidthInput.addEventListener('change', ()=>{/* scale recomputed each frame */});
+laneWidthInput.addEventListener('change', ()=>{});
 fpsInput.addEventListener('change', ()=> { desiredFPS = parseInt(fpsInput.value)||15; });
 detStrideInput.addEventListener('change', ()=> { detStride = Math.max(1, parseInt(detStrideInput.value)||2); });
 
