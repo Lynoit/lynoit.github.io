@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Webcam Free-Space Viewer</title>
+<title>Webcam Free-Space Viewer (ml5 DeepLab)</title>
 <style>
   :root{
     --bg:#0b0c0f; --ink:#f5f7fb; --muted:#9aa4b2; --accent:#4ade80; --warn:#f59e0b;
@@ -85,7 +85,7 @@
     <details>
       <summary>How it works</summary>
       <ul>
-        <li>Runs <b>DeepLab (ADE20K)</b> in TF.js to segment each frame.</li>
+        <li>Runs <b>DeepLab (Cityscapes via ml5.js)</b> in TF.js to segment each frame.</li>
         <li>Pixels labeled as road/sidewalk/parking → marked as <b>free-space</b>.</li>
         <li>Overlay mask blended over live video.</li>
         <li>Near-field band (bottom 35% of image) split into Left/Center/Right to estimate coverage.</li>
@@ -104,9 +104,8 @@
 
 <video id="video" autoplay playsinline muted style="display:none"></video>
 
-<!-- 1) Robust multi-CDN loader (TFJS + DeepLab with ESM fallback) -->
+<!-- 1) Robust multi-CDN loader for TF.js + ml5.js -->
 <script>
-  // Load a classic <script> (UMD) and wait for it
   function loadScript(src){
     return new Promise((resolve, reject)=>{
       const s = document.createElement('script');
@@ -118,67 +117,52 @@
       document.head.appendChild(s);
     });
   }
-
   async function loadFromAny(urls){
     let lastErr;
-    for (const url of urls){
-      try { await loadScript(url); return true; }
+    for (const u of urls){
+      try { await loadScript(u); return true; }
       catch(e){ lastErr = e; console.warn('[loader]', e.message); }
     }
     if (lastErr) throw lastErr;
   }
-
   (async ()=>{
     const statusEl = document.getElementById('status');
-    try {
+    try{
       statusEl.textContent = 'Loading TensorFlow.js…';
       await loadFromAny([
         'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
-        'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
+        'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+        'https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.22.0/tf.min.js'
       ]);
-
-      statusEl.textContent = 'Loading DeepLab model code…';
-      // 1) Try UMD bundles on two CDNs
-      try {
-        await loadFromAny([
-          'https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@1.4.0/dist/deeplab.min.js',
-          'https://unpkg.com/@tensorflow-models/deeplab@1.4.0/dist/deeplab.min.js'
-        ]);
-      } catch(umdErr){
-        // 2) Fallback: ESM import via Skypack (assign to window.deeplab)
-        statusEl.textContent = 'Loading DeepLab (ESM fallback)…';
-        const mod = await import('https://cdn.skypack.dev/@tensorflow-models/deeplab@1.4.0');
-        window.deeplab = mod; // expose a UMD-like global so app code stays the same
-      }
-
+      statusEl.textContent = 'Loading ml5.js…';
+      await loadFromAny([
+        'https://cdn.jsdelivr.net/npm/ml5@0.12.2/dist/ml5.min.js',
+        'https://unpkg.com/ml5@0.12.2/dist/ml5.min.js',
+        'https://cdnjs.cloudflare.com/ajax/libs/ml5/0.12.2/ml5.min.js'
+      ]);
       statusEl.textContent = 'Libraries loaded.';
     } catch(err){
-      statusEl.innerHTML =
-        '<span class="err">Error loading libraries: '+String(err.message)+
-        '. If you are on a restricted network, try the unpkg mirror or serve libs locally.</span>';
+      statusEl.innerHTML = '<span class="err">Error loading libraries: '+String(err.message)+'</span>';
       console.error(err);
     }
   })();
 </script>
 
-<!-- 2) Main app logic (runs AFTER libs are present) -->
+<!-- 2) Main app logic (uses ml5.deeplab 'cityscapes') -->
 <script>
 (async function(){
-  // Wait until deeplab & tf are available (defensive)
-  function waitForDeeplab(timeoutMs=15000){
-    const start = performance.now();
-    return new Promise((resolve, reject)=>{
-      (function tick(){
-        if (window.deeplab && window.tf) return resolve();
-        if (performance.now() - start > timeoutMs) return reject(new Error('deeplab not available'));
-        setTimeout(tick, 50);
-      })();
-    });
+  // Wait until ml5 & tf exist
+  async function waitForLibs(timeoutMs=15000){
+    const t0 = performance.now();
+    while (performance.now() - t0 < timeoutMs){
+      if (window.ml5 && window.tf) return;
+      await new Promise(r=>setTimeout(r,50));
+    }
+    throw new Error('ml5/tf not available');
   }
-  try { await waitForDeeplab(); }
-  catch(e){
+  try { await waitForLibs(); } catch(e){
     const s = document.getElementById('status');
-    s.innerHTML = '<span class="err">DeepLab failed to initialize. Check network/HTTPS and reload.</span>';
+    s.innerHTML = '<span class="err">Libraries failed to initialize. Reload this page over HTTPS/localhost.</span>';
     console.error(e);
     return;
   }
@@ -213,14 +197,12 @@
   let lastFrameT = performance.now();
   let frameCount = 0;
 
-  // Populate camera list
+  // Camera list
   async function listCameras() {
     try {
-      // Prompt once so device labels are available
       await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
         .then(s => s.getTracks().forEach(t => t.stop()));
     } catch(e) { /* ignore */ }
-
     const devices = await navigator.mediaDevices.enumerateDevices();
     const cams = devices.filter(d => d.kind === 'videoinput');
     cameraSelect.innerHTML = '';
@@ -235,39 +217,51 @@
   await listCameras();
   navigator.mediaDevices.addEventListener?.('devicechange', listCameras);
 
-  // Load model (ADE20K has road/sidewalk/parking)
-  try {
-    modelBadge.textContent = 'Model: loading DeepLab (ADE20K)…';
-    deeplabModel = await deeplab.load({ base: 'ade20k', quantizationBytes: 2 });
-    modelBadge.textContent = 'Model: DeepLab (ADE20K) loaded';
-  } catch(e) {
-    console.warn('ADE20K load failed, trying Pascal as fallback', e);
-    try {
-      deeplabModel = await deeplab.load({ base: 'pascal', quantizationBytes: 2 });
-      modelBadge.textContent = 'Model: DeepLab (Pascal) loaded (limited classes)';
-    } catch(e2) {
-      modelBadge.textContent = 'Model: failed to load';
-      statusEl.innerHTML = '<span class="err">Could not load any DeepLab model. Check network and reload.</span>';
-      console.error(e2);
-      return;
-    }
+  // Load ml5 DeepLab (Cityscapes)
+  async function loadMl5DeepLab(){
+    return new Promise((resolve, reject)=>{
+      try{
+        const model = ml5.deeplab('cityscapes', ()=>resolve(model));
+      } catch(e){ reject(e); }
+    });
+  }
+  try{
+    modelBadge.textContent = 'Model: loading DeepLab (Cityscapes)…';
+    deeplabModel = await loadMl5DeepLab();
+    modelBadge.textContent = 'Model: DeepLab (Cityscapes) loaded';
+  } catch(e){
+    modelBadge.textContent = 'Model: failed to load';
+    statusEl.innerHTML = '<span class="err">Could not load ml5 DeepLab model.</span>';
+    console.error(e);
+    return;
   }
 
-  // dynamic set of indices for "free" classes; updated after first prediction if legend present
-  let FREE_LABELS = new Set([12,13,132]); // fallback guesses
+  // Legend → indices for free classes
+  let FREE_LABELS = new Set([/* will be discovered dynamically */]);
   function updateFreeLabelsFromLegend(legend) {
-    if (!Array.isArray(legend)) return;
+    if (!legend) return;
     const desired = ['road','sidewalk','parking','path','floor','pavement','ground','street','lane'];
-    const newSet = new Set();
-    legend.forEach((name, idx) => {
-      const n = String(name).toLowerCase();
-      if (desired.some(d => n.includes(d))) newSet.add(idx);
+    const set = new Set();
+    legend.forEach((name, idx)=>{
+      const n = String(name||'').toLowerCase();
+      if (desired.some(d=>n.includes(d))) set.add(idx);
     });
-    if (newSet.size) FREE_LABELS = newSet;
+    if (set.size) FREE_LABELS = set;
+  }
+
+  function segmentOnce(videoEl, desiredSize){
+    // ml5 DeepLab doesn’t take a target size param; we’ll downscale via a temp canvas if needed.
+    // For simplicity, pass the video; model handles internal resizing.
+    return new Promise((resolve, reject)=>{
+      deeplabModel.segment(videoEl, (err, result)=>{
+        if (err) return reject(err);
+        resolve(result); // { segmentationMap, legend, width, height }
+      });
+    });
   }
 
   async function start() {
-    stop(); // ensure clean
+    stop();
     const deviceId = cameraSelect.value || undefined;
     const constraints = {
       video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
@@ -282,11 +276,8 @@
     video.srcObject = stream;
     await video.play();
 
-    // Resize canvas to video aspect
-    const w = video.videoWidth || 960;
-    const h = video.videoHeight || 540;
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = video.videoWidth || 960;
+    canvas.height = video.videoHeight || 540;
 
     running = true;
     stopBtn.disabled = false;
@@ -297,79 +288,73 @@
 
   function stop() {
     running = false;
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
-    }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     stopBtn.disabled = true;
     startBtn.disabled = false;
   }
-
   stopBtn.addEventListener('click', stop);
   startBtn.addEventListener('click', start);
 
   // Main loop
   async function loop() {
-    const desiredSize = parseInt(resSelect.value, 10);
     const overlayOpacity = parseFloat(opacity.value);
 
     while (running) {
-      // Draw video frame
+      // Draw video
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // Run segmentation at lower res for speed
+      // Segment (ml5)
       let seg;
       try {
-        seg = await deeplabModel.segment(video, desiredSize);
+        seg = await segmentOnce(video);
       } catch(err){
         statusEl.innerHTML = '<span class="err">Segmentation error: '+String(err.message)+'</span>';
         console.error(err);
-        await new Promise(r=>setTimeout(r, 100));
+        await new Promise(r=>setTimeout(r,100));
         continue;
       }
-      // seg: {legend, height, width, segmentationMap}
+      // seg: { segmentationMap, legend, width, height }
       updateFreeLabelsFromLegend(seg.legend);
 
-      // Build mask (use a regular offscreen canvas for compatibility)
+      // Build mask
       const sw = seg.width, sh = seg.height;
+      const map = seg.segmentationMap;
       const maskCanvas = document.createElement('canvas');
       maskCanvas.width = sw; maskCanvas.height = sh;
       const mctx = maskCanvas.getContext('2d');
       const imgData = mctx.createImageData(sw, sh);
+
       const includeRoad = incRoad.checked;
       const includeSidewalk = incSidewalk.checked;
       const includeParking = incParking.checked;
-
       const nameFor = (idx)=> seg.legend?.[idx]?.toLowerCase?.() || '';
       const includeIdx = (idx)=>{
         const nm = nameFor(idx);
         if (nm.includes('road') || nm.includes('street') || nm.includes('lane')) return includeRoad;
         if (nm.includes('sidewalk') || nm.includes('pavement')) return includeSidewalk;
         if (nm.includes('parking')) return includeParking;
-        // fallback by index set
         return FREE_LABELS.has(idx);
       };
 
       let p = 0;
-      const map = seg.segmentationMap;
-      for (let i = 0; i < map.length; i++) {
+      for (let i=0; i<map.length; i++){
         const idx = map[i];
         const on = includeIdx(idx);
         imgData.data[p++] = 0;            // R
         imgData.data[p++] = on ? 255 : 0; // G
         imgData.data[p++] = 0;            // B
-        imgData.data[p++] = on ? 140 : 0; // A (semi)
+        imgData.data[p++] = on ? 140 : 0; // A
       }
       mctx.putImageData(imgData, 0, 0);
 
-      // Draw scaled overlay
+      // Draw overlay scaled
       ctx.save();
       ctx.globalAlpha = overlayOpacity;
-      ctx.imageSmoothingEnabled = false; // keep mask crisp
+      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Compute simple near-field coverage (bottom 35% of image)
+      // Near-field coverage (bottom 35%)
       const nearY0 = Math.floor(canvas.height * 0.65);
       const nearH  = canvas.height - nearY0;
       const sample = ctx.getImageData(0, nearY0, canvas.width, nearH).data;
@@ -380,9 +365,9 @@
           const idx4 = (y*canvas.width + x)*4;
           const g = sample[idx4+1], a = sample[idx4+3];
           const free = (g>0 && a>0);
-          const bucket = (x < thirds) ? 0 : (x < 2*thirds) ? 1 : 2;
-          if (bucket===0){ leftTot++; if (free) left++; }
-          else if (bucket===1){ centerTot++; if (free) center++; }
+          const b = (x < thirds) ? 0 : (x < 2*thirds) ? 1 : 2;
+          if (b===0){ leftTot++; if (free) left++; }
+          else if (b===1){ centerTot++; if (free) center++; }
           else { rightTot++; if (free) right++; }
         }
       }
@@ -411,7 +396,7 @@
   }
 
   // Keep UI reactive
-  resSelect.addEventListener('change', ()=>{ /* loop reads live */ });
+  resSelect.addEventListener('change', ()=>{ /* ml5 handles size internally */ });
   [opacity,incRoad,incSidewalk,incParking].forEach(el=>el.addEventListener('input',()=>{}));
 })();
 </script>
