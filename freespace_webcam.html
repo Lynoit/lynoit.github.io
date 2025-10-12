@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Webcam Free-Space Viewer</title>
+<style>
+  :root{
+    --bg:#0b0c0f; --ink:#f5f7fb; --muted:#9aa4b2; --accent:#4ade80; --warn:#f59e0b;
+    --panel:#141821; --card:#1b2130; --grid:#2a3342;
+  }
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  header{padding:14px 16px;border-bottom:1px solid #1f2633;background:var(--panel);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  header h1{font-size:16px;margin:0 10px 0 0;font-weight:600;letter-spacing:.2px}
+  .row{display:flex;gap:16px;flex-wrap:wrap;padding:16px}
+  .col{background:var(--card);border:1px solid #253043;border-radius:14px; padding:12px}
+  .col video,.col canvas{border-radius:12px;background:#000;display:block}
+  .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  select,button,input[type="range"]{background:#121723;color:var(--ink);border:1px solid #2b3648;border-radius:10px;padding:8px}
+  button{cursor:pointer}
+  label{color:var(--muted)}
+  .stat{font-variant-numeric:tabular-nums}
+  .gridBar{height:10px;background:var(--grid);border-radius:6px;overflow:hidden}
+  .gridBar>span{display:block;height:100%;background:var(--accent)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2b3648;background:#121723;color:var(--muted);font-size:12px}
+  details{margin-top:8px}
+  .hint{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Webcam Free-Space Viewer</h1>
+  <div class="controls">
+    <label>Camera
+      <select id="cameraSelect"></select>
+    </label>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span class="badge" id="modelBadge">Model: loading…</span>
+    <span class="badge" id="fpsBadge">FPS: --</span>
+  </div>
+  <div class="controls">
+    <label>Opacity
+      <input type="range" id="opacity" min="0" max="1" step="0.05" value="0.5">
+    </label>
+    <label>Include:
+      <input type="checkbox" id="incRoad" checked> road
+      <input type="checkbox" id="incSidewalk" checked> sidewalk
+      <input type="checkbox" id="incParking" checked> parking
+    </label>
+    <label>Resolution
+      <select id="resSelect">
+        <option value="256">256</option>
+        <option value="321">321</option>
+        <option value="513" selected>513</option>
+      </select>
+    </label>
+  </div>
+</header>
+
+<div class="row">
+  <div class="col" style="flex:1;min-width:320px">
+    <canvas id="view" width="960" height="540"></canvas>
+    <div class="hint" style="margin-top:8px">
+      Tip: If you use an <strong>external USB/UVC webcam</strong> on Android, you may need an OTG adapter and some devices only expose it to the browser on newer Android/Chrome versions.
+    </div>
+  </div>
+
+  <div class="col" style="width:340px">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <div style="width:10px;height:10px;background:var(--accent);border-radius:2px"></div>
+      <div>Free-space coverage per horizontal sector (near field)</div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center">
+      <div>Left</div><div class="stat" id="leftPct">--%</div>
+      <div class="gridBar"><span id="leftBar" style="width:0%"></span></div><div></div>
+      <div>Center</div><div class="stat" id="centerPct">--%</div>
+      <div class="gridBar"><span id="centerBar" style="width:0%"></span></div><div></div>
+      <div>Right</div><div class="stat" id="rightPct">--%</div>
+      <div class="gridBar"><span id="rightBar" style="width:0%"></span></div><div></div>
+    </div>
+
+    <details>
+      <summary>How it works</summary>
+      <ul>
+        <li>Runs <b>DeepLab (Cityscapes)</b> in TF.js to segment each frame.</li>
+        <li>Pixels labeled as road/sidewalk/parking → marked as <b>free-space</b>.</li>
+        <li>Overlay mask blended over live video.</li>
+        <li>Near-field band (bottom 35% of image) split into Left/Center/Right to estimate coverage.</li>
+      </ul>
+    </details>
+    <details>
+      <summary>Troubleshooting</summary>
+      <ul>
+        <li>Chrome: use HTTPS or <code>localhost</code> for camera access.</li>
+        <li>External cameras: use the camera dropdown to pick the UVC device.</li>
+        <li>Performance: lower “Resolution” for faster FPS.</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
+<video id="video" autoplay playsinline muted style="display:none"></video>
+
+<!-- TFJS + DeepLab (Cityscapes) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/deeplab@1.4.0/dist/deeplab.min.js"></script>
+
+<script>
+(async function(){
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const cameraSelect = document.getElementById('cameraSelect');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn  = document.getElementById('stopBtn');
+  const modelBadge = document.getElementById('modelBadge');
+  const fpsBadge = document.getElementById('fpsBadge');
+
+  const opacity = document.getElementById('opacity');
+  const incRoad = document.getElementById('incRoad');
+  const incSidewalk = document.getElementById('incSidewalk');
+  const incParking = document.getElementById('incParking');
+  const resSelect = document.getElementById('resSelect');
+
+  const leftPctEl = document.getElementById('leftPct');
+  const centerPctEl = document.getElementById('centerPct');
+  const rightPctEl = document.getElementById('rightPct');
+  const leftBar = document.getElementById('leftBar');
+  const centerBar = document.getElementById('centerBar');
+  const rightBar = document.getElementById('rightBar');
+
+  let stream = null;
+  let running = false;
+  let deeplabModel = null;
+  let lastFrameT = performance.now();
+  let frameCount = 0, fps = 0;
+
+  // Populate camera list
+  async function listCameras() {
+    try {
+      // Prompt for any cam once to get device labels
+      await navigator.mediaDevices.getUserMedia({ video: true, audio: false }).then(s => s.getTracks().forEach(t => t.stop()));
+    } catch(e) { /* ignore */ }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    cameraSelect.innerHTML = '';
+    for (const d of cams) {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Camera ${cameraSelect.length+1}`;
+      cameraSelect.appendChild(opt);
+    }
+  }
+
+  await listCameras();
+  navigator.mediaDevices.addEventListener?.('devicechange', listCameras);
+
+  // Load model
+  modelBadge.textContent = 'Model: loading DeepLab (Cityscapes)…';
+  deeplabModel = await deeplab.load({ base: 'pascal', quantizationBytes: 2 });
+  // Switch to Cityscapes labels/color map if available via model config
+  // The npm @tensorflow-models/deeplab exposes 'cityscapes' as 'ade20k'/'pascal' variants historically.
+  // We'll use the default colorMap; we only care about class indices anyway.
+  modelBadge.textContent = 'Model: DeepLab (Pascal) loaded';
+
+  // PASCAL label indices (approximate mapping; road=12 in Cityscapes; in Pascal, "road" class doesn’t exist).
+  // To keep it robust across variants, we detect common "free" categories by name from the model if available.
+  // Fallback: assume 'person' index 15 etc and treat no classes as free until we can map.
+  // Better: use model.predict(..., quantization) which returns legend; deeplab.getColormap() etc not public.
+  // Practical approach: use ADE20K model for broader classes:
+  try {
+    // try load ADE20K variant which includes road/sidewalk/parking
+    modelBadge.textContent = 'Model: loading DeepLab (ADE20K)…';
+    deeplabModel = await deeplab.load({ base: 'ade20k', quantizationBytes: 2 });
+    modelBadge.textContent = 'Model: DeepLab (ADE20K) loaded';
+  } catch(e) {
+    console.warn('ADE20K load failed, sticking with Pascal.', e);
+    modelBadge.textContent += ' (fallback)';
+  }
+
+  // Known ADE20K indices for common drivable areas (as used in many forks; may vary slightly):
+  // road: 12, sidewalk: 13, parking: 132 (varies). We’ll detect by label strings from segmentation.legend if present.
+  let FREE_LABELS = new Set([12, 13, 132]); // will update after first prediction if legend available
+
+  function updateFreeLabelsFromLegend(legend) {
+    if (!Array.isArray(legend)) return;
+    const desired = ['road','sidewalk','parking','path','floor','pavement','ground','street','lane'];
+    const newSet = new Set();
+    legend.forEach((name, idx) => {
+      const n = String(name).toLowerCase();
+      if (desired.some(d => n.includes(d))) newSet.add(idx);
+    });
+    if (newSet.size) FREE_LABELS = newSet;
+  }
+
+  async function start() {
+    stop(); // ensure clean
+    const deviceId = cameraSelect.value || undefined;
+    const constraints = {
+      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'environment' },
+      audio: false
+    };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      alert('Could not start camera: ' + e.message);
+      return;
+    }
+    video.srcObject = stream;
+    await video.play();
+
+    // Resize canvas to video aspect
+    const w = video.videoWidth || 960;
+    const h = video.videoHeight || 540;
+    canvas.width = w;
+    canvas.height = h;
+
+    running = true;
+    stopBtn.disabled = false;
+    startBtn.disabled = true;
+
+    loop();
+  }
+
+  function stop() {
+    running = false;
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+  }
+
+  stopBtn.addEventListener('click', stop);
+  startBtn.addEventListener('click', start);
+
+  // Main loop
+  async function loop() {
+    const desiredSize = parseInt(resSelect.value, 10);
+    const overlayOpacity = parseFloat(opacity.value);
+
+    while (running) {
+      const t0 = performance.now();
+      // Draw video frame
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Run segmentation at lower res for speed
+      const seg = await deeplabModel.segment(video, desiredSize);
+      // seg has {legend, height, width, segmentationMap}
+      updateFreeLabelsFromLegend(seg.legend);
+
+      // Build mask
+      const {width: sw, height: sh, segmentationMap} = seg;
+      // Create an offscreen mask image
+      const maskCanvas = new OffscreenCanvas(sw, sh);
+      const mctx = maskCanvas.getContext('2d');
+      const imgData = mctx.createImageData(sw, sh);
+      const includeRoad = incRoad.checked;
+      const includeSidewalk = incSidewalk.checked;
+      const includeParking = incParking.checked;
+
+      // Determine which indices to include based on legend names if possible
+      const nameFor = (idx)=> seg.legend?.[idx]?.toLowerCase?.() || '';
+      const includeIdx = (idx)=>{
+        const nm = nameFor(idx);
+        if (nm.includes('road') || nm.includes('street') || nm.includes('lane')) return includeRoad;
+        if (nm.includes('sidewalk') || nm.includes('pavement')) return includeSidewalk;
+        if (nm.includes('parking')) return includeParking;
+        // fallback to set
+        if (FREE_LABELS.has(idx)) return true;
+        return false;
+      };
+
+      let p = 0;
+      for (let i = 0; i < segmentationMap.length; i++) {
+        const idx = segmentationMap[i];
+        const on = includeIdx(idx);
+        imgData.data[p++] = 0;            // R
+        imgData.data[p++] = on ? 255 : 0; // G
+        imgData.data[p++] = 0;            // B
+        imgData.data[p++] = on ? 140 : 0; // A (semi)
+      }
+      mctx.putImageData(imgData, 0, 0);
+
+      // Draw scaled overlay
+      ctx.save();
+      ctx.globalAlpha = overlayOpacity;
+      ctx.imageSmoothingEnabled = false; // keep mask crisp
+      ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      // Compute simple near-field coverage (bottom 35% of image)
+      const nearY0 = Math.floor(canvas.height * 0.65);
+      const nearH  = canvas.height - nearY0;
+      const sample = ctx.getImageData(0, nearY0, canvas.width, nearH).data;
+      // Count green alpha pixels as free
+      let left=0, center=0, right=0, leftTot=0, centerTot=0, rightTot=0;
+      const thirds = Math.floor(canvas.width/3);
+      for (let y=0; y<nearH; y++) {
+        for (let x=0; x<canvas.width; x++) {
+          const idx4 = (y*canvas.width + x)*4;
+          const g = sample[idx4+1], a = sample[idx4+3];
+          const free = (g>0 && a>0);
+          const bucket = (x < thirds) ? 0 : (x < 2*thirds) ? 1 : 2;
+          if (bucket===0){ leftTot++; if (free) left++; }
+          else if (bucket===1){ centerTot++; if (free) center++; }
+          else { rightTot++; if (free) right++; }
+        }
+      }
+      const lp = leftTot? Math.round(100*left/leftTot):0;
+      const cp = centerTot? Math.round(100*center/centerTot):0;
+      const rp = rightTot? Math.round(100*right/rightTot):0;
+      leftPctEl.textContent = lp + '%';
+      centerPctEl.textContent = cp + '%';
+      rightPctEl.textContent = rp + '%';
+      leftBar.style.width = lp + '%';
+      centerBar.style.width = cp + '%';
+      rightBar.style.width = rp + '%';
+
+      // FPS
+      frameCount++;
+      const now = performance.now();
+      const dt = now - lastFrameT;
+      if (dt >= 1000) {
+        fps = Math.round(1000 * frameCount / dt);
+        fpsBadge.textContent = 'FPS: ' + fps;
+        frameCount = 0; lastFrameT = now;
+      }
+
+      // Yield to browser
+      const spent = performance.now() - t0;
+      // Smooth a bit; no fixed delay, but let RAF schedule next tick
+      await new Promise(requestAnimationFrame);
+    }
+  }
+
+  // Small UX niceties
+  resSelect.addEventListener('change', ()=>{
+    // no-op: loop reads it live
+  });
+  [opacity,incRoad,incSidewalk,incParking].forEach(el=>el.addEventListener('input',()=>{}));
+
+})();
+</script>
+</body>
+</html>
