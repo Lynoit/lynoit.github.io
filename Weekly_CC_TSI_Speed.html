@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CSV Speed Checker — Map & Plots</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet (OSM) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Plotly for charts -->
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+  <!-- PapaParse for CSV -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    :root { --ink:#111; --muted:#666; --bg:#fff; --card:#f7f7f9; --accent:#0b5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, sans-serif; color: var(--ink); background: var(--bg); }
+    header {
+      position: sticky; top: 0; z-index: 10; background: white; border-bottom: 1px solid #eee;
+      padding: 12px 16px; display: flex; gap: 12px; align-items: center; justify-content: space-between;
+    }
+    .title { font-weight: 700; }
+    .picker {
+      display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px dashed #aaa; border-radius: 10px;
+      background: #fafafa;
+    }
+    input[type="file"] { display: none; }
+    .btn { cursor: pointer; padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #fff; }
+    .btn:hover { background: #f5f5f5; }
+    .container { max-width: 1200px; margin: 18px auto; padding: 0 16px 80px; }
+    .fileCard {
+      background: var(--card); border: 1px solid #ececf1; border-radius: 14px; margin: 18px 0; padding: 12px 12px 18px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.03);
+    }
+    .fileHead { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .badges { display:flex; gap:8px; flex-wrap:wrap; }
+    .badge { font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background:#fff; }
+    .map { width: 100%; height: 360px; border-radius: 12px; border: 1px solid #e6e6ea; overflow: hidden; }
+    .sectionTitle { margin: 12px 0 8px; font-weight: 700; }
+    .chart { width: 100%; height: 280px; border: 1px solid #e6e6ea; border-radius: 12px; background: #fff; }
+    .legend { font-size: 13px; color: var(--muted); }
+    .hl { color: var(--accent); font-weight: 700; }
+    .hr { height: 1px; background: #eee; margin: 10px 0 14px; }
+    .note { font-size: 12px; color: #777; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title">CSV Speed Checker — Map & Plots</div>
+    <label class="picker">
+      <span>📁 Pick CSV folder…</span>
+      <input id="folder" type="file" webkitdirectory directory multiple accept=".csv" />
+    </label>
+  </header>
+
+  <div class="container" id="app">
+    <p class="note">
+      Expected CSV columns: <b>A: lat</b>, <b>B: lon</b>, <b>C: SpdLimFirst</b>, <b>D: MaxSpeed_kph</b>.
+      This tool creates <b>E: distance_m</b> (between consecutive points) and <b>F: true_positive_distance_m</b> where distance accumulates only when <b>C == D</b>.
+    </p>
+  </div>
+
+<script>
+/** ---- Helpers ---- **/
+
+// Parse filename format "car_software_testdate.csv"
+function parseMetaFromFilename(name) {
+  const base = name.replace(/\.[^/.]+$/, "");
+  const parts = base.split("_");
+  if (parts.length >= 3) {
+    const testdate = parts.pop();
+    const software = parts.pop();
+    const car = parts.join("_");
+    return { car, software, testdate };
+  }
+  return { car: base, software: "n/a", testdate: "n/a" };
+}
+
+// Haversine distance in meters between [lat1, lon1] and [lat2, lon2]
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // meters
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// Try to coerce a CSV cell to number; returns null if not finite
+function numOrNull(v) {
+  if (v === null || v === undefined) return null;
+  const n = Number(String(v).trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+// Return [lat, lon, spdLimFirst, maxSpeed] array from parsed row (A,B,C,D)
+function extractRow(row) {
+  const lat = numOrNull(row[0]);
+  const lon = numOrNull(row[1]);
+  const c = numOrNull(row[2]); // SpdLimFirst
+  const d = numOrNull(row[3]); // MaxSpeed_kph
+  return [lat, lon, c, d];
+}
+
+/** ---- Core processing per file ---- **/
+async function processCsvFile(file, container) {
+  const filename = file.name;
+  const meta = parseMetaFromFilename(filename);
+
+  // Build card UI
+  const card = document.createElement("div");
+  card.className = "fileCard";
+  card.innerHTML = `
+    <div class="fileHead">
+      <div>
+        <div><strong>${filename}</strong></div>
+        <div class="legend">Parsed as <span class="hl">${meta.car}</span> • ${meta.software} • ${meta.testdate}</div>
+      </div>
+      <div class="badges">
+        <span class="badge">Car: ${meta.car}</span>
+        <span class="badge">SW: ${meta.software}</span>
+        <span class="badge">Date: ${meta.testdate}</span>
+      </div>
+    </div>
+    <div class="hr"></div>
+    <div class="sectionTitle">Map</div>
+    <div class="map" id="map_${crypto.randomUUID()}"></div>
+    <div class="sectionTitle">SpdLimFirst (C) vs MaxSpeed_kph (D)</div>
+    <div class="chart" id="chart1_${crypto.randomUUID()}"></div>
+    <div class="sectionTitle">True Positive Distance (F)</div>
+    <div class="chart" id="chart2_${crypto.randomUUID()}"></div>
+  `;
+  container.appendChild(card);
+
+  // DOM refs
+  const mapEl = card.querySelector(".map");
+  const chart1El = card.querySelectorAll(".chart")[0];
+  const chart2El = card.querySelectorAll(".chart")[1];
+
+  // Parse CSV
+  const text = await file.text();
+  const parsed = Papa.parse(text, { skipEmptyLines: true });
+  const data = [];
+
+  // Accept both headerless and headered CSVs; try to detect numeric rows
+  for (let i = 0; i < parsed.data.length; i++) {
+    const row = parsed.data[i];
+    if (!row || row.length < 4) continue;
+    const [lat, lon, c, d] = extractRow(row);
+    if (lat === null || lon === null) continue;
+    data.push({ lat, lon, C: c, D: d });
+  }
+
+  if (data.length === 0) {
+    chart1El.innerHTML = "<div style='padding:1rem;color:#a00'>No valid rows found.</div>";
+    return;
+  }
+
+  // Forward-fill D (MaxSpeed_kph) when missing
+  let lastD = data[0].D;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i].D === null || data[i].D === undefined) {
+      data[i].D = lastD;
+    } else {
+      lastD = data[i].D;
+    }
+  }
+
+  // Compute E (distance_m) and F (true positive distance)
+  let cumulativeTruePos = 0;
+  data[0].E = 0;
+  data[0].F = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const p0 = data[i-1];
+    const p1 = data[i];
+    const dist = haversine(p0.lat, p0.lon, p1.lat, p1.lon);
+    p1.E = dist;
+
+    // If SpdLimFirst (C) equals MaxSpeed_kph (D), add distance to cumulative F
+    if (p1.C !== null && p1.D !== null && p1.C === p1.D) {
+      cumulativeTruePos += dist;
+    }
+    p1.F = cumulativeTruePos;
+  }
+
+  // Build the map
+  const map = L.map(mapEl, { zoomControl: true, preferCanvas: true });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+
+  const latlngs = data.map(p => [p.lat, p.lon]);
+  const bounds = L.latLngBounds(latlngs);
+  map.fitBounds(bounds, { padding: [20, 20] });
+
+  // Draw points: black if C==D else red
+  const group = L.layerGroup().addTo(map);
+  for (let i = 0; i < data.length; i++) {
+    const p = data[i];
+    const match = (p.C !== null && p.D !== null && p.C === p.D);
+    const color = match ? "#000000" : "#d40000";
+    const m = L.circleMarker([p.lat, p.lon], {
+      radius: 3,
+      stroke: false,
+      fillColor: color,
+      fillOpacity: 0.9
+    });
+    m.bindTooltip(`idx ${i}<br>lat: ${p.lat.toFixed(6)}<br>lon: ${p.lon.toFixed(6)}<br>C (SpdLimFirst): ${p.C ?? "NA"}<br>D (MaxSpeed_kph): ${p.D ?? "NA"}<br>E (dist m): ${p.E?.toFixed(1) ?? "0"}<br>F (TP m): ${p.F?.toFixed(1) ?? "0"}`,
+      { sticky: true });
+    m.addTo(group);
+  }
+
+  // Plot 1: C vs D over index
+  {
+    const x = data.map((_, i) => i);
+    const cSeries = {
+      x, y: data.map(p => p.C),
+      mode: "lines",
+      name: "SpdLimFirst (C)"
+    };
+    const dSeries = {
+      x, y: data.map(p => p.D),
+      mode: "lines",
+      name: "MaxSpeed_kph (D)"
+    };
+    Plotly.newPlot(chart1El, [cSeries, dSeries], {
+      margin: { l: 50, r: 20, t: 20, b: 40 },
+      xaxis: { title: "Sample index" },
+      yaxis: { title: "Speed (kph)" },
+      showlegend: true
+    }, { responsive: true, displaylogo: false });
+  }
+
+  // Plot 2: F (true positive distance)
+  {
+    const x = data.map((_, i) => i);
+    const fSeries = {
+      x, y: data.map(p => p.F),
+      mode: "lines",
+      name: "True positive distance (F)"
+    };
+    Plotly.newPlot(chart2El, [fSeries], {
+      margin: { l: 50, r: 20, t: 20, b: 40 },
+      xaxis: { title: "Sample index" },
+      yaxis: { title: "Distance (m)" },
+      showlegend: true
+    }, { responsive: true, displaylogo: false });
+  }
+}
+
+/** ---- Folder handling ---- **/
+document.getElementById("folder").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files).filter(f => /\.csv$/i.test(f.name));
+  const app = document.getElementById("app");
+  app.innerHTML = ""; // clear
+
+  if (files.length === 0) {
+    app.innerHTML = "<p class='note'>No CSV files found in the selected folder.</p>";
+    return;
+  }
+
+  // Sort files alphabetically for deterministic order
+  files.sort((a,b) => a.name.localeCompare(b.name));
+
+  for (const file of files) {
+    await processCsvFile(file, app);
+  }
+});
+</script>
+</body>
+</html>
