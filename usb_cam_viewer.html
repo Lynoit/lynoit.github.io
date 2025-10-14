@@ -12,6 +12,7 @@
     html,body { margin:0; padding:0; background:var(--bg); color:var(--fg); font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
     .wrap { max-width: 820px; margin: 0 auto; padding: 16px; }
     h1 { font-size: 1.25rem; margin: 0 0 8px; }
+    h2 { font-size: 1.05rem; margin: 0 0 8px; }
     .card { background:var(--card); border-radius: 16px; padding: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.25); margin-bottom: 12px; }
     .row { display:grid; grid-template-columns: 1fr; gap: 8px; }
     @media (min-width: 560px) { .row.two { grid-template-columns: 1fr 1fr; } }
@@ -39,13 +40,13 @@
     <h1>USB-C Webcam Viewer (Android)</h1>
     <div class="card">
       <div class="hint">
-        <span class="pill">Step 1</span> Tap <b>Grant camera access</b> → then pick your camera (your USB cam may appear as “USB Camera”, vendor name, or similar).<br/>
-        <span class="pill">If USB cam doesn’t show:</span> use the <b>Fallback Stream</b> section below with a URL from the “USB Camera” Android app (HTTP MJPEG/HLS).
+        <span class="pill">Step 1</span> Tap <b>Grant camera access</b> → then pick your camera (if Android exposes it).<br/>
+        <span class="pill">USB cam not listed?</span> Use <b>Fallback Stream</b> below. On the same tablet, the USB Camera app usually serves MJPEG at <code>http://localhost:8081/video</code>.
       </div>
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0;">Browser Camera</h2>
+      <h2>Browser Camera</h2>
       <div class="row two">
         <div>
           <label for="deviceSelect">Video device</label>
@@ -87,14 +88,14 @@
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0;">Fallback Stream (IP/MJPEG/RTSP via Gateway)</h2>
+      <h2>Fallback Stream (MJPEG/Video with auto-reconnect)</h2>
       <div class="hint" style="margin-bottom:6px;">
-        Use if your USB camera isn’t exposed to the browser. In the <b>USB Camera</b> app, enable its web server and copy the stream URL (often <i>http://&lt;phone-ip&gt;:8080/video</i> for MJPEG). HLS (.m3u8) also works on recent Chrome/Android.
+        Use if your USB camera isn’t listed above. This tries <code>http://localhost:8081/video</code> → <code>http://127.0.0.1:8081/video</code> → your URL.
       </div>
       <div class="row two">
         <div>
-          <label for="fallbackUrl">Stream URL (MJPEG/HLS/MP4)</label>
-          <input id="fallbackUrl" type="text" placeholder="e.g. http://192.168.1.50:8080/video or http://.../stream.m3u8" />
+          <label for="fallbackUrl">Stream URL (optional, e.g. http://192.168.0.37:8081/video)</label>
+          <input id="fallbackUrl" type="text" placeholder="Leave empty to auto-try localhost, or paste MJPEG/HLS/MP4 URL" />
         </div>
         <div class="controls" style="align-items:end;">
           <button id="btnOpenFallback" class="primary">Open stream</button>
@@ -109,12 +110,12 @@
         </div>
       </div>
       <div class="hint" style="margin-top:6px;">
-        For pure MJPEG URLs (<code>.../video</code>), the app uses an &lt;img&gt; tag (lowest latency). For MP4/HLS, it uses &lt;video&gt;.
+        MJPEG uses &lt;img&gt; for lowest latency. MP4/HLS uses &lt;video&gt;. “Stay awake” prevents screen dimming.
       </div>
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0;">Log</h2>
+      <h2>Log</h2>
       <div id="log" class="log">Ready.</div>
     </div>
 
@@ -146,7 +147,6 @@
     let currentStream = null;
 
     function setBadge(txt) { badge.textContent = txt; }
-    function setBadge2(txt) { el('badge2').textContent = txt; }
 
     async function stopCurrentStream() {
       if (currentStream) {
@@ -166,7 +166,6 @@
     }
 
     async function ensurePermission() {
-      // Must call gUM at least once for device labels.
       try {
         addLog('Requesting initial camera permission…');
         const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
@@ -215,8 +214,7 @@
         audio: false,
         video: {
           ...resolutionToConstraints(resVal),
-          deviceId: deviceId ? { exact: deviceId } : undefined,
-          facingMode: undefined // don’t force; we’ll target the selected device
+          deviceId: deviceId ? { exact: deviceId } : undefined
         }
       };
       try {
@@ -229,11 +227,10 @@
       } catch (e) {
         setBadge('Error');
         addLog('getUserMedia error: ' + e.message);
-        alert('Could not start the selected camera.\n\nIf this is a USB camera that does not appear here, use the Fallback Stream below via the USB Camera app.');
+        alert('Could not start the selected camera.\n\nIf this is a USB camera that does not appear here, use the Fallback Stream below (localhost or /video on port 8081).');
       }
     }
 
-    // Handle device hotplug events (e.g., plug/unplug USB cam)
     navigator.mediaDevices?.addEventListener?.('devicechange', async () => {
       addLog('devicechange event → refreshing device list…');
       await refreshDevices();
@@ -243,7 +240,6 @@
       const ok = await ensurePermission();
       if (ok) await refreshDevices();
     });
-
     btnRefresh.addEventListener('click', async () => {
       if (deviceSelect.disabled) {
         const ok = await ensurePermission();
@@ -251,7 +247,6 @@
       }
       await refreshDevices();
     });
-
     btnStart.addEventListener('click', startSelected);
     btnStop.addEventListener('click', stopCurrentStream);
 
@@ -268,8 +263,7 @@
       canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext('2d');
       if (mirrorToggle.checked) {
-        ctx.translate(w, 0);
-        ctx.scale(-1, 1);
+        ctx.translate(w, 0); ctx.scale(-1, 1);
       }
       ctx.drawImage(video, 0, 0, w, h);
       canvas.toBlob(b => {
@@ -286,75 +280,164 @@
 
     btnFullscreen.addEventListener('click', () => {
       const elem = video.parentElement;
-      if (document.fullscreenElement) {
-        document.exitFullscreen();
-      } else {
-        elem.requestFullscreen?.();
-      }
+      if (document.fullscreenElement) document.exitFullscreen();
+      else elem.requestFullscreen?.();
     });
 
-    // ===== Fallback Stream (MJPEG / MP4 / HLS) =====
+    // ===== Fallback Stream (MJPEG with auto-reconnect; tries localhost/127.0.0.1/custom) =====
     const fallbackUrl = el('fallbackUrl');
     const btnOpenFallback = el('btnOpenFallback');
     const btnStopFallback = el('btnStopFallback');
     const mjpegImg = el('mjpeg');
-    const altVideo = el('altVideo');
+    const altVideo = el('altVideo'); // kept for MP4/HLS if you ever need it
+    const badge2 = el('badge2');
 
-    let mjpegActive = false;
+    let mjpegState = {
+      active: false,
+      currentUrl: '',
+      retryMs: 1000,
+      retryTimer: null,
+      wakeLock: null,
+      stayAwake: false,
+    };
+
+    function setBadge2(txt) { badge2.textContent = txt; }
+    function clearRetry() { if (mjpegState.retryTimer) { clearTimeout(mjpegState.retryTimer); mjpegState.retryTimer = null; } }
+
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator && mjpegState.stayAwake && !mjpegState.wakeLock) {
+          mjpegState.wakeLock = await navigator.wakeLock.request('screen');
+          mjpegState.wakeLock.addEventListener('release', () => { mjpegState.wakeLock = null; });
+        }
+      } catch { /* ignore */ }
+    }
+    async function releaseWakeLock() { try { await mjpegState.wakeLock?.release(); } catch {} mjpegState.wakeLock = null; }
 
     function stopFallback() {
-      if (mjpegActive) {
+      clearRetry();
+      if (mjpegState.active) {
         mjpegImg.src = '';
         mjpegImg.style.display = 'none';
-        mjpegActive = false;
       }
-      if (!altVideo.paused || altVideo.src) {
-        altVideo.pause();
-        altVideo.removeAttribute('src');
-        altVideo.load();
-        altVideo.style.display = 'none';
-      }
-      setBadge2('Fallback stopped');
-      addLog('Stopped fallback stream.');
+      altVideo.pause(); altVideo.removeAttribute('src'); altVideo.load(); altVideo.style.display = 'none';
+      mjpegState.active = false;
+      mjpegState.currentUrl = '';
+      mjpegState.retryMs = 1000;
+      setBadge2('Stopped');
+      addLog('Fallback: stopped.');
+      releaseWakeLock();
     }
 
+    function trySetMjpeg(url) {
+      // Avoid redundant restarts for same URL
+      if (mjpegState.active && mjpegState.currentUrl === url && mjpegImg.complete) return;
+
+      clearRetry();
+      mjpegState.active = true;
+      mjpegState.currentUrl = url;
+      setBadge2('Connecting…');
+      addLog('Fallback: opening MJPEG ' + url);
+
+      // Some Android builds fire onload for every MJPEG frame; treat onload as "playing"
+      mjpegImg.onload = () => {
+        setBadge2('Playing');
+        mjpegState.retryMs = 1000; // reset backoff
+      };
+      mjpegImg.onerror = () => {
+        setBadge2(`Retrying in ${Math.round(mjpegState.retryMs/1000)}s…`);
+        addLog('Fallback: MJPEG error, will retry.');
+        clearRetry();
+        mjpegState.retryTimer = setTimeout(() => {
+          mjpegState.retryMs = Math.min(mjpegState.retryMs + 1000, 5000); // linear backoff to 5s
+          mjpegImg.src = '';                // force reconnect
+          mjpegImg.src = mjpegState.currentUrl;
+        }, mjpegState.retryMs);
+      };
+
+      mjpegImg.style.display = 'block';
+      altVideo.style.display = 'none';
+      mjpegImg.src = url;
+    }
+
+    async function openFallbackSmart() {
+      // Try in order: localhost → 127.0.0.1 → user-entered
+      const user = (fallbackUrl.value || '').trim();
+      const candidates = [
+        'http://localhost:8081/video',
+        'http://127.0.0.1:8081/video',
+      ];
+      if (user) candidates.push(user);
+
+      // clean start without extra spam
+      stopFallback();
+
+      await requestWakeLock();
+      setBadge2('Scanning…');
+
+      let tried = 0;
+      const tryNext = () => {
+        if (tried >= candidates.length) {
+          setBadge2('No stream reachable');
+          addLog('Fallback: no candidate URL worked.');
+          releaseWakeLock();
+          return;
+        }
+        const url = candidates[tried++];
+        addLog('Fallback: trying ' + url);
+
+        // Quick probe with <img>; if we get any frame, adopt this URL
+        let settled = false;
+        const probeImg = new Image();
+        const settle = (ok) => {
+          if (settled) return;
+          settled = true;
+          probeImg.onload = null;
+          probeImg.onerror = null;
+          if (ok) {
+            addLog('Fallback: selected ' + url);
+            trySetMjpeg(url);
+          } else {
+            setTimeout(tryNext, 200);
+          }
+        };
+        const timeout = setTimeout(() => settle(false), 1200);
+        probeImg.onload = () => { clearTimeout(timeout); settle(true); };
+        probeImg.onerror = () => { clearTimeout(timeout); settle(false); };
+
+        const bust = url.includes('?') ? '&_=' : '?_=';
+        probeImg.src = url + bust + Date.now();
+      };
+
+      tryNext();
+    }
+
+    btnOpenFallback.addEventListener('click', openFallbackSmart);
     btnStopFallback.addEventListener('click', stopFallback);
 
-    btnOpenFallback.addEventListener('click', async () => {
-      stopFallback();
-      const url = fallbackUrl.value.trim();
-      if (!url) return alert('Enter a stream URL.');
-      try {
-        // crude check: MJPEG endpoints are often not content-sniffable in browser JS; try by extension/keyword
-        const isMJPEG = /mjpg|mjpeg|\/video(\/?\?.*)?$/i.test(url);
-        if (isMJPEG) {
-          // MJPEG via <img> – lowest latency
-          mjpegImg.src = url;
-          mjpegImg.style.display = 'block';
-          altVideo.style.display = 'none';
-          mjpegActive = true;
-          setBadge2('MJPEG');
-          addLog('Opened MJPEG stream.');
-        } else {
-          // MP4/HLS – many Android Chromes can play HLS directly; if not, use native app’s MP4 endpoint
-          altVideo.src = url;
-          altVideo.style.display = 'block';
-          mjpegImg.style.display = 'none';
-          await altVideo.play().catch(() => {/* user gesture may be required */});
-          setBadge2('Video');
-          addLog('Opened video stream (MP4/HLS).');
-        }
-      } catch (e) {
-        setBadge2('Error');
-        addLog('Fallback open error: ' + e.message);
-        alert('Could not open stream. If this is RTSP, use the USB Camera app to convert it to HTTP MJPEG/HLS.');
-      }
+    // Add a “Stay awake” toggle next to the buttons
+    (function addStayAwakeToggle() {
+      const parent = btnOpenFallback.parentElement;
+      const wrap = document.createElement('label');
+      wrap.className = 'switch';
+      wrap.style.marginLeft = '8px';
+      wrap.innerHTML = `<input id="stayAwake" type="checkbox" /> Stay awake`;
+      parent.appendChild(wrap);
+      const stay = document.getElementById('stayAwake');
+      stay.addEventListener('change', async () => {
+        mjpegState.stayAwake = stay.checked;
+        if (stay.checked) await requestWakeLock(); else await releaseWakeLock();
+      });
+    })();
+
+    // Release wake lock on visibility change
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseWakeLock(); else requestWakeLock();
     });
 
-    // Initial notes + gentle permission nudge
-    (async function init() {
-      addLog('Tip: On Android, browsers may not enumerate USB UVC cameras. If yours does not appear, use the Fallback Stream with the "USB Camera" app.');
-      // Don’t auto-prompt permission; leave it for explicit user action.
+    // Initial note
+    (function init() {
+      addLog('Tip: On Android, browsers often cannot enumerate USB UVC cameras. Use the fallback stream (localhost:8081/video) from the USB Camera app.');
     })();
   </script>
 </body>
