@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Annotator — Card Builder (Sidebar descriptions, exact CSV)</title>
+<title>Annotator — Card Builder (Empty start, Sidebar descriptions, Exact CSV)</title>
 <style>
   :root{
     --bg:#0b0d12; --panel:#121622; --ink:#eef2ff;
@@ -11,11 +11,10 @@
     --shadow: 0 10px 30px rgba(0,0,0,.35);
   }
   *{ box-sizing:border-box; }
-  body{ margin:0; background:linear-gradient(180deg,#0a0c12,#0d1120 60%); color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+  body{ margin:0; background:linear-gradient(180deg,#0a0c12,#0d1120 60%); color:#eef2ff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
   header{ display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid #1a2033; position:sticky; top:0; background:rgba(10,12,18,.7); backdrop-filter: blur(10px); z-index:10;}
   h1{ font-size:15px; margin:0; font-weight:700; color:#dbeafe; }
 
-  /* Two columns: sidebar + board */
   .row{ display:grid; grid-template-columns: 240px 1fr; gap:12px; padding:12px; }
   .panel{ background:#121622; border:1px solid #1a2033; border-radius:14px; box-shadow:var(--shadow); }
   .panel header{ padding:10px 12px; font-size:12px; font-weight:700; color:#c7d2fe; border-bottom:1px solid #1a2033; }
@@ -36,6 +35,10 @@
 
   /* Board + columns */
   .card{ display:flex; gap:10px; padding:10px; min-height:520px; overflow:auto; }
+  .empty-board{
+    display:flex; align-items:center; justify-content:center; width:100%; min-height:380px;
+    border:2px dashed #33406a; border-radius:12px; color:#93c5fd; font-size:13px; text-align:center; padding:24px;
+  }
   .col{ background:#0c1222; border:1px solid #1e2740; border-radius:12px; width:300px; flex:0 0 300px; display:flex; flex-direction:column; }
   .col-header{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border-bottom:1px solid #1e2740; cursor:grab; }
   .col-title{ font-weight:800; color:#e5e7eb; font-size:13px; outline:none; }
@@ -128,9 +131,9 @@ const csvEscape = (v) => {
   return (/[",\n]/.test(s)) ? `"${s.replace(/"/g,'""')}"` : s;
 };
 
-/* ---------- Init ---------- */
+/* ---------- Init (start empty if no saved layout) ---------- */
 document.addEventListener('DOMContentLoaded', () => {
-  if (!loadFromLocal(true)) { addColumn('TSI Speed'); addColumn('DMS'); addColumn('iACC'); addColumn('ACC'); }
+  loadFromLocal(true);   // if present, loads; otherwise keep empty
   renderAll();
   wireSidebar();
 });
@@ -151,8 +154,8 @@ function wireSidebar(){
 
 /* ---------- Columns ---------- */
 function addColumn(name){
-  columns.push({ id:'col_'+crypto.randomUUID().slice(0,8), name });
-  saveToLocal();
+  columns.push({ id:'col_'+crypto.randomUUID().slice(0,8), name: name.trim() || 'Unnamed' });
+  saveToLocal(); renderAll();
 }
 function renderAll(){ renderColumns(); renderItems(); }
 
@@ -160,6 +163,18 @@ function renderAll(){ renderColumns(); renderItems(); }
 let draggingColId = null;
 function renderColumns(){
   card.innerHTML = '';
+
+  if (columns.length === 0){
+    const empty = document.createElement('div');
+    empty.className = 'empty-board';
+    empty.innerHTML = `
+      The board is empty.<br><br>
+      Click <b>“➕ Add column”</b> to create your first group,<br>
+      then drag a color from the sidebar into the new column.`;
+    card.appendChild(empty);
+    return;
+  }
+
   columns.forEach((c)=>{
     const col = document.createElement('div');
     col.className = 'col';
@@ -180,14 +195,14 @@ function renderColumns(){
       renderItems(); saveToLocal();
     });
     head.querySelector('[data-act="add"]').addEventListener('click', ()=>{
-      const nm = prompt('New column name:', 'New Column');
-      if (nm) { addColumn(nm.trim()||'Unnamed'); renderAll(); }
+      const nm = prompt('New column name:', '');
+      if (nm !== null) addColumn(nm);
     });
     head.querySelector('[data-act="del"]').addEventListener('click', ()=>{
       if (!confirm('Delete this column and its items?')) return;
       items = items.filter(it=>it.colId!==c.id);
       columns = columns.filter(x=>x.id!==c.id);
-      renderAll(); saveToLocal();
+      saveToLocal(); renderAll();
     });
 
     head.addEventListener('dragstart', e=>{
@@ -213,14 +228,13 @@ function renderColumns(){
       const rect = col.getBoundingClientRect();
       const insertAfter = e.clientX > rect.left + rect.width/2;
       columns.splice(insertAfter ? toIdx+1 : toIdx, 0, moved);
-      renderAll(); saveToLocal();
+      saveToLocal(); renderAll();
     });
 
     const drop = document.createElement('div');
     drop.className = 'drop';
     drop.dataset.id = c.id;
 
-    // Accept color drops from sidebar
     drop.addEventListener('dragover', e=>{
       if (dragColor) { e.preventDefault(); e.dataTransfer.dropEffect='copy'; }
     });
@@ -246,7 +260,7 @@ function renderColumns(){
 /* ---------- Items (vertical list, reorder within column) ---------- */
 function createItem(colId, color, label){
   items.push({ id:'it_'+crypto.randomUUID().slice(0,8), colId, color, label });
-  renderItems(); saveToLocal();
+  saveToLocal(); renderItems();
 }
 function renderItems(){
   $$('.items').forEach(ul => { ul.innerHTML=''; });
@@ -282,7 +296,7 @@ function renderItems(){
       });
       li.querySelector('.btn-del').addEventListener('click', ()=>{
         items = items.filter(x=>x.id!==it.id);
-        renderItems(); saveToLocal();
+        saveToLocal(); renderItems();
       });
 
       // reorder within same column
@@ -307,7 +321,7 @@ function renderItems(){
           const reordered = siblings.filter(x=>x.id!==dragging.id);
           reordered.splice(toIdx, 0, dragging);
           items = others.concat(reordered);
-          renderItems();
+          saveToLocal(); renderItems();
         }
       });
 
@@ -334,10 +348,9 @@ function downloadCSV(){
   const cssMap = { red:'redButton', green:'greenButton', orange:'orangeButton', blue:'blueButton' };
 
   columns.forEach((c)=>{
-    // column header row
+    // Column header row
     rows.push([c.name, c.name, 'greyButton', c.name, false]);
-
-    // item rows in current order
+    // Items
     const colItems = items.filter(it=>it.colId===c.id);
     colItems.forEach((it)=>{
       const cssClass = cssMap[it.color] || 'blueButton';
@@ -359,9 +372,9 @@ function downloadCSV(){
 }
 
 /* ---------- Save / Load / Controls ---------- */
-function saveToLocal(){ localStorage.setItem('cardLayout_v5', JSON.stringify({columns, items})); }
+function saveToLocal(){ localStorage.setItem('cardLayout_v6', JSON.stringify({columns, items})); }
 function loadFromLocal(init=false){
-  const raw = localStorage.getItem('cardLayout_v5');
+  const raw = localStorage.getItem('cardLayout_v6');
   if (!raw) return false;
   try{
     const obj = JSON.parse(raw);
@@ -371,16 +384,15 @@ function loadFromLocal(init=false){
 }
 function clearAll(){
   if (!confirm('Clear layout and local storage?')) return;
-  localStorage.removeItem('cardLayout_v5');
+  localStorage.removeItem('cardLayout_v6');
   columns=[]; items=[];
-  addColumn('TSI Speed'); addColumn('DMS'); addColumn('iACC'); addColumn('ACC');
   renderAll();
 }
 
 /* ---------- Header buttons ---------- */
 $('#addColumnBtn').addEventListener('click', ()=>{
-  const nm = prompt('Column name:', 'New Column');
-  if (nm) { addColumn(nm.trim()||'Unnamed'); renderAll(); }
+  const nm = prompt('Column name:', '');
+  if (nm !== null) addColumn(nm);
 });
 $('#downloadBtn').addEventListener('click', downloadCSV);
 $('#saveBtn').addEventListener('click', saveToLocal);
