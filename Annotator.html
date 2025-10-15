@@ -679,6 +679,21 @@ function renderMetaForm(questions) {
     const buttonGroups = document.getElementById('buttonGroups');
     const micLamp   = document.getElementById('micLamp');
     const textBox   = document.getElementById('textBox');
+
+    // Clear any previous pending snapshot when the user focuses the box
+textBox.addEventListener('focus', () => {
+  pendingSnapshotDataUrl = null;
+});
+
+// Take a snapshot as soon as the user begins typing a non-whitespace char.
+// Only capture once per entry (until they submit or focus again).
+textBox.addEventListener('input', () => {
+  if (pendingSnapshotDataUrl) return;                   // already captured for this entry
+  if (textBox.value.trim().length === 0) return;        // ignore blanks
+  const snap = captureSnapshotFromCamera();
+  if (snap) pendingSnapshotDataUrl = snap;
+});
+    
     const countryDistances  = {};
     const weatherDistances = {};
     const phaseDistances = {};
@@ -704,6 +719,8 @@ function renderMetaForm(questions) {
     let bridgeStreak = 0;
     let corrections = {};
     let lastUploadTime = 0;
+
+    let pendingSnapshotDataUrl = null; // snapshot taken when user starts typing
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -1411,6 +1428,26 @@ function updateStatsTable () {
     function getWeather(city){fetch(`https://api.weatherapi.com/v1/current.json?key=ad8caecea06c43d1912181938230407&q=${encodeURIComponent(city)}`)
         .then(r=>r.json()).then(d=>{const iconPath=d.current.condition.icon||'';const iconUrl=iconPath.startsWith('//')?'https:'+iconPath:iconPath;iconEl.src=iconUrl;iconEl.alt=d.current.condition.text||'weather';tempEl.textContent=`Temp: ${d.current.temp_c}°C`;}).catch(err=>{tempEl.textContent='Temp: N/A';console.error('Weather error',err);});}
 
+  function captureSnapshotFromCamera() {
+  try {
+    const video  = document.getElementById('camera');
+    const canvas = document.getElementById('cameraCanvas');
+    if (!video || !canvas) return null;
+
+    // Ensure camera is actually streaming
+    if (!video.videoWidth || !video.videoHeight) return null;
+
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.8); // ~80% quality
+  } catch (e) {
+    console.warn('captureSnapshotFromCamera failed', e);
+    return null;
+  }
+}
+    
   function logButton(name, isRed) {
     // ① Timestamp
     const dt   = new Date();
@@ -1437,24 +1474,8 @@ function updateStatsTable () {
     comment = applyCorrections(comment);
 
     // ⑥ Optional camera snapshot
-    let camDataUrl = null;
-    try {
-const video  = document.getElementById('camera');
-const canvas = document.getElementById('cameraCanvas');
-const ctx    = canvas.getContext('2d');
-
-// 1) Match canvas to the video’s actual dimensions
-canvas.width  = video.videoWidth  || 640;   // fallback if not ready
-canvas.height = video.videoHeight || 480;
-
-// 2) Draw full-resolution frame
-ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-// 3) Export at 80% JPEG quality
-camDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-    } catch (e) {
-      console.warn('Camera frame failed', e);
-    }
+// Prefer the early snapshot captured when typing; fall back to capturing now.
+let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
 
     // ⑦ Push into the log array
     logTable.push([
@@ -1499,6 +1520,8 @@ camDataUrl = canvas.toDataURL('image/jpeg', 0.8);
 
     // ⑩ Clear the textbox
     document.getElementById('textBox').value = '';
+    // reset the cached early snapshot for the next entry
+    pendingSnapshotDataUrl = null;
   }
 
 function displayCameraTable() {
@@ -2360,6 +2383,7 @@ uploadNowBtn.addEventListener('click', () => {
   </script>
 </body>
 </html>
+
 
 
 
