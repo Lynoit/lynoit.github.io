@@ -865,36 +865,10 @@ textBox.addEventListener('input', () => {
   updateDateTime();
   setInterval(updateDateTime, 1000);
 
-    // ─── schedule 30 sec samples for (Timestamp, Lat, Lon, Distance, Speed, Maxspeed) ───
+// ─── periodic sampling (timer) ───
 setInterval(() => {
-  // Only record if we have at least one GPS fix
-  if (!lastPos) return;
-
-  // Build a new row
-  const rowNo       = samplingTable.length + 1;
-  const timestamp   = new Date().toISOString();          // ISO format, e.g. "2025-06-02T14:08:30.123Z"
-  const latitude    = lastPos.lat;
-  const longitude   = lastPos.lon;
-  // totalDist is in meters; convert to kilometers with 3 decimals
-  const distanceKm  = (totalDist / 1000).toFixed(3);
-  // lastSpeedKmh was stored above
-  const speed       = lastSpeedKmh.toFixed(1);
-  // maxSpeed is already a Number; record with 1 decimal
-  const maxSpd      = maxSpeed.toFixed(1);
-  const legalSpd = (currentLegalSpeed ?? '');
-
-  // Push into our hidden sampling table
-  samplingTable.push({
-    no:        rowNo,
-    timestamp: timestamp,
-    lat:       latitude,
-    lon:       longitude,
-    distance:  distanceKm,
-    speed:     speed,
-    maxspeed:  maxSpd,
-    legalSpeed: legalSpd
-  });
-}, 10 * 1000);  // every 30 000 ms
+  recordSample('');   // timer sample (no issue text)
+}, 30 * 1000);        // or 10*1000 if you prefer
     
   navigator.geolocation.watchPosition(showPosition, showError, {
     enableHighAccuracy: true,
@@ -1463,6 +1437,32 @@ function updateStatsTable () {
     return null;
   }
 }
+
+    function recordSample(issueText = '') {
+  // only record if we have at least one GPS fix
+  if (!lastPos) return;
+
+  const rowNo      = samplingTable.length + 1;
+  const timestamp  = new Date().toISOString();
+  const latitude   = lastPos.lat;
+  const longitude  = lastPos.lon;
+  const distanceKm = (totalDist / 1000).toFixed(3);
+  const speed      = lastSpeedKmh.toFixed(1);
+  const maxSpd     = maxSpeed.toFixed(1);
+  const legalSpd   = (currentLegalSpeed ?? '');
+
+  samplingTable.push({
+    no:        rowNo,
+    timestamp: timestamp,
+    lat:       latitude,
+    lon:       longitude,
+    distance:  distanceKm,
+    speed:     speed,
+    maxspeed:  maxSpd,
+    legalSpeed: legalSpd,
+    issue:     issueText || ''   // ← Column H
+  });
+}
     
   function logButton(name, isRed) {
     // ① Timestamp
@@ -1500,6 +1500,7 @@ let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
       lat, lon, dist, spd, rt,
       comment, camDataUrl
     ]);
+    recordSample(name);
     displayLogTable();        // renders Issue list only
     renderLatestSnapshots(5); // renders only the latest 5 snapshots
 
@@ -1962,28 +1963,26 @@ async function uploadCSVtoAzure(tableId) {
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-  // 3. Build and append the hidden "Sampling" sheet
-  // 3.1) First row = headers
-  const samplingAoA = [
-    ["No", "Timestamp", "Latitude", "Longitude", "Distance (km)", "Speed (km/h)", "Legal Speed (km/h)"]
-  ];
+// 3. Build and append the hidden "Sampling" sheet
+const samplingAoA = [
+  ["No", "Timestamp", "Latitude", "Longitude", "Distance (km)", "Speed (km/h)", "Legal Speed (km/h)", "Issue"] // ← H
+];
 
-  // 3.2) One row per entry in samplingTable (each entry must have .legalSpeed)
-  samplingTable.forEach(entry => {
-    samplingAoA.push([
-      entry.no,
-      entry.timestamp,
-      entry.lat,
-      entry.lon,
-      entry.distance,
-      entry.speed,
-      entry.legalSpeed
-    ]);
-  });
+samplingTable.forEach(entry => {
+  samplingAoA.push([
+    entry.no,
+    entry.timestamp,
+    entry.lat,
+    entry.lon,
+    entry.distance,
+    entry.speed,
+    entry.legalSpeed,
+    entry.issue || ''  // ← H
+  ]);
+});
 
-  // 3.3) Convert that array‐of‐arrays into a worksheet and append as "Sampling"
-  const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
-  XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
+const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
+XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
   // 4. Generate the binary workbook
   const wbout = XLSX.write(wb, {
@@ -2399,6 +2398,7 @@ uploadNowBtn.addEventListener('click', () => {
   </script>
 </body>
 </html>
+
 
 
 
