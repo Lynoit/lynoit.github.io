@@ -717,7 +717,64 @@ function renderSummary(container, parsed){
     g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
   }
 
-    // ==== LEGEND (unchanged, now appears after both charts)
+  // ==== NEW: CC timeline bar chart (INSIDE this card, before the legend)
+  const ccRows = rowsRaw
+    .filter(r => /^CC\b/i.test(r.base) && r.date && r.avg != null)
+    .sort((a,b) => (a.date || '').localeCompare(b.date || ''));
+
+  if (ccRows.length){
+    card.append('div').attr('class','small')
+      .style('margin','10px 0 4px')
+      .text('CC — Average per 1000 km by test date (bar color = score)');
+
+    const yLabels2 = ccRows.map(d => `${d.base}  (${d.date})`);
+    const tmp2 = d3.select('body').append('svg')
+      .attr('width',0).attr('height',0)
+      .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+    let labelW2 = 0; yLabels2.forEach(t=>{
+      const n=tmp2.append('text').attr('font-size',12).text(t).node();
+      labelW2=Math.max(labelW2,n.getComputedTextLength());
+    });
+    tmp2.remove();
+
+    const cardW2 = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+    const cw2 = Math.max(560, Math.min(1000, cardW2));
+    const leftPad2 = Math.min(Math.floor(cw2 * 0.48), Math.max(180, Math.ceil(labelW2)+14));
+    const rightPad2 = 16, topPad2 = 8, barH2 = 22, gap2 = 6;
+
+    const svg2 = card.append('svg')
+      .attr('width', cw2)
+      .attr('height', topPad2 + ccRows.length * (barH2 + gap2) + 34)
+      .style('display','block').style('margin','0 auto 6px');
+    const g2 = svg2.append('g').attr('transform', `translate(0, ${topPad2})`);
+    const maxAvg2 = d3.max(ccRows, d => Math.min(1000, d.avg));
+    const x2 = d3.scaleLinear().domain([0, Math.max(1, maxAvg2)]).range([leftPad2, cw2 - rightPad2]);
+
+    ccRows.forEach((d,i)=> d._y = i * (barH2 + gap2));
+
+    g2.selectAll('.ylabel2').data(ccRows).enter().append('text')
+      .attr('x', leftPad2 - 10).attr('y', d => d._y + barH2/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .text((d,i)=> yLabels2[i]).append('title').text(d => `${d.base} — ${d.date}`);
+
+    g2.selectAll('.bar2').data(ccRows).enter().append('rect')
+      .attr('x', x2(0)).attr('y', d => d._y)
+      .attr('width', d => x2(Math.min(1000, d.avg)) - x2(0))
+      .attr('height', barH2)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
+      .append('title').text(d => `Score ${Math.trunc(d.score)}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+
+    g2.selectAll('.val2').data(ccRows).enter().append('text')
+      .attr('x', d => x2(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH2/2)
+      .attr('dominant-baseline','middle').attr('font-size', 12).text(d => d.avg.toFixed(1));
+
+    const axisY2 = ccRows.length * (barH2 + gap2);
+    g2.append('g').attr('transform', `translate(0, ${axisY2})`).call(d3.axisBottom(x2).ticks(6));
+  }
+
+  renderCCTimelineInSummary(card, parsed);
+
+  // ==== LEGEND (unchanged, now appears after both charts)
   const ranges = scoreRangeLabels(getThresholds());
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
@@ -1493,18 +1550,30 @@ function renderCharts(parsedFull){
   }
 
   const ext = (CURRENT_MODE === MODES.EXTERNAL);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
 
-  // ⬇️ REMOVE the old stand-alone CC timeline card
-  // renderCCTimeline(container, parsed);
-  // renderCCTimelineCard(container, parsed);
-  // renderCCTimelineBar(container, parsed);
+  // 1) Summary
+  if (!ext || EXTERNAL_CARD_VISIBILITY.summary){
+    renderSummary(container, parsed);
+  }
 
-  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
+  // 2) CC timeline FIRST, then CC KPI×Software matrix (CC-only)
+  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix){
+    if (typeof renderCCTimeline === 'function'){
+      renderCCTimeline(container, parsed);   // <-- timeline comes BEFORE the matrix
+    }
+    renderCCMatrix(container, parsed);       // KPI × Software matrix (CC-only) + heatmap
+  }
+
+  // 3) Non-CC + latest CC matrix (+ its heatmap is called inside)
+  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC){
+    renderNonCCPlusLatestCCMatrix(container, parsed);
+  }
+
+  // 4) Per-software radar cards
+  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards){
+    renderSoftwareCards(container, parsed);
+  }
 }
-
 
 /* ==================== Loader ==================== */
 async function loadCsvAndRender(){
