@@ -512,6 +512,7 @@ function nc(url){
       }
       return 0;
     }
+    
     // Reads "Statistics" sheet → row/col labeled "Total test distance" (e.g. "518.6 km")
 function extractTotalDistanceKmFromStatistics(wb){
   const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
@@ -561,6 +562,29 @@ function extractTotalDistanceKmFromStatistics(wb){
   return null;
 }
 
+// Extract [lat, lon] points from the first non-Sampling sheet that has lat/lon
+function extractIssueCoordsFast(wb){
+  const out = [];
+  for (const name of wb.SheetNames){
+    if (name.toLowerCase() === 'sampling') continue;
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, blankrows: false });
+    if (rows.length < 2) continue;
+
+    const hdrs = rows[0].map(h => String(h ?? '').toLowerCase());
+    const latIdx = hdrs.findIndex(h => h.includes('lat'));
+    const lonIdx = hdrs.findIndex(h => h.includes('lon') || h.includes('lng') || h.includes('long'));
+    if (latIdx < 0 || lonIdx < 0) continue;
+
+    for (let r = 1; r < rows.length; r++){
+      const lat = parseFloat(rows[r][latIdx]);
+      const lon = parseFloat(rows[r][lonIdx]);
+      if (!isNaN(lat) && !isNaN(lon)) out.push([lat, lon]);
+    }
+    break; // first sheet with coords is enough
+  }
+  return out;
+}
+    
 // Uses loadWorkbook(filename) → Promise<{ wb, buf }>
 async function fetchSessionSummary(filename) {
   if (summaryCache.has(filename)) return summaryCache.get(filename);
@@ -1631,107 +1655,136 @@ function ensureActiveBadgeUpdater(){
     }
 
     // ---------- EU Mileage Map (NEW) ----------
-    function buildEUMileageMap(files){
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+function buildEUMileageMap(files){
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(withDates.map(x =>
-        fetchSessionSummary(x.filename)
-          .then(s => ({...x, ...s}))
-          .then(r => {
-            if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-            return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
-          })
-      )).then(rows => {
-        const valid = rows.filter(Boolean);
-        const agg = new Map(); // country -> total mileage (km)
+  return Promise.all(withDates.map(x =>
+    fetchSessionSummary(x.filename)
+      .then(s => ({...x, ...s}))
+      .then(r => {
+        if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+        return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+      })
+  )).then(async rows => {
+    const valid = rows.filter(Boolean);
+    const agg = new Map();           // country -> total mileage (km)
+    const issuePoints = [];          // all issue coordinates across valid sessions
 
-        valid.forEach(r => {
-          const euCountries = Array.isArray(r.countries)
-            ? r.countries.map(canonicalEU).filter(Boolean)
-            : [];
-          if (!euCountries.length) return;
-
-          // Split session mileage evenly across encountered EU countries
-          const share = r.mileageKm / euCountries.length;
-          euCountries.forEach(cty => {
-            agg.set(cty, (agg.get(cty) || 0) + share);
-          });
-        });
-
-        renderEUMileageMap(agg);
-      });
-    }
-
-    function renderEUMileageMap(agg){
-      const hostId = 'eu-mileage-map';
-      const container = document.getElementById(hostId);
-      if (!container) return;
-
-      // Reset container
-      container.innerHTML = '';
-
-      const h = Math.round(container.getBoundingClientRect().height);
-      container.style.height = h + 'px';
-
-      // If no data, show a message and bail
-      const entries = Array.from(agg.entries()).filter(([,km]) => km > 0);
-      if (!entries.length){
-        container.outerHTML = `<div id="${hostId}" class="eu-mileage-map" style="display:flex;align-items:center;justify-content:center;color:#666;">No EU mileage data available yet.</div>`;
-        return;
+    // Gather mileage + issue coordinates
+    for (const r of valid){
+      const euCountries = Array.isArray(r.countries)
+        ? r.countries.map(canonicalEU).filter(Boolean)
+        : [];
+      if (euCountries.length){
+        const share = r.mileageKm / euCountries.length;
+        euCountries.forEach(cty => agg.set(cty, (agg.get(cty)||0) + share));
       }
 
-      const map = L.map(container, { attributionControl:true, zoomControl:true });
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(map);
-
-      // Compute bounds from centroids we will plot
-      const latlngs = [];
-      const maxKm = Math.max(...entries.map(([,km]) => km));
-      const minR = 6, maxR = 30;
-
-      entries.forEach(([country, km]) => {
-        const [lat, lon] = EU_CENTROIDS[country] || [null, null];
-        if (lat == null || lon == null) return;
-        latlngs.push([lat, lon]);
-
-        // radius in px; area ~ mileage
-        const r = (function(){
-          if (maxKm <= 0) return minR;
-          const f = Math.sqrt(km / maxKm); // sqrt for perceptual scaling
-          return Math.round(minR + f * (maxR - minR));
-        })();
-
-        const marker = L.circleMarker([lat,lon], {
-          radius: r,
-          color: '#900',
-          weight: 1,
-          fillColor: '#d00',
-          fillOpacity: 0.7
-        }).addTo(map);
-
-        marker.bindTooltip(`${Math.round(km)} km`, {
-          permanent: true,
-          direction: 'center',
-          className: 'eu-mileage-label'
-        });
-      });
-
-      if (latlngs.length){
-        map.fitBounds(latlngs, { padding:[20,20] });
-      } else {
-        // fallback: view central EU
-        map.setView([54,15], 4);
-      }
-
-      // ensure proper sizing
-      map.whenReady(() => map.invalidateSize());
-      // also after a tick in case of CSS transitions/layout
-      setTimeout(() => map.invalidateSize(), 100);
+      // Pull issue points from the workbook (fast scan)
+      try{
+        const { wb } = await loadWorkbook(r.filename);
+        const pts = extractIssueCoordsFast(wb);
+        if (pts && pts.length) issuePoints.push(...pts);
+      }catch(e){ /* ignore */ }
     }
+
+    renderEUMileageMap(agg, issuePoints);
+  });
+}
+
+function renderEUMileageMap(agg, issuePoints = []){
+  const hostId = 'eu-mileage-map';
+  const container = document.getElementById(hostId);
+  if (!container) return;
+
+  container.innerHTML = '';
+  const h = Math.round(container.getBoundingClientRect().height);
+  container.style.height = h + 'px';
+
+  const entries = Array.from(agg.entries()).filter(([,km]) => km > 0);
+  if (!entries.length && (!issuePoints || !issuePoints.length)){
+    container.outerHTML = `<div id="${hostId}" class="eu-mileage-map" style="display:flex;align-items:center;justify-content:center;color:#666;">No EU mileage data available yet.</div>`;
+    return;
+  }
+
+  const map = L.map(container, { attributionControl:true, zoomControl:true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  // --- Black trace layer (tiny dots) ---
+  if (issuePoints && issuePoints.length){
+    // keep performance sane on huge datasets
+    const MAX_POINTS = 25000;
+    const stride = Math.max(1, Math.ceil(issuePoints.length / MAX_POINTS));
+    const dots = [];
+    for (let i = 0; i < issuePoints.length; i += stride){
+      const p = issuePoints[i];
+      if (!p || p.length !== 2) continue;
+      dots.push(L.circleMarker(p, {
+        radius: 1.5,
+        color: '#000',
+        weight: 0,
+        fillColor: '#000',
+        fillOpacity: 0.45
+      }));
+    }
+    L.layerGroup(dots).addTo(map);
+  }
+
+  // --- Country bubbles (same as before) ---
+  const latlngs = [];
+  const maxKm = entries.length ? Math.max(...entries.map(([,km]) => km)) : 0;
+  const minR = 6, maxR = 30;
+
+  entries.forEach(([country, km]) => {
+    const [lat, lon] = EU_CENTROIDS[country] || [null, null];
+    if (lat == null || lon == null) return;
+    latlngs.push([lat, lon]);
+
+    const r = (function(){
+      if (maxKm <= 0) return minR;
+      const f = Math.sqrt(km / maxKm);
+      return Math.round(minR + f * (maxR - minR));
+    })();
+
+    const marker = L.circleMarker([lat,lon], {
+      radius: r,
+      color: '#900',
+      weight: 1,
+      fillColor: '#d00',
+      fillOpacity: 0.7
+    }).addTo(map);
+
+    marker.bindTooltip(`${Math.round(km)} km`, {
+      permanent: true,
+      direction: 'center',
+      className: 'eu-mileage-label'
+    });
+  });
+
+  const allBounds = latlngs.slice();
+  if (issuePoints && issuePoints.length){
+    // help fit view even if no country bubbles
+    const MAX_BOUNDS_SAMPLES = 2000;
+    const jump = Math.max(1, Math.ceil(issuePoints.length / MAX_BOUNDS_SAMPLES));
+    for (let i = 0; i < issuePoints.length; i += jump){
+      allBounds.push(issuePoints[i]);
+    }
+  }
+
+  if (allBounds.length){
+    map.fitBounds(allBounds, { padding:[20,20] });
+  }else{
+    map.setView([54,15], 4);
+  }
+
+  map.whenReady(() => map.invalidateSize());
+  setTimeout(() => map.invalidateSize(), 100);
+}
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
 function buildLatestRoutePreviews(files){
@@ -2288,6 +2341,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
