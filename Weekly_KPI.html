@@ -241,6 +241,8 @@ function parseTable(text){
   return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
 }
 
+  
+
 /* ===== modal & fetch utils ===== */
 async function readTextOrNull(path){
   try{
@@ -344,6 +346,120 @@ function scoreRangeLabels(T){
   lab.push('< ' + (Number.isInteger(T[8])?T[8]:T[8].toFixed(2)) + (T[9]===0?' (incl. 0)':''));
   return lab;
 }
+
+// CC — Average per 1000 km by test date (bar color = score)
+function renderCCTimeline(container, parsed){
+  const T = getThresholds();
+
+  // CC softwares that have a date
+  const cc = (parsed.software||[]).filter(sw => /^CC\b/i.test(sw.base) && sw.date);
+  if (!cc.length) return;
+
+  // Build rows: average per 1000 km (÷ total KPIs, same logic as Summary)
+  const rows = cc.map(sw => {
+    const swLabel = sw.label;
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
+    const sum  = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT>0) ? TOTAL_KPI_COUNT : vals.length;
+    const avg  = denom ? (sum/denom) : null;
+    const score = avg==null ? null : scoreFromAvg(avg, T);
+    return { date: sw.date, label: swLabel, avg, score };
+  }).sort((a,b)=> a.date.localeCompare(b.date));
+
+  // Running average (ignores nulls)
+  const running = [];
+  let s = 0, n = 0;
+  rows.forEach(r => { if (r.avg!=null){ s+=r.avg; n++; } running.push(n ? s/n : null); });
+
+  const card = container.append('div').attr('class','chart-card');
+  card.append('div')
+      .attr('class','matrix-sub')
+      .style('text-align','left')
+      .text('CC — Average per 1000 km by test date (bar color = score)');
+
+  const w = 980, h = 260;
+  const m = {top:26, right:64, bottom:64, left:54};
+  const svg = card.append('svg').attr('width', w).attr('height', h);
+
+  const x = d3.scaleBand()
+    .domain(rows.map(r=>r.date))
+    .range([m.left, w - m.right])
+    .padding(0.22);
+
+  const maxY = d3.max(rows, d => d.avg==null ? 0 : d.avg) || 1;
+  const y = d3.scaleLinear()
+    .domain([0, Math.max(1, maxY*1.25)]).nice()
+    .range([h - m.bottom, m.top]);
+
+  // axes
+  svg.append('g')
+    .attr('transform', `translate(0,${h - m.bottom})`)
+    .call(d3.axisBottom(x).tickSizeOuter(0))
+    .selectAll('text')
+    .attr('transform','rotate(-35)')
+    .style('text-anchor','end');
+
+  svg.append('g')
+    .attr('transform', `translate(${m.left},0)`)
+    .call(d3.axisLeft(y).ticks(6));
+
+  // bars
+  svg.selectAll('.bar')
+    .data(rows)
+    .enter().append('rect')
+      .attr('class','bar')
+      .attr('x', d => x(d.date))
+      .attr('y', d => y(d.avg || 0))
+      .attr('width', x.bandwidth())
+      .attr('height', d => d.avg==null ? 0 : (y(0) - y(d.avg)))
+      .attr('fill', d => d.score==null ? '#eee' : scoreColors[d.score-1])
+      .attr('fill-opacity', 0.9)
+    .append('title')
+      .text(d => `${d.label}\n${d.date}\nAverage: ${d.avg==null?'n/a':d.avg.toFixed(1)}\nScore: ${d.score??'n/a'}`);
+
+  // value label (bold) and SW label inside bar
+  svg.selectAll('.val')
+    .data(rows).enter().append('text')
+      .attr('class','val')
+      .text(d => d.avg==null ? 'n/a' : d.avg.toFixed(1))
+      .attr('x', d => x(d.date) + x.bandwidth()/2)
+      .attr('y', d => y((d.avg||0)) - 6)
+      .attr('text-anchor','middle')
+      .attr('font-weight', 800);
+
+  svg.selectAll('.lab')
+    .data(rows).enter().append('text')
+      .attr('class','lab')
+      .text(d => d.label)
+      .attr('x', d => x(d.date) + x.bandwidth()/2)
+      .attr('y', d => y((d.avg||0)) + 16)
+      .attr('text-anchor','middle')
+      .attr('font-size', 11);
+
+  // dashed running average line with label at end
+  const line = d3.line()
+    .defined(v => v!=null)
+    .x((v,i) => x(rows[i].date) + x.bandwidth()/2)
+    .y(v => y(v));
+
+  svg.append('path')
+    .datum(running)
+    .attr('fill','none')
+    .attr('stroke','#444')
+    .attr('stroke-dasharray','6,5')
+    .attr('stroke-width',2)
+    .attr('d', line);
+
+  if (running.length && running[running.length-1]!=null){
+    svg.append('text')
+      .attr('x', x(rows[rows.length-1].date) + x.bandwidth()/2 + 8)
+      .attr('y', y(running[running.length-1]) - 6)
+      .attr('font-size', 12)
+      .attr('fill', '#333')
+      .text(`Running average: ${running[running.length-1].toFixed(1)}`);
+  }
+}
+  
 function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
@@ -1226,10 +1342,32 @@ function renderCharts(parsedFull){
   }
 
   const ext = (CURRENT_MODE === MODES.EXTERNAL);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
+
+  // Summary
+  if (!ext || EXTERNAL_CARD_VISIBILITY.summary) {
+    renderSummary(container, parsed);
+  }
+
+  // CC-only table + heatmap, then CC timeline (bar chart)
+  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix) {
+    renderCCMatrix(container, parsed);
+    // NEW: draw the CC timeline bar chart
+    if (typeof renderCCTimeline === 'function') {
+      renderCCTimeline(container, parsed);
+    } else {
+      console.warn('renderCCTimeline is not defined. Add that function to show the CC timeline chart.');
+    }
+  }
+
+  // Non-CC + latest CC table (+ its heatmap inside the function)
+  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC) {
+    renderNonCCPlusLatestCCMatrix(container, parsed);
+  }
+
+  // Per-software radar cards
+  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards) {
+    renderSoftwareCards(container, parsed);
+  }
 }
 
 /* ==================== Loader ==================== */
