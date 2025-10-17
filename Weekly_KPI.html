@@ -464,6 +464,9 @@ function renderSummary(container, parsed){
   const T = getThresholds();
   if (!parsed || !parsed.software || !parsed.software.length) return;
 
+  const scoreText = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+
+  // Build per-software summary rows
   const rowsRaw = parsed.software.map(sw => {
     const swLabel = sw.label;
     const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
@@ -473,11 +476,21 @@ function renderSummary(container, parsed){
     const score = avg == null ? null : scoreFromAvg(avg, T);
     const note = (parsed.releaseNotes?.[swLabel] || '').trim();
     const wx = (sw.date && parsed.weatherByDate) ? parsed.weatherByDate[sw.date] : null;
-    return { sw: swLabel, date: sw.date, avg, score, text: score==null?'n/a': ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'][score-1], note, weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—' };
+    return {
+      sw: swLabel,
+      base: sw.base,
+      date: sw.date,
+      avg,
+      score,
+      text: score==null ? 'n/a' : scoreText[score-1],
+      note,
+      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
+    };
   });
 
   const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
+  // Sort: higher score first, then lower avg
   const rows = rowsRaw.slice().sort((a,b)=>{
     const sa = a.score ?? -1, sb = b.score ?? -1;
     if (sa !== sb) return sb - sa;
@@ -488,12 +501,15 @@ function renderSummary(container, parsed){
   });
 
   if (!rows.length) return;
-  const chartData = rows.filter(r => r.avg != null);
 
+  // ==== CARD
   const card = container.append('div').attr('class', 'chart-card summary-card');
-  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL) ? 'Summary Weekly KPI — External (whitelisted)' : 'Summary Weekly KPI';
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL)
+    ? 'Summary Weekly KPI — External (whitelisted)'
+    : 'Summary Weekly KPI';
   card.append('div').attr('class','summary-title').text(modeLabel);
 
+  // ==== TABLE
   const table = card.append('table').attr('class', 'summary-table');
   const theadRow = table.append('thead').append('tr');
   theadRow.append('th').attr('class','col-sw').text('Software');
@@ -507,20 +523,24 @@ function renderSummary(container, parsed){
   const tbody = table.append('tbody');
   rows.forEach(r=>{
     const tr = tbody.append('tr');
-    tr.append('td').attr('class','col-sw').append('span').attr('class','software-cell').attr('title', r.sw).text(r.sw);
+    tr.append('td').attr('class','col-sw').append('span')
+      .attr('class','software-cell').attr('title', r.sw).text(r.sw);
     tr.append('td').attr('class','col-date').text(r.date || '—');
     tr.append('td').attr('class','col-weather').text(r.date ? r.weatherText : '—');
     tr.append('td').attr('class','col-avg').text(r.avg == null ? '—' : r.avg.toFixed(1));
 
     const scoreCell = tr.append('td').attr('class','col-score');
     if (r.score == null){
-      scoreCell.text('—'); tr.append('td').attr('class','col-rating').text('n/a');
+      scoreCell.text('—');
+      tr.append('td').attr('class','col-rating').text('n/a');
     } else {
+      // show integer score
       scoreCell.append('span').attr('class','summary-chip')
         .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`)
-        .text(r.score);
+        .text(String(Math.trunc(r.score)));
       tr.append('td').attr('class','col-rating').text(r.text);
     }
+
     if (hasAnyNotes){
       const tdNote = tr.append('td').attr('class','col-note');
       if (r.note){
@@ -530,19 +550,32 @@ function renderSummary(container, parsed){
     }
   });
 
+  // ==== BAR CHART: Average per 1000 km (existing)
+  const chartData = rows.filter(r => r.avg != null);
   if (chartData.length){
-    card.append('div').attr('class','small').style('margin','8px 0 4px').text('Average per 1000 km (bar color = score)');
-    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    card.append('div').attr('class','small')
+      .style('margin','8px 0 4px')
+      .text('Average per 1000 km (bar color = score)');
 
-    const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
-    let labelW = 0; yLabels.forEach(t=>{ const n=tmp.append('text').attr('font-size',12).text(t).node(); labelW=Math.max(labelW,n.getComputedTextLength()); }); tmp.remove();
+    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    const tmp = d3.select('body').append('svg')
+      .attr('width',0).attr('height',0)
+      .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+    let labelW = 0; yLabels.forEach(t=>{
+      const n=tmp.append('text').attr('font-size',12).text(t).node();
+      labelW=Math.max(labelW,n.getComputedTextLength());
+    });
+    tmp.remove();
 
     const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
     const cw = Math.max(560, Math.min(1000, cardW));
     const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, Math.ceil(labelW)+14));
     const rightPad = 16, topPad = 8, barH = 22, gap = 6;
 
-    const svg = card.append('svg').attr('width', cw).attr('height', topPad + chartData.length * (barH + gap) + 34).style('display','block').style('margin','0 auto 6px');
+    const svg = card.append('svg')
+      .attr('width', cw)
+      .attr('height', topPad + chartData.length * (barH + gap) + 34)
+      .style('display','block').style('margin','0 auto 6px');
     const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
     const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
     const x = d3.scaleLinear().domain([0, Math.max(1, maxAvg)]).range([leftPad, cw - rightPad]);
@@ -550,13 +583,16 @@ function renderSummary(container, parsed){
     chartData.forEach((d,i)=> d._y = i * (barH + gap));
 
     g.selectAll('.ylabel').data(chartData).enter().append('text')
-      .attr('x', leftPad - 10).attr('y', d => d._y + barH/2).attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .attr('x', leftPad - 10).attr('y', d => d._y + barH/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
       .text((d,i)=> yLabels[i]).append('title').text(d => d.sw);
 
     g.selectAll('.bar').data(chartData).enter().append('rect')
-      .attr('x', x(0)).attr('y', d => d._y).attr('width', d => x(Math.min(1000, d.avg)) - x(0)).attr('height', barH)
+      .attr('x', x(0)).attr('y', d => d._y)
+      .attr('width', d => x(Math.min(1000, d.avg)) - x(0))
+      .attr('height', barH)
       .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
-      .append('title').text(d => `Score ${d.score}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+      .append('title').text(d => `Score ${Math.trunc(d.score)}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
 
     g.selectAll('.val').data(chartData).enter().append('text')
       .attr('x', d => x(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH/2)
@@ -566,7 +602,62 @@ function renderSummary(container, parsed){
     g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
   }
 
-  // Legend (kept)
+  // ==== NEW: CC timeline bar chart (INSIDE this card, before the legend)
+  const ccRows = rowsRaw
+    .filter(r => /^CC\b/i.test(r.base) && r.date && r.avg != null)
+    .sort((a,b) => (a.date || '').localeCompare(b.date || ''));
+
+  if (ccRows.length){
+    card.append('div').attr('class','small')
+      .style('margin','10px 0 4px')
+      .text('CC — Average per 1000 km by test date (bar color = score)');
+
+    const yLabels2 = ccRows.map(d => `${d.base}  (${d.date})`);
+    const tmp2 = d3.select('body').append('svg')
+      .attr('width',0).attr('height',0)
+      .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+    let labelW2 = 0; yLabels2.forEach(t=>{
+      const n=tmp2.append('text').attr('font-size',12).text(t).node();
+      labelW2=Math.max(labelW2,n.getComputedTextLength());
+    });
+    tmp2.remove();
+
+    const cardW2 = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+    const cw2 = Math.max(560, Math.min(1000, cardW2));
+    const leftPad2 = Math.min(Math.floor(cw2 * 0.48), Math.max(180, Math.ceil(labelW2)+14));
+    const rightPad2 = 16, topPad2 = 8, barH2 = 22, gap2 = 6;
+
+    const svg2 = card.append('svg')
+      .attr('width', cw2)
+      .attr('height', topPad2 + ccRows.length * (barH2 + gap2) + 34)
+      .style('display','block').style('margin','0 auto 6px');
+    const g2 = svg2.append('g').attr('transform', `translate(0, ${topPad2})`);
+    const maxAvg2 = d3.max(ccRows, d => Math.min(1000, d.avg));
+    const x2 = d3.scaleLinear().domain([0, Math.max(1, maxAvg2)]).range([leftPad2, cw2 - rightPad2]);
+
+    ccRows.forEach((d,i)=> d._y = i * (barH2 + gap2));
+
+    g2.selectAll('.ylabel2').data(ccRows).enter().append('text')
+      .attr('x', leftPad2 - 10).attr('y', d => d._y + barH2/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .text((d,i)=> yLabels2[i]).append('title').text(d => `${d.base} — ${d.date}`);
+
+    g2.selectAll('.bar2').data(ccRows).enter().append('rect')
+      .attr('x', x2(0)).attr('y', d => d._y)
+      .attr('width', d => x2(Math.min(1000, d.avg)) - x2(0))
+      .attr('height', barH2)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
+      .append('title').text(d => `Score ${Math.trunc(d.score)}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+
+    g2.selectAll('.val2').data(ccRows).enter().append('text')
+      .attr('x', d => x2(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH2/2)
+      .attr('dominant-baseline','middle').attr('font-size', 12).text(d => d.avg.toFixed(1));
+
+    const axisY2 = ccRows.length * (barH2 + gap2);
+    g2.append('g').attr('transform', `translate(0, ${axisY2})`).call(d3.axisBottom(x2).ticks(6));
+  }
+
+  // ==== LEGEND (unchanged, now appears after both charts)
   const ranges = scoreRangeLabels(getThresholds());
   const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
   const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
@@ -582,7 +673,7 @@ function renderSummary(container, parsed){
       const idx = i - 1;
       g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[idx]).attr('stroke', '#111').attr('stroke-width', 0.4);
       g.append('text').attr('x', x + boxW/2).attr('y', 34).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i);
-      g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'][idx]);
+      g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[idx]);
       g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[idx]);
     }
   }
