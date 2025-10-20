@@ -884,59 +884,107 @@ function updateUploadAgo() {
 );
 
 // Stop testing + final upload
+// Stop testing + final upload + end-screen
 async function stopTesting() {
-  if (sessionEnded) return;
-  sessionEnded = true;
+  // prevent double runs
+  if (typeof sessionEnded !== 'undefined' && sessionEnded) return;
+  window.sessionEnded = true;
 
-  // 1) Disable UI that logs events
-  document.querySelectorAll('#buttonGroups button, #micToggle, #uploadNowButton')
-    .forEach(b => b.disabled = true);
+  try {
+    // 1) Freeze UI
+    try {
+      document.querySelectorAll('#buttonGroups button, #micToggle, #uploadNowButton, #stopTestingBtn')
+        .forEach(b => b && (b.disabled = true));
+    } catch {}
 
-  // 2) Stop timers & GPS
-  if (samplingIntervalId)  clearInterval(samplingIntervalId);
-  if (dateTimeIntervalId)  clearInterval(dateTimeIntervalId);
-  if (uploadAgoIntervalId) clearInterval(uploadAgoIntervalId);
-  if (geoWatchId !== null) {
-    navigator.geolocation.clearWatch(geoWatchId);
-    geoWatchId = null;
+    // 2) Stop timers & GPS
+    try { if (typeof samplingIntervalId  !== 'undefined' && samplingIntervalId)  clearInterval(samplingIntervalId); } catch {}
+    try { if (typeof dateTimeIntervalId  !== 'undefined' && dateTimeIntervalId)  clearInterval(dateTimeIntervalId); } catch {}
+    try { if (typeof uploadAgoIntervalId !== 'undefined' && uploadAgoIntervalId) clearInterval(uploadAgoIntervalId); } catch {}
+    try {
+      if (typeof geoWatchId !== 'undefined' && geoWatchId !== null) {
+        navigator.geolocation.clearWatch(geoWatchId);
+        geoWatchId = null;
+      }
+    } catch {}
+
+    // 3) Stop camera stream
+    try {
+      const video = document.getElementById('camera');
+      if (video && video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+    } catch {}
+
+    // 4) Stop Azure speech recognizer (if present) & release wake lock
+    try { if (typeof recognizer !== 'undefined' && recognizer) recognizer.stopContinuousRecognitionAsync(); } catch {}
+    try { if (typeof releaseWakeLock === 'function') await releaseWakeLock(); } catch {}
+
+    // 5) Final table refresh (guard if elements were removed)
+    try { if (typeof displayLogTable     === 'function') displayLogTable(); } catch {}
+    try { if (typeof renderLatestSnapshots === 'function') renderLatestSnapshots(5); } catch {}
+    try { if (typeof updateStatsTable    === 'function') updateStatsTable(); } catch {}
+    try { if (typeof updateCountTable    === 'function') updateCountTable(); } catch {}
+    try { if (typeof updateStreetTable   === 'function') updateStreetTable(); } catch {}
+    try { if (typeof updateCountryTable  === 'function') updateCountryTable(); } catch {}
+    try { if (typeof updateWeatherTable  === 'function') updateWeatherTable(); } catch {}
+    try { if (typeof updatePhaseTable    === 'function') updatePhaseTable(); } catch {}
+
+    // 6) Final uploads (log errors but keep going)
+    try {
+      if (typeof uploadWorkbookToAzure === 'function') {
+        await uploadWorkbookToAzure();
+        // stamp "last upload" time if you use the sidebar label
+        if (typeof lastXlsxUploadMs !== 'undefined') lastXlsxUploadMs = Date.now();
+        if (typeof updateUploadAgo === 'function') updateUploadAgo();
+      }
+    } catch (e) {
+      console.error('Final XLSX upload failed:', e);
+    }
+
+    try {
+      if (typeof uploadSnapshotsZip === 'function') {
+        await uploadSnapshotsZip();
+      }
+    } catch (e) {
+      console.error('Final snapshots ZIP upload failed:', e);
+    }
+
+    // optionally:
+    // try { if (typeof exportPDFToAzure === 'function') await exportPDFToAzure(); } catch(e){ console.error(e); }
+
+    // 7) Clear the “unsaved changes” prompt flag
+    try { if (typeof markClean === 'function') markClean(); } catch {}
+
+  } finally {
+    // 8) Replace main window with end message (do this LAST to avoid update funcs crashing)
+    const main = document.getElementById('mainContent');
+    if (main) {
+      main.innerHTML = `
+        <div style="
+          min-height: 70vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          padding: 24px;
+        ">
+          <div>
+            <h2 style="margin:0 0 8px;">Session ended</h2>
+            <p>Reload window to start new test</p>
+          </div>
+        </div>`;
+    }
+
+    // (optional) hide sidebar & toggle
+    const sb  = document.getElementById('sidebar');
+    const tgl = document.getElementById('toggleSidebar');
+    if (sb)  sb.style.display  = 'none';
+    if (tgl) tgl.style.display = 'none';
+
+    console.log('✔ Session ended and shutdown completed');
   }
-
-  // 3) Stop camera
-  const video = document.getElementById('camera');
-  if (video?.srcObject) {
-    video.srcObject.getTracks().forEach(t => t.stop());
-    video.srcObject = null;
-  }
-
-  // 4) Stop Azure speech & release wake lock
-  try { if (recognizer) recognizer.stopContinuousRecognitionAsync(); } catch {}
-  await releaseWakeLock();
-
-  // 5) Final table refresh (ensure latest stats are rendered)
-  displayLogTable();
-  renderLatestSnapshots(5);
-  updateStatsTable();
-  updateCountTable();
-  updateStreetTable();
-  updateCountryTable();
-  updateWeatherTable();
-  updatePhaseTable();
-
-  // 6) Final uploads
-  await uploadWorkbookToAzure();
-  await uploadSnapshotsZip();
-  // optionally: await exportPDFToAzure();
-
-  // 7) Clear the “unsaved changes” prompt
-  markClean();
-
-  // 8) Optional: mark UI
-  const ago = document.getElementById('xlsxAgo');
-  if (ago) ago.textContent = 'XLSX upload: just now';
-  const dist = document.getElementById('totalDistance');
-  if (dist) dist.textContent += '  (session ended)';
-
-  console.log('✔ Session ended and data uploaded');
 }
     
   function startApp() {
