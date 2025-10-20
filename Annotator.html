@@ -883,6 +883,62 @@ function updateUploadAgo() {
   window.addEventListener(evt, () => requestWakeLock(), { once: true, passive: true })
 );
 
+// Stop testing + final upload
+async function stopTesting() {
+  if (sessionEnded) return;
+  sessionEnded = true;
+
+  // 1) Disable UI that logs events
+  document.querySelectorAll('#buttonGroups button, #micToggle, #uploadNowButton')
+    .forEach(b => b.disabled = true);
+
+  // 2) Stop timers & GPS
+  if (samplingIntervalId)  clearInterval(samplingIntervalId);
+  if (dateTimeIntervalId)  clearInterval(dateTimeIntervalId);
+  if (uploadAgoIntervalId) clearInterval(uploadAgoIntervalId);
+  if (geoWatchId !== null) {
+    navigator.geolocation.clearWatch(geoWatchId);
+    geoWatchId = null;
+  }
+
+  // 3) Stop camera
+  const video = document.getElementById('camera');
+  if (video?.srcObject) {
+    video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+  }
+
+  // 4) Stop Azure speech & release wake lock
+  try { if (recognizer) recognizer.stopContinuousRecognitionAsync(); } catch {}
+  await releaseWakeLock();
+
+  // 5) Final table refresh (ensure latest stats are rendered)
+  displayLogTable();
+  renderLatestSnapshots(5);
+  updateStatsTable();
+  updateCountTable();
+  updateStreetTable();
+  updateCountryTable();
+  updateWeatherTable();
+  updatePhaseTable();
+
+  // 6) Final uploads
+  await uploadWorkbookToAzure();
+  await uploadSnapshotsZip();
+  // optionally: await exportPDFToAzure();
+
+  // 7) Clear the “unsaved changes” prompt
+  markClean();
+
+  // 8) Optional: mark UI
+  const ago = document.getElementById('xlsxAgo');
+  if (ago) ago.textContent = 'XLSX upload: just now';
+  const dist = document.getElementById('totalDistance');
+  if (dist) dist.textContent += '  (session ended)';
+
+  console.log('✔ Session ended and data uploaded');
+}
+    
   function startApp() {
     // 1) Acquire a wake lock right away
     requestWakeLock();
@@ -2445,10 +2501,18 @@ uploadNowBtn.addEventListener('click', () => {
     console.log('✔ All uploads complete');
   });
 });
+
+// Stop testing button
+const stopBtn = document.getElementById('stopTestingBtn');
+if (stopBtn) {
+  stopBtn.addEventListener('click', () => withSpinner(stopBtn, stopTesting));
+}
+
     
   </script>
 </body>
 </html>
+
 
 
 
