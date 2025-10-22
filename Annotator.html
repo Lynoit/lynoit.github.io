@@ -134,6 +134,29 @@ function renderMetaForm(questions) {
   text-shadow: 0 0 1px rgba(0,0,0,.35);  /* subtle crispness (optional) */
 }
 
+    /* keep sidebar fixed, no scrolling here */
+#sidebar{
+  position: fixed; top: 0; left: 0; width: 182px; height: 100%;
+  transform: translateX(-152px); transition: transform .3s ease;
+  background: #121212; box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+  padding: 50px 10px 10px; z-index: 1000;
+  /* IMPORTANT: let the inner element handle scrolling */
+  overflow: hidden;
+}
+
+/* the scrollable area */
+#sidebarScroll{
+  height: calc(100% - 60px);   /* 50px top padding + a little buffer */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch; /* mobile smooth scroll */
+  padding-bottom: 120px;       /* breathing room for bottom buttons */
+}
+
+/* sidebar state still controls main content offset */
+#sidebar.expanded  ~ #mainContent { margin-left: 202px; }
+#sidebar.collapsed ~ #mainContent { margin-left: 45px; }
+
+
     /* Sidebar slides in/out */
     #sidebar.expanded  { transform: translateX(0); }
     #sidebar.collapsed { transform: translateX(-152px); }
@@ -497,6 +520,7 @@ function renderMetaForm(questions) {
   
   <button id="toggleSidebar" aria-expanded="true">☰</button>
   <div id="sidebar" class="expanded">
+    <div id="sidebarScroll">
     <p id="dateTime"></p>
     <p id="dayPhase">Phase: N/A</p>
     <div class="weatherSection">
@@ -513,9 +537,12 @@ function renderMetaForm(questions) {
     </div>   
     <div class="distanceContainer">
       <p id="totalDistance">Distance: 0.0 km</p>
+      <p id="xlsxAgo">Last upload: never</p>
     </div>
     <button class="bigButton orangeButton" id="uploadNowButton">Upload data to cloud</button>
     <button class="bigButton greenButton" onclick="saveAndPrint()">Save report to PDF</button>
+    <button class="bigButton redButton" id="stopTestingBtn">Stop testing</button>
+    </div>
   </div>
 
   <div id="mainContent">
@@ -734,6 +761,13 @@ textBox.addEventListener('input', () => {
     let pendingSnapshotDataUrl = null; // snapshot taken when user starts typing
 
     let currentLegalSpeed = null;
+
+    let sessionEnded = false;
+
+   let geoWatchId            = null;
+   let samplingIntervalId    = null;
+   let dateTimeIntervalId    = null;
+   let uploadAgoIntervalId   = null; // if you added the minutes-since-upload label
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -793,6 +827,22 @@ textBox.addEventListener('input', () => {
        const ss   = pad(d.getSeconds());
       return `${YYYY}-${MM}-${DD}_${hh}${mm}${ss}`;
     }
+
+let lastXlsxUploadMs = 0;
+
+function formatMinutesAgo(ms) {
+  if (!ms) return 'never';
+  const mins = Math.floor((Date.now() - ms) / 60000); // milliseconds → minutes
+  if (mins === 0) return 'just now';
+  if (mins === 1) return '1 minute ago';
+  return `${mins} minutes ago`;
+}
+
+function updateUploadAgo() {
+  const el = document.getElementById('xlsxAgo');
+  if (!el) return;
+  el.textContent = `Last upload: ${formatMinutesAgo(lastXlsxUploadMs)}`;
+}
 
     const reportBaseName = `Annotator_report_${formatAppStartTimestamp()}`; 
     
@@ -858,6 +908,110 @@ textBox.addEventListener('input', () => {
   window.addEventListener(evt, () => requestWakeLock(), { once: true, passive: true })
 );
 
+// Stop testing + final upload
+// Stop testing + final upload + end-screen
+async function stopTesting() {
+  // prevent double runs
+  if (typeof sessionEnded !== 'undefined' && sessionEnded) return;
+  window.sessionEnded = true;
+
+  try {
+    // 1) Freeze UI
+    try {
+      document.querySelectorAll('#buttonGroups button, #micToggle, #uploadNowButton, #stopTestingBtn')
+        .forEach(b => b && (b.disabled = true));
+    } catch {}
+
+    // 2) Stop timers & GPS
+    try { if (typeof samplingIntervalId  !== 'undefined' && samplingIntervalId)  clearInterval(samplingIntervalId); } catch {}
+    try { if (typeof dateTimeIntervalId  !== 'undefined' && dateTimeIntervalId)  clearInterval(dateTimeIntervalId); } catch {}
+    try { if (typeof uploadAgoIntervalId !== 'undefined' && uploadAgoIntervalId) clearInterval(uploadAgoIntervalId); } catch {}
+    try {
+      if (typeof geoWatchId !== 'undefined' && geoWatchId !== null) {
+        navigator.geolocation.clearWatch(geoWatchId);
+        geoWatchId = null;
+      }
+    } catch {}
+
+    // 3) Stop camera stream
+    try {
+      const video = document.getElementById('camera');
+      if (video && video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+    } catch {}
+
+    // 4) Stop Azure speech recognizer (if present) & release wake lock
+    try { if (typeof recognizer !== 'undefined' && recognizer) recognizer.stopContinuousRecognitionAsync(); } catch {}
+    try { if (typeof releaseWakeLock === 'function') await releaseWakeLock(); } catch {}
+
+    // 5) Final table refresh (guard if elements were removed)
+    try { if (typeof displayLogTable     === 'function') displayLogTable(); } catch {}
+    try { if (typeof renderLatestSnapshots === 'function') renderLatestSnapshots(5); } catch {}
+    try { if (typeof updateStatsTable    === 'function') updateStatsTable(); } catch {}
+    try { if (typeof updateCountTable    === 'function') updateCountTable(); } catch {}
+    try { if (typeof updateStreetTable   === 'function') updateStreetTable(); } catch {}
+    try { if (typeof updateCountryTable  === 'function') updateCountryTable(); } catch {}
+    try { if (typeof updateWeatherTable  === 'function') updateWeatherTable(); } catch {}
+    try { if (typeof updatePhaseTable    === 'function') updatePhaseTable(); } catch {}
+
+    // 6) Final uploads (log errors but keep going)
+    try {
+      if (typeof uploadWorkbookToAzure === 'function') {
+        await uploadWorkbookToAzure();
+        // stamp "last upload" time if you use the sidebar label
+        if (typeof lastXlsxUploadMs !== 'undefined') lastXlsxUploadMs = Date.now();
+        if (typeof updateUploadAgo === 'function') updateUploadAgo();
+      }
+    } catch (e) {
+      console.error('Final XLSX upload failed:', e);
+    }
+
+    try {
+      if (typeof uploadSnapshotsZip === 'function') {
+        await uploadSnapshotsZip();
+      }
+    } catch (e) {
+      console.error('Final snapshots ZIP upload failed:', e);
+    }
+
+    // optionally:
+    // try { if (typeof exportPDFToAzure === 'function') await exportPDFToAzure(); } catch(e){ console.error(e); }
+
+    // 7) Clear the “unsaved changes” prompt flag
+    try { if (typeof markClean === 'function') markClean(); } catch {}
+
+  } finally {
+    // 8) Replace main window with end message (do this LAST to avoid update funcs crashing)
+    const main = document.getElementById('mainContent');
+    if (main) {
+      main.innerHTML = `
+        <div style="
+          min-height: 70vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          padding: 24px;
+        ">
+          <div>
+            <h2 style="margin:0 0 8px;">Session ended</h2>
+            <p>Reload window to start new test</p>
+          </div>
+        </div>`;
+    }
+
+    // (optional) hide sidebar & toggle
+    const sb  = document.getElementById('sidebar');
+    const tgl = document.getElementById('toggleSidebar');
+    if (sb)  sb.style.display  = 'none';
+    if (tgl) tgl.style.display = 'none';
+
+    console.log('✔ Session ended and shutdown completed');
+  }
+}
+    
   function startApp() {
     // 1) Acquire a wake lock right away
     requestWakeLock();
@@ -868,18 +1022,37 @@ textBox.addEventListener('input', () => {
   initMap();
   //initMap2();
   updateDateTime();
-  setInterval(updateDateTime, 1000);
+  dateTimeIntervalId = setInterval(updateDateTime, 1000);
+updateUploadAgo();
+setInterval(updateUploadAgo, 60 * 1000); // every 60 seconds
 
-// ─── periodic sampling (timer) ───
-setInterval(() => {
-  recordSample('');   // timer sample (no issue text)
-}, 30 * 1000);        // or 10*1000 if you prefer
+let lastSampleMeters = 0;
+let lastSampleTimeMs = 0;
+
+function shouldSampleNow() {
+  const movedMeters = totalDist - lastSampleMeters; // totalDist is in meters
+  const now = Date.now();
+  const timeGapOk = (now - lastSampleTimeMs) >= 10_000; // max 10 s gap
+  const distGapOk = movedMeters >= 50;                  // 50 m step
+
+  return distGapOk || timeGapOk;
+}
+
+samplingIntervalId = setInterval(() => {
+  if (!lastPos) return;
+  if (!shouldSampleNow()) return;
+
+  recordSample('');
+  lastSampleMeters = totalDist;
+  lastSampleTimeMs = Date.now();
+}, 2 * 1000); // check frequently; actual writes are gated
     
-  navigator.geolocation.watchPosition(showPosition, showError, {
-    enableHighAccuracy: true,
-    maximumAge: 5000,
-    timeout: 10000
-  });
+geoWatchId = navigator.geolocation.watchPosition(showPosition, showError, {
+  enableHighAccuracy: true,
+  maximumAge: 5000,
+  timeout: 10000
+});
+
     const configSelect = document.getElementById('buttonConfig');
   configSelect.addEventListener('change', e => {
     // rebuild with the newly selected CSV
@@ -1817,7 +1990,6 @@ const tablesToUpload = [
 async function maybeUpdateTables() {
   const now = Date.now();
 
-  // 1) Table updates (unchanged)
   if (now - lastTableUpdate > TABLE_THROTTLE) {
     displayLogTable();
     renderLatestSnapshots(5);
@@ -1827,29 +1999,23 @@ async function maybeUpdateTables() {
     updateCountryTable();
     updateWeatherTable();
     updatePhaseTable();
-    uploadSnapshotsZip();
-    uploadWorkbookToAzure()
-      .then(() => console.log('Workbook auto-uploaded'))
-      .catch(err => console.error('Workbook upload failed:', err));
     lastTableUpdate = now;
   }
 
-  // 2) Uploads, but only once every 5 minutes
   if (now - lastUploadTime > UPLOAD_THROTTLE) {
     lastUploadTime = now;
-    //uploadWorkbookToAzure()
-    //  .then(() => console.log('Workbook auto-uploaded'))
-    //  .catch(err => console.error('Workbook upload failed:', err));
-    //exportMainContentToAzure()
-    //  .then(() => console.log('Main content auto-uploaded'))
-    //  .catch(err => console.error('HTML upload failed:', err));
-    //exportPDFToAzure()
-    //  .then(() => console.log('PDF report uploaded'))
-    //  .catch(err => console.error('PDF upload failed:', err));
+
+    uploadWorkbookToAzure()
+      .then(() => console.log('Workbook auto-uploaded'))
+      .catch(err => console.error('Workbook upload failed:', err));
+
+    uploadSnapshotsZip()
+      .then(() => console.log('Snapshots ZIP uploaded'))
+      .catch(err => console.error('Snapshots ZIP upload failed:', err));
 
     exportCustomSectionsToAzure()
       .then(() => console.log('PDF report uploaded'))
-      .catch(err => console.error('PDF upload failed:', err));    
+      .catch(err => console.error('PDF upload failed:', err));
   }
 }
 
@@ -2022,6 +2188,8 @@ XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
   }
 
   console.log(`✔ Uploaded workbook: ${blobName}`);
+lastXlsxUploadMs = Date.now();
+updateUploadAgo();
 }
     
   async function exportMainContentToAzure() {
@@ -2399,6 +2567,13 @@ uploadNowBtn.addEventListener('click', () => {
     console.log('✔ All uploads complete');
   });
 });
+
+// Stop testing button
+const stopBtn = document.getElementById('stopTestingBtn');
+if (stopBtn) {
+  stopBtn.addEventListener('click', () => withSpinner(stopBtn, stopTesting));
+}
+
     
   </script>
 </body>
