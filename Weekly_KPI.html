@@ -1160,6 +1160,101 @@ if (forceBlack){
   }
 }
 
+// CC-style heatmap legend (0..10, contiguous boxes, same caption & labels)
+function drawCcStyleLegend(scroller, gridW, T){
+  const ranges  = scoreRangeLabels(T);
+  const legendW = Math.max(720, gridW);
+  const leg     = scroller.append('svg')
+    .attr('width', legendW)
+    .style('display','block')
+    .style('margin','8px auto 12px');
+
+  const marginX = 16;
+  const nBoxes  = 11;                 // 0..10
+  const boxW    = (legendW - marginX*2) / nBoxes;
+  const boxH    = 24;
+  const yBoxes  = 26;
+
+  // caption
+  leg.append('text')
+    .attr('x', marginX)
+    .attr('y', 14)
+    .attr('font-size', 12)
+    .attr('fill', '#555')
+    .text('Score colors (0 = No function, 1 = worst … 10 = best)');
+
+  // contrast helper
+  const textColorForFill = (hex) => {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if (!m) return '#111';
+    const r = parseInt(m[1],16)/255, g = parseInt(m[2],16)/255, b = parseInt(m[3],16)/255;
+    const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+    return lum < 0.45 ? '#fff' : '#111';
+  };
+
+  // one/two-line helper under each box
+  const drawUnderText = (xc, baseY, str) => {
+    const m = str.match(/^(.+?)\s*(\(.+\))?$/);
+    const line1 = m ? m[1] : str;
+    const line2 = (m && m[2]) ? m[2] : null;
+
+    leg.append('text')
+      .attr('x', xc).attr('y', baseY)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 11)
+      .text(line1);
+
+    if (line2) {
+      leg.append('text')
+        .attr('x', xc).attr('y', baseY + 12)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 11)
+        .text(line2);
+      return 2;
+    }
+    return 1;
+  };
+
+  let maxLines = 1;
+
+  // box 0 (No function) — black
+  const x0 = marginX;
+  leg.append('rect')
+    .attr('x', x0).attr('y', yBoxes)
+    .attr('width', boxW).attr('height', boxH)
+    .attr('fill', '#000').attr('stroke', '#ddd');
+  leg.append('text')
+    .attr('x', x0 + boxW/2).attr('y', yBoxes + boxH/2 + 4)
+    .attr('text-anchor', 'middle')
+    .attr('font-size', 12).attr('font-weight', 800).attr('fill', '#fff')
+    .text('0');
+  maxLines = Math.max(maxLines, drawUnderText(x0 + boxW/2, yBoxes + boxH + 14, 'No function'));
+
+  // boxes 1..10 (contiguous; use global scoreColors)
+  for (let i = 0; i < 10; i++) {
+    const left = marginX + (i+1) * boxW;
+    const fill = scoreColors[i];
+    const xc   = left + boxW/2;
+
+    leg.append('rect')
+      .attr('x', left).attr('y', yBoxes)
+      .attr('width', boxW).attr('height', boxH)
+      .attr('fill', fill).attr('stroke', '#ddd');
+
+    leg.append('text')
+      .attr('x', xc).attr('y', yBoxes + boxH/2 + 4)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 12).attr('font-weight', 800)
+      .attr('fill', textColorForFill(fill))
+      .text(i+1);
+
+    maxLines = Math.max(maxLines, drawUnderText(xc, yBoxes + boxH + 14, ranges[i]));
+  }
+
+  const extra = maxLines === 2 ? 12 : 0;
+  leg.attr('height', yBoxes + boxH + 14 + 12 + extra + 8);
+}
+
 // Heatmap for the Non-CC + latest CC table (black mask + hide "No Function" rows)
 function renderNonCCMatrixHeatmap(card, rowLabels, colKeys, colLabels, matrixVals){
   const T = getThresholds();
@@ -1286,38 +1381,8 @@ if (forceBlack){
       .append('title').text(lab);
   });
 
-  // Compact legend (0..10 boxes, no gaps)
-  const ranges = scoreRangeLabels(T);
-  const legendW = Math.max(900, gridW + 140);
-  const leg = scroller.append('svg')
-    .attr('width', legendW)
-    .style('display','block')
-    .style('margin','8px auto 12px');
-
-  const marginX = 16, gapX = 0, nBoxes = 11;
-  const boxW = Math.floor((legendW - marginX*2 - gapX*(nBoxes-1)) / nBoxes);
-  const boxH = 24, yBoxes = 26;
-
-  leg.append('text')
-    .attr('x', marginX).attr('y', 14)
-    .attr('font-size', 12).attr('fill', '#555')
-    .text('Score colors (0 = No function, 1 = worst … 10 = best)');
-
-  // 0: black "No function"
-  leg.append('rect').attr('x', marginX).attr('y', yBoxes).attr('width', boxW).attr('height', boxH).attr('fill','#000').attr('stroke','#ddd');
-  leg.append('text').attr('x', marginX + boxW/2).attr('y', yBoxes + boxH/2 + 4).attr('text-anchor','middle').attr('font-size',12).attr('font-weight',800).attr('fill','#fff').text('0');
-  leg.append('text').attr('x', marginX + boxW/2).attr('y', yBoxes + boxH + 14).attr('text-anchor','middle').attr('font-size',11).text('No function');
-
-  // 1..10
-  for (let i=0; i<10; i++){
-    const left = marginX + (i+1)*(boxW + gapX);
-    const xc = left + boxW/2;
-    const fill = scoreColors[i];
-    leg.append('rect').attr('x', left).attr('y', yBoxes).attr('width', boxW).attr('height', boxH).attr('fill', fill).attr('stroke','#ddd');
-    leg.append('text').attr('x', xc).attr('y', yBoxes + boxH/2 + 4).attr('text-anchor','middle').attr('font-size',12).attr('font-weight',800).attr('fill', '#111').text(i+1);
-    leg.append('text').attr('x', xc).attr('y', yBoxes + boxH + 14).attr('text-anchor','middle').attr('font-size',11).text(ranges[i]);
-  }
-  leg.attr('height', yBoxes + boxH + 14 + 12 + 8);
+// Legend: reuse the exact CC-only style
+drawCcStyleLegend(scroller, gridW, T);
 }
   
 /* ==================== Non-CC + latest CC (unchanged) ==================== */
