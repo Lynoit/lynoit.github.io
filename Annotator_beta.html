@@ -193,12 +193,48 @@ function renderMetaForm(questions) {
 
     #totalDistance.updated { transition: background .5s; background: yellow; }
 
+    
+
     .bigButton { display: block; width: 80%; min-width: 80px; padding: 12px; font-size: 14px; border-radius: 4px; cursor: pointer; margin: 8px auto; }
     .orangeButton { background-color: orange; color: white; }
     .blueButton   { background-color: blue;   color: white; }
     .greyButton   { background-color: grey;   color: white; }
     .greenButton  { background-color: green;  color: white; }
     .redButton    { background-color: red;    color: white; }
+
+    
+  /* --- Toggle pill styles (dark mode friendly) --- */
+  .toggleButton {
+    width: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 999px;
+    border: 1px solid #555;
+    background: #2a2a2a;
+    color: #e0e0e0;
+    user-select: none;
+  }
+  .toggleButton .track {
+    position: relative;
+    width: 44px; height: 24px;
+    border-radius: 999px;
+    background: #555;
+    transition: background .15s ease;
+  }
+  .toggleButton .thumb {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: #e0e0e0;
+    transition: left .15s ease;
+  }
+  .toggleButton[aria-checked="true"] .track { background: #2e7d32; }
+  .toggleButton[aria-checked="true"] .thumb { left: 22px; }
+  .toggleButton:focus-visible { outline: 2px solid #90caf9; outline-offset: 2px; }
 
     #mainContent {
       height: 100vh;
@@ -743,6 +779,10 @@ textBox.addEventListener('input', () => {
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
+
+    // --- Toggle system ---
+const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
+let toggleDefs = [];      // list of { signal, onValue, offValue, label } built from CSV
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -1616,8 +1656,7 @@ function updateStatsTable () {
   }
 }
 
-    function recordSample(issueText = '') {
-  // only record if we have at least one GPS fix
+function recordSample(issueText = '') {
   if (!lastPos) return;
 
   const rowNo      = samplingTable.length + 1;
@@ -1629,16 +1668,23 @@ function updateStatsTable () {
   const maxSpd     = maxSpeed.toFixed(1);
   const legalSpd   = (currentLegalSpeed ?? '');
 
+  // snapshot current toggles (so export is time-accurate)
+  const toggleSnapshot = {};
+  toggleDefs.forEach(def => {
+    toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
+  });
+
   samplingTable.push({
     no:        rowNo,
-    timestamp: timestamp,
+    timestamp,
     lat:       latitude,
     lon:       longitude,
     distance:  distanceKm,
     speed:     speed,
     maxspeed:  maxSpd,
     legalSpeed: legalSpd,
-    issue:     issueText || ''   // ← Column H
+    issue:     issueText || '',
+    toggles:   toggleSnapshot
   });
 }
     
@@ -1857,66 +1903,102 @@ function renderLatestSnapshots(limit = 5) {
 
     // Build buttons from CSV using fetch + PapaParse
   function buildButtons(csvFile = 'KPI_buttons.csv') {
-  // 1. Get the container and clear out any existing buttons
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
+  toggleDefs = []; // reset on rebuild
 
-  // 2. Fetch & parse the CSV
   fetch(csvFile)
     .then(response => {
-      if (!response.ok) {
-        throw new Error(`Failed to load ${csvFile}: ${response.status} ${response.statusText}`);
-      }
+      if (!response.ok) throw new Error(`Failed to load ${csvFile}: ${response.status} ${response.statusText}`);
       return response.text();
     })
     .then(csvText => {
-      const { data, errors } = Papa.parse(csvText, {
-        header: true,
-        skipEmptyLines: true
-      });
-      if (errors.length) {
-        console.error('CSV parse errors:', errors);
-      }
+      const { data, errors } = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+      if (errors?.length) console.error('CSV parse errors:', errors);
 
-      // 3. Organize buttons by group
-      const groups = {};  // { groupName: <div> }
+      const groups = {};  // { groupName: element }
 
       data.forEach(row => {
         const {
           group    = '',
           label    = '',
           cssClass = '',
-          logName  = label    // fallback if not specified
+          logName  = label,
+          type     = '',
+          signal   = '',
+          onValue  = '1',
+          offValue = '0',
+          default: def = ''
         } = row;
 
-        if (!group || !label) return;  // skip invalid rows
+        if (!group || !label) return;
 
-        // Create a container for this group if needed
+        // ensure group container
         if (!groups[group]) {
           const wrap = document.createElement('div');
           wrap.className = 'button-group';
-          buttonGroups.appendChild(wrap);
           groups[group] = wrap;
+          buttonGroups.appendChild(wrap);
         }
 
-        // Create the button
+        const semanticType = (type || '').trim().toLowerCase();
+
+        // --- NEW: Toggle button ---
+        if (semanticType === 'toggle' && signal) {
+          const isOn =
+            String(def).toLowerCase() === '1' ||
+            String(def).toLowerCase() === 'true' ||
+            String(def).toLowerCase() === 'on';
+
+          // init current value
+          toggleState[signal] = isOn ? onValue : offValue;
+          toggleDefs.push({ signal, onValue, offValue, label });
+
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `toggleButton bigButton ${cssClass}`.trim();
+          btn.setAttribute('role', 'switch');
+          btn.setAttribute('aria-checked', String(isOn));
+
+          const text  = document.createElement('span');
+          const track = document.createElement('span');
+          const thumb = document.createElement('span');
+          track.className = 'track';
+          thumb.className = 'thumb';
+          track.appendChild(thumb);
+          btn.append(text, track);
+
+          function render() {
+            const on = btn.getAttribute('aria-checked') === 'true';
+            text.textContent = `${label}: ${on ? 'ON' : 'OFF'}`;
+          }
+          function flip() {
+            const on = btn.getAttribute('aria-checked') === 'true';
+            const next = !on;
+            btn.setAttribute('aria-checked', String(next));
+            toggleState[signal] = next ? onValue : offValue;
+            render();
+          }
+          render();
+          btn.addEventListener('click', flip);
+          btn.addEventListener('keydown', e => {
+            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
+          });
+
+          groups[group].appendChild(btn);
+          return;
+        }
+
+        // --- Existing: normal press-to-log buttons ---
         const btn = document.createElement('button');
         btn.textContent = label;
         btn.classList.add('bigButton', ...cssClass.trim().split(/\s+/));
-
-        // Determine whether it's a "red" KPI event
         const isRed = btn.classList.contains('redButton');
-
-        // Wire up the click handler
         btn.addEventListener('click', () => logButton(logName, isRed));
-
-        // Add it to the right group
         groups[group].appendChild(btn);
       });
     })
-    .catch(err => {
-      console.error('Error building buttons:', err);
-    });
+    .catch(err => console.error('Error building buttons:', err));
 }
   
     function updateDayPhase(lat, lon) {
@@ -2134,13 +2216,18 @@ async function uploadCSVtoAzure(tableId) {
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-// 3. Build and append the hidden "Sampling" sheet
-const samplingAoA = [
-  ["No", "Timestamp", "Latitude", "Longitude", "Distance (km)", "Speed (km/h)", "Legal Speed (km/h)", "Issue"] // ← H
+// --- Build Sampling AoA (with dynamic toggle columns) ---
+const samplingHeader = [
+  "No","Timestamp","Latitude","Longitude",
+  "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
 ];
+// one column per configured toggle signal (order = CSV order)
+toggleDefs.forEach(def => samplingHeader.push(def.signal));
+
+const samplingAoA = [ samplingHeader ];
 
 samplingTable.forEach(entry => {
-  samplingAoA.push([
+  const row = [
     entry.no,
     entry.timestamp,
     entry.lat,
@@ -2148,8 +2235,12 @@ samplingTable.forEach(entry => {
     entry.distance,
     entry.speed,
     entry.legalSpeed,
-    entry.issue || ''  // ← H
-  ]);
+    entry.issue || ''
+  ];
+  toggleDefs.forEach(def => {
+    row.push(entry.toggles?.[def.signal] ?? def.offValue);
+  });
+  samplingAoA.push(row);
 });
 
 const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
@@ -2578,27 +2669,3 @@ if (stopBtn) {
   </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
