@@ -83,7 +83,7 @@
     <button id="stopAll" class="danger" disabled>Stop All</button>
 
     <div id="fpsCtl">
-      <label for="fpsRange" title="Capture FPS cap">FPS</</label>
+      <label for="fpsRange" title="Capture FPS cap">FPS</label>
       <input id="fpsRange" type="range" min="1" max="30" value="1" step="1" />
       <output id="fpsOut" for="fpsRange">1</output>
     </div>
@@ -131,7 +131,7 @@
   const writing   = [false, false, false, false]; // per-pane writer loop flag
   let recording   = false;
   let usingFSA    = false;     // whether File System Access API is used
-  let startStamp  = '';        // YYYYMMDD_HHMM taken when user presses "Save streams"
+  let startStamp  = '';        // YYYYMMDD_HHMMSS taken when user presses "Save streams"
 
   const positionNames = ['Front','Back','Left','Right'];
   const rememberedKey = 'quadcam-deviceIds-v1';
@@ -190,10 +190,11 @@
     stopAllBtn.disabled = !streams.some(s => s);
   }
 
+  // >>> UPDATED: include seconds in timestamp (YYYYMMDD_HHMMSS)
   function timestamp() {
     const d = new Date();
     const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   }
 
   function pickSupportedMime() {
@@ -221,7 +222,6 @@
       } catch (e) {
         console.error(`Write error (${positionNames[i]}):`, e);
         infos[i].textContent = 'Write error';
-        // keep looping, but you may want to stop recording this cam
       }
     }
     writing[i] = false;
@@ -255,11 +255,11 @@
   // ---------- Save / Stop logic ----------
   async function toggleSavingAll() {
     if (!recording) {
-      // START: choose folder (if supported), start recorders, stream to disk if possible
+      // START
       const anyLive = streams.some(Boolean);
       if (!anyLive) { alert('No active streams. Start at least one camera.'); return; }
 
-      startStamp = timestamp();
+      startStamp = timestamp(); // now includes seconds
 
       let dirHandle = null;
       if (window.showDirectoryPicker) {
@@ -279,19 +279,16 @@
       for (let i = 0; i < 4; i++) {
         if (!streams[i]) { infos[i].textContent ||= 'Not running'; continue; }
         try {
-          chunks[i] = []; // always collect, used by fallback or as backup
+          chunks[i] = []; // keep memory copy as fallback
           const rec = new MediaRecorder(streams[i], mime ? { mimeType: mime } : undefined);
           recorders[i] = rec;
 
           rec.ondataavailable = (e) => {
             if (e.data && e.data.size) {
-              // Always keep a copy in memory (backup / fallback)
               chunks[i].push(e.data);
-              // If FSA is active for this cam, enqueue for writing
               if (writers[i]) writeQ[i].push(e.data);
             }
           };
-          rec.onstop = () => { /* the file is finalized when we close writer */ };
           rec.start(1000); // 1s timeslices
           infos[i].textContent = writers[i] ? 'Recording to folder…' : 'Recording (buffering)…';
         } catch (e) {
@@ -305,7 +302,7 @@
       saveBtn.classList.add('danger');
 
     } else {
-      // STOP: stop recorders, finalize files; if FSA not used, download blobs
+      // STOP
       for (let i = 0; i < 4; i++) {
         if (recorders[i]) {
           try { if (recorders[i].state !== 'inactive') recorders[i].stop(); } catch {}
@@ -313,10 +310,8 @@
         }
       }
 
-      // Close FSA writers (commits data to disk)
       await closeFSAFiles();
 
-      // If FSA not used, fall back to downloading the recorded blobs
       if (!window.showDirectoryPicker || !usingFSA) {
         for (let i = 0; i < 4; i++) {
           const blob = new Blob(chunks[i], { type: (chunks[i][0]?.type || 'video/webm') });
@@ -356,9 +351,9 @@
       const track = s.getVideoTracks()[0];
       if (!track) continue;
       const attempts = [
-        { frameRate: fps },                             // exact
-        { frameRate: { ideal: fps, max: fps } },        // ideal + cap
-        { frameRate: { max: fps } }                     // cap only
+        { frameRate: fps },
+        { frameRate: { ideal: fps, max: fps } },
+        { frameRate: { max: fps } }
       ];
       tasks.push((async () => {
         let lastErr;
@@ -391,7 +386,6 @@
   }
 
   async function ensurePermissionPrompted() {
-    // To reveal device labels, prompt once for generic camera access.
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       s.getTracks().forEach(t => t.stop());
@@ -469,8 +463,7 @@
     stopOne(idx);
     try {
       infos[idx].textContent = 'Starting...';
-      // Stagger startup to reduce driver contention
-      await new Promise(r => setTimeout(r, idx * 150));
+      await new Promise(r => setTimeout(r, idx * 150)); // stagger
       const stream = await openWithFallbacks(deviceId, getTargetFps());
       streams[idx] = stream;
       videos[idx].srcObject = stream;
@@ -486,7 +479,6 @@
   }
 
   function stopOne(idx) {
-    // If recording, stop recorder and close writer for this cam
     if (recorders[idx]) {
       try { if (recorders[idx].state !== 'inactive') recorders[idx].stop(); } catch {}
       recorders[idx] = null;
@@ -513,7 +505,7 @@
         continue;
       }
       chosen.add(id);
-      await startOne(i); // serial, not parallel
+      await startOne(i); // serial
     }
     stopAllBtn.disabled = !streams.some(Boolean);
   }
@@ -521,7 +513,6 @@
   function stopAll() {
     for (let i = 0; i < 4; i++) stopOne(i);
     stopAllBtn.disabled = true;
-    // Reset saving state if it was on
     if (recording) {
       recording = false;
       saveBtn.textContent = 'Save streams';
@@ -529,14 +520,13 @@
     }
   }
 
-  // Keep info badge coherent on selection change
   selects.forEach((sel, i) => {
     sel.addEventListener('change', () => {
       infos[i].textContent = streams[i] ? (recording ? (writers[i] ? 'Recording to folder…' : 'Recording (buffering)…') : 'Live') : 'Idle';
     });
   });
 
-  // Initial load
+  // Init
   if (!navigator.mediaDevices?.getUserMedia) {
     alert('getUserMedia not supported in this browser.');
   } else {
