@@ -220,42 +220,69 @@
     }
   }
 
-  async function startOne(idx) {
-    const deviceId = selects[idx].value;
-    if (!deviceId) {
-      alert(`Select a camera for slot ${idx + 1}`);
-      return;
-    }
-    // Stop any previous stream for this pane
-    stopOne(idx);
-
+  async function openWithFallbacks(deviceId) {
+  // From lowest bandwidth upward. Keep fps low.
+  const attempts = [
+    { width: { max: 640 },  height: { max: 360 },  frameRate: { max: 15 } },
+    { width: { max: 640 },  height: { max: 480 },  frameRate: { max: 15 } },
+    { width: { max: 800 },  height: { max: 600 },  frameRate: { max: 15 } },
+    { width: { max: 1280 }, height: { max: 720 },  frameRate: { max: 15 } },
+    { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 15 } },
+  ];
+  let lastErr = null;
+  for (const video of attempts) {
     try {
-      infos[idx].textContent = 'Starting...';
-      const constraints = {
-        video: {
-          deviceId: { exact: deviceId },
-          // You can tweak these depending on your cameras:
-          width:  { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 60 }
-        },
+      // Avoid "exact" except for deviceId; let the browser negotiate down.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId }, ...video },
         audio: false
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streams[idx] = stream;
-      videos[idx].srcObject = stream;
-      setButtonsEnabled(idx, true);
-      labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
-      infos[idx].textContent = 'Live';
-      // Remember all selections once any starts
-      rememberSelection(selects.map(s => s.value));
+      });
+      return stream;
     } catch (e) {
-      infos[idx].textContent = 'Error';
-      console.error(`Cam ${idx+1} start error:`, e);
-      alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
-      setButtonsEnabled(idx, false);
+      lastErr = e;
+      // If device is busy, a short wait sometimes helps drivers recover.
+      await new Promise(r => setTimeout(r, 200));
     }
   }
+  throw lastErr || new Error('Could not start video source');
+}
+
+async function startOne(idx) {
+  const deviceId = selects[idx].value;
+  if (!deviceId) { alert(`Select a camera for slot ${idx + 1}`); return; }
+  stopOne(idx);
+  try {
+    infos[idx].textContent = 'Starting...';
+    // Stagger startup to reduce driver contention
+    await new Promise(r => setTimeout(r, idx * 150));
+    const stream = await openWithFallbacks(deviceId);
+    streams[idx] = stream;
+    videos[idx].srcObject = stream;
+    setButtonsEnabled(idx, true);
+    labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
+    infos[idx].textContent = 'Live';
+    rememberSelection(selects.map(s => s.value));
+  } catch (e) {
+    infos[idx].textContent = 'Error';
+    console.error(`Cam ${idx+1} start error:`, e);
+    alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
+    setButtonsEnabled(idx, false);
+  }
+}
+
+async function startAll() {
+  const chosen = new Set();
+  for (let i = 0; i < 4; i++) {
+    const id = selects[i].value;
+    if (chosen.has(id)) {
+      infos[i].textContent = 'Duplicate selection—pick a different camera.';
+      continue;
+    }
+    chosen.add(id);
+    await startOne(i); // serial, not parallel
+  }
+  stopAllBtn.disabled = !streams.some(Boolean);
+}
 
   function stopOne(idx) {
     const s = streams[idx];
