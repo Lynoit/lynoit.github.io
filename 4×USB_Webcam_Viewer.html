@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>4× USB Webcam Viewer — Car Layout</title>
+<title>4× USB Webcam Viewer — Car Layout + Safe Mode</title>
 <style>
   :root { --gap: 12px; --panel:#1a1a1a; --border:#2e2e2e; --text:#eee; --muted:#bbb; --accent:#2c7be5; --danger:#b54b4b; }
   * { box-sizing: border-box; }
@@ -52,7 +52,7 @@
   #tokenTray.drop-hint { outline:2px dashed #2c7be5; outline-offset:4px; }
 
   /* Video grid mapped to positions */
-  #grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; gap: var(--gap); padding: var(--gap); height: calc(100vh - 380px); box-sizing: border-box; }
+  #grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; gap: var(--gap); padding: var(--gap); height: calc(100vh - 420px); box-sizing: border-box; }
   .pane { position: relative; background: #000; border: 1px solid #333; border-radius: 12px; overflow: hidden; }
   .pane header { position: absolute; inset: 0 auto auto 0; background: rgba(0,0,0,0.55); border: none; padding: 6px 10px; font-size: 12px; z-index: 2; }
   video { width: 100%; height: 100%; object-fit: cover; background: #000; }
@@ -67,7 +67,7 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>4× USB Webcam Viewer — Car Layout</h1>
+    <h1>4× USB Webcam Viewer — Car Layout + Safe Mode</h1>
   </header>
 
   <!-- Camera selectors -->
@@ -121,6 +121,12 @@
       <output id="fpsOut" for="fpsRange">10</output>
     </div>
 
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input id="usbSafe" type="checkbox" />
+      USB Safe Mode (QVGA)
+    </label>
+    <button id="reopenSafe" title="Stop all and reopen at 320×240 with low FPS">Reopen All (Safe)</button>
+
     <div class="spacer"></div>
 
     <button id="refreshList">Refresh Camera List</button>
@@ -132,12 +138,9 @@
     <div id="carCanvas">
       <!-- Car silhouette -->
       <svg id="carSVG" viewBox="0 0 120 180" aria-hidden="true">
-        <!-- body -->
         <rect x="20" y="20" width="80" height="140" rx="10" fill="#2a2a2a" stroke="#444" />
-        <!-- windshield & rear -->
         <rect x="28" y="28" width="64" height="40" rx="6" fill="#333"/>
         <rect x="28" y="112" width="64" height="40" rx="6" fill="#333"/>
-        <!-- wheels -->
         <rect x="10" y="36" width="12" height="24" rx="3" fill="#222"/>
         <rect x="98" y="36" width="12" height="24" rx="3" fill="#222"/>
         <rect x="10" y="120" width="12" height="24" rx="3" fill="#222"/>
@@ -197,6 +200,8 @@
   const resetRememberedBtn = document.getElementById('resetRemembered');
   const fpsRange = document.getElementById('fpsRange');
   const fpsOut   = document.getElementById('fpsOut');
+  const usbSafe  = document.getElementById('usbSafe');
+  const reopenSafeBtn = document.getElementById('reopenSafe');
   const tokenTray = document.getElementById('tokenTray');
   const zoneEls = {
     front: document.getElementById('zone-front'),
@@ -226,6 +231,19 @@
     fpsOut.textContent = fpsRange.value;
     clearTimeout(fpsDebounce);
     fpsDebounce = setTimeout(() => setLiveFpsForAll(getTargetFps()), 150);
+  });
+
+  // Safe mode: when turned on manually, cap FPS to 7 if higher
+  usbSafe.addEventListener('change', () => {
+    if (usbSafe.checked && getTargetFps() > 7) { fpsRange.value = '7'; fpsOut.textContent = '7'; }
+  });
+
+  // Reopen all in Safe Mode
+  reopenSafeBtn.addEventListener('click', async () => {
+    if (getTargetFps() > 7) { fpsRange.value = '7'; fpsOut.textContent = '7'; }
+    usbSafe.checked = true;
+    stopAll();
+    await startAll();
   });
 
   // Attach start/stop per camera
@@ -339,10 +357,8 @@
         sel.value = candidate;
       });
 
-      // Update tokens & zone labels
       renderTokensAndZones();
 
-      // Try apply remembered device selection
       const remembered = loadRememberedSelection();
       if (remembered) {
         remembered.forEach((id, i) => {
@@ -358,14 +374,25 @@
     }
   }
 
-  // Open with FPS-aware fallbacks (low bandwidth first)
+  // Open with FPS-aware fallbacks (low bandwidth first; QVGA first in Safe Mode)
   async function openWithFallbacks(deviceId, fpsCap) {
-    const attempts = [
-      { width: { exact: 640 },  height: { exact: 360 },  frameRate: { max: fpsCap } },
-      { width: { exact: 640 },  height: { exact: 480 },  frameRate: { max: fpsCap } },
-      { width: { max: 800 },    height: { max: 600 },    frameRate: { max: fpsCap } },
-      { width: { max: 1280 },   height: { max: 720 },    frameRate: { max: fpsCap } },
-    ];
+    const safe = !!usbSafe?.checked;
+    const cappedFps = safe ? Math.min(fpsCap, 7) : fpsCap;
+
+    const attempts = safe
+      ? [
+          { width: { exact: 320 }, height: { exact: 240 }, frameRate: { max: cappedFps }, resizeMode: 'crop-and-scale' },
+          { width: { exact: 424 }, height: { exact: 240 }, frameRate: { max: cappedFps }, resizeMode: 'crop-and-scale' },
+          { width: { exact: 640 }, height: { exact: 360 }, frameRate: { max: cappedFps } },
+          { width: { exact: 640 }, height: { exact: 480 }, frameRate: { max: cappedFps } },
+        ]
+      : [
+          { width: { exact: 640 }, height: { exact: 360 }, frameRate: { max: cappedFps } },
+          { width: { exact: 640 }, height: { exact: 480 }, frameRate: { max: cappedFps } },
+          { width: { max: 800 },  height: { max: 600 },  frameRate: { max: cappedFps } },
+          { width: { max: 1280 }, height: { max: 720 },  frameRate: { max: cappedFps } },
+        ];
+
     let lastErr;
     for (const video of attempts) {
       try {
@@ -375,7 +402,7 @@
         });
         const track = stream.getVideoTracks()[0];
         const s = track.getSettings();
-        console.log(`Negotiated ${s.width}×${s.height} @ ${s.frameRate} fps for ${deviceId}`);
+        console.log(`Negotiated ${s.width}×${s.height} @ ${s.frameRate} fps for ${deviceId} ${safe ? '(SAFE)' : ''}`);
         return stream;
       } catch (e) {
         lastErr = e;
@@ -401,6 +428,15 @@
     } catch (e) {
       infos[idx].textContent = 'Error';
       console.error(`Cam ${idx+1} start error:`, e);
+      // Auto-fallback: if cam 3/4 fails and Safe Mode is off, enable Safe Mode and reopen all
+      if (!usbSafe.checked && (idx >= 2)) {
+        console.warn('Auto-fallback: enabling USB Safe Mode and reopening all at low bandwidth');
+        usbSafe.checked = true;
+        if (getTargetFps() > 7) { fpsRange.value = '7'; fpsOut.textContent = '7'; }
+        stopAll();
+        await startAll();
+        return;
+      }
       alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
       setButtonsEnabled(idx, false);
     }
