@@ -83,12 +83,12 @@
     <button id="stopAll" class="danger" disabled>Stop All</button>
 
     <div id="fpsCtl">
-      <label for="fpsRange" title="Capture FPS cap">FPS</label>
+      <label for="fpsRange" title="Capture FPS cap">FPS</</label>
       <input id="fpsRange" type="range" min="1" max="30" value="1" step="1" />
       <output id="fpsOut" for="fpsRange">1</output>
     </div>
 
-    <button id="saveBtn" title="Record all active streams">Save streams</button>
+    <button id="saveBtn" title="Save streams to a folder">Save streams</button>
 
     <div class="spacer"></div>
 
@@ -123,10 +123,15 @@
 <script>
 (async () => {
   // --- State ---
-  const streams = [null, null, null, null]; // MediaStream per pane
+  const streams   = [null, null, null, null]; // MediaStream per pane
   const recorders = [null, null, null, null]; // MediaRecorder per pane
-  const chunks = [[], [], [], []]; // Blob parts per pane
-  let recording = false;
+  const chunks    = [[], [], [], []];         // fallback download buffers (non-FSA browsers)
+  const writers   = [null, null, null, null]; // FileSystemWritableFileStream per pane (FSA)
+  const writeQ    = [[], [], [], []];         // per-pane write queues for FSA streaming
+  const writing   = [false, false, false, false]; // per-pane writer loop flag
+  let recording   = false;
+  let usingFSA    = false;     // whether File System Access API is used
+  let startStamp  = '';        // YYYYMMDD_HHMM taken when user presses "Save streams"
 
   const positionNames = ['Front','Back','Left','Right'];
   const rememberedKey = 'quadcam-deviceIds-v1';
@@ -134,7 +139,6 @@
   // --- Elements ---
   const selects = [0,1,2,3].map(i => document.getElementById('sel-' + i));
   const infos   = [0,1,2,3].map(i => document.getElementById('info-' + i));
-  const labels  = [0,1,2,3].map(i => document.getElementById('label-' + i)); // video headers (fixed names)
   const videos  = [0,1,2,3].map(i => document.getElementById('vid-' + i));
   const startAllBtn = document.getElementById('startAll');
   const stopAllBtn  = document.getElementById('stopAll');
@@ -172,7 +176,7 @@
     alert('Saved camera choices cleared.');
   });
 
-  saveBtn.addEventListener('click', toggleRecordingAll);
+  saveBtn.addEventListener('click', toggleSavingAll);
 
   navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceList);
 
@@ -197,53 +201,130 @@
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
       'video/webm'
-      // Safari (some versions) may support 'video/mp4' with H.264; uncomment if needed:
-      // 'video/mp4'
+      // 'video/mp4' // some Safari builds; add if needed
     ];
     for (const m of candidates) {
       if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
     }
-    return ''; // Let browser decide
+    return ''; // let browser decide
   }
 
-  async function toggleRecordingAll() {
+  // ---------- File System Access helpers (continuous writing) ----------
+  async function startWriterLoop(i) {
+    if (writing[i]) return;
+    writing[i] = true;
+    while (writers[i]) {
+      const chunk = writeQ[i].shift();
+      if (!chunk) { await new Promise(r => setTimeout(r, 50)); continue; }
+      try {
+        await writers[i].write(chunk);
+      } catch (e) {
+        console.error(`Write error (${positionNames[i]}):`, e);
+        infos[i].textContent = 'Write error';
+        // keep looping, but you may want to stop recording this cam
+      }
+    }
+    writing[i] = false;
+  }
+
+  async function setupFSAFiles(dirHandle, stamp) {
+    usingFSA = !!(window.showDirectoryPicker && dirHandle);
+    if (!usingFSA) return;
+
+    for (let i = 0; i < 4; i++) {
+      if (!streams[i]) { writers[i] = null; continue; }
+      const fileName = `${stamp}_${positionNames[i]}.webm`;
+      const fh = await dirHandle.getFileHandle(fileName, { create: true });
+      writers[i] = await fh.createWritable();
+      writeQ[i] = [];
+      startWriterLoop(i);
+      infos[i].textContent = 'Recording to folder…';
+    }
+  }
+
+  async function closeFSAFiles() {
+    for (let i = 0; i < 4; i++) {
+      if (writers[i]) {
+        try { await writers[i].close(); } catch {}
+        writers[i] = null;
+      }
+      writeQ[i] = [];
+    }
+  }
+
+  // ---------- Save / Stop logic ----------
+  async function toggleSavingAll() {
     if (!recording) {
-      // Start recording any active streams
-      const mime = pickSupportedMime();
-      let any = false;
-      for (let i = 0; i < 4; i++) {
-        if (!streams[i]) { infos[i].textContent = 'Not running'; continue; }
+      // START: choose folder (if supported), start recorders, stream to disk if possible
+      const anyLive = streams.some(Boolean);
+      if (!anyLive) { alert('No active streams. Start at least one camera.'); return; }
+
+      startStamp = timestamp();
+
+      let dirHandle = null;
+      if (window.showDirectoryPicker) {
         try {
-          chunks[i] = [];
+          dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+          if (e?.name === 'AbortError') return; // user cancelled
+          console.warn('Directory picker failed, falling back to download-on-stop:', e);
+        }
+      } else {
+        console.warn('File System Access API not supported; falling back to download-on-stop.');
+      }
+
+      await setupFSAFiles(dirHandle, startStamp);
+
+      const mime = pickSupportedMime();
+      for (let i = 0; i < 4; i++) {
+        if (!streams[i]) { infos[i].textContent ||= 'Not running'; continue; }
+        try {
+          chunks[i] = []; // always collect, used by fallback or as backup
           const rec = new MediaRecorder(streams[i], mime ? { mimeType: mime } : undefined);
           recorders[i] = rec;
-          rec.ondataavailable = e => { if (e.data && e.data.size) chunks[i].push(e.data); };
-          rec.onstop = () => { /* blob assembled later */ };
-          rec.start(1000); // gather data every second
-          any = true;
-          infos[i].textContent = 'Recording…';
+
+          rec.ondataavailable = (e) => {
+            if (e.data && e.data.size) {
+              // Always keep a copy in memory (backup / fallback)
+              chunks[i].push(e.data);
+              // If FSA is active for this cam, enqueue for writing
+              if (writers[i]) writeQ[i].push(e.data);
+            }
+          };
+          rec.onstop = () => { /* the file is finalized when we close writer */ };
+          rec.start(1000); // 1s timeslices
+          infos[i].textContent = writers[i] ? 'Recording to folder…' : 'Recording (buffering)…';
         } catch (e) {
-          console.error(`Recorder ${i+1} error:`, e);
+          console.error(`Recorder ${positionNames[i]} error:`, e);
           infos[i].textContent = 'Recorder error';
         }
       }
-      if (!any) { alert('No active streams to record. Start at least one camera.'); return; }
+
       recording = true;
-      saveBtn.textContent = 'Stop & Download';
+      saveBtn.textContent = 'Stop saving';
       saveBtn.classList.add('danger');
+
     } else {
-      // Stop and download
-      const stamp = timestamp();
+      // STOP: stop recorders, finalize files; if FSA not used, download blobs
       for (let i = 0; i < 4; i++) {
         if (recorders[i]) {
-          await stopRecorder(recorders[i]);
+          try { if (recorders[i].state !== 'inactive') recorders[i].stop(); } catch {}
           recorders[i] = null;
+        }
+      }
+
+      // Close FSA writers (commits data to disk)
+      await closeFSAFiles();
+
+      // If FSA not used, fall back to downloading the recorded blobs
+      if (!window.showDirectoryPicker || !usingFSA) {
+        for (let i = 0; i < 4; i++) {
           const blob = new Blob(chunks[i], { type: (chunks[i][0]?.type || 'video/webm') });
-          chunks[i] = [];
           if (blob.size > 0) {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
+            const stamp = startStamp || timestamp();
             a.download = `${stamp}_${positionNames[i]}.webm`;
             document.body.appendChild(a);
             a.click();
@@ -253,22 +334,18 @@
           } else {
             infos[i].textContent = 'No data';
           }
+          chunks[i] = [];
+        }
+      } else {
+        for (let i = 0; i < 4; i++) {
+          if (streams[i]) infos[i].textContent = 'Saved to folder';
         }
       }
+
       recording = false;
       saveBtn.textContent = 'Save streams';
       saveBtn.classList.remove('danger');
     }
-  }
-
-  function stopRecorder(rec) {
-    return new Promise(resolve => {
-      try {
-        rec.onstop = () => resolve();
-        if (rec.state !== 'inactive') rec.stop();
-        else resolve();
-      } catch { resolve(); }
-    });
   }
 
   // Live FPS adjuster for all running streams
@@ -343,8 +420,6 @@
           ? currentSelections[i]
           : (vids[0]?.deviceId || '');
         sel.value = candidate;
-        // Keep pane headers fixed to Front/Back/Left/Right — do not overwrite labels[]
-        // If you want to also show the selected device name, append here instead of replacing.
       });
 
       const remembered = loadRememberedSelection();
@@ -363,7 +438,6 @@
 
   // --- Open with FPS-aware fallbacks ---
   async function openWithFallbacks(deviceId, fpsCap) {
-    // Try very low bandwidth first; all attempts cap frameRate at the GUI value
     const attempts = [
       { width: { exact: 640 },  height: { exact: 360 },  frameRate: { max: fpsCap } },
       { width: { exact: 640 },  height: { exact: 480 },  frameRate: { max: fpsCap } },
@@ -377,7 +451,6 @@
           video: { deviceId: { exact: deviceId }, ...video },
           audio: false
         });
-        // Log what we actually got
         const track = stream.getVideoTracks()[0];
         const s = track.getSettings();
         console.log(`Negotiated ${s.width}×${s.height} @ ${s.frameRate} fps for ${deviceId}`);
@@ -402,7 +475,7 @@
       streams[idx] = stream;
       videos[idx].srcObject = stream;
       setButtonsEnabled(idx, true);
-      infos[idx].textContent = 'Live';
+      infos[idx].textContent = recording ? (writers[idx] ? 'Recording to folder…' : 'Recording (buffering)…') : 'Live';
       rememberSelection(selects.map(s => s.value));
     } catch (e) {
       infos[idx].textContent = 'Error';
@@ -413,11 +486,13 @@
   }
 
   function stopOne(idx) {
-    // Stop any ongoing recording for this cam (so chunks flush cleanly)
-    if (recorders[idx] && recording) {
-      try { recorders[idx].stop(); } catch {}
+    // If recording, stop recorder and close writer for this cam
+    if (recorders[idx]) {
+      try { if (recorders[idx].state !== 'inactive') recorders[idx].stop(); } catch {}
       recorders[idx] = null;
-      chunks[idx] = [];
+    }
+    if (writers[idx]) {
+      writers[idx].close().catch(()=>{}).finally(()=>{ writers[idx]=null; writeQ[idx]=[]; });
     }
     const s = streams[idx];
     if (s) {
@@ -446,8 +521,8 @@
   function stopAll() {
     for (let i = 0; i < 4; i++) stopOne(i);
     stopAllBtn.disabled = true;
+    // Reset saving state if it was on
     if (recording) {
-      // if user hit Stop All while recording, reset UI
       recording = false;
       saveBtn.textContent = 'Save streams';
       saveBtn.classList.remove('danger');
@@ -457,7 +532,7 @@
   // Keep info badge coherent on selection change
   selects.forEach((sel, i) => {
     sel.addEventListener('change', () => {
-      infos[i].textContent = streams[i] ? 'Live' : 'Idle';
+      infos[i].textContent = streams[i] ? (recording ? (writers[i] ? 'Recording to folder…' : 'Recording (buffering)…') : 'Live') : 'Idle';
     });
   });
 
