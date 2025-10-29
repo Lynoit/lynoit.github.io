@@ -41,38 +41,38 @@
 
   <div id="controls">
     <div class="camctl" data-idx="0">
-      <label for="sel-0">Camera 1</label>
+      <label for="sel-0">Front</label>
       <select id="sel-0"></select>
       <div style="display:flex; gap:8px;">
-        <button class="primary" data-action="start">Start 1</button>
-        <button class="danger" data-action="stop" disabled>Stop 1</button>
+        <button class="primary" data-action="start">Start Front</button>
+        <button class="danger" data-action="stop" disabled>Stop Front</button>
       </div>
       <small class="badge" id="info-0">Idle</small>
     </div>
     <div class="camctl" data-idx="1">
-      <label for="sel-1">Camera 2</label>
+      <label for="sel-1">Back</label>
       <select id="sel-1"></select>
       <div style="display:flex; gap:8px;">
-        <button class="primary" data-action="start">Start 2</button>
-        <button class="danger" data-action="stop" disabled>Stop 2</button>
+        <button class="primary" data-action="start">Start Back</button>
+        <button class="danger" data-action="stop" disabled>Stop Back</button>
       </div>
       <small class="badge" id="info-1">Idle</small>
     </div>
     <div class="camctl" data-idx="2">
-      <label for="sel-2">Camera 3</label>
+      <label for="sel-2">Left</label>
       <select id="sel-2"></select>
       <div style="display:flex; gap:8px;">
-        <button class="primary" data-action="start">Start 3</button>
-        <button class="danger" data-action="stop" disabled>Stop 3</button>
+        <button class="primary" data-action="start">Start Left</button>
+        <button class="danger" data-action="stop" disabled>Stop Left</button>
       </div>
       <small class="badge" id="info-2">Idle</small>
     </div>
     <div class="camctl" data-idx="3">
-      <label for="sel-3">Camera 4</label>
+      <label for="sel-3">Right</label>
       <select id="sel-3"></select>
       <div style="display:flex; gap:8px;">
-        <button class="primary" data-action="start">Start 4</button>
-        <button class="danger" data-action="stop" disabled>Stop 4</button>
+        <button class="primary" data-action="start">Start Right</button>
+        <button class="danger" data-action="stop" disabled>Stop Right</button>
       </div>
       <small class="badge" id="info-3">Idle</small>
     </div>
@@ -88,6 +88,8 @@
       <output id="fpsOut" for="fpsRange">1</output>
     </div>
 
+    <button id="saveBtn" title="Record all active streams">Save streams</button>
+
     <div class="spacer"></div>
 
     <button id="refreshList">Refresh Camera List</button>
@@ -96,19 +98,19 @@
 
   <main id="grid">
     <div class="pane">
-      <header id="label-0">Camera 1</header>
+      <header id="label-0">Front</header>
       <video id="vid-0" autoplay playsinline muted></video>
     </div>
     <div class="pane">
-      <header id="label-1">Camera 2</header>
+      <header id="label-1">Back</header>
       <video id="vid-1" autoplay playsinline muted></video>
     </div>
     <div class="pane">
-      <header id="label-2">Camera 3</header>
+      <header id="label-2">Left</header>
       <video id="vid-2" autoplay playsinline muted></video>
     </div>
     <div class="pane">
-      <header id="label-3">Camera 4</header>
+      <header id="label-3">Right</header>
       <video id="vid-3" autoplay playsinline muted></video>
     </div>
   </main>
@@ -122,17 +124,23 @@
 (async () => {
   // --- State ---
   const streams = [null, null, null, null]; // MediaStream per pane
+  const recorders = [null, null, null, null]; // MediaRecorder per pane
+  const chunks = [[], [], [], []]; // Blob parts per pane
+  let recording = false;
+
+  const positionNames = ['Front','Back','Left','Right'];
   const rememberedKey = 'quadcam-deviceIds-v1';
 
   // --- Elements ---
   const selects = [0,1,2,3].map(i => document.getElementById('sel-' + i));
   const infos   = [0,1,2,3].map(i => document.getElementById('info-' + i));
-  const labels  = [0,1,2,3].map(i => document.getElementById('label-' + i));
+  const labels  = [0,1,2,3].map(i => document.getElementById('label-' + i)); // video headers (fixed names)
   const videos  = [0,1,2,3].map(i => document.getElementById('vid-' + i));
   const startAllBtn = document.getElementById('startAll');
   const stopAllBtn  = document.getElementById('stopAll');
   const refreshBtn  = document.getElementById('refreshList');
   const resetRememberedBtn = document.getElementById('resetRemembered');
+  const saveBtn = document.getElementById('saveBtn');
   const fpsRange = document.getElementById('fpsRange');
   const fpsOut   = document.getElementById('fpsOut');
 
@@ -141,7 +149,7 @@
     return Math.max(1, parseInt(fpsRange.value || '1', 10));
   }
 
-  // Debounced live-FPS listener (replaces the simple one)
+  // Debounced live-FPS listener
   let fpsDebounce;
   fpsRange.addEventListener('input', () => {
     fpsOut.textContent = fpsRange.value;
@@ -164,6 +172,8 @@
     alert('Saved camera choices cleared.');
   });
 
+  saveBtn.addEventListener('click', toggleRecordingAll);
+
   navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceList);
 
   // --- Helpers ---
@@ -174,6 +184,91 @@
     startBtn.disabled = running;
     stopBtn.disabled  = !running;
     stopAllBtn.disabled = !streams.some(s => s);
+  }
+
+  function timestamp() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+  }
+
+  function pickSupportedMime() {
+    const candidates = [
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm'
+      // Safari (some versions) may support 'video/mp4' with H.264; uncomment if needed:
+      // 'video/mp4'
+    ];
+    for (const m of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+    }
+    return ''; // Let browser decide
+  }
+
+  async function toggleRecordingAll() {
+    if (!recording) {
+      // Start recording any active streams
+      const mime = pickSupportedMime();
+      let any = false;
+      for (let i = 0; i < 4; i++) {
+        if (!streams[i]) { infos[i].textContent = 'Not running'; continue; }
+        try {
+          chunks[i] = [];
+          const rec = new MediaRecorder(streams[i], mime ? { mimeType: mime } : undefined);
+          recorders[i] = rec;
+          rec.ondataavailable = e => { if (e.data && e.data.size) chunks[i].push(e.data); };
+          rec.onstop = () => { /* blob assembled later */ };
+          rec.start(1000); // gather data every second
+          any = true;
+          infos[i].textContent = 'Recording…';
+        } catch (e) {
+          console.error(`Recorder ${i+1} error:`, e);
+          infos[i].textContent = 'Recorder error';
+        }
+      }
+      if (!any) { alert('No active streams to record. Start at least one camera.'); return; }
+      recording = true;
+      saveBtn.textContent = 'Stop & Download';
+      saveBtn.classList.add('danger');
+    } else {
+      // Stop and download
+      const stamp = timestamp();
+      for (let i = 0; i < 4; i++) {
+        if (recorders[i]) {
+          await stopRecorder(recorders[i]);
+          recorders[i] = null;
+          const blob = new Blob(chunks[i], { type: (chunks[i][0]?.type || 'video/webm') });
+          chunks[i] = [];
+          if (blob.size > 0) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${stamp}_${positionNames[i]}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            infos[i].textContent = 'Saved';
+          } else {
+            infos[i].textContent = 'No data';
+          }
+        }
+      }
+      recording = false;
+      saveBtn.textContent = 'Save streams';
+      saveBtn.classList.remove('danger');
+    }
+  }
+
+  function stopRecorder(rec) {
+    return new Promise(resolve => {
+      try {
+        rec.onstop = () => resolve();
+        if (rec.state !== 'inactive') rec.stop();
+        else resolve();
+      } catch { resolve(); }
+    });
   }
 
   // Live FPS adjuster for all running streams
@@ -248,7 +343,8 @@
           ? currentSelections[i]
           : (vids[0]?.deviceId || '');
         sel.value = candidate;
-        labels[i].textContent = sel.selectedOptions[0]?.textContent || `Camera ${i+1}`;
+        // Keep pane headers fixed to Front/Back/Left/Right — do not overwrite labels[]
+        // If you want to also show the selected device name, append here instead of replacing.
       });
 
       const remembered = loadRememberedSelection();
@@ -256,7 +352,6 @@
         remembered.forEach((id, i) => {
           if (id && [...selects[i].options].some(o => o.value === id)) {
             selects[i].value = id;
-            labels[i].textContent = selects[i].selectedOptions[0]?.textContent || labels[i].textContent;
           }
         });
       }
@@ -282,7 +377,7 @@
           video: { deviceId: { exact: deviceId }, ...video },
           audio: false
         });
-        // Log what we actually got (useful for debugging bandwidth limits)
+        // Log what we actually got
         const track = stream.getVideoTracks()[0];
         const s = track.getSettings();
         console.log(`Negotiated ${s.width}×${s.height} @ ${s.frameRate} fps for ${deviceId}`);
@@ -297,7 +392,7 @@
 
   async function startOne(idx) {
     const deviceId = selects[idx].value;
-    if (!deviceId) { alert(`Select a camera for slot ${idx + 1}`); return; }
+    if (!deviceId) { alert(`Select a camera for ${positionNames[idx]}`); return; }
     stopOne(idx);
     try {
       infos[idx].textContent = 'Starting...';
@@ -307,18 +402,23 @@
       streams[idx] = stream;
       videos[idx].srcObject = stream;
       setButtonsEnabled(idx, true);
-      labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
       infos[idx].textContent = 'Live';
       rememberSelection(selects.map(s => s.value));
     } catch (e) {
       infos[idx].textContent = 'Error';
       console.error(`Cam ${idx+1} start error:`, e);
-      alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
+      alert(`${positionNames[idx]} failed: ${e.name || 'Error'} — ${e.message || e}`);
       setButtonsEnabled(idx, false);
     }
   }
 
   function stopOne(idx) {
+    // Stop any ongoing recording for this cam (so chunks flush cleanly)
+    if (recorders[idx] && recording) {
+      try { recorders[idx].stop(); } catch {}
+      recorders[idx] = null;
+      chunks[idx] = [];
+    }
     const s = streams[idx];
     if (s) {
       s.getTracks().forEach(t => t.stop());
@@ -346,13 +446,18 @@
   function stopAll() {
     for (let i = 0; i < 4; i++) stopOne(i);
     stopAllBtn.disabled = true;
+    if (recording) {
+      // if user hit Stop All while recording, reset UI
+      recording = false;
+      saveBtn.textContent = 'Save streams';
+      saveBtn.classList.remove('danger');
+    }
   }
 
-  // Keep label in sync when user changes selection
+  // Keep info badge coherent on selection change
   selects.forEach((sel, i) => {
     sel.addEventListener('change', () => {
-      labels[i].textContent = sel.selectedOptions[0]?.textContent || `Camera ${i+1}`;
-      infos[i].textContent = 'Idle';
+      infos[i].textContent = streams[i] ? 'Live' : 'Idle';
     });
   });
 
