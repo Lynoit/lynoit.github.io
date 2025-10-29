@@ -7,7 +7,7 @@
 <style>
   :root { --gap: 12px; }
   body { margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background: #111; color: #eee; }
-  header { padding: 12px 16px; background: #1b1b1b; border-bottom: 1px solid #333; }
+  header.topbar { padding: 12px 16px; background: #1b1b1b; border-bottom: 1px solid #333; }
   h1 { margin: 0; font-size: 18px; font-weight: 600; }
   #controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px 16px; background: #141414; border-bottom: 1px solid #2a2a2a; }
   .camctl { background: #1a1a1a; border: 1px solid #2e2e2e; border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
@@ -17,12 +17,15 @@
   button.primary { background: #2c7be5; border-color: #2c7be5; }
   button.danger { background: #b54b4b; border-color: #b54b4b; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  #global { display: flex; gap: var(--gap); padding: 0 16px 12px; background: #141414; border-bottom: 1px solid #2a2a2a; }
-  #grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; gap: var(--gap); padding: var(--gap); height: calc(100vh - 220px); box-sizing: border-box; }
+  #global { display: flex; gap: var(--gap); padding: 10px 16px; align-items: center; background: #141414; border-bottom: 1px solid #2a2a2a; flex-wrap: wrap; }
+  #grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; gap: var(--gap); padding: var(--gap); height: calc(100vh - 230px); box-sizing: border-box; }
   .pane { position: relative; background: #000; border: 1px solid #333; border-radius: 12px; overflow: hidden; }
   .pane header { position: absolute; inset: 0 auto auto 0; background: rgba(0,0,0,0.55); border: none; padding: 6px 10px; font-size: 12px; z-index: 2; }
   video { width: 100%; height: 100%; object-fit: cover; background: #000; }
   .badge { font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1 1 auto; }
+  #fpsCtl { display:flex; align-items:center; gap:8px; }
+  #fpsRange { width: 180px; }
   footer { padding: 8px 16px; font-size: 12px; color: #888; border-top: 1px solid #2a2a2a; background: #141414; }
   @media (max-width: 900px) {
     #controls { grid-template-columns: repeat(2, 1fr); }
@@ -32,7 +35,7 @@
 </style>
 </head>
 <body>
-  <header>
+  <header class="topbar">
     <h1>4× USB Webcam Viewer</h1>
   </header>
 
@@ -78,10 +81,17 @@
   <div id="global">
     <button id="startAll" class="primary">Start All</button>
     <button id="stopAll" class="danger" disabled>Stop All</button>
-    <div style="margin-left:auto;display:flex;gap:8px;">
-      <button id="refreshList">Refresh Camera List</button>
-      <button id="resetRemembered">Reset Remembered Choices</button>
+
+    <div id="fpsCtl">
+      <label for="fpsRange" title="Capture FPS cap">FPS</label>
+      <input id="fpsRange" type="range" min="1" max="30" value="1" step="1" />
+      <output id="fpsOut" for="fpsRange">1</output>
     </div>
+
+    <div class="spacer"></div>
+
+    <button id="refreshList">Refresh Camera List</button>
+    <button id="resetRemembered">Reset Remembered Choices</button>
   </div>
 
   <main id="grid">
@@ -104,8 +114,8 @@
   </main>
 
   <footer>
-    Notes: Use HTTPS or <code>http://localhost</code>. You must grant camera access. After permission, camera labels become visible.
-    For 4 simultaneous USB webcams, prefer Chrome/Edge on Windows/macOS/Linux.
+    Use HTTPS or <code>http://localhost</code>. Grant camera access when prompted. After permission, device labels appear.
+    For 4 simultaneous webcams, keep resolution modest (640×360/480) and FPS low.
   </footer>
 
 <script>
@@ -123,6 +133,13 @@
   const stopAllBtn  = document.getElementById('stopAll');
   const refreshBtn  = document.getElementById('refreshList');
   const resetRememberedBtn = document.getElementById('resetRemembered');
+  const fpsRange = document.getElementById('fpsRange');
+  const fpsOut   = document.getElementById('fpsOut');
+
+  function getTargetFps() {
+    return Math.max(1, parseInt(fpsRange.value || '1', 10));
+  }
+  fpsRange.addEventListener('input', () => { fpsOut.textContent = fpsRange.value; });
 
   // Attach button handlers per camera control block
   document.querySelectorAll('.camctl').forEach(block => {
@@ -177,13 +194,10 @@
 
   async function refreshDeviceList() {
     try {
-      // Ensure labels visible
       await ensurePermissionPrompted();
-
       const devices = await navigator.mediaDevices.enumerateDevices();
       const vids = devices.filter(d => d.kind === 'videoinput');
 
-      // Build options for each select
       const currentSelections = selects.map(sel => sel.value || '');
       selects.forEach((sel, i) => {
         const prev = sel.value;
@@ -191,12 +205,10 @@
         vids.forEach((d, ix) => {
           const opt = document.createElement('option');
           opt.value = d.deviceId;
-          // Show nice label with index to disambiguate identical labels
           const label = d.label || `Camera ${ix+1}`;
           opt.textContent = `${label} [${ix+1}]`;
           sel.appendChild(opt);
         });
-        // Reapply previous value if still present, else first option
         const candidate = currentSelections[i] && vids.some(v => v.deviceId === currentSelections[i])
           ? currentSelections[i]
           : (vids[0]?.deviceId || '');
@@ -204,7 +216,6 @@
         labels[i].textContent = sel.selectedOptions[0]?.textContent || `Camera ${i+1}`;
       });
 
-      // Try apply remembered selection if nothing chosen yet
       const remembered = loadRememberedSelection();
       if (remembered) {
         remembered.forEach((id, i) => {
@@ -220,69 +231,57 @@
     }
   }
 
-  async function openWithFallbacks(deviceId) {
-  // From lowest bandwidth upward. Keep fps low.
-  const attempts = [
-    { width: { max: 640 },  height: { max: 360 },  frameRate: { max: 15 } },
-    { width: { max: 640 },  height: { max: 480 },  frameRate: { max: 15 } },
-    { width: { max: 800 },  height: { max: 600 },  frameRate: { max: 15 } },
-    { width: { max: 1280 }, height: { max: 720 },  frameRate: { max: 15 } },
-    { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 15 } },
-  ];
-  let lastErr = null;
-  for (const video of attempts) {
+  // --- Open with FPS-aware fallbacks ---
+  async function openWithFallbacks(deviceId, fpsCap) {
+    // Try very low bandwidth first; all attempts cap frameRate at the GUI value
+    const attempts = [
+      { width: { exact: 640 },  height: { exact: 360 },  frameRate: { max: fpsCap } },
+      { width: { exact: 640 },  height: { exact: 480 },  frameRate: { max: fpsCap } },
+      { width: { max: 800 },    height: { max: 600 },    frameRate: { max: fpsCap } },
+      { width: { max: 1280 },   height: { max: 720 },    frameRate: { max: fpsCap } },
+    ];
+    let lastErr;
+    for (const video of attempts) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId }, ...video },
+          audio: false
+        });
+        // Log what we actually got (useful for debugging bandwidth limits)
+        const track = stream.getVideoTracks()[0];
+        const s = track.getSettings();
+        console.log(`Negotiated ${s.width}×${s.height} @ ${s.frameRate} fps for ${deviceId}`);
+        return stream;
+      } catch (e) {
+        lastErr = e;
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+    throw lastErr || new Error('Could not start video source');
+  }
+
+  async function startOne(idx) {
+    const deviceId = selects[idx].value;
+    if (!deviceId) { alert(`Select a camera for slot ${idx + 1}`); return; }
+    stopOne(idx);
     try {
-      // Avoid "exact" except for deviceId; let the browser negotiate down.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: deviceId }, ...video },
-        audio: false
-      });
-      return stream;
+      infos[idx].textContent = 'Starting...';
+      // Stagger startup to reduce driver contention
+      await new Promise(r => setTimeout(r, idx * 150));
+      const stream = await openWithFallbacks(deviceId, getTargetFps());
+      streams[idx] = stream;
+      videos[idx].srcObject = stream;
+      setButtonsEnabled(idx, true);
+      labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
+      infos[idx].textContent = 'Live';
+      rememberSelection(selects.map(s => s.value));
     } catch (e) {
-      lastErr = e;
-      // If device is busy, a short wait sometimes helps drivers recover.
-      await new Promise(r => setTimeout(r, 200));
+      infos[idx].textContent = 'Error';
+      console.error(`Cam ${idx+1} start error:`, e);
+      alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
+      setButtonsEnabled(idx, false);
     }
   }
-  throw lastErr || new Error('Could not start video source');
-}
-
-async function startOne(idx) {
-  const deviceId = selects[idx].value;
-  if (!deviceId) { alert(`Select a camera for slot ${idx + 1}`); return; }
-  stopOne(idx);
-  try {
-    infos[idx].textContent = 'Starting...';
-    // Stagger startup to reduce driver contention
-    await new Promise(r => setTimeout(r, idx * 150));
-    const stream = await openWithFallbacks(deviceId);
-    streams[idx] = stream;
-    videos[idx].srcObject = stream;
-    setButtonsEnabled(idx, true);
-    labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
-    infos[idx].textContent = 'Live';
-    rememberSelection(selects.map(s => s.value));
-  } catch (e) {
-    infos[idx].textContent = 'Error';
-    console.error(`Cam ${idx+1} start error:`, e);
-    alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
-    setButtonsEnabled(idx, false);
-  }
-}
-
-async function startAll() {
-  const chosen = new Set();
-  for (let i = 0; i < 4; i++) {
-    const id = selects[i].value;
-    if (chosen.has(id)) {
-      infos[i].textContent = 'Duplicate selection—pick a different camera.';
-      continue;
-    }
-    chosen.add(id);
-    await startOne(i); // serial, not parallel
-  }
-  stopAllBtn.disabled = !streams.some(Boolean);
-}
 
   function stopOne(idx) {
     const s = streams[idx];
@@ -296,16 +295,15 @@ async function startAll() {
   }
 
   async function startAll() {
-    // Avoid selecting the same physical camera twice (some drivers allow it, but it often fails).
     const chosen = new Set();
     for (let i = 0; i < 4; i++) {
       const id = selects[i].value;
       if (chosen.has(id)) {
         infos[i].textContent = 'Duplicate selection—pick a different camera.';
-      } else {
-        chosen.add(id);
-        await startOne(i);
+        continue;
       }
+      chosen.add(id);
+      await startOne(i); // serial, not parallel
     }
     stopAllBtn.disabled = !streams.some(Boolean);
   }
