@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>4-Cam Session Viewer</title>
+<title>4-Cam Session Viewer (Master-Sync, mtime-based length)</title>
 <style>
   body { margin:0; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; background:#111; color:#eee; display:flex; height:100vh; overflow:hidden; }
   #sidebar { width:260px; background:#1b1b1b; border-right:1px solid #333; display:flex; flex-direction:column; }
@@ -37,14 +37,14 @@
       <input id="timeline" type="range" min="0" max="100" value="0" step="0.01" disabled />
       <span id="currentTime">00:00</span>
       <div style="flex:1"></div>
-      <!-- right side shows GLOBAL time (timestamp + elapsed) -->
+      <!-- Right side shows GLOBAL time (session timestamp + master elapsed) -->
       <span id="sessionName"></span>
     </div>
     <div id="videos">
-      <div class="vwrap"><header>Front</header><video id="vidFront"></video></div>
-      <div class="vwrap"><header>Back</header><video id="vidBack"></video></div>
-      <div class="vwrap"><header>Left</header><video id="vidLeft"></video></div>
-      <div class="vwrap"><header>Right</header><video id="vidRight"></video></div>
+      <div class="vwrap"><header>Front</header><video id="vidFront" preload="metadata" muted></video></div>
+      <div class="vwrap"><header>Back</header> <video id="vidBack"  preload="metadata" muted></video></div>
+      <div class="vwrap"><header>Left</header> <video id="vidLeft"  preload="metadata" muted></video></div>
+      <div class="vwrap"><header>Right</header><video id="vidRight" preload="metadata" muted></video></div>
     </div>
   </div>
 
@@ -63,11 +63,17 @@
     Right: document.getElementById('vidRight')
   };
 
-  let sessions = {};     // { timestamp: {Front:File,Back:File,Left:File,Right:File} }
+  let sessions = {};     // { "YYYYMMDD_HHMMSS": {Front:File,Back:File,Left:File,Right:File} }
   let currentSession = null;
-  let baseSec = 0;       // seconds-of-day from session timestamp (HH*3600+MM*60+SS)
-  let syncing = false;
-  let timelineSyncInterval = null;
+  let baseDate = new Date(NaN);  // full date from filename (local)
+  let master = null;             // clock video
+  let rVFCHandle = null;         // rVFC handle
+  let playing = false;
+
+  // Sync thresholds (seconds)
+  const SOFT_SLEW_TH = 0.030;    // start gentle playbackRate correction above 30 ms
+  const HARD_JUMP_TH = 0.100;    // jump if drift exceeds 100 ms
+  const MAX_SLEW = 0.03;         // cap playbackRate adjustment to ±3%
 
   // ---------- Utils ----------
   function fmtTime(sec){
@@ -75,18 +81,16 @@
     const m=Math.floor(sec/60), s=Math.floor(sec%60);
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
   }
-  function fmtHMS(sec){
-    const h = Math.floor(sec / 3600) % 24;
-    const m = Math.floor(sec / 60) % 60;
-    const s = Math.floor(sec % 60);
+  function fmtHMSfromDate(dt){
+    const h=dt.getHours(), m=dt.getMinutes(), s=dt.getSeconds();
     return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
   }
-  function parseBaseSeconds(stamp){
+  function parseBaseDate(stamp){
     // stamp like YYYYMMDD_HHMMSS
-    const m = stamp.match(/_(\d{6})$/);
-    if (!m) return 0;
-    const hh = +m[1].slice(0,2), mm = +m[1].slice(2,4), ss = +m[1].slice(4,6);
-    return hh*3600 + mm*60 + ss;
+    const m = stamp.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/);
+    if(!m) return new Date(NaN);
+    const [_, Y, Mo, D, h, mi, s] = m;
+    return new Date(+Y, +Mo-1, +D, +h, +mi, +s, 0); // local
   }
 
   async function pickFolder() {
@@ -114,7 +118,7 @@
   function parseSessions(files){
     sessions={};
     for(const f of files){
-      // accept seconds: YYYYMMDD_HHMMSS_Position.webm
+      // seconds-aware: YYYYMMDD_HHMMSS_Position.webm
       const m = f.name.match(/^(\d{8}_\d{6})_(Front|Back|Left|Right)\.webm$/i);
       if(!m) continue;
       const [,stamp,pos] = m;
@@ -137,50 +141,77 @@
   }
 
   async function loadSession(stamp,elem){
+    // Stop previous playback loop if any
+    stopSyncLoop();
+    playing = false;
+    playPause.textContent='▶️ Play';
+    playPause.dataset.state='paused';
+
     [...sessionList.children].forEach(c=>c.classList.remove('active'));
     elem.classList.add('active');
     currentSession=stamp;
 
-    // Calculate base seconds from timestamp and show initial global time
-    baseSec = parseBaseSeconds(stamp);
-    sessionNameEl.textContent = fmtHMS(baseSec);
+    // Parse base date from filename and show initial global time
+    baseDate = parseBaseDate(stamp);
+    sessionNameEl.textContent = fmtHMSfromDate(baseDate);
 
     playPause.disabled=false;
     timeline.disabled=false;
 
-    // Load each existing video
+    // Load videos; pick first available as master
+    master = null;
     for(const pos of ['Front','Back','Left','Right']){
-      const file = sessions[stamp][pos];
       const v = vids[pos];
+      const file = sessions[stamp][pos];
       if(file){
         v.src = URL.createObjectURL(file);
-        await v.play().catch(()=>{});
+        v.play().catch(()=>{});  // prime
         v.pause();
         v.currentTime=0;
+        if (!master) master = v;
       } else {
         v.removeAttribute('src');
       }
+      v.playbackRate = 1.0;
     }
 
-    // Wait for metadata
+    // Wait for metadata (fallback timeout)
     await Promise.all(Object.values(vids).map(v=> new Promise(r=>{
+      if (!v.src) return r();
       v.onloadedmetadata=()=>r();
       setTimeout(r,500);
     })));
 
-    // Set timeline range to 0–max duration found
-    const maxDur = Math.max(...Object.values(vids).map(v=>v.duration||0));
-    timeline.max = maxDur || 0;
+    // --- NEW: compute elapsed from filename timestamp to the latest file's lastModified ---
+    const filesInSession = ['Front','Back','Left','Right']
+      .map(pos => sessions[stamp][pos])
+      .filter(Boolean);
+    let elapsedByMtimeSec = 0;
+    if (filesInSession.length) {
+      const latestMs = Math.max(...filesInSession.map(f => f.lastModified || 0));
+      const startMs  = baseDate.getTime();
+      if (isFinite(latestMs) && isFinite(startMs) && latestMs > startMs) {
+        elapsedByMtimeSec = Math.floor((latestMs - startMs) / 1000);
+      }
+    }
+
+    // Fallback: if mtime diff couldn't be computed, use max media duration
+    const durations = Object.values(vids).map(v => (v.src ? (v.duration || 0) : 0));
+    const maxDur = Math.max(...durations, 0);
+
+    const totalSec = elapsedByMtimeSec > 0 ? elapsedByMtimeSec : maxDur;
+
+    timeline.max = totalSec || 0;
     timeline.value=0;
     currentTime.textContent = fmtTime(0);
-    sessionNameEl.textContent = fmtHMS(baseSec); // initialize global clock at t=0
+    sessionNameEl.textContent = fmtHMSfromDate(baseDate); // global time at t=0
   }
 
-  // --- playback sync ---
+  // --- playback control ---
   playPause.addEventListener('click', ()=>{
-    if(!currentSession) return;
-    const playing = playPause.dataset.state==='playing';
-    if(playing){
+    if(!currentSession || !master) return;
+    const isPlaying = playPause.dataset.state==='playing';
+    if(isPlaying){
       pauseAll();
     } else {
       playAll();
@@ -190,38 +221,97 @@
   function playAll(){
     playPause.textContent='⏸ Pause';
     playPause.dataset.state='playing';
-    for(const v of Object.values(vids)){ v.play().catch(()=>{}); }
-    syncing=true;
-    timelineSyncInterval=setInterval(()=>{
-      const t = Object.values(vids).reduce((acc,v)=>acc+v.currentTime,0)/4;
-      timeline.value=t;
-      currentTime.textContent=fmtTime(t);
-      // update GLOBAL time display (timestamp + elapsed)
-      sessionNameEl.textContent = fmtHMS((baseSec + Math.floor(t)) % 86400);
-    },100);
+    playing = true;
+
+    for (const v of Object.values(vids)) {
+      if (!v.src) continue;
+      v.play().catch(()=>{});
+    }
+    startSyncLoop();
   }
 
   function pauseAll(){
     playPause.textContent='▶️ Play';
     playPause.dataset.state='paused';
-    for(const v of Object.values(vids)){ v.pause(); }
-    clearInterval(timelineSyncInterval);
-    syncing=false;
+    playing = false;
+
+    for (const v of Object.values(vids)) {
+      if (!v.src) continue;
+      v.pause();
+      v.playbackRate = 1.0;
+    }
+    stopSyncLoop();
   }
 
-  timeline.addEventListener('input',()=>{
-    if(!syncing){
-      const t=parseFloat(timeline.value);
-      for(const v of Object.values(vids)){
-        try{ v.currentTime=t; }catch{}
-      }
-      currentTime.textContent=fmtTime(t);
-      // update GLOBAL time display while scrubbing
-      sessionNameEl.textContent = fmtHMS((baseSec + Math.floor(t)) % 86400);
+  // --- timeline scrubbing ---
+  timeline.addEventListener('input', ()=>{
+    if(!master) return;
+    const t=parseFloat(timeline.value);
+    master.currentTime = t;
+    for (const v of Object.values(vids)) {
+      if (v !== master && v.src) v.currentTime = t;
     }
+    currentTime.textContent = fmtTime(t);
+    const nowDt = new Date(baseDate.getTime() + Math.floor(t)*1000);
+    sessionNameEl.textContent = fmtHMSfromDate(nowDt);
   });
 
-  pickBtn.onclick=pickFolder;
+  // --- master-driven sync loop with rVFC + slew control ---
+  function startSyncLoop(){
+    if (!master) return;
+    const followers = Object.values(vids).filter(v => v !== master && v.src);
+
+    const loop = () => {
+      const t = master.currentTime || 0;
+
+      // clamp UI timeline to declared max (mtime-based)
+      const tClamped = Math.min(t, parseFloat(timeline.max) || t);
+      timeline.value = tClamped;
+      currentTime.textContent = fmtTime(tClamped);
+      const nowDt = new Date(baseDate.getTime() + Math.floor(tClamped)*1000);
+      sessionNameEl.textContent = fmtHMSfromDate(nowDt);
+
+      // sync followers to master time
+      for (const v of followers) {
+        const drift = (v.currentTime || 0) - t;
+        const adrift = Math.abs(drift);
+
+        if (adrift > HARD_JUMP_TH) {
+          v.currentTime = t;
+          v.playbackRate = 1.0;
+        } else if (adrift > SOFT_SLEW_TH) {
+          const sign = (drift > 0) ? -1 : 1; // ahead? slow down; behind? speed up
+          const adj = Math.min(MAX_SLEW, Math.max(-MAX_SLEW, sign * Math.min(MAX_SLEW, adrift * 0.5)));
+          v.playbackRate = 1.0 + adj;
+        } else {
+          v.playbackRate = 1.0;
+        }
+      }
+
+      if (playing && master.requestVideoFrameCallback) {
+        rVFCHandle = master.requestVideoFrameCallback(() => loop());
+      } else if (playing) {
+        rVFCHandle = setTimeout(loop, 33);
+      }
+    };
+
+    if (master.requestVideoFrameCallback) {
+      rVFCHandle = master.requestVideoFrameCallback(() => loop());
+    } else {
+      rVFCHandle = setTimeout(loop, 33);
+    }
+  }
+
+  function stopSyncLoop(){
+    if (master && master.cancelVideoFrameCallback && rVFCHandle) {
+      try { master.cancelVideoFrameCallback(rVFCHandle); } catch {}
+    } else if (rVFCHandle) {
+      clearTimeout(rVFCHandle);
+    }
+    rVFCHandle = null;
+  }
+
+  pickBtn.onclick = pickFolder;
 })();
 </script>
 </body>
