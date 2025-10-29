@@ -18,7 +18,8 @@
   .vwrap { position:relative; }
   .vwrap header { position:absolute; top:4px; left:4px; background:rgba(0,0,0,0.5); padding:2px 6px; border-radius:4px; font-size:12px; }
   #timeline { width:100%; }
-  #currentTime { width:90px; text-align:right; font-variant-numeric:tabular-nums; }
+  #currentTime { width:70px; text-align:right; font-variant-numeric:tabular-nums; }
+  #sessionName { font-variant-numeric:tabular-nums; }
   button { background:#2c7be5; border:none; color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer; }
   button:hover { background:#3d8af0; }
 </style>
@@ -36,6 +37,7 @@
       <input id="timeline" type="range" min="0" max="100" value="0" step="0.01" disabled />
       <span id="currentTime">00:00</span>
       <div style="flex:1"></div>
+      <!-- right side shows GLOBAL time (timestamp + elapsed) -->
       <span id="sessionName"></span>
     </div>
     <div id="videos">
@@ -63,14 +65,28 @@
 
   let sessions = {};     // { timestamp: {Front:File,Back:File,Left:File,Right:File} }
   let currentSession = null;
+  let baseSec = 0;       // seconds-of-day from session timestamp (HH*3600+MM*60+SS)
   let syncing = false;
   let timelineSyncInterval = null;
 
-  // Utility
+  // ---------- Utils ----------
   function fmtTime(sec){
     sec = Math.max(0,sec);
     const m=Math.floor(sec/60), s=Math.floor(sec%60);
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+  function fmtHMS(sec){
+    const h = Math.floor(sec / 3600) % 24;
+    const m = Math.floor(sec / 60) % 60;
+    const s = Math.floor(sec % 60);
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+  function parseBaseSeconds(stamp){
+    // stamp like YYYYMMDD_HHMMSS
+    const m = stamp.match(/_(\d{6})$/);
+    if (!m) return 0;
+    const hh = +m[1].slice(0,2), mm = +m[1].slice(2,4), ss = +m[1].slice(4,6);
+    return hh*3600 + mm*60 + ss;
   }
 
   async function pickFolder() {
@@ -98,6 +114,7 @@
   function parseSessions(files){
     sessions={};
     for(const f of files){
+      // accept seconds: YYYYMMDD_HHMMSS_Position.webm
       const m = f.name.match(/^(\d{8}_\d{6})_(Front|Back|Left|Right)\.webm$/i);
       if(!m) continue;
       const [,stamp,pos] = m;
@@ -123,7 +140,11 @@
     [...sessionList.children].forEach(c=>c.classList.remove('active'));
     elem.classList.add('active');
     currentSession=stamp;
-    sessionNameEl.textContent=stamp;
+
+    // Calculate base seconds from timestamp and show initial global time
+    baseSec = parseBaseSeconds(stamp);
+    sessionNameEl.textContent = fmtHMS(baseSec);
+
     playPause.disabled=false;
     timeline.disabled=false;
 
@@ -141,7 +162,7 @@
       }
     }
 
-    // Wait a bit for metadata
+    // Wait for metadata
     await Promise.all(Object.values(vids).map(v=> new Promise(r=>{
       v.onloadedmetadata=()=>r();
       setTimeout(r,500);
@@ -152,6 +173,7 @@
     timeline.max = maxDur || 0;
     timeline.value=0;
     currentTime.textContent = fmtTime(0);
+    sessionNameEl.textContent = fmtHMS(baseSec); // initialize global clock at t=0
   }
 
   // --- playback sync ---
@@ -174,6 +196,8 @@
       const t = Object.values(vids).reduce((acc,v)=>acc+v.currentTime,0)/4;
       timeline.value=t;
       currentTime.textContent=fmtTime(t);
+      // update GLOBAL time display (timestamp + elapsed)
+      sessionNameEl.textContent = fmtHMS((baseSec + Math.floor(t)) % 86400);
     },100);
   }
 
@@ -192,6 +216,8 @@
         try{ v.currentTime=t; }catch{}
       }
       currentTime.textContent=fmtTime(t);
+      // update GLOBAL time display while scrubbing
+      sessionNameEl.textContent = fmtHMS((baseSec + Math.floor(t)) % 86400);
     }
   });
 
