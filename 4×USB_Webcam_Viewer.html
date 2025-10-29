@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>4× USB Webcam Viewer</title>
+<style>
+  :root { --gap: 12px; }
+  body { margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background: #111; color: #eee; }
+  header { padding: 12px 16px; background: #1b1b1b; border-bottom: 1px solid #333; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  #controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap); padding: 12px 16px; background: #141414; border-bottom: 1px solid #2a2a2a; }
+  .camctl { background: #1a1a1a; border: 1px solid #2e2e2e; border-radius: 10px; padding: 10px; display: grid; gap: 8px; }
+  label { font-size: 12px; color: #bbb; }
+  select, button { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid #444; background: #202020; color: #eee; }
+  button { cursor: pointer; }
+  button.primary { background: #2c7be5; border-color: #2c7be5; }
+  button.danger { background: #b54b4b; border-color: #b54b4b; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #global { display: flex; gap: var(--gap); padding: 0 16px 12px; background: #141414; border-bottom: 1px solid #2a2a2a; }
+  #grid { display: grid; grid-template-columns: repeat(2, 1fr); grid-auto-rows: 1fr; gap: var(--gap); padding: var(--gap); height: calc(100vh - 220px); box-sizing: border-box; }
+  .pane { position: relative; background: #000; border: 1px solid #333; border-radius: 12px; overflow: hidden; }
+  .pane header { position: absolute; inset: 0 auto auto 0; background: rgba(0,0,0,0.55); border: none; padding: 6px 10px; font-size: 12px; z-index: 2; }
+  video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+  .badge { font-variant-numeric: tabular-nums; }
+  footer { padding: 8px 16px; font-size: 12px; color: #888; border-top: 1px solid #2a2a2a; background: #141414; }
+  @media (max-width: 900px) {
+    #controls { grid-template-columns: repeat(2, 1fr); }
+    #grid { grid-template-columns: 1fr; height: auto; }
+    .pane { aspect-ratio: 16/9; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>4× USB Webcam Viewer</h1>
+  </header>
+
+  <div id="controls">
+    <div class="camctl" data-idx="0">
+      <label for="sel-0">Camera 1</label>
+      <select id="sel-0"></select>
+      <div style="display:flex; gap:8px;">
+        <button class="primary" data-action="start">Start 1</button>
+        <button class="danger" data-action="stop" disabled>Stop 1</button>
+      </div>
+      <small class="badge" id="info-0">Idle</small>
+    </div>
+    <div class="camctl" data-idx="1">
+      <label for="sel-1">Camera 2</label>
+      <select id="sel-1"></select>
+      <div style="display:flex; gap:8px;">
+        <button class="primary" data-action="start">Start 2</button>
+        <button class="danger" data-action="stop" disabled>Stop 2</button>
+      </div>
+      <small class="badge" id="info-1">Idle</small>
+    </div>
+    <div class="camctl" data-idx="2">
+      <label for="sel-2">Camera 3</label>
+      <select id="sel-2"></select>
+      <div style="display:flex; gap:8px;">
+        <button class="primary" data-action="start">Start 3</button>
+        <button class="danger" data-action="stop" disabled>Stop 3</button>
+      </div>
+      <small class="badge" id="info-2">Idle</small>
+    </div>
+    <div class="camctl" data-idx="3">
+      <label for="sel-3">Camera 4</label>
+      <select id="sel-3"></select>
+      <div style="display:flex; gap:8px;">
+        <button class="primary" data-action="start">Start 4</button>
+        <button class="danger" data-action="stop" disabled>Stop 4</button>
+      </div>
+      <small class="badge" id="info-3">Idle</small>
+    </div>
+  </div>
+
+  <div id="global">
+    <button id="startAll" class="primary">Start All</button>
+    <button id="stopAll" class="danger" disabled>Stop All</button>
+    <div style="margin-left:auto;display:flex;gap:8px;">
+      <button id="refreshList">Refresh Camera List</button>
+      <button id="resetRemembered">Reset Remembered Choices</button>
+    </div>
+  </div>
+
+  <main id="grid">
+    <div class="pane">
+      <header id="label-0">Camera 1</header>
+      <video id="vid-0" autoplay playsinline muted></video>
+    </div>
+    <div class="pane">
+      <header id="label-1">Camera 2</header>
+      <video id="vid-1" autoplay playsinline muted></video>
+    </div>
+    <div class="pane">
+      <header id="label-2">Camera 3</header>
+      <video id="vid-2" autoplay playsinline muted></video>
+    </div>
+    <div class="pane">
+      <header id="label-3">Camera 4</header>
+      <video id="vid-3" autoplay playsinline muted></video>
+    </div>
+  </main>
+
+  <footer>
+    Notes: Use HTTPS or <code>http://localhost</code>. You must grant camera access. After permission, camera labels become visible.
+    For 4 simultaneous USB webcams, prefer Chrome/Edge on Windows/macOS/Linux.
+  </footer>
+
+<script>
+(async () => {
+  // --- State ---
+  const streams = [null, null, null, null]; // MediaStream per pane
+  const rememberedKey = 'quadcam-deviceIds-v1';
+
+  // --- Elements ---
+  const selects = [0,1,2,3].map(i => document.getElementById('sel-' + i));
+  const infos   = [0,1,2,3].map(i => document.getElementById('info-' + i));
+  const labels  = [0,1,2,3].map(i => document.getElementById('label-' + i));
+  const videos  = [0,1,2,3].map(i => document.getElementById('vid-' + i));
+  const startAllBtn = document.getElementById('startAll');
+  const stopAllBtn  = document.getElementById('stopAll');
+  const refreshBtn  = document.getElementById('refreshList');
+  const resetRememberedBtn = document.getElementById('resetRemembered');
+
+  // Attach button handlers per camera control block
+  document.querySelectorAll('.camctl').forEach(block => {
+    const idx = Number(block.dataset.idx);
+    block.querySelector('[data-action="start"]').addEventListener('click', () => startOne(idx));
+    block.querySelector('[data-action="stop"]').addEventListener('click', () => stopOne(idx));
+  });
+
+  startAllBtn.addEventListener('click', startAll);
+  stopAllBtn.addEventListener('click', stopAll);
+  refreshBtn.addEventListener('click', refreshDeviceList);
+  resetRememberedBtn.addEventListener('click', () => {
+    localStorage.removeItem(rememberedKey);
+    alert('Saved camera choices cleared.');
+  });
+
+  navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceList);
+
+  // --- Helpers ---
+  function setButtonsEnabled(idx, running) {
+    const block = document.querySelector(`.camctl[data-idx="${idx}"]`);
+    const startBtn = block.querySelector('[data-action="start"]');
+    const stopBtn = block.querySelector('[data-action="stop"]');
+    startBtn.disabled = running;
+    stopBtn.disabled  = !running;
+    stopAllBtn.disabled = !streams.some(s => s);
+  }
+
+  function rememberSelection(deviceIds) {
+    try { localStorage.setItem(rememberedKey, JSON.stringify(deviceIds)); } catch {}
+  }
+
+  function loadRememberedSelection() {
+    try {
+      const raw = localStorage.getItem(rememberedKey);
+      if (!raw) return null;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length === 4) return arr;
+    } catch {}
+    return null;
+  }
+
+  async function ensurePermissionPrompted() {
+    // To reveal device labels, prompt once for generic camera access.
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      s.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      console.warn('Initial permission request failed:', e);
+    }
+  }
+
+  async function refreshDeviceList() {
+    try {
+      // Ensure labels visible
+      await ensurePermissionPrompted();
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const vids = devices.filter(d => d.kind === 'videoinput');
+
+      // Build options for each select
+      const currentSelections = selects.map(sel => sel.value || '');
+      selects.forEach((sel, i) => {
+        const prev = sel.value;
+        sel.innerHTML = '';
+        vids.forEach((d, ix) => {
+          const opt = document.createElement('option');
+          opt.value = d.deviceId;
+          // Show nice label with index to disambiguate identical labels
+          const label = d.label || `Camera ${ix+1}`;
+          opt.textContent = `${label} [${ix+1}]`;
+          sel.appendChild(opt);
+        });
+        // Reapply previous value if still present, else first option
+        const candidate = currentSelections[i] && vids.some(v => v.deviceId === currentSelections[i])
+          ? currentSelections[i]
+          : (vids[0]?.deviceId || '');
+        sel.value = candidate;
+        labels[i].textContent = sel.selectedOptions[0]?.textContent || `Camera ${i+1}`;
+      });
+
+      // Try apply remembered selection if nothing chosen yet
+      const remembered = loadRememberedSelection();
+      if (remembered) {
+        remembered.forEach((id, i) => {
+          if (id && [...selects[i].options].some(o => o.value === id)) {
+            selects[i].value = id;
+            labels[i].textContent = selects[i].selectedOptions[0]?.textContent || labels[i].textContent;
+          }
+        });
+      }
+    } catch (e) {
+      console.error('Failed to refresh device list', e);
+      alert('Failed to list cameras: ' + e.message);
+    }
+  }
+
+  async function startOne(idx) {
+    const deviceId = selects[idx].value;
+    if (!deviceId) {
+      alert(`Select a camera for slot ${idx + 1}`);
+      return;
+    }
+    // Stop any previous stream for this pane
+    stopOne(idx);
+
+    try {
+      infos[idx].textContent = 'Starting...';
+      const constraints = {
+        video: {
+          deviceId: { exact: deviceId },
+          // You can tweak these depending on your cameras:
+          width:  { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30, max: 60 }
+        },
+        audio: false
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streams[idx] = stream;
+      videos[idx].srcObject = stream;
+      setButtonsEnabled(idx, true);
+      labels[idx].textContent = selects[idx].selectedOptions[0]?.textContent || `Camera ${idx+1}`;
+      infos[idx].textContent = 'Live';
+      // Remember all selections once any starts
+      rememberSelection(selects.map(s => s.value));
+    } catch (e) {
+      infos[idx].textContent = 'Error';
+      console.error(`Cam ${idx+1} start error:`, e);
+      alert(`Camera ${idx+1} failed: ${e.name || 'Error'} — ${e.message || e}`);
+      setButtonsEnabled(idx, false);
+    }
+  }
+
+  function stopOne(idx) {
+    const s = streams[idx];
+    if (s) {
+      s.getTracks().forEach(t => t.stop());
+      streams[idx] = null;
+    }
+    videos[idx].srcObject = null;
+    infos[idx].textContent = 'Stopped';
+    setButtonsEnabled(idx, false);
+  }
+
+  async function startAll() {
+    // Avoid selecting the same physical camera twice (some drivers allow it, but it often fails).
+    const chosen = new Set();
+    for (let i = 0; i < 4; i++) {
+      const id = selects[i].value;
+      if (chosen.has(id)) {
+        infos[i].textContent = 'Duplicate selection—pick a different camera.';
+      } else {
+        chosen.add(id);
+        await startOne(i);
+      }
+    }
+    stopAllBtn.disabled = !streams.some(Boolean);
+  }
+
+  function stopAll() {
+    for (let i = 0; i < 4; i++) stopOne(i);
+    stopAllBtn.disabled = true;
+  }
+
+  // Keep label in sync when user changes selection
+  selects.forEach((sel, i) => {
+    sel.addEventListener('change', () => {
+      labels[i].textContent = sel.selectedOptions[0]?.textContent || `Camera ${i+1}`;
+      infos[i].textContent = 'Idle';
+    });
+  });
+
+  // Initial load
+  if (!navigator.mediaDevices?.getUserMedia) {
+    alert('getUserMedia not supported in this browser.');
+  } else {
+    await refreshDeviceList();
+  }
+})();
+</script>
+</body>
+</html>
