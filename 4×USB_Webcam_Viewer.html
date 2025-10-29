@@ -136,10 +136,18 @@
   const fpsRange = document.getElementById('fpsRange');
   const fpsOut   = document.getElementById('fpsOut');
 
+  // Current FPS target from GUI
   function getTargetFps() {
     return Math.max(1, parseInt(fpsRange.value || '1', 10));
   }
-  fpsRange.addEventListener('input', () => { fpsOut.textContent = fpsRange.value; });
+
+  // Debounced live-FPS listener (replaces the simple one)
+  let fpsDebounce;
+  fpsRange.addEventListener('input', () => {
+    fpsOut.textContent = fpsRange.value;
+    clearTimeout(fpsDebounce);
+    fpsDebounce = setTimeout(() => setLiveFpsForAll(getTargetFps()), 150);
+  });
 
   // Attach button handlers per camera control block
   document.querySelectorAll('.camctl').forEach(block => {
@@ -166,6 +174,34 @@
     startBtn.disabled = running;
     stopBtn.disabled  = !running;
     stopAllBtn.disabled = !streams.some(s => s);
+  }
+
+  // Live FPS adjuster for all running streams
+  async function setLiveFpsForAll(fps) {
+    const tasks = [];
+    for (const s of streams) {
+      if (!s) continue;
+      const track = s.getVideoTracks()[0];
+      if (!track) continue;
+      const attempts = [
+        { frameRate: fps },                             // exact
+        { frameRate: { ideal: fps, max: fps } },        // ideal + cap
+        { frameRate: { max: fps } }                     // cap only
+      ];
+      tasks.push((async () => {
+        let lastErr;
+        for (const c of attempts) {
+          try {
+            await track.applyConstraints(c);
+            const got = track.getSettings();
+            console.log(`Live FPS set → ${got.frameRate ?? 'unknown'} fps`);
+            return;
+          } catch (e) { lastErr = e; }
+        }
+        console.warn('Live FPS change not supported by this camera/driver:', lastErr?.message || lastErr);
+      })());
+    }
+    await Promise.all(tasks);
   }
 
   function rememberSelection(deviceIds) {
@@ -200,7 +236,6 @@
 
       const currentSelections = selects.map(sel => sel.value || '');
       selects.forEach((sel, i) => {
-        const prev = sel.value;
         sel.innerHTML = '';
         vids.forEach((d, ix) => {
           const opt = document.createElement('option');
