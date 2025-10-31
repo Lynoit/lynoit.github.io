@@ -307,6 +307,14 @@ form.addEventListener('submit', async e => {
   cursor:default;         /* feels like a label */
 }
 
+    /* Container already flex row via .center-groups */
+.button-group{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  min-width:280px; /* adjust as needed */
+}
+
     #mainContent {
       height: 100vh;
       overflow-y: auto;
@@ -2101,54 +2109,45 @@ function renderLatestSnapshots(limit = 5) {
   function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
-  function buildButtons(csvFile = 'KPI_buttons.csv') {
+function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
 
   fetch(csvFile)
-    .then(response => {
-      if (!response.ok) throw new Error(`Failed to load ${csvFile}: ${response.status} ${response.statusText}`);
-      return response.text();
-    })
+    .then(r => { if (!r.ok) throw new Error(`Failed to load ${csvFile}: ${r.status} ${r.statusText}`); return r.text(); })
     .then(csvText => {
       const { data, errors } = Papa.parse(csvText, { header: true, skipEmptyLines: true });
       if (errors?.length) console.error('CSV parse errors:', errors);
 
-      const groups = {};  // { groupName: element }
+      const groups = {};  // { groupKey: <div.button-group> }
 
-data.forEach(row => {
-  // --- normalize & trim all the CSV fields ---
-  const groupKey = String(row.group ?? '').trim();
-  const label    = String(row.label ?? '').trim();
-  const cssClass = String(row.cssClass ?? '').trim();
-  const logName  = String(row.logName ?? label).trim();
-  const type     = String(row.type ?? '').trim().toLowerCase();
-  const signal   = String(row.signal ?? '').trim();
-  const onValue  = String(row.onValue ?? '1').trim();
-  const offValue = String(row.offValue ?? '0').trim();
-  const def      = String(row.default ?? '').trim();
+      data.forEach(row => {
+        // --- normalize all CSV fields (trim + sane defaults) ---
+        const groupKey = String(row.group ?? '').trim();
+        const label    = String(row.label ?? '').trim();
+        const cssClass = String(row.cssClass ?? '').trim();
+        const logName  = String((row.logName ?? label)).trim();
+        const type     = String(row.type ?? '').trim().toLowerCase();
+        const signal   = String(row.signal ?? '').trim();
+        const onValue  = String(row.onValue ?? '1').trim();
+        const offValue = String(row.offValue ?? '0').trim();
+        const def      = String(row.default ?? '').trim();
 
-  if (!groupKey || !label) return;
+        if (!groupKey || !label) return;
 
-  // ensure group container (one column per group)
-  if (!groups[groupKey]) {
-    const wrap = document.createElement('div');
-    wrap.className = 'button-group';
-    groups[groupKey] = wrap;
-    buttonGroups.appendChild(wrap);
-  }
+        // one column per group (header item will be just another row in the group)
+        if (!groups[groupKey]) {
+          const wrap = document.createElement('div');
+          wrap.className = 'button-group';
+          groups[groupKey] = wrap;
+          buttonGroups.appendChild(wrap);
+        }
 
-        const semanticType = (type || '').trim().toLowerCase();
-
-        // --- NEW: Toggle button ---
-        if (semanticType === 'toggle' && signal) {
+        if (type === 'toggle' && signal) {
           const isOn =
-            String(def).toLowerCase() === '1' ||
-            String(def).toLowerCase() === 'true' ||
-            String(def).toLowerCase() === 'on';
+            def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
 
-          // init current value
           toggleState[signal] = isOn ? onValue : offValue;
           toggleDefs.push({ signal, onValue, offValue, label });
 
@@ -2166,43 +2165,34 @@ data.forEach(row => {
           track.appendChild(thumb);
           btn.append(text, track);
 
-function render() {
-  const on = btn.getAttribute('aria-checked') === 'true';
-  const current = on ? onValue : offValue;   // <-- from CSV
-  text.textContent = `${label}: ${current}`;
-}
-
-          function flip() {
+          const render = () => {
             const on = btn.getAttribute('aria-checked') === 'true';
-            const next = !on;
-            btn.setAttribute('aria-checked', String(next));
-            toggleState[signal] = next ? onValue : offValue;
+            const current = on ? onValue : offValue;
+            text.textContent = `${label}: ${current}`;
+          };
+          const flip = () => {
+            const on = btn.getAttribute('aria-checked') === 'true';
+            btn.setAttribute('aria-checked', String(!on));
+            toggleState[signal] = !on ? onValue : offValue;
             render();
-          }
+          };
           render();
           btn.addEventListener('click', flip);
           btn.addEventListener('keydown', e => {
             if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
           });
 
-          groups[group].appendChild(btn);
+          groups[groupKey].appendChild(btn);
           return;
         }
 
-// --- Existing: normal press-to-log buttons ---
-const btn = document.createElement('button');
-btn.textContent = label;
-btn.classList.add('bigButton', ...cssClass.trim().split(/\s+/));
-const isRed = btn.classList.contains('redButton');
-btn.addEventListener('click', () => logButton(logName, isRed));
-
-if (btn.classList.contains('greyButton')) {
-  // make this the column header
-  btn.classList.add('group-header');
-  groups[group].prepend(btn);
-} else {
-  groups[group].appendChild(btn);
-}
+        // normal press-to-log buttons (including grey headers)
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.className = `bigButton ${cssClass}`.trim();
+        const isRed = btn.classList.contains('redButton');
+        btn.addEventListener('click', () => logButton(logName, isRed));
+        groups[groupKey].appendChild(btn);
       });
     })
     .catch(err => console.error('Error building buttons:', err));
