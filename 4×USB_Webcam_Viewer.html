@@ -68,7 +68,6 @@ video {
 
 <!-- Detection libs -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
-<script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV loaded')"></script>  
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 </head>
 <body>
@@ -99,22 +98,6 @@ video {
     <input type="checkbox" id="detectToggle" checked />
     Detect front objects
   </label>
-
-  <label title="Detect lane markings (white/yellow)">
-  <input type="checkbox" id="edgesToggle" checked />
-  Lane markings
-</label>
-
-  <label title="Visualize the binary mask used for lane detection">
-  <input type="checkbox" id="laneMaskToggle" checked />
-  Show lane mask
-</label>
-  
-  <label title="Detect left/right road edges with Canny + Hough">
-  <input type="checkbox" id="edgesToggle" checked />
-  Road edges
-</label>
-
   <label title="Horizontal FOV of the Front camera (degrees)">
     FOV°
     <input type="number" id="fovInput" min="20" max="180" step="0.1" value="78" />
@@ -169,8 +152,6 @@ video {
   const birdToggle = document.getElementById('birdToggle');
   const birdRangeInput = document.getElementById('birdRange');
 
-  const laneMaskToggle = document.getElementById('laneMaskToggle');
-
   // Birdview canvas
   const birdCanvas = document.getElementById('birdview');
   const birdCtx = birdCanvas.getContext('2d');
@@ -210,30 +191,6 @@ video {
   let master = null;
   let rVFCHandle = null;
   let playing = false;
-
-  // ---- Road-edge detection (OpenCV.js) ----
-const edgesToggle = document.getElementById('edgesToggle');
-let cvReady = false;
-
-// Offscreen canvas for CV processing (sized to draw area, like inferCanvas)
-const cvCanvas = document.createElement('canvas');
-const cvCtx = cvCanvas.getContext('2d');
-
-// Throttling (edge detection is cheap but do ~15 Hz)
-let lastEdgeT = 0;
-const EDGE_EVERY_MS = 66;
-
-// Will store bearings for birdview rays (updated each frame we detect)
-let lastLaneBearings = null; // {leftRad, rightRad} or null
-
-// OpenCV readiness (it sets cv['onRuntimeInitialized'])
-if (window.cv && cv['onRuntimeInitialized'] === undefined) {
-  // Already initialized
-  cvReady = true;
-} else {
-  window.cv = window.cv || {};
-  cv['onRuntimeInitialized'] = () => { cvReady = true; };
-}
 
   // Sync thresholds (seconds)
   const SOFT_SLEW_TH = 0.030, HARD_JUMP_TH = 0.100, MAX_SLEW = 0.03;
@@ -545,189 +502,6 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
     return { fy };
   }
 
- function detectLaneMarkingsOnFront(map) {
-  if (!cvReady) return null;
-
-  const W = Math.max(1, Math.floor(map.drawW));
-  const H = Math.max(1, Math.floor(map.drawH));
-  if (cvCanvas.width !== W || cvCanvas.height !== H) { cvCanvas.width = W; cvCanvas.height = H; }
-
-  // draw intrinsic frame -> draw area
-  cvCtx.drawImage(vids.Front, 0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1, 0, 0, W, H);
-
-  // Mats
-  let src   = cv.imread(cvCanvas);
-  let lab   = new cv.Mat(), hsv = new cv.Mat();
-  let l     = new cv.Mat(), whiteMask = new cv.Mat(), yellowMask = new cv.Mat();
-  let comb  = new cv.Mat(), blur = new cv.Mat(), edges = new cv.Mat();
-  let mask  = new cv.Mat.zeros(H, W, cv.CV_8UC1), masked = new cv.Mat();
-
-  // ROI trapezoid (tune these 4 multipliers to your framing)
-  const botY = H - 1;
-  const topY = Math.floor(H * 0.60);
-  const leftX_bot  = Math.floor(W * 0.08);
-  const rightX_bot = Math.floor(W * 0.92);
-  const leftX_top  = Math.floor(W * 0.38);
-  const rightX_top = Math.floor(W * 0.62);
-
-  try {
-    // --- White via LAB:L*, with CLAHE ---
-    cv.cvtColor(src, lab, cv.COLOR_RGBA2Lab);
-    const split = new cv.MatVector(); cv.split(lab, split); l = split.get(0); split.delete();
-    const clahe = new cv.CLAHE(2.5, new cv.Size(8,8)); clahe.apply(l, l); clahe.delete();
-    cv.threshold(l, whiteMask, 180, 255, cv.THRESH_BINARY); // 170–200 for wet roads
-
-    // --- Yellow via HSV ---
-    cv.cvtColor(src, hsv, cv.COLOR_RGBA2HSV);
-    const lower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15, 70, 80, 0]);
-    const upper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [40,255,255, 0]);
-    cv.inRange(hsv, lower, upper, yellowMask);
-    lower.delete(); upper.delete();
-
-    // Combine & clean
-    cv.bitwise_or(whiteMask, yellowMask, comb);
-    let k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5,5));
-    cv.morphologyEx(comb, comb, cv.MORPH_CLOSE, k); k.delete();
-    cv.GaussianBlur(comb, blur, new cv.Size(5,5), 1.0, 1.0);
-
-    // Optional edges (helps break blobs)
-    cv.Canny(blur, edges, 60, 150);
-
-    // ROI
-    const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
-      leftX_bot, botY, rightX_bot, botY, rightX_top, topY, leftX_top, topY
-    ]);
-    cv.fillPoly(mask, [pts], new cv.Scalar(255)); pts.delete();
-
-    // Use either edges or comb; edges usually cleaner
-    cv.bitwise_and(edges, mask, masked);
-
-    // --- Split mask points left/right and robust-fit lines with cv.fitLine ---
-    const midX = W / 2;
-    const leftPts  = [];
-    const rightPts = [];
-    // Sample pixels sparsely to keep it fast
-    const step = 2;
-    for (let y = topY; y <= botY; y += step) {
-      const rowOfs = y * masked.cols;
-      for (let x = 0; x < W; x += step) {
-        const v = masked.ucharPtr(y, x)[0];
-        if (v > 0) {
-          if (x < midX) leftPts.push(x, y);
-          else          rightPts.push(x, y);
-        }
-      }
-    }
-
-    function fitFromPoints(arrXY){
-      if (arrXY.length < 2*60) return null; // need ~60 pts
-      const mat = cv.matFromArray(arrXY.length/2, 1, cv.CV_32SC2, arrXY);
-      const line = new cv.Mat();
-      // Returns [vx, vy, x0, y0] in float32
-      cv.fitLine(mat, line, cv.DIST_L2, 0, 0.01, 0.01);
-      mat.delete();
-      const vx = line.data32F[0], vy = line.data32F[1], x0 = line.data32F[2], y0 = line.data32F[3];
-      line.delete();
-      // Convert to y = m x + b; beware vx≈0
-      if (Math.abs(vx) < 1e-3) return null;
-      const m = vy / vx;
-      const b = y0 - m * x0;
-      // Make a segment within [topY..botY]
-      const y1 = botY, y2 = topY;
-      const x1 = (y1 - b)/m, x2 = (y2 - b)/m;
-      if (!isFinite(x1) || !isFinite(x2)) return null;
-      return {x1,y1,x2,y2,m,b};
-    }
-
-    const leftSeg  = fitFromPoints(leftPts);
-    const rightSeg = fitFromPoints(rightPts);
-
-    return {
-      left: leftSeg, right: rightSeg,
-      drawW: W, drawH: H, topY, botY,
-      masked: (laneMaskToggle.checked ? masked.clone() : null), // for optional overlay
-      roi: [
-        {x:leftX_bot,y:botY}, {x:rightX_bot,y:botY},
-        {x:rightX_top,y:topY}, {x:leftX_top,y:topY}
-      ]
-    };
-  } finally {
-    // cleanup (keep masked if cloned above)
-    src.delete(); lab.delete(); hsv.delete(); l.delete();
-    whiteMask.delete(); yellowMask.delete(); comb.delete();
-    blur.delete(); edges.delete(); mask.delete(); /* masked freed if not cloned */
-  }
-}
-
-  function drawLaneMask(maskedMat, map){
-  if (!maskedMat) return;
-  const ctx = ovlFront.getContext('2d');
-  const tmp = document.createElement('canvas');
-  tmp.width = maskedMat.cols; tmp.height = maskedMat.rows;
-  const tctx = tmp.getContext('2d');
-  const id = tctx.createImageData(tmp.width, tmp.height);
-  const src = maskedMat.data;
-  for (let i=0, j=0; i<src.length; i++, j+=4){
-    const v = src[i];
-    id.data[j] = 0; id.data[j+1] = 255; id.data[j+2] = 0; id.data[j+3] = v ? 120 : 0; // translucent green
-  }
-  tctx.putImageData(id, 0, 0);
-  ctx.drawImage(tmp, map.padX, map.padY);
-}
-
-function drawROIPolygon(map, poly, color='#2cc9ff'){
-  const ctx = ovlFront.getContext('2d');
-  ctx.save();
-  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([6,4]);
-  ctx.beginPath();
-  ctx.moveTo(map.padX + poly[0].x, map.padY + poly[0].y);
-  for (let i=1;i<poly.length;i++) ctx.lineTo(map.padX + poly[i].x, map.padY + poly[i].y);
-  ctx.closePath(); ctx.stroke();
-  ctx.restore();
-}
-
-function drawRoadEdgesToOverlay(segments, map){
-  if (!segments) { lastLaneBearings = null; return; }
-  const ctx = ovlFront.getContext('2d');
-
-  // Style
-  ctx.save();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#60ff82';
-
-  // Utility
-  function drawSeg(seg){
-    if (!seg) return;
-    const x1 = map.padX + seg.x1;
-    const y1 = map.padY + seg.y1;
-    const x2 = map.padX + seg.x2;
-    const y2 = map.padY + seg.y2;
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
-  }
-
-  drawSeg(segments.left);
-  drawSeg(segments.right);
-  ctx.restore();
-
-  // --- Compute lane bearings for birdview (angle at the bottom) ---
-  const centerX = map.padX + map.drawW/2;
-  const hFovRad = (parseFloat(fovInput.value) || 90) * Math.PI / 180;
-
-  function bearingAtBottom(seg){
-    if (!seg) return null;
-    const cx = (seg.x1 + seg.x2)/2; // midpoint of the drawn segment
-    // Use the x-position of the segment at bottom y to estimate bearing
-    const xBottom = seg.x1; // since y1 = botY in our build
-    const norm = clamp((xBottom - centerX) / (map.drawW/2), -1, 1);
-    return norm * (hFovRad/2);
-  }
-
-  lastLaneBearings = {
-    leftRad:  segments.left  ? bearingAtBottom(segments.left)  : null,
-    rightRad: segments.right ? bearingAtBottom(segments.right) : null
-  };
-}
-  
   // Draw detections on front overlay and prepare birdview info
   function drawDetections(dets, map){
     const ctx = ovlFront.getContext('2d');
@@ -793,79 +567,59 @@ function drawRoadEdgesToOverlay(segments, map){
 
   // Detection loop on offscreen infer canvas
   function startDetectionLoop(){
-  if (detRunning) return;
-  detRunning = true;
+    if (detRunning) return;
+    detRunning = true;
 
-  const v = vids.Front;
-  if (!v || !v.src || !cocoModel) return;
+    const v = vids.Front;
+    if (!v || !v.src || !cocoModel) return;
 
-  const step = async () => {
-    if (!detRunning || !playing || !detectToggle.checked) return;
+    const step = async () => {
+      if (!detRunning || !playing || !detectToggle.checked) return;
 
-    const now = performance.now();
-    if (now - lastInferT >= INFER_EVERY_MS) {
-      lastInferT = now;
-      try {
-        // Map video → visible draw-area (letterbox-safe)
-        const map = computeLetterboxMapping(vids.Front, ovlFront);
+      const now = performance.now();
+      if (now - lastInferT >= INFER_EVERY_MS) {
+        lastInferT = now;
+        try {
+          const map = computeLetterboxMapping(vids.Front, ovlFront);
 
-        // Ensure infer canvas matches draw area
-        const targetW = Math.max(1, Math.floor(map.drawW));
-        const targetH = Math.max(1, Math.floor(map.drawH));
-        if (inferCanvas.width !== targetW || inferCanvas.height !== targetH) {
-          inferCanvas.width  = targetW;
-          inferCanvas.height = targetH;
-        }
-
-        // Draw the current frame (intrinsic → draw area, no padding)
-        inferCtx.drawImage(
-          vids.Front,
-          0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1,
-          0, 0, inferCanvas.width, inferCanvas.height
-        );
-
-        // --- Object detection ---
-        const preds = await cocoModel.detect(inferCanvas, 20);
-        // Draw boxes/labels/distances (this clears the overlay first)
-        drawDetections(preds, map);
-
-        // --- Lane markings (E) ---
-        let segs = null;
-        if (edgesToggle.checked) {
-          segs = detectLaneMarkingsOnFront(map);    // robust mask + fitLine
-          if (segs && (segs.left || segs.right)) {
-            drawRoadEdgesToOverlay(segs, map);      // reuse your line renderer (updates bearings too)
+          // Resize infer canvas to draw area
+          const targetW = Math.max(1, Math.floor(map.drawW));
+          const targetH = Math.max(1, Math.floor(map.drawH));
+          if (inferCanvas.width !== targetW || inferCanvas.height !== targetH) {
+            inferCanvas.width  = targetW;
+            inferCanvas.height = targetH;
           }
-          // Optional debug overlays
-          if (segs && laneMaskToggle.checked) {
-            drawLaneMask(segs.masked, map);
-            drawROIPolygon(map, segs.roi);
-            if (segs.masked) segs.masked.delete();
-          }
-        } else {
-          lastLaneBearings = null; // keeps birdview rays clean when disabled
-        }
 
-      } catch (e) {
-        console.error('Detection loop error:', e);
+          // Draw intrinsic video to draw area (no padding)
+          inferCtx.drawImage(
+            vids.Front,
+            0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1,
+            0, 0, inferCanvas.width, inferCanvas.height
+          );
+
+          // Detect
+          const preds = await cocoModel.detect(inferCanvas, 20);
+
+          // Show + prep birdview
+          drawDetections(preds, map);
+        } catch (e) {
+          console.error('Detection error:', e);
+        }
       }
-    }
 
-    // Schedule next frame
+      if (v.requestVideoFrameCallback) {
+        cancelDetCb = v.requestVideoFrameCallback(() => step());
+      } else {
+        cancelDetCb = setTimeout(step, 33);
+      }
+    };
+
     if (v.requestVideoFrameCallback) {
       cancelDetCb = v.requestVideoFrameCallback(() => step());
     } else {
       cancelDetCb = setTimeout(step, 33);
     }
-  };
-
-  // Kick off
-  if (v.requestVideoFrameCallback) {
-    cancelDetCb = v.requestVideoFrameCallback(() => step());
-  } else {
-    cancelDetCb = setTimeout(step, 33);
   }
-}
 
   function stopDetectionLoop(clear=false){
     detRunning = false;
