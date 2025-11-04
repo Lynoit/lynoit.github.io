@@ -104,6 +104,11 @@ video {
   <input type="checkbox" id="edgesToggle" checked />
   Lane markings
 </label>
+
+  <label title="Visualize the binary mask used for lane detection">
+  <input type="checkbox" id="laneMaskToggle" checked />
+  Show lane mask
+</label>
   
   <label title="Detect left/right road edges with Canny + Hough">
   <input type="checkbox" id="edgesToggle" checked />
@@ -163,6 +168,8 @@ video {
   const fovInput = document.getElementById('fovInput');
   const birdToggle = document.getElementById('birdToggle');
   const birdRangeInput = document.getElementById('birdRange');
+
+  const laneMaskToggle = document.getElementById('laneMaskToggle');
 
   // Birdview canvas
   const birdCanvas = document.getElementById('birdview');
@@ -549,21 +556,13 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
   cvCtx.drawImage(vids.Front, 0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1, 0, 0, W, H);
 
   // Mats
-  let src = cv.imread(cvCanvas);
-  let lab = new cv.Mat();     // for L* brightness (white marks)
-  let lch = new cv.Mat();
-  let l = new cv.Mat();
-  let hsv = new cv.Mat();     // for yellow marks
-  let whiteMask = new cv.Mat();
-  let yellowMask = new cv.Mat();
-  let combined = new cv.Mat();
-  let blur = new cv.Mat();
-  let edges = new cv.Mat();
-  let mask = new cv.Mat.zeros(H, W, cv.CV_8UC1);
-  let masked = new cv.Mat();
-  let lines = new cv.Mat();
+  let src   = cv.imread(cvCanvas);
+  let lab   = new cv.Mat(), hsv = new cv.Mat();
+  let l     = new cv.Mat(), whiteMask = new cv.Mat(), yellowMask = new cv.Mat();
+  let comb  = new cv.Mat(), blur = new cv.Mat(), edges = new cv.Mat();
+  let mask  = new cv.Mat.zeros(H, W, cv.CV_8UC1), masked = new cv.Mat();
 
-  // ROI (tweak if needed)
+  // ROI trapezoid (tune these 4 multipliers to your framing)
   const botY = H - 1;
   const topY = Math.floor(H * 0.60);
   const leftX_bot  = Math.floor(W * 0.08);
@@ -572,106 +571,119 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
   const rightX_top = Math.floor(W * 0.62);
 
   try {
-    // --- White mask via LAB L* ---
+    // --- White via LAB:L*, with CLAHE ---
     cv.cvtColor(src, lab, cv.COLOR_RGBA2Lab);
-    const labSplit = new cv.MatVector();
-    cv.split(lab, labSplit);
-    l = labSplit.get(0); // L* channel
-    labSplit.delete();
+    const split = new cv.MatVector(); cv.split(lab, split); l = split.get(0); split.delete();
+    const clahe = new cv.CLAHE(2.5, new cv.Size(8,8)); clahe.apply(l, l); clahe.delete();
+    cv.threshold(l, whiteMask, 180, 255, cv.THRESH_BINARY); // 170–200 for wet roads
 
-    // CLAHE on L*
-    const clahe = new cv.CLAHE(2.0, new cv.Size(8,8));
-    clahe.apply(l, l); clahe.delete();
-
-    // Threshold bright (white lines). Tune 180..210 for wet roads.
-    cv.threshold(l, whiteMask, 190, 255, cv.THRESH_BINARY);
-
-    // --- Yellow mask in HSV ---
+    // --- Yellow via HSV ---
     cv.cvtColor(src, hsv, cv.COLOR_RGBA2HSV);
-    // Two small ranges for yellows (handle wrap if needed)
-    const lowerY = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15,  60,  80, 0]);  // H≈15°, S≥60, V≥80
-    const upperY = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 255, 255, 0]);  // H≈35°
-    const yMask1 = new cv.Mat(); cv.inRange(hsv, lowerY, upperY, yMask1);
-    lowerY.delete(); upperY.delete();
+    const lower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15, 70, 80, 0]);
+    const upper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [40,255,255, 0]);
+    cv.inRange(hsv, lower, upper, yellowMask);
+    lower.delete(); upper.delete();
 
-    // Optional: expand yellow slightly (helps dashed lines)
-    const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3,3));
-    cv.morphologyEx(yMask1, yellowMask, cv.MORPH_DILATE, k);
-    k.delete(); yMask1.delete();
+    // Combine & clean
+    cv.bitwise_or(whiteMask, yellowMask, comb);
+    let k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5,5));
+    cv.morphologyEx(comb, comb, cv.MORPH_CLOSE, k); k.delete();
+    cv.GaussianBlur(comb, blur, new cv.Size(5,5), 1.0, 1.0);
 
-    // Combine white + yellow
-    cv.bitwise_or(whiteMask, yellowMask, combined);
-
-    // Morph close gaps and suppress noise
-    const k2 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5,5));
-    cv.morphologyEx(combined, combined, cv.MORPH_CLOSE, k2);
-    k2.delete();
-
-    // Smooth & edges
-    cv.GaussianBlur(combined, blur, new cv.Size(5,5), 1.0, 1.0, cv.BORDER_DEFAULT);
+    // Optional edges (helps break blobs)
     cv.Canny(blur, edges, 60, 150);
 
-    // Mask to ROI
+    // ROI
     const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
       leftX_bot, botY, rightX_bot, botY, rightX_top, topY, leftX_top, topY
     ]);
     cv.fillPoly(mask, [pts], new cv.Scalar(255)); pts.delete();
+
+    // Use either edges or comb; edges usually cleaner
     cv.bitwise_and(edges, mask, masked);
 
-    // Hough
-    const minLen = Math.floor(W * 0.14);
-    const maxGap = Math.floor(W * 0.08);
-    cv.HoughLinesP(masked, lines, 1, Math.PI/180, 24, minLen, maxGap);
-
-    // Classify left/right
+    // --- Split mask points left/right and robust-fit lines with cv.fitLine ---
     const midX = W / 2;
-    let leftLines = [], rightLines = [];
-    for (let i=0; i<lines.rows; ++i){
-      const p = lines.intPtr(i);
-      const x1=p[0], y1=p[1], x2=p[2], y2=p[3];
-      const dx = x2-x1, dy = y2-y1;
-      if (dx === 0) continue;
-      const slope = dy/dx;
-      if (Math.abs(slope) < 0.12) continue; // filter near-horizontal
-      const xb = (y1 > y2) ? x1 : x2;       // bottom x
-      if (slope < 0 && xb < midX) leftLines.push({x1,y1,x2,y2});
-      if (slope > 0 && xb > midX) rightLines.push({x1,y1,x2,y2});
+    const leftPts  = [];
+    const rightPts = [];
+    // Sample pixels sparsely to keep it fast
+    const step = 2;
+    for (let y = topY; y <= botY; y += step) {
+      const rowOfs = y * masked.cols;
+      for (let x = 0; x < W; x += step) {
+        const v = masked.ucharPtr(y, x)[0];
+        if (v > 0) {
+          if (x < midX) leftPts.push(x, y);
+          else          rightPts.push(x, y);
+        }
+      }
     }
 
-    // Fit one line per side (least squares)
-    function fitLine(linesArr){
-      if (!linesArr.length) return null;
-      let sumX=0,sumY=0,sumXX=0,sumXY=0,n=0;
-      for (const L of linesArr){ sumX+=L.x1; sumY+=L.y1; sumXX+=L.x1*L.x1; sumXY+=L.x1*L.y1; n++; sumX+=L.x2; sumY+=L.y2; sumXX+=L.x2*L.x2; sumXY+=L.x2*L.y2; n++; }
-      const denom = (n*sumXX - sumX*sumX);
-      if (!denom) return null;
-      const m = (n*sumXY - sumX*sumY) / denom;
-      const b = (sumY - m*sumX) / n;
-      return {m,b};
-    }
-
-    const left = fitLine(leftLines);
-    const right = fitLine(rightLines);
-
-    if (!left && !right) return null;
-
-    // Segment within [topY..botY]
-    function seg(mb){
-      if (!mb) return null;
-      const {m,b} = mb;
+    function fitFromPoints(arrXY){
+      if (arrXY.length < 2*60) return null; // need ~60 pts
+      const mat = cv.matFromArray(arrXY.length/2, 1, cv.CV_32SC2, arrXY);
+      const line = new cv.Mat();
+      // Returns [vx, vy, x0, y0] in float32
+      cv.fitLine(mat, line, cv.DIST_L2, 0, 0.01, 0.01);
+      mat.delete();
+      const vx = line.data32F[0], vy = line.data32F[1], x0 = line.data32F[2], y0 = line.data32F[3];
+      line.delete();
+      // Convert to y = m x + b; beware vx≈0
+      if (Math.abs(vx) < 1e-3) return null;
+      const m = vy / vx;
+      const b = y0 - m * x0;
+      // Make a segment within [topY..botY]
       const y1 = botY, y2 = topY;
-      let x1 = (y1 - b) / m;
-      let x2 = (y2 - b) / m;
+      const x1 = (y1 - b)/m, x2 = (y2 - b)/m;
+      if (!isFinite(x1) || !isFinite(x2)) return null;
       return {x1,y1,x2,y2,m,b};
     }
 
-    return { left: seg(left), right: seg(right), drawW: W, drawH: H, topY, botY };
+    const leftSeg  = fitFromPoints(leftPts);
+    const rightSeg = fitFromPoints(rightPts);
+
+    return {
+      left: leftSeg, right: rightSeg,
+      drawW: W, drawH: H, topY, botY,
+      masked: (laneMaskToggle.checked ? masked.clone() : null), // for optional overlay
+      roi: [
+        {x:leftX_bot,y:botY}, {x:rightX_bot,y:botY},
+        {x:rightX_top,y:topY}, {x:leftX_top,y:topY}
+      ]
+    };
   } finally {
-    // cleanup
-    src.delete(); lab.delete(); l.delete(); hsv.delete();
-    whiteMask.delete(); yellowMask.delete(); combined.delete();
-    blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
+    // cleanup (keep masked if cloned above)
+    src.delete(); lab.delete(); hsv.delete(); l.delete();
+    whiteMask.delete(); yellowMask.delete(); comb.delete();
+    blur.delete(); edges.delete(); mask.delete(); /* masked freed if not cloned */
   }
+}
+
+  function drawLaneMask(maskedMat, map){
+  if (!maskedMat) return;
+  const ctx = ovlFront.getContext('2d');
+  const tmp = document.createElement('canvas');
+  tmp.width = maskedMat.cols; tmp.height = maskedMat.rows;
+  const tctx = tmp.getContext('2d');
+  const id = tctx.createImageData(tmp.width, tmp.height);
+  const src = maskedMat.data;
+  for (let i=0, j=0; i<src.length; i++, j+=4){
+    const v = src[i];
+    id.data[j] = 0; id.data[j+1] = 255; id.data[j+2] = 0; id.data[j+3] = v ? 120 : 0; // translucent green
+  }
+  tctx.putImageData(id, 0, 0);
+  ctx.drawImage(tmp, map.padX, map.padY);
+}
+
+function drawROIPolygon(map, poly, color='#2cc9ff'){
+  const ctx = ovlFront.getContext('2d');
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash([6,4]);
+  ctx.beginPath();
+  ctx.moveTo(map.padX + poly[0].x, map.padY + poly[0].y);
+  for (let i=1;i<poly.length;i++) ctx.lineTo(map.padX + poly[i].x, map.padY + poly[i].y);
+  ctx.closePath(); ctx.stroke();
+  ctx.restore();
 }
 
 function drawRoadEdgesToOverlay(segments, map){
@@ -781,73 +793,79 @@ function drawRoadEdgesToOverlay(segments, map){
 
   // Detection loop on offscreen infer canvas
   function startDetectionLoop(){
-    if (detRunning) return;
-    detRunning = true;
+  if (detRunning) return;
+  detRunning = true;
 
-    const v = vids.Front;
-    if (!v || !v.src || !cocoModel) return;
+  const v = vids.Front;
+  if (!v || !v.src || !cocoModel) return;
 
-    const step = async () => {
-      if (!detRunning || !playing || !detectToggle.checked) return;
+  const step = async () => {
+    if (!detRunning || !playing || !detectToggle.checked) return;
 
-      const now = performance.now();
-      if (now - lastInferT >= INFER_EVERY_MS) {
-        lastInferT = now;
-        try {
-          const map = computeLetterboxMapping(vids.Front, ovlFront);
+    const now = performance.now();
+    if (now - lastInferT >= INFER_EVERY_MS) {
+      lastInferT = now;
+      try {
+        // Map video → visible draw-area (letterbox-safe)
+        const map = computeLetterboxMapping(vids.Front, ovlFront);
 
-          // Resize infer canvas to draw area
-          const targetW = Math.max(1, Math.floor(map.drawW));
-          const targetH = Math.max(1, Math.floor(map.drawH));
-          if (inferCanvas.width !== targetW || inferCanvas.height !== targetH) {
-            inferCanvas.width  = targetW;
-            inferCanvas.height = targetH;
+        // Ensure infer canvas matches draw area
+        const targetW = Math.max(1, Math.floor(map.drawW));
+        const targetH = Math.max(1, Math.floor(map.drawH));
+        if (inferCanvas.width !== targetW || inferCanvas.height !== targetH) {
+          inferCanvas.width  = targetW;
+          inferCanvas.height = targetH;
+        }
+
+        // Draw the current frame (intrinsic → draw area, no padding)
+        inferCtx.drawImage(
+          vids.Front,
+          0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1,
+          0, 0, inferCanvas.width, inferCanvas.height
+        );
+
+        // --- Object detection ---
+        const preds = await cocoModel.detect(inferCanvas, 20);
+        // Draw boxes/labels/distances (this clears the overlay first)
+        drawDetections(preds, map);
+
+        // --- Lane markings (E) ---
+        let segs = null;
+        if (edgesToggle.checked) {
+          segs = detectLaneMarkingsOnFront(map);    // robust mask + fitLine
+          if (segs && (segs.left || segs.right)) {
+            drawRoadEdgesToOverlay(segs, map);      // reuse your line renderer (updates bearings too)
           }
-
-          // Draw intrinsic video to draw area (no padding)
-          inferCtx.drawImage(
-            vids.Front,
-            0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1,
-            0, 0, inferCanvas.width, inferCanvas.height
-          );
-
-          // Detect
-          const preds = await cocoModel.detect(inferCanvas, 20);
-
-          // Show + prep birdview
-          drawDetections(preds, map);
-
-                  if (edgesToggle.checked) {
-          const nowE = performance.now();
-          if (nowE - lastEdgeT >= EDGE_EVERY_MS) {
-            lastEdgeT = nowE;
-            try {
-              const segs = edgesToggle.checked ? detectLaneMarkingsOnFront(map) : null;
-              if (segs) drawRoadEdgesToOverlay(segs, map);
-            } catch (e) { console.warn('edge detect error', e); }
+          // Optional debug overlays
+          if (segs && laneMaskToggle.checked) {
+            drawLaneMask(segs.masked, map);
+            drawROIPolygon(map, segs.roi);
+            if (segs.masked) segs.masked.delete();
           }
         } else {
-          lastLaneBearings = null;
+          lastLaneBearings = null; // keeps birdview rays clean when disabled
         }
-          
-        } catch (e) {
-          console.error('Detection error:', e);
-        }
-      }
 
-      if (v.requestVideoFrameCallback) {
-        cancelDetCb = v.requestVideoFrameCallback(() => step());
-      } else {
-        cancelDetCb = setTimeout(step, 33);
+      } catch (e) {
+        console.error('Detection loop error:', e);
       }
-    };
+    }
 
+    // Schedule next frame
     if (v.requestVideoFrameCallback) {
       cancelDetCb = v.requestVideoFrameCallback(() => step());
     } else {
       cancelDetCb = setTimeout(step, 33);
     }
+  };
+
+  // Kick off
+  if (v.requestVideoFrameCallback) {
+    cancelDetCb = v.requestVideoFrameCallback(() => step());
+  } else {
+    cancelDetCb = setTimeout(step, 33);
   }
+}
 
   function stopDetectionLoop(clear=false){
     detRunning = false;
