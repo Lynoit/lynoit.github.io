@@ -1791,120 +1791,126 @@ document.querySelectorAll('.tab').forEach(btn=>{
   btn.addEventListener('keydown', (e)=>{ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
 });
 
-// ===== PDF Export: capture all Internal cards, one per page =====
 async function exportInternalToPDF(){
-  // Ensure we're in Internal mode and charts are rendered
-  const wasMode = CURRENT_MODE;
+  const { jsPDF } = window.jspdf;
+
+  // Ensure INTERNAL mode is active and drawn
   if (CURRENT_MODE !== MODES.INTERNAL){
     CURRENT_MODE = MODES.INTERNAL;
     updateTabsUI();
-    if (LAST_PARSED) { renderCharts(LAST_PARSED); }
-    else { await loadCsvAndRender(); }
+    if (LAST_PARSED) renderCharts(LAST_PARSED); else await loadCsvAndRender();
   }
-  // Wait a frame for layout
   await new Promise(r => requestAnimationFrame(r));
 
-  const { jsPDF } = window.jspdf;
-  const A4 = { w: 210, h: 297 };             // mm
-  const PX_TO_MM = 0.264583;                  // 96dpi assumption
-  const MARGIN = 10;                          // mm
+  // Page + unit helpers
+  const A4 = { w: 210, h: 297 };  // mm
+  const PX_PER_MM = 96 / 25.4;    // ≈3.7795 @ 96dpi
+  const MARGIN_MM = 10;           // mm
+  const H2C_SCALE = 1.0;          // render scale (was 2). 1.0 is usually enough.
 
-  // Helper: capture an element fully (including overflow content) as canvas
+  // Downscale canvas to target CSS pixel width/height (keeping aspect)
+  function downscaleCanvas(srcCanvas, targetWpx, targetHpx){
+    const tmp = document.createElement('canvas');
+    tmp.width  = Math.max(1, Math.round(targetWpx));
+    tmp.height = Math.max(1, Math.round(targetHpx));
+    const ctx = tmp.getContext('2d', { alpha: false });
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srcCanvas, 0, 0, tmp.width, tmp.height);
+    return tmp;
+  }
+
   async function captureElement(el){
-    // Temporarily relax overflow in scroll containers to capture full content
+    // Temporarily un-confine overflow/sticky to capture full content
     const mutated = [];
     el.querySelectorAll('*').forEach(node => {
       const cs = getComputedStyle(node);
       if (/(auto|scroll)/.test(cs.overflow + cs.overflowY + cs.overflowX)) {
-        mutated.push([node, node.style.overflow, node.style.maxHeight, node.style.height]);
+        mutated.push([node, node.style.overflow, node.style.maxHeight, node.style.height, 'overflow']);
         node.style.overflow = 'visible';
         node.style.maxHeight = 'none';
-        // If it's a fixed-height scroller, let it expand
         if (cs.height && cs.height.endsWith('px')) node.style.height = 'auto';
       }
-      // Unstick sticky things so they render in flow
       if (cs.position === 'sticky'){
-        mutated.push([node, node.style.position, null, null, 'positionOnly']);
+        mutated.push([node, node.style.position, null, null, 'position']);
         node.style.position = 'static';
       }
     });
 
-    // Use a white background for clean PDF pages
     const canvas = await html2canvas(el, {
       backgroundColor: '#ffffff',
-      scale: 2,            // sharper
+      scale: H2C_SCALE,
       useCORS: true,
       windowWidth: document.documentElement.clientWidth
     });
 
-    // Restore styles
-    mutated.forEach(([node, overflow, maxH, h, kind]) => {
-      if (kind === 'positionOnly') node.style.position = '';
-      else {
-        node.style.overflow = overflow;
-        node.style.maxHeight = maxH;
-        node.style.height = h;
-      }
+    // Restore
+    mutated.forEach(([node, a, b, c, kind]) => {
+      if (kind === 'position') node.style.position = a;
+      else { node.style.overflow = a; node.style.maxHeight = b; node.style.height = c; }
     });
 
     return canvas;
   }
 
-  // Body flag to tweak CSS while capturing
   document.body.classList.add('exporting');
 
   try{
     const cards = Array.from(document.querySelectorAll('#charts .chart-card'));
-    if (!cards.length){
-      alert('No cards found in Internal mode to export.');
-      return;
-    }
+    if (!cards.length){ alert('No cards found in Internal mode to export.'); return; }
 
     let pdf = null;
     for (let i = 0; i < cards.length; i++){
       const card = cards[i];
-
-      // Scroll into view to ensure lazy SVG layout is finalized
       card.scrollIntoView({ block: 'nearest' });
       await new Promise(r => requestAnimationFrame(r));
 
-      const canvas = await captureElement(card);
-      const imgWmm = canvas.width * PX_TO_MM;
-      const imgHmm = canvas.height * PX_TO_MM;
+      const srcCanvas = await captureElement(card);
 
-      // Pick page orientation based on aspect ratio of the card
-      const isLandscape = imgWmm >= imgHmm;
-      const pageW = isLandscape ? A4.h : A4.w;
-      const pageH = isLandscape ? A4.w : A4.h;
-      const orient = isLandscape ? 'landscape' : 'portrait';
+      // Choose page orientation by element aspect
+      const srcWpx = srcCanvas.width, srcHpx = srcCanvas.height;
+      const isLandscape = srcWpx >= srcHpx;
+      const pageWmm = isLandscape ? A4.h : A4.w;
+      const pageHmm = isLandscape ? A4.w : A4.h;
 
-      // Create or add a page
       if (!pdf){
-        pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: orient });
+        pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: isLandscape ? 'landscape' : 'portrait' });
       } else {
-        pdf.addPage('a4', orient);
+        pdf.addPage('a4', isLandscape ? 'landscape' : 'portrait');
       }
 
-      const maxW = pageW - MARGIN*2;
-      const maxH = pageH - MARGIN*2;
-      const scale = Math.min(maxW / imgWmm, maxH / imgHmm);
+      // Compute the image’s target size in CSS pixels so it matches the page width
+      const maxDrawWmm = pageWmm - MARGIN_MM*2;
+      const maxDrawHmm = pageHmm - MARGIN_MM*2;
+      const pageWpx = maxDrawWmm * PX_PER_MM;
+      const pageHpx = maxDrawHmm * PX_PER_MM;
 
-      const drawW = imgWmm * scale;
-      const drawH = imgHmm * scale;
-      const offX = (pageW - drawW) / 2;
-      const offY = (pageH - drawH) / 2;
+      // Maintain aspect ratio, but cap to page pixel box to avoid oversized bitmaps
+      const scaleToPage = Math.min(pageWpx / srcWpx, pageHpx / srcHpx, 1); // never upscale
+      const tgtWpx = Math.floor(srcWpx * scaleToPage);
+      const tgtHpx = Math.floor(srcHpx * scaleToPage);
 
-      const imgData = canvas.toDataURL('image/png');
-      pdf.addImage(imgData, 'PNG', offX, offY, drawW, drawH);
+      // Downscale to target pixels (massive size win) and encode as JPEG
+      const scaledCanvas = (scaleToPage < 1) ? downscaleCanvas(srcCanvas, tgtWpx, tgtHpx) : srcCanvas;
+
+      // Place centered on the page (mm)
+      const drawWmm = scaledCanvas.width / PX_PER_MM;
+      const drawHmm = scaledCanvas.height / PX_PER_MM;
+      const offXmm = (pageWmm - drawWmm) / 2;
+      const offYmm = (pageHmm - drawHmm) / 2;
+
+      // JPEG with quality ~0.72 is visually crisp for UI and much smaller than PNG
+      const jpegDataUrl = scaledCanvas.toDataURL('image/jpeg', 0.72);
+
+      // Add JPEG; compression arg ('FAST'|'MEDIUM'|'SLOW') optional
+      pdf.addImage(jpegDataUrl, 'JPEG', offXmm, offYmm, drawWmm, drawHmm, undefined, 'MEDIUM');
     }
 
     pdf.save('KPI_Internal_Cards.pdf');
   } finally {
     document.body.classList.remove('exporting');
-    // Leave the UI in Internal mode (that’s what the user exported)
   }
 }
-
+  
 // Wire the button
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('exportPdfBtn');
