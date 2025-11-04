@@ -99,6 +99,11 @@ video {
     <input type="checkbox" id="detectToggle" checked />
     Detect front objects
   </label>
+
+  <label title="Detect lane markings (white/yellow)">
+  <input type="checkbox" id="edgesToggle" checked />
+  Lane markings
+</label>
   
   <label title="Detect left/right road edges with Canny + Hough">
   <input type="checkbox" id="edgesToggle" checked />
@@ -533,83 +538,113 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
     return { fy };
   }
 
- function detectRoadEdgesOnFront(map) {
+ function detectLaneMarkingsOnFront(map) {
   if (!cvReady) return null;
 
-  // --- sizes ---
   const W = Math.max(1, Math.floor(map.drawW));
   const H = Math.max(1, Math.floor(map.drawH));
-  if (cvCanvas.width !== W || cvCanvas.height !== H) {
-    cvCanvas.width = W; cvCanvas.height = H;
-  }
+  if (cvCanvas.width !== W || cvCanvas.height !== H) { cvCanvas.width = W; cvCanvas.height = H; }
 
-  // draw intrinsic frame -> draw area (same as detector)
+  // draw intrinsic frame -> draw area
   cvCtx.drawImage(vids.Front, 0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1, 0, 0, W, H);
 
-  // mats
+  // Mats
   let src = cv.imread(cvCanvas);
-  let gray = new cv.Mat();
-  let claheOut = new cv.Mat();
+  let lab = new cv.Mat();     // for L* brightness (white marks)
+  let lch = new cv.Mat();
+  let l = new cv.Mat();
+  let hsv = new cv.Mat();     // for yellow marks
+  let whiteMask = new cv.Mat();
+  let yellowMask = new cv.Mat();
+  let combined = new cv.Mat();
   let blur = new cv.Mat();
   let edges = new cv.Mat();
   let mask = new cv.Mat.zeros(H, W, cv.CV_8UC1);
   let masked = new cv.Mat();
   let lines = new cv.Mat();
 
+  // ROI (tweak if needed)
+  const botY = H - 1;
+  const topY = Math.floor(H * 0.60);
+  const leftX_bot  = Math.floor(W * 0.08);
+  const rightX_bot = Math.floor(W * 0.92);
+  const leftX_top  = Math.floor(W * 0.38);
+  const rightX_top = Math.floor(W * 0.62);
+
   try {
-    // --- grayscale + CLAHE for wet/low-contrast roads ---
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-    const clahe = new cv.CLAHE(2.0, new cv.Size(8,8)); // clipLimit, tileGrid
-    clahe.apply(gray, claheOut);
-    clahe.delete();
+    // --- White mask via LAB L* ---
+    cv.cvtColor(src, lab, cv.COLOR_RGBA2Lab);
+    const labSplit = new cv.MatVector();
+    cv.split(lab, labSplit);
+    l = labSplit.get(0); // L* channel
+    labSplit.delete();
 
-    // --- slight blur, then Canny (relaxed) ---
-    cv.GaussianBlur(claheOut, blur, new cv.Size(5,5), 1.2, 1.2, cv.BORDER_DEFAULT);
-    cv.Canny(blur, edges, 50, 120); // was 70/150
+    // CLAHE on L*
+    const clahe = new cv.CLAHE(2.0, new cv.Size(8,8));
+    clahe.apply(l, l); clahe.delete();
 
-    // --- ROI: wider base, slightly higher top for curb/edge scenes ---
-    const botY = H - 1;
-    const topY = Math.floor(H * 0.62);      // was 0.55
-    const leftX_bot  = Math.floor(W * 0.08);
-    const rightX_bot = Math.floor(W * 0.92);
-    const leftX_top  = Math.floor(W * 0.35);
-    const rightX_top = Math.floor(W * 0.65);
+    // Threshold bright (white lines). Tune 180..210 for wet roads.
+    cv.threshold(l, whiteMask, 190, 255, cv.THRESH_BINARY);
 
+    // --- Yellow mask in HSV ---
+    cv.cvtColor(src, hsv, cv.COLOR_RGBA2HSV);
+    // Two small ranges for yellows (handle wrap if needed)
+    const lowerY = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15,  60,  80, 0]);  // H≈15°, S≥60, V≥80
+    const upperY = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 255, 255, 0]);  // H≈35°
+    const yMask1 = new cv.Mat(); cv.inRange(hsv, lowerY, upperY, yMask1);
+    lowerY.delete(); upperY.delete();
+
+    // Optional: expand yellow slightly (helps dashed lines)
+    const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3,3));
+    cv.morphologyEx(yMask1, yellowMask, cv.MORPH_DILATE, k);
+    k.delete(); yMask1.delete();
+
+    // Combine white + yellow
+    cv.bitwise_or(whiteMask, yellowMask, combined);
+
+    // Morph close gaps and suppress noise
+    const k2 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5,5));
+    cv.morphologyEx(combined, combined, cv.MORPH_CLOSE, k2);
+    k2.delete();
+
+    // Smooth & edges
+    cv.GaussianBlur(combined, blur, new cv.Size(5,5), 1.0, 1.0, cv.BORDER_DEFAULT);
+    cv.Canny(blur, edges, 60, 150);
+
+    // Mask to ROI
     const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
-      leftX_bot, botY,   rightX_bot, botY,   rightX_top, topY,   leftX_top, topY
+      leftX_bot, botY, rightX_bot, botY, rightX_top, topY, leftX_top, topY
     ]);
-    cv.fillPoly(mask, [pts], new cv.Scalar(255));
-    pts.delete();
-
+    cv.fillPoly(mask, [pts], new cv.Scalar(255)); pts.delete();
     cv.bitwise_and(edges, mask, masked);
 
-    // --- Hough (looser) ---
-    const minLen  = Math.floor(W * 0.18);   // was 30 px
-    const maxGap  = Math.floor(W * 0.06);   // was 120 px absolute
-    cv.HoughLinesP(masked, lines, 1, Math.PI/180, 30, minLen, maxGap);
+    // Hough
+    const minLen = Math.floor(W * 0.14);
+    const maxGap = Math.floor(W * 0.08);
+    cv.HoughLinesP(masked, lines, 1, Math.PI/180, 24, minLen, maxGap);
 
-    // --- classify left/right by slope & bottom x ---
+    // Classify left/right
     const midX = W / 2;
     let leftLines = [], rightLines = [];
-    for (let i = 0; i < lines.rows; ++i) {
+    for (let i=0; i<lines.rows; ++i){
       const p = lines.intPtr(i);
-      const x1 = p[0], y1 = p[1], x2 = p[2], y2 = p[3];
-      const dx = x2 - x1, dy = y2 - y1;
+      const x1=p[0], y1=p[1], x2=p[2], y2=p[3];
+      const dx = x2-x1, dy = y2-y1;
       if (dx === 0) continue;
-      const slope = dy / dx;
-      if (Math.abs(slope) < 0.2) continue; // was 0.3: keep slightly flatter lines
-      const xb = (y1 > y2) ? x1 : x2;      // use lower endpoint x
+      const slope = dy/dx;
+      if (Math.abs(slope) < 0.12) continue; // filter near-horizontal
+      const xb = (y1 > y2) ? x1 : x2;       // bottom x
       if (slope < 0 && xb < midX) leftLines.push({x1,y1,x2,y2});
       if (slope > 0 && xb > midX) rightLines.push({x1,y1,x2,y2});
     }
 
-    // --- fit one line per side (least squares) ---
+    // Fit one line per side (least squares)
     function fitLine(linesArr){
-      if (linesArr.length === 0) return null;
+      if (!linesArr.length) return null;
       let sumX=0,sumY=0,sumXX=0,sumXY=0,n=0;
       for (const L of linesArr){ sumX+=L.x1; sumY+=L.y1; sumXX+=L.x1*L.x1; sumXY+=L.x1*L.y1; n++; sumX+=L.x2; sumY+=L.y2; sumXX+=L.x2*L.x2; sumXY+=L.x2*L.y2; n++; }
       const denom = (n*sumXX - sumX*sumX);
-      if (denom === 0) return null;
+      if (!denom) return null;
       const m = (n*sumXY - sumX*sumY) / denom;
       const b = (sumY - m*sumX) / n;
       return {m,b};
@@ -620,7 +655,7 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
 
     if (!left && !right) return null;
 
-    // segmentize within [topY..botY]
+    // Segment within [topY..botY]
     function seg(mb){
       if (!mb) return null;
       const {m,b} = mb;
@@ -633,10 +668,11 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
     return { left: seg(left), right: seg(right), drawW: W, drawH: H, topY, botY };
   } finally {
     // cleanup
-    src.delete(); gray.delete(); claheOut.delete(); blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
+    src.delete(); lab.delete(); l.delete(); hsv.delete();
+    whiteMask.delete(); yellowMask.delete(); combined.delete();
+    blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
   }
 }
-
 
 function drawRoadEdgesToOverlay(segments, map){
   if (!segments) { lastLaneBearings = null; return; }
@@ -786,7 +822,7 @@ function drawRoadEdgesToOverlay(segments, map){
           if (nowE - lastEdgeT >= EDGE_EVERY_MS) {
             lastEdgeT = nowE;
             try {
-              const segs = detectRoadEdgesOnFront(map);
+              const segs = edgesToggle.checked ? detectLaneMarkingsOnFront(map) : null;
               if (segs) drawRoadEdgesToOverlay(segs, map);
             } catch (e) { console.warn('edge detect error', e); }
           }
