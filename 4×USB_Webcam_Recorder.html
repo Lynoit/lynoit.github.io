@@ -295,7 +295,15 @@ button.primary:hover { background: var(--btn-bg-hover); }
   let usingFSA    = false;     // whether File System Access API is used
   let startStamp  = '';        // YYYYMMDD_HHMMSS taken when user presses "Save streams"
 
-  const positionNames = ['Front','Back','Left','Right'];
+  const defaultNames = ['Front','Back','Left','Right'];
+const nameSelects  = [null, null, null, null];
+const nameStorageKey = 'quadcam-position-names-v1';
+const positionOptions = ['Front','Back','Left','Right','DIM','DHU'];
+
+function posName(i){
+  return (nameSelects[i]?.value || defaultNames[i]);
+}
+
   const rememberedKey = 'quadcam-deviceIds-v1';
 
   // --- Elements ---
@@ -309,6 +317,58 @@ button.primary:hover { background: var(--btn-bg-hover); }
   const saveBtn = document.getElementById('saveBtn');
   const fpsRange = document.getElementById('fpsRange');
   const fpsOut   = document.getElementById('fpsOut');
+
+  function loadRememberedNames() {
+  try {
+    const raw = localStorage.getItem(nameStorageKey);
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr) && arr.length === 4) return arr;
+  } catch {}
+  return null;
+}
+
+function rememberNames() {
+  try {
+    const arr = [0,1,2,3].map(i => posName(i));
+    localStorage.setItem(nameStorageKey, JSON.stringify(arr));
+  } catch {}
+}
+
+function initPositionDropdowns() {
+  const remembered = loadRememberedNames();
+
+  document.querySelectorAll('.camctl').forEach((block, i) => {
+    // Reuse the existing label spot to introduce a "Position" label
+    const oldLabel = block.querySelector(`label[for="sel-${i}"]`);
+    if (oldLabel) oldLabel.textContent = 'Position';
+
+    // Create the new name <select>
+    const nameSel = document.createElement('select');
+    nameSel.id = `name-${i}`;
+    positionOptions.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n;
+      opt.textContent = n;
+      nameSel.appendChild(opt);
+    });
+
+    // Default to current fixed name, or remembered choice
+    nameSel.value = remembered?.[i] || defaultNames[i];
+
+    // Insert the new dropdown just before the device select
+    const deviceSel = block.querySelector(`#sel-${i}`);
+    block.insertBefore(nameSel, deviceSel);
+
+    // Keep a handle to it
+    nameSelects[i] = nameSel;
+
+    // Wire: update pane header text on change
+    const header = document.getElementById(`label-${i}`);
+    const updateHeader = () => { if (header) header.textContent = posName(i); };
+    nameSel.addEventListener('change', () => { updateHeader(); rememberNames(); });
+    updateHeader();
+  });
+}
 
   // Current FPS target from GUI
   function getTargetFps() {
@@ -395,7 +455,7 @@ button.primary:hover { background: var(--btn-bg-hover); }
 
     for (let i = 0; i < 4; i++) {
       if (!streams[i]) { writers[i] = null; continue; }
-      const fileName = `${stamp}_${positionNames[i]}.webm`;
+      const fileName = `${stamp}_${posName(i)}.webm`;
       const fh = await dirHandle.getFileHandle(fileName, { create: true });
       writers[i] = await fh.createWritable();
       writeQ[i] = [];
@@ -454,7 +514,7 @@ button.primary:hover { background: var(--btn-bg-hover); }
           rec.start(1000); // 1s timeslices
           infos[i].textContent = writers[i] ? 'Recording to folder…' : 'Recording (buffering)…';
         } catch (e) {
-          console.error(`Recorder ${positionNames[i]} error:`, e);
+          console.error(`Recorder ${posName(i)} error:`, e);
           infos[i].textContent = 'Recorder error';
         }
       }
@@ -482,7 +542,7 @@ button.primary:hover { background: var(--btn-bg-hover); }
             const a = document.createElement('a');
             a.href = url;
             const stamp = startStamp || timestamp();
-            a.download = `${stamp}_${positionNames[i]}.webm`;
+            a.download = `${stamp}_${posName(i)}.webm`;
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -635,7 +695,7 @@ button.primary:hover { background: var(--btn-bg-hover); }
     } catch (e) {
       infos[idx].textContent = 'Error';
       console.error(`Cam ${idx+1} start error:`, e);
-      alert(`${positionNames[idx]} failed: ${e.name || 'Error'} — ${e.message || e}`);
+      alert(`${posName(idx)} failed: ${e.name || 'Error'} — ${e.message || e}`);
       setButtonsEnabled(idx, false);
     }
   }
@@ -693,6 +753,7 @@ button.primary:hover { background: var(--btn-bg-hover); }
     alert('getUserMedia not supported in this browser.');
   } else {
     await refreshDeviceList();
+    initPositionDropdowns();
   }
 })();
 </script>
