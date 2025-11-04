@@ -964,6 +964,52 @@ form.addEventListener('submit', async e => {
     <script src="https://cdn.jsdelivr.net/npm/leaflet-image@0.4.0/leaflet-image.js"></script>
 
   <script>
+/* --- Chime audio setup --- */
+let audioCtx = null;
+let chimeBus = null; // master gain for chimes
+
+function initAudioOnce() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  chimeBus = audioCtx.createGain();
+  chimeBus.gain.value = 0.08;       // overall chime volume
+  chimeBus.connect(audioCtx.destination);
+}
+
+/* Unlock the AudioContext on first user gesture */
+['click','touchstart','keydown'].forEach(evt => {
+  window.addEventListener(evt, () => {
+    initAudioOnce();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }, { once:true, passive:true });
+});
+
+/* Play a short up->down “ping”; higher/brighter for red events */
+function playChime(kind = 'normal') {
+  if (!audioCtx || audioCtx.state !== 'running') return;
+
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const env = audioCtx.createGain();
+
+  const startHz = (kind === 'red') ? 880 : 660;      // A5 vs E5-ish
+  const endHz   = (kind === 'red') ? 523.25 : 440;   // C5 vs A4-ish
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(startHz, now);
+  osc.frequency.exponentialRampToValueAtTime(endHz, now + 0.25);
+
+  // quick attack, short decay
+  env.gain.setValueAtTime(0.0001, now);
+  env.gain.linearRampToValueAtTime(0.18, now + 0.005);
+  env.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+
+  osc.connect(env).connect(chimeBus);
+  osc.start(now);
+  osc.stop(now + 0.26);
+}
+</script>
+
+  <script>
 
     console.log('main script executing');
     
@@ -1950,6 +1996,9 @@ let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
       lat, lon, dist, spd, rt,
       comment, camDataUrl
     ]);
+
+    try { playChime(isRed ? 'red' : 'normal'); } catch(e) {}
+    
     recordSample(name);
     displayLogTable();        // renders Issue list only
     renderLatestSnapshots(5); // renders only the latest 5 snapshots
