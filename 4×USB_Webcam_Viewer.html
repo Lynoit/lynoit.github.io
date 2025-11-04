@@ -533,106 +533,110 @@ if (window.cv && cv['onRuntimeInitialized'] === undefined) {
     return { fy };
   }
 
-  function detectRoadEdgesOnFront(map) {
+ function detectRoadEdgesOnFront(map) {
   if (!cvReady) return null;
 
-  // Resize cv canvas to draw area
+  // --- sizes ---
   const W = Math.max(1, Math.floor(map.drawW));
   const H = Math.max(1, Math.floor(map.drawH));
   if (cvCanvas.width !== W || cvCanvas.height !== H) {
     cvCanvas.width = W; cvCanvas.height = H;
   }
 
-  // Draw the same image used for inference (intrinsic -> draw area)
+  // draw intrinsic frame -> draw area (same as detector)
   cvCtx.drawImage(vids.Front, 0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1, 0, 0, W, H);
 
-  // Wrap as OpenCV Mat
+  // mats
   let src = cv.imread(cvCanvas);
   let gray = new cv.Mat();
+  let claheOut = new cv.Mat();
   let blur = new cv.Mat();
   let edges = new cv.Mat();
-
-  // Preprocess
-  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-  cv.GaussianBlur(gray, blur, new cv.Size(5,5), 1.2, 1.2, cv.BORDER_DEFAULT);
-
-  // Canny
-  cv.Canny(blur, edges, 70, 150); // tweak if needed
-
-  // ROI mask (lower trapezoid)
   let mask = new cv.Mat.zeros(H, W, cv.CV_8UC1);
-  const botY = H - 1, topY = Math.floor(H * 0.55);
-  const leftX_bot = Math.floor(W * 0.12), rightX_bot = Math.floor(W * 0.88);
-  const leftX_top = Math.floor(W * 0.40), rightX_top = Math.floor(W * 0.60);
-  const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
-    leftX_bot, botY,   rightX_bot, botY,   rightX_top, topY,   leftX_top, topY
-  ]);
-  cv.fillPoly(mask, [pts], new cv.Scalar(255));
-  pts.delete();
-
   let masked = new cv.Mat();
-  cv.bitwise_and(edges, mask, masked);
-
-  // Hough lines
   let lines = new cv.Mat();
-  cv.HoughLinesP(masked, lines, 1, Math.PI/180, 50, 30, 120); // rho, theta, threshold, minLineLen, maxLineGap
 
-  // Classify left vs right by slope and x position
-  const midX = W / 2;
-  let leftLines = [], rightLines = [];
-  for (let i = 0; i < lines.rows; ++i) {
-    const [x1,y1,x2,y2] = lines.intPtr(i);
-    const dx = x2 - x1, dy = y2 - y1;
-    if (dx === 0) continue;
-    const slope = dy / dx;
-    if (Math.abs(slope) < 0.3) continue; // near-horizontal, skip
+  try {
+    // --- grayscale + CLAHE for wet/low-contrast roads ---
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+    const clahe = new cv.CLAHE(2.0, new cv.Size(8,8)); // clipLimit, tileGrid
+    clahe.apply(gray, claheOut);
+    clahe.delete();
 
-    // Use lower endpoint to decide side
-    const xb = (y1 > y2) ? x1 : x2;
-    if (slope < 0 && xb < midX) leftLines.push({x1,y1,x2,y2});
-    if (slope > 0 && xb > midX) rightLines.push({x1,y1,x2,y2});
+    // --- slight blur, then Canny (relaxed) ---
+    cv.GaussianBlur(claheOut, blur, new cv.Size(5,5), 1.2, 1.2, cv.BORDER_DEFAULT);
+    cv.Canny(blur, edges, 50, 120); // was 70/150
+
+    // --- ROI: wider base, slightly higher top for curb/edge scenes ---
+    const botY = H - 1;
+    const topY = Math.floor(H * 0.62);      // was 0.55
+    const leftX_bot  = Math.floor(W * 0.08);
+    const rightX_bot = Math.floor(W * 0.92);
+    const leftX_top  = Math.floor(W * 0.35);
+    const rightX_top = Math.floor(W * 0.65);
+
+    const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
+      leftX_bot, botY,   rightX_bot, botY,   rightX_top, topY,   leftX_top, topY
+    ]);
+    cv.fillPoly(mask, [pts], new cv.Scalar(255));
+    pts.delete();
+
+    cv.bitwise_and(edges, mask, masked);
+
+    // --- Hough (looser) ---
+    const minLen  = Math.floor(W * 0.18);   // was 30 px
+    const maxGap  = Math.floor(W * 0.06);   // was 120 px absolute
+    cv.HoughLinesP(masked, lines, 1, Math.PI/180, 30, minLen, maxGap);
+
+    // --- classify left/right by slope & bottom x ---
+    const midX = W / 2;
+    let leftLines = [], rightLines = [];
+    for (let i = 0; i < lines.rows; ++i) {
+      const p = lines.intPtr(i);
+      const x1 = p[0], y1 = p[1], x2 = p[2], y2 = p[3];
+      const dx = x2 - x1, dy = y2 - y1;
+      if (dx === 0) continue;
+      const slope = dy / dx;
+      if (Math.abs(slope) < 0.2) continue; // was 0.3: keep slightly flatter lines
+      const xb = (y1 > y2) ? x1 : x2;      // use lower endpoint x
+      if (slope < 0 && xb < midX) leftLines.push({x1,y1,x2,y2});
+      if (slope > 0 && xb > midX) rightLines.push({x1,y1,x2,y2});
+    }
+
+    // --- fit one line per side (least squares) ---
+    function fitLine(linesArr){
+      if (linesArr.length === 0) return null;
+      let sumX=0,sumY=0,sumXX=0,sumXY=0,n=0;
+      for (const L of linesArr){ sumX+=L.x1; sumY+=L.y1; sumXX+=L.x1*L.x1; sumXY+=L.x1*L.y1; n++; sumX+=L.x2; sumY+=L.y2; sumXX+=L.x2*L.x2; sumXY+=L.x2*L.y2; n++; }
+      const denom = (n*sumXX - sumX*sumX);
+      if (denom === 0) return null;
+      const m = (n*sumXY - sumX*sumY) / denom;
+      const b = (sumY - m*sumX) / n;
+      return {m,b};
+    }
+
+    const left = fitLine(leftLines);
+    const right = fitLine(rightLines);
+
+    if (!left && !right) return null;
+
+    // segmentize within [topY..botY]
+    function seg(mb){
+      if (!mb) return null;
+      const {m,b} = mb;
+      const y1 = botY, y2 = topY;
+      let x1 = (y1 - b) / m;
+      let x2 = (y2 - b) / m;
+      return {x1,y1,x2,y2,m,b};
+    }
+
+    return { left: seg(left), right: seg(right), drawW: W, drawH: H, topY, botY };
+  } finally {
+    // cleanup
+    src.delete(); gray.delete(); claheOut.delete(); blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
   }
-
-  // Fit single line per side by averaging (simple & robust enough)
-  function fitLine(linesArr){
-    if (linesArr.length === 0) return null;
-    // Gather points
-    const pts = [];
-    for (const L of linesArr){ pts.push([L.x1,L.y1], [L.x2,L.y2]); }
-    // Linear regression y = m x + b
-    let sumX=0,sumY=0,sumXX=0,sumXY=0, n=pts.length;
-    for (const [x,y] of pts){ sumX+=x; sumY+=y; sumXX+=x*x; sumXY+=x*y; }
-    const denom = (n*sumXX - sumX*sumX);
-    if (denom === 0) return null;
-    const m = (n*sumXY - sumX*sumY) / denom;
-    const b = (sumY - m*sumX) / n;
-    return {m,b};
-  }
-
-  const left = fitLine(leftLines);
-  const right = fitLine(rightLines);
-
-  // Clean up
-  src.delete(); gray.delete(); blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
-
-  if (!left && !right) return null;
-
-  // Return line segments in draw-area coords, clipped to [topY..botY]
-  function segmentFromMB(line){
-    if (!line) return null;
-    const {m,b} = line;
-    const y1 = botY, y2 = topY;
-    let x1 = (y1 - b) / m;
-    let x2 = (y2 - b) / m;
-    return {x1,y1,x2,y2,m,b};
-  }
-
-  return {
-    left: left ? segmentFromMB(left) : null,
-    right: right ? segmentFromMB(right) : null,
-    drawW: W, drawH: H
-  };
 }
+
 
 function drawRoadEdgesToOverlay(segments, map){
   if (!segments) { lastLaneBearings = null; return; }
