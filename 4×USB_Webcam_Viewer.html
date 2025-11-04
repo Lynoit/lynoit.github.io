@@ -17,12 +17,22 @@
   video { width:100%; height:100%; object-fit:contain; background:#000; }
   .vwrap { position:relative; }
   .vwrap header { position:absolute; top:4px; left:4px; background:rgba(0,0,0,0.5); padding:2px 6px; border-radius:4px; font-size:12px; }
+  /* === Detection additions: overlay canvas always stretches to video box === */
+  .overlay {
+    position:absolute; inset:0; pointer-events:none;
+  }
   #timeline { width:100%; }
   #currentTime { width:70px; text-align:right; font-variant-numeric:tabular-nums; }
   #sessionName { font-variant-numeric:tabular-nums; }
   button { background:#2c7be5; border:none; color:#fff; padding:6px 10px; border-radius:6px; cursor:pointer; }
   button:hover { background:#3d8af0; }
+  label { display:flex; align-items:center; gap:6px; }
+  input[type="number"] { width:76px; }
 </style>
+
+<!-- === Detection additions: TFJS + COCO-SSD === -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 </head>
 <body>
   <div id="sidebar">
@@ -31,17 +41,32 @@
     </div>
     <div id="sessionList"></div>
   </div>
+
   <div id="main">
     <div id="toolbar">
       <button id="playPause" disabled>▶️ Play</button>
       <input id="timeline" type="range" min="0" max="100" value="0" step="0.01" disabled />
       <span id="currentTime">00:00</span>
       <div style="flex:1"></div>
-      <!-- Right side shows GLOBAL time (session timestamp + master elapsed) -->
+      <!-- === Detection additions: controls on the right === -->
+      <label title="Run object detection on the Front camera">
+        <input type="checkbox" id="detectToggle" />
+        Detect Front Objects
+      </label>
+      <label title="Horizontal FOV of the Front camera (degrees)">
+        FOV°
+        <input type="number" id="fovInput" min="20" max="180" step="0.1" value="90" />
+      </label>
       <span id="sessionName"></span>
     </div>
+
     <div id="videos">
-      <div class="vwrap"><header>Front</header><video id="vidFront" preload="metadata" muted></video></div>
+      <div class="vwrap">
+        <header>Front</header>
+        <video id="vidFront" preload="metadata" muted></video>
+        <!-- === Detection additions: overlay canvas === -->
+        <canvas id="ovlFront" class="overlay"></canvas>
+      </div>
       <div class="vwrap"><header>Back</header> <video id="vidBack"  preload="metadata" muted></video></div>
       <div class="vwrap"><header>Left</header> <video id="vidLeft"  preload="metadata" muted></video></div>
       <div class="vwrap"><header>Right</header><video id="vidRight" preload="metadata" muted></video></div>
@@ -62,6 +87,27 @@
     Left:  document.getElementById('vidLeft'),
     Right: document.getElementById('vidRight')
   };
+
+  // === Detection additions ===
+  const ovlFront = document.getElementById('ovlFront');
+  const detectToggle = document.getElementById('detectToggle');
+  const fovInput = document.getElementById('fovInput');
+
+  // Classes to keep, mapping TF label -> display label and assumed height (m)
+  const CLASS_HEIGHTS = {
+    person: 1.70,
+    car: 1.50,
+    bus: 3.20,
+    truck: 3.00,
+    bicycle: 1.50,
+    motorcycle: 1.40
+  };
+  const KEEP = new Set(Object.keys(CLASS_HEIGHTS));
+  let cocoModel = null;          // loaded coco-ssd model
+  let detRunning = false;        // whether the rVFC detection loop is active
+  let cancelDetCb = null;        // cancel handle for rVFC
+  let lastInferT = 0;            // simple throttle
+  const INFER_EVERY_MS = 120;    // ~8 FPS infer cap (adjust as needed)
 
   let sessions = {};     // { "YYYYMMDD_HHMMSS": {Front:File,Back:File,Left:File,Right:File} }
   let currentSession = null;
@@ -92,6 +138,9 @@
     const [_, Y, Mo, D, h, mi, s] = m;
     return new Date(+Y, +Mo-1, +D, +h, +mi, +s, 0); // local
   }
+  // Clamp + nice rounding
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+  const round1 = (x)=>Math.round(x*10)/10;
 
   async function pickFolder() {
     let files = [];
@@ -141,8 +190,9 @@
   }
 
   async function loadSession(stamp,elem){
-    // Stop previous playback loop if any
+    // Stop previous playback and detection loops if any
     stopSyncLoop();
+    stopDetectionLoop();
     playing = false;
     playPause.textContent='▶️ Play';
     playPause.dataset.state='paused';
@@ -165,7 +215,7 @@
       const file = sessions[stamp][pos];
       if(file){
         v.src = URL.createObjectURL(file);
-        v.play().catch(()=>{});  // prime
+        v.play().catch(()=>{});
         v.pause();
         v.currentTime=0;
         if (!master) master = v;
@@ -182,7 +232,10 @@
       setTimeout(r,500);
     })));
 
-    // --- NEW: compute elapsed from filename timestamp to the latest file's lastModified ---
+    // Resize overlay to match displayed box (CSS contains video, so use client size)
+    resizeOverlayToFront();
+
+    // Compute timeline max from mtime or duration
     const filesInSession = ['Front','Back','Left','Right']
       .map(pos => sessions[stamp][pos])
       .filter(Boolean);
@@ -194,11 +247,8 @@
         elapsedByMtimeSec = Math.floor((latestMs - startMs) / 1000);
       }
     }
-
-    // Fallback: if mtime diff couldn't be computed, use max media duration
     const durations = Object.values(vids).map(v => (v.src ? (v.duration || 0) : 0));
     const maxDur = Math.max(...durations, 0);
-
     const totalSec = elapsedByMtimeSec > 0 ? elapsedByMtimeSec : maxDur;
 
     timeline.max = totalSec || 0;
@@ -208,13 +258,18 @@
   }
 
   // --- playback control ---
-  playPause.addEventListener('click', ()=>{
+  playPause.addEventListener('click', async ()=>{
     if(!currentSession || !master) return;
     const isPlaying = playPause.dataset.state==='playing';
     if(isPlaying){
       pauseAll();
+      stopDetectionLoop();
     } else {
       playAll();
+      if (detectToggle.checked) {
+        await ensureModelLoaded();
+        startDetectionLoop();
+      }
     }
   });
 
@@ -243,6 +298,16 @@
     stopSyncLoop();
   }
 
+  // --- detection toggle ---
+  detectToggle.addEventListener('change', async ()=>{
+    if (detectToggle.checked && playing) {
+      await ensureModelLoaded();
+      startDetectionLoop();
+    } else {
+      stopDetectionLoop(true);
+    }
+  });
+
   // --- timeline scrubbing ---
   timeline.addEventListener('input', ()=>{
     if(!master) return;
@@ -254,6 +319,8 @@
     currentTime.textContent = fmtTime(t);
     const nowDt = new Date(baseDate.getTime() + Math.floor(t)*1000);
     sessionNameEl.textContent = fmtHMSfromDate(nowDt);
+    // On scrub, also refresh overlay once (use last detection results? here we clear)
+    clearOverlay();
   });
 
   // --- master-driven sync loop with rVFC + slew control ---
@@ -309,6 +376,168 @@
       clearTimeout(rVFCHandle);
     }
     rVFCHandle = null;
+  }
+
+  // === Detection: overlay helpers ===
+  function resizeOverlayToFront(){
+    const box = vids.Front.getBoundingClientRect();
+    ovlFront.width  = Math.max(1, Math.floor(box.width));
+    ovlFront.height = Math.max(1, Math.floor(box.height));
+  }
+  function clearOverlay(){
+    const ctx = ovlFront.getContext('2d');
+    ctx.clearRect(0,0,ovlFront.width, ovlFront.height);
+  }
+  window.addEventListener('resize', resizeOverlayToFront);
+
+  // Ensure TF model is loaded
+  async function ensureModelLoaded(){
+    if (!cocoModel) {
+      // 'lite_mobilenet_v2' is fast; 'mobilenet_v2' is more accurate
+      cocoModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    }
+  }
+
+  // Map video-intrinsic coordinates to drawn canvas coordinates
+  function computeLetterboxMapping(videoEl, canvasEl){
+    // video is object-fit: contain; canvas overlays the drawn box.
+    const vw = videoEl.videoWidth || 1;
+    const vh = videoEl.videoHeight || 1;
+    const cw = canvasEl.width || 1;
+    const ch = canvasEl.height || 1;
+    const videoAspect = vw / vh;
+    const canvasAspect = cw / ch;
+    let drawW, drawH, padX, padY;
+    if (videoAspect > canvasAspect) {
+      // limited by width
+      drawW = cw;
+      drawH = cw / videoAspect;
+      padX = 0;
+      padY = (ch - drawH) / 2;
+    } else {
+      // limited by height
+      drawH = ch;
+      drawW = ch * videoAspect;
+      padY = 0;
+      padX = (cw - drawW) / 2;
+    }
+    return { vw, vh, cw, ch, drawW, drawH, padX, padY };
+  }
+
+  // Distance estimator using bbox height + camera FOV
+  function estimateDistanceMeters(bbox, label){
+    // bbox: [x, y, width, height] in *display canvas* pixels
+    const Hreal = CLASS_HEIGHTS[label];
+    if (!Hreal) return null;
+    const imgH = ovlFront.height; // using display height for pixel units
+    const imgW = ovlFront.width;
+    const hPix = bbox[3];
+    if (hPix <= 2) return null;
+
+    const hFovDeg = parseFloat(fovInput.value) || 90;
+    const hFov = hFovDeg * Math.PI/180;
+    // Convert horizontal FOV to vertical FOV using aspect ratio
+    const vFov = 2 * Math.atan( Math.tan(hFov/2) * (imgH/imgW) );
+    const fy = (imgH/2) / Math.tan(vFov/2); // pixels
+
+    const Z = (Hreal * fy) / hPix; // meters
+    return clamp(Z, 0.1, 300); // keep sane
+  }
+
+  function drawDetections(dets){
+    const ctx = ovlFront.getContext('2d');
+    clearOverlay();
+
+    ctx.lineWidth = 2;
+    ctx.font = '12px system-ui, Segoe UI, Roboto, Arial, sans-serif';
+
+    const map = computeLetterboxMapping(vids.Front, ovlFront);
+
+    for (const d of dets){
+      const {bbox, class: label, score} = d;
+      if (!KEEP.has(label)) continue;
+      // coco-ssd returns bbox in *displayed* pixels when run on an HTMLVideoElement,
+      // but due to object-fit: contain, we should map into the letterboxed region.
+      // bbox = [x, y, width, height] relative to the drawn video rectangle.
+      const x = map.padX + bbox[0] * (map.drawW / map.cw);
+      const y = map.padY + bbox[1] * (map.drawH / map.ch);
+      const w = bbox[2] * (map.drawW / map.cw);
+      const h = bbox[3] * (map.drawH / map.ch);
+
+      const dist = estimateDistanceMeters([x,y,w,h], label);
+      const labelText = `${label} ${(score*100).toFixed(0)}%` + (dist ? ` • ${round1(dist)} m` : '');
+
+      // Box
+      ctx.strokeStyle = 'rgba(72, 190, 255, 0.95)';
+      ctx.strokeRect(x, y, w, h);
+      // Label bg
+      const pad = 4;
+      const metrics = ctx.measureText(labelText);
+      const textH = 14;
+      const textW = metrics.width + pad*2;
+      const textX = Math.max(0, Math.min(ovlFront.width - textW, x));
+      const textY = Math.max(0, y - (textH + 6));
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(textX, textY, textW, textH + 4);
+      // Text
+      ctx.fillStyle = '#eaf6ff';
+      ctx.fillText(labelText, textX + pad, textY + textH - 2);
+    }
+  }
+
+  // Detection loop tied to Front video frames
+  function startDetectionLoop(){
+    if (detRunning) return;
+    detRunning = true;
+
+    const v = vids.Front;
+    if (!v || !v.src || !cocoModel) return;
+
+    const step = async () => {
+      if (!detRunning || !playing || !detectToggle.checked) return;
+
+      // Simple FPS cap
+      const now = performance.now();
+      if (now - lastInferT >= INFER_EVERY_MS) {
+        lastInferT = now;
+        try {
+          // Run on the HTMLVideoElement directly; model handles resizing
+          const preds = await cocoModel.detect(v, 20); // max 20 boxes
+          // Normalize bbox to overlay canvas coordinate system.
+          // coco-ssd's bbox for a video element corresponds to rendered pixels of that <video>.
+          // We'll remap to our overlay using computeLetterboxMapping proportions.
+          drawDetections(preds);
+        } catch (e) {
+          // If inference fails, keep going but don't spam
+          console.error('Detection error:', e);
+        }
+      }
+
+      if (v.requestVideoFrameCallback) {
+        cancelDetCb = v.requestVideoFrameCallback(() => step());
+      } else {
+        cancelDetCb = setTimeout(step, 33);
+      }
+    };
+
+    // First run
+    if (v.requestVideoFrameCallback) {
+      cancelDetCb = v.requestVideoFrameCallback(() => step());
+    } else {
+      cancelDetCb = setTimeout(step, 33);
+    }
+  }
+
+  function stopDetectionLoop(clear=false){
+    detRunning = false;
+    const v = vids.Front;
+    if (v && v.cancelVideoFrameCallback && cancelDetCb) {
+      try { v.cancelVideoFrameCallback(cancelDetCb); } catch {}
+    } else if (cancelDetCb) {
+      clearTimeout(cancelDetCb);
+    }
+    cancelDetCb = null;
+    if (clear) clearOverlay();
   }
 
   pickBtn.onclick = pickFolder;
