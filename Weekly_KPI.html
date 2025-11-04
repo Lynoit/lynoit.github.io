@@ -7,6 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg'/%3e">
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <style>
     :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
@@ -171,15 +172,30 @@
 
 /* Optional: disable page scroll while modal is open */
 body.modal-open{ overflow: hidden; }
+
+    /* Hide UI chrome while capturing to PDF */
+.exporting .download { visibility:hidden !important; }
+/* If you ever add sticky headers etc. we can unstick during capture */
+.exporting .matrix-table thead th { position:static !important; }
+
     
   </style>
 </head>
 <body>
   <div class="topbar">
-    <div class="tabs">
-      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
-      <button class="tab" data-mode="external" aria-pressed="false">External</button>
-    </div>
+<div class="tabs" style="justify-content:space-between; align-items:center">
+  <div style="display:flex; gap:8px">
+    <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
+    <button class="tab" data-mode="external" aria-pressed="false">External</button>
+  </div>
+  <button id="exportPdfBtn"
+          class="tab"
+          style="background:#1f3de3; color:#fff"
+          title="Export all Internal cards to a multi-page PDF">
+    Export PDF (Internal)
+  </button>
+</div>
+
   </div>
 
   <div class="container">
@@ -1774,6 +1790,126 @@ document.querySelectorAll('.tab').forEach(btn=>{
   btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
   btn.addEventListener('keydown', (e)=>{ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
 });
+
+// ===== PDF Export: capture all Internal cards, one per page =====
+async function exportInternalToPDF(){
+  // Ensure we're in Internal mode and charts are rendered
+  const wasMode = CURRENT_MODE;
+  if (CURRENT_MODE !== MODES.INTERNAL){
+    CURRENT_MODE = MODES.INTERNAL;
+    updateTabsUI();
+    if (LAST_PARSED) { renderCharts(LAST_PARSED); }
+    else { await loadCsvAndRender(); }
+  }
+  // Wait a frame for layout
+  await new Promise(r => requestAnimationFrame(r));
+
+  const { jsPDF } = window.jspdf;
+  const A4 = { w: 210, h: 297 };             // mm
+  const PX_TO_MM = 0.264583;                  // 96dpi assumption
+  const MARGIN = 10;                          // mm
+
+  // Helper: capture an element fully (including overflow content) as canvas
+  async function captureElement(el){
+    // Temporarily relax overflow in scroll containers to capture full content
+    const mutated = [];
+    el.querySelectorAll('*').forEach(node => {
+      const cs = getComputedStyle(node);
+      if (/(auto|scroll)/.test(cs.overflow + cs.overflowY + cs.overflowX)) {
+        mutated.push([node, node.style.overflow, node.style.maxHeight, node.style.height]);
+        node.style.overflow = 'visible';
+        node.style.maxHeight = 'none';
+        // If it's a fixed-height scroller, let it expand
+        if (cs.height && cs.height.endsWith('px')) node.style.height = 'auto';
+      }
+      // Unstick sticky things so they render in flow
+      if (cs.position === 'sticky'){
+        mutated.push([node, node.style.position, null, null, 'positionOnly']);
+        node.style.position = 'static';
+      }
+    });
+
+    // Use a white background for clean PDF pages
+    const canvas = await html2canvas(el, {
+      backgroundColor: '#ffffff',
+      scale: 2,            // sharper
+      useCORS: true,
+      windowWidth: document.documentElement.clientWidth
+    });
+
+    // Restore styles
+    mutated.forEach(([node, overflow, maxH, h, kind]) => {
+      if (kind === 'positionOnly') node.style.position = '';
+      else {
+        node.style.overflow = overflow;
+        node.style.maxHeight = maxH;
+        node.style.height = h;
+      }
+    });
+
+    return canvas;
+  }
+
+  // Body flag to tweak CSS while capturing
+  document.body.classList.add('exporting');
+
+  try{
+    const cards = Array.from(document.querySelectorAll('#charts .chart-card'));
+    if (!cards.length){
+      alert('No cards found in Internal mode to export.');
+      return;
+    }
+
+    let pdf = null;
+    for (let i = 0; i < cards.length; i++){
+      const card = cards[i];
+
+      // Scroll into view to ensure lazy SVG layout is finalized
+      card.scrollIntoView({ block: 'nearest' });
+      await new Promise(r => requestAnimationFrame(r));
+
+      const canvas = await captureElement(card);
+      const imgWmm = canvas.width * PX_TO_MM;
+      const imgHmm = canvas.height * PX_TO_MM;
+
+      // Pick page orientation based on aspect ratio of the card
+      const isLandscape = imgWmm >= imgHmm;
+      const pageW = isLandscape ? A4.h : A4.w;
+      const pageH = isLandscape ? A4.w : A4.h;
+      const orient = isLandscape ? 'landscape' : 'portrait';
+
+      // Create or add a page
+      if (!pdf){
+        pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: orient });
+      } else {
+        pdf.addPage('a4', orient);
+      }
+
+      const maxW = pageW - MARGIN*2;
+      const maxH = pageH - MARGIN*2;
+      const scale = Math.min(maxW / imgWmm, maxH / imgHmm);
+
+      const drawW = imgWmm * scale;
+      const drawH = imgHmm * scale;
+      const offX = (pageW - drawW) / 2;
+      const offY = (pageH - drawH) / 2;
+
+      const imgData = canvas.toDataURL('image/png');
+      pdf.addImage(imgData, 'PNG', offX, offY, drawW, drawH);
+    }
+
+    pdf.save('KPI_Internal_Cards.pdf');
+  } finally {
+    document.body.classList.remove('exporting');
+    // Leave the UI in Internal mode (that’s what the user exported)
+  }
+}
+
+// Wire the button
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('exportPdfBtn');
+  if (btn) btn.addEventListener('click', exportInternalToPDF);
+});  
 
 /* ==================== Boot ==================== */
 document.addEventListener('DOMContentLoaded', ()=>{ updateTabsUI(); loadCsvAndRender(); });
