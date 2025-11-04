@@ -635,77 +635,102 @@ video {
   }
 
   function drawBirdview(items){
-    // items: [{label, score, dist, bearingRad}]
-    const ctx = birdCtx;
-    const W = birdCanvas.width, H = birdCanvas.height;
-    ctx.clearRect(0,0,W,H);
+  // items: [{label, score, dist, bearingRad}]
+  const ctx = birdCtx;
+  const W = birdCanvas.width, H = birdCanvas.height;
+  ctx.clearRect(0,0,W,H);
 
-    if (!birdToggle.checked) return;
+  if (!birdToggle.checked) return;
 
-    // Config
-    const rangeM = parseFloat(birdRangeInput.value) || 60; // forward range
-    const sideM  = Math.max(10, rangeM/2);                 // lateral half-range
-    // margins
-    const margin = 14;
+  // Desired world extents (meters)
+  const rangeM = parseFloat(birdRangeInput.value) || 60; // forward
+  const sideM  = Math.max(10, rangeM/2);                 // lateral half-range
 
-    // world (meters) -> canvas
-    const scaleY = (H - 2*margin) / rangeM;     // m → px forward
-    const scaleX = (W - 2*margin) / (2*sideM);  // m → px lateral
-    const centerX = W/2;
-    const egoY = H - margin; // ego at bottom
+  // Drawing margins
+  const margin = 14;
 
-    // Draw grid
-    ctx.strokeStyle = '#2a2a2a';
-    ctx.lineWidth = 1;
-    for (let m=10; m<=rangeM; m+=10){
-      const y = egoY - m*scaleY;
-      ctx.beginPath(); ctx.moveTo(margin, y); ctx.lineTo(W-margin, y); ctx.stroke();
-      ctx.fillStyle = '#777'; ctx.font = '11px system-ui';
-      ctx.fillText(`${m} m`, 4, y-2);
-    }
-    // center line
-    ctx.beginPath(); ctx.moveTo(centerX, margin); ctx.lineTo(centerX, H-margin); ctx.stroke();
+  // Available pixels for plotting
+  const availYpx = H - 2*margin;   // forward space in px
+  const availXpx = W - 2*margin;   // lateral space in px
 
-    // Ego vehicle
-    ctx.fillStyle = '#3aa3ff';
-    ctx.strokeStyle = '#3aa3ff';
-    ctx.lineWidth = 2;
-    const egoW=24, egoH=36;
-    ctx.fillRect(centerX-egoW/2, egoY-egoH, egoW, egoH);
-    ctx.beginPath(); ctx.moveTo(centerX-egoW/2, egoY-egoH); ctx.lineTo(centerX+egoW/2, egoY-egoH); ctx.stroke();
+  // --- Isotropic scale (same m→px for x and y) ---
+  // Use the limiting dimension so both axes share the same scale S
+  const S = Math.min(availYpx / rangeM, availXpx / (2*sideM)); // px per meter
 
-    // Plot detections
-    for (const it of items){
-      const { label, dist, bearingRad, score } = it;
-      if (!dist || dist<=0) continue;
+  // Compute actual pixel extents based on S
+  const usedYpx = S * rangeM;        // forward span we can draw
+  const usedXpx = S * (2*sideM);     // lateral span we can draw
 
-      const x_m = Math.sin(bearingRad) * dist; // lateral right +, left -
-      const y_m = Math.cos(bearingRad) * dist; // forward
+  // Center plot horizontally; ego at bottom
+  const centerX = W/2;
+  const leftX   = centerX - usedXpx/2;
+  const rightX  = centerX + usedXpx/2;
+  const topY    = (H - usedYpx) - margin + usedYpx - usedYpx; // equals margin + (availYpx - usedYpx) but simpler below
+  const egoY    = H - margin;        // bottom line for ego
+  const topPlotY = egoY - usedYpx;   // top edge of the plot area
 
-      // Skip outside plot
-      if (y_m<0 || y_m>rangeM || Math.abs(x_m)>sideM) continue;
+  // --- Grid (forward every 10 m, lateral every 5 m) ---
+  ctx.strokeStyle = '#2a2a2a';
+  ctx.lineWidth = 1;
+  ctx.font = '11px system-ui';
+  ctx.fillStyle = '#777';
 
-      const px = centerX + x_m*scaleX;
-      const py = egoY - y_m*scaleY;
-
-      const name = DISPLAY_LABEL[label] || label;
-      const color = CLASS_COLOR[label] || '#e6e6e6';
-
-      // dot
-      ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI*2); ctx.fill();
-
-      // label
-      const txt = `${name} • ${round1(dist)} m`;
-      ctx.font = '12px system-ui';
-      ctx.fillStyle = '#ddd';
-      ctx.fillText(txt, Math.min(px+8, W-110), Math.max(py-8, 14));
-    }
-
-    // outline
-    ctx.strokeStyle = '#333';
-    ctx.strokeRect(0.5,0.5,W-1,H-1);
+  // Forward gridlines
+  for (let m=10; m<=rangeM; m+=10){
+    const y = egoY - m*S;
+    ctx.beginPath(); ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); ctx.stroke();
+    ctx.fillText(`${m} m`, Math.max(4, leftX+4), y-2);
   }
+  // Lateral gridlines (centered)
+  for (let m=5; m<=sideM; m+=5){
+    const xR = centerX + m*S;
+    const xL = centerX - m*S;
+    ctx.beginPath(); ctx.moveTo(xR, topPlotY); ctx.lineTo(xR, egoY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(xL, topPlotY); ctx.lineTo(xL, egoY); ctx.stroke();
+  }
+  // Center line
+  ctx.beginPath(); ctx.moveTo(centerX, topPlotY); ctx.lineTo(centerX, egoY); ctx.stroke();
+
+  // Ego vehicle
+  ctx.fillStyle = '#3aa3ff';
+  ctx.strokeStyle = '#3aa3ff';
+  ctx.lineWidth = 2;
+  const egoW=24, egoH=36;
+  ctx.fillRect(centerX-egoW/2, egoY-egoH, egoW, egoH);
+  ctx.beginPath(); ctx.moveTo(centerX-egoW/2, egoY-egoH); ctx.lineTo(centerX+egoW/2, egoY-egoH); ctx.stroke();
+
+  // Plot detections using isotropic S
+  for (const it of items){
+    const { label, dist, bearingRad, score } = it;
+    if (!dist || dist<=0) continue;
+
+    const x_m = Math.sin(bearingRad) * dist; // lateral (right +)
+    const y_m = Math.cos(bearingRad) * dist; // forward
+
+    // Skip if outside configured world extents
+    if (y_m < 0 || y_m > rangeM || Math.abs(x_m) > sideM) continue;
+
+    const px = centerX + x_m * S;
+    const py = egoY  - y_m * S;
+
+    const name = (DISPLAY_LABEL[label] || label);
+    const color = CLASS_COLOR[label] || '#e6e6e6';
+
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI*2); ctx.fill();
+
+    const txt = `${name} • ${round1(dist)} m`;
+    ctx.font = '12px system-ui';
+    ctx.fillStyle = '#ddd';
+    const textX = Math.min(px+8, rightX-110);
+    const textY = Math.max(py-8, topPlotY+12);
+    ctx.fillText(txt, textX, textY);
+  }
+
+  // Plot border
+  ctx.strokeStyle = '#333';
+  ctx.strokeRect(leftX + 0.5, topPlotY + 0.5, usedXpx - 1, usedYpx - 1);
+}
 
   // --------------- Wire up ---------------
   pickBtn.onclick = pickFolder;
