@@ -68,6 +68,7 @@ video {
 
 <!-- Detection libs -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV loaded')"></script>  
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 </head>
 <body>
@@ -98,6 +99,12 @@ video {
     <input type="checkbox" id="detectToggle" checked />
     Detect front objects
   </label>
+  
+  <label title="Detect left/right road edges with Canny + Hough">
+  <input type="checkbox" id="edgesToggle" checked />
+  Road edges
+</label>
+
   <label title="Horizontal FOV of the Front camera (degrees)">
     FOV°
     <input type="number" id="fovInput" min="20" max="180" step="0.1" value="78" />
@@ -191,6 +198,30 @@ video {
   let master = null;
   let rVFCHandle = null;
   let playing = false;
+
+  // ---- Road-edge detection (OpenCV.js) ----
+const edgesToggle = document.getElementById('edgesToggle');
+let cvReady = false;
+
+// Offscreen canvas for CV processing (sized to draw area, like inferCanvas)
+const cvCanvas = document.createElement('canvas');
+const cvCtx = cvCanvas.getContext('2d');
+
+// Throttling (edge detection is cheap but do ~15 Hz)
+let lastEdgeT = 0;
+const EDGE_EVERY_MS = 66;
+
+// Will store bearings for birdview rays (updated each frame we detect)
+let lastLaneBearings = null; // {leftRad, rightRad} or null
+
+// OpenCV readiness (it sets cv['onRuntimeInitialized'])
+if (window.cv && cv['onRuntimeInitialized'] === undefined) {
+  // Already initialized
+  cvReady = true;
+} else {
+  window.cv = window.cv || {};
+  cv['onRuntimeInitialized'] = () => { cvReady = true; };
+}
 
   // Sync thresholds (seconds)
   const SOFT_SLEW_TH = 0.030, HARD_JUMP_TH = 0.100, MAX_SLEW = 0.03;
@@ -502,6 +533,149 @@ video {
     return { fy };
   }
 
+  function detectRoadEdgesOnFront(map) {
+  if (!cvReady) return null;
+
+  // Resize cv canvas to draw area
+  const W = Math.max(1, Math.floor(map.drawW));
+  const H = Math.max(1, Math.floor(map.drawH));
+  if (cvCanvas.width !== W || cvCanvas.height !== H) {
+    cvCanvas.width = W; cvCanvas.height = H;
+  }
+
+  // Draw the same image used for inference (intrinsic -> draw area)
+  cvCtx.drawImage(vids.Front, 0, 0, vids.Front.videoWidth || 1, vids.Front.videoHeight || 1, 0, 0, W, H);
+
+  // Wrap as OpenCV Mat
+  let src = cv.imread(cvCanvas);
+  let gray = new cv.Mat();
+  let blur = new cv.Mat();
+  let edges = new cv.Mat();
+
+  // Preprocess
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
+  cv.GaussianBlur(gray, blur, new cv.Size(5,5), 1.2, 1.2, cv.BORDER_DEFAULT);
+
+  // Canny
+  cv.Canny(blur, edges, 70, 150); // tweak if needed
+
+  // ROI mask (lower trapezoid)
+  let mask = new cv.Mat.zeros(H, W, cv.CV_8UC1);
+  const botY = H - 1, topY = Math.floor(H * 0.55);
+  const leftX_bot = Math.floor(W * 0.12), rightX_bot = Math.floor(W * 0.88);
+  const leftX_top = Math.floor(W * 0.40), rightX_top = Math.floor(W * 0.60);
+  const pts = cv.matFromArray(4, 1, cv.CV_32SC2, [
+    leftX_bot, botY,   rightX_bot, botY,   rightX_top, topY,   leftX_top, topY
+  ]);
+  cv.fillPoly(mask, [pts], new cv.Scalar(255));
+  pts.delete();
+
+  let masked = new cv.Mat();
+  cv.bitwise_and(edges, mask, masked);
+
+  // Hough lines
+  let lines = new cv.Mat();
+  cv.HoughLinesP(masked, lines, 1, Math.PI/180, 50, 30, 120); // rho, theta, threshold, minLineLen, maxLineGap
+
+  // Classify left vs right by slope and x position
+  const midX = W / 2;
+  let leftLines = [], rightLines = [];
+  for (let i = 0; i < lines.rows; ++i) {
+    const [x1,y1,x2,y2] = lines.intPtr(i);
+    const dx = x2 - x1, dy = y2 - y1;
+    if (dx === 0) continue;
+    const slope = dy / dx;
+    if (Math.abs(slope) < 0.3) continue; // near-horizontal, skip
+
+    // Use lower endpoint to decide side
+    const xb = (y1 > y2) ? x1 : x2;
+    if (slope < 0 && xb < midX) leftLines.push({x1,y1,x2,y2});
+    if (slope > 0 && xb > midX) rightLines.push({x1,y1,x2,y2});
+  }
+
+  // Fit single line per side by averaging (simple & robust enough)
+  function fitLine(linesArr){
+    if (linesArr.length === 0) return null;
+    // Gather points
+    const pts = [];
+    for (const L of linesArr){ pts.push([L.x1,L.y1], [L.x2,L.y2]); }
+    // Linear regression y = m x + b
+    let sumX=0,sumY=0,sumXX=0,sumXY=0, n=pts.length;
+    for (const [x,y] of pts){ sumX+=x; sumY+=y; sumXX+=x*x; sumXY+=x*y; }
+    const denom = (n*sumXX - sumX*sumX);
+    if (denom === 0) return null;
+    const m = (n*sumXY - sumX*sumY) / denom;
+    const b = (sumY - m*sumX) / n;
+    return {m,b};
+  }
+
+  const left = fitLine(leftLines);
+  const right = fitLine(rightLines);
+
+  // Clean up
+  src.delete(); gray.delete(); blur.delete(); edges.delete(); mask.delete(); masked.delete(); lines.delete();
+
+  if (!left && !right) return null;
+
+  // Return line segments in draw-area coords, clipped to [topY..botY]
+  function segmentFromMB(line){
+    if (!line) return null;
+    const {m,b} = line;
+    const y1 = botY, y2 = topY;
+    let x1 = (y1 - b) / m;
+    let x2 = (y2 - b) / m;
+    return {x1,y1,x2,y2,m,b};
+  }
+
+  return {
+    left: left ? segmentFromMB(left) : null,
+    right: right ? segmentFromMB(right) : null,
+    drawW: W, drawH: H
+  };
+}
+
+function drawRoadEdgesToOverlay(segments, map){
+  if (!segments) { lastLaneBearings = null; return; }
+  const ctx = ovlFront.getContext('2d');
+
+  // Style
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#60ff82';
+
+  // Utility
+  function drawSeg(seg){
+    if (!seg) return;
+    const x1 = map.padX + seg.x1;
+    const y1 = map.padY + seg.y1;
+    const x2 = map.padX + seg.x2;
+    const y2 = map.padY + seg.y2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  }
+
+  drawSeg(segments.left);
+  drawSeg(segments.right);
+  ctx.restore();
+
+  // --- Compute lane bearings for birdview (angle at the bottom) ---
+  const centerX = map.padX + map.drawW/2;
+  const hFovRad = (parseFloat(fovInput.value) || 90) * Math.PI / 180;
+
+  function bearingAtBottom(seg){
+    if (!seg) return null;
+    const cx = (seg.x1 + seg.x2)/2; // midpoint of the drawn segment
+    // Use the x-position of the segment at bottom y to estimate bearing
+    const xBottom = seg.x1; // since y1 = botY in our build
+    const norm = clamp((xBottom - centerX) / (map.drawW/2), -1, 1);
+    return norm * (hFovRad/2);
+  }
+
+  lastLaneBearings = {
+    leftRad:  segments.left  ? bearingAtBottom(segments.left)  : null,
+    rightRad: segments.right ? bearingAtBottom(segments.right) : null
+  };
+}
+  
   // Draw detections on front overlay and prepare birdview info
   function drawDetections(dets, map){
     const ctx = ovlFront.getContext('2d');
@@ -602,6 +776,20 @@ video {
 
           // Show + prep birdview
           drawDetections(preds, map);
+
+                  if (edgesToggle.checked) {
+          const nowE = performance.now();
+          if (nowE - lastEdgeT >= EDGE_EVERY_MS) {
+            lastEdgeT = nowE;
+            try {
+              const segs = detectRoadEdgesOnFront(map);
+              if (segs) drawRoadEdgesToOverlay(segs, map);
+            } catch (e) { console.warn('edge detect error', e); }
+          }
+        } else {
+          lastLaneBearings = null;
+        }
+          
         } catch (e) {
           console.error('Detection error:', e);
         }
