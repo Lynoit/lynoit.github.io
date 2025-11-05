@@ -238,6 +238,11 @@ button.primary:hover { background: var(--btn-bg-hover); }
       <output id="fpsOut" for="fpsRange">1</output>
     </div>
 
+    <!-- Disk space estimate (appears below FPS slider) -->
+<div id="spaceEstimate" style="font-size:12px;color:var(--fg-muted);margin-top:-6px;">
+  <!-- filled by JS -->
+</div>
+
     <button id="saveBtn" title="Save streams to a folder">Save streams</button>
 
     <div class="spacer"></div>
@@ -378,7 +383,10 @@ function initPositionDropdowns() {
   fpsRange.addEventListener('input', () => {
     fpsOut.textContent = fpsRange.value;
     clearTimeout(fpsDebounce);
-    fpsDebounce = setTimeout(() => setLiveFpsForAll(getTargetFps()), 150);
+    fpsDebounce = setTimeout(() => {
+  setLiveFpsForAll(getTargetFps());
+  updateSpaceEstimate(); // <— add this
+}, 150);
   });
 
   // Attach button handlers per camera control block
@@ -401,6 +409,53 @@ function initPositionDropdowns() {
   navigator.mediaDevices?.addEventListener?.('devicechange', refreshDeviceList);
 
   // --- Helpers ---
+// --- Disk space estimate (MB/hour) ---------------------
+function bpsEstimateForStream(w, h, fps) {
+  // Heuristic range for VP8/VP9 quality: 0.05–0.12 bits/pixel/frame
+  const bppfLow = 0.05, bppfHigh = 0.12;
+  const pxPerSec = (w||0) * (h||0) * fps;
+  return {
+    low:  pxPerSec * bppfLow,  // bits/second
+    high: pxPerSec * bppfHigh, // bits/second
+  };
+}
+function bitsToMBPerHour(bitsPerSec){
+  const bytesPerSec = bitsPerSec / 8;
+  const bytesPerHour = bytesPerSec * 3600;
+  return bytesPerHour / 1e6; // MB (decimal)
+}
+function updateSpaceEstimate(){
+  const el = document.getElementById('spaceEstimate');
+  if (!el) return;
+
+  const fps = getTargetFps();
+  let totalLowMBh = 0, totalHighMBh = 0, active = 0;
+
+  for (let i=0; i<4; i++){
+    const s = streams[i];
+    if (!s) continue;
+    const track = s.getVideoTracks()[0];
+    if (!track) continue;
+    const st = track.getSettings();
+    const w = st.width || 0;
+    const h = st.height || 0;
+    if (!w || !h) continue;
+
+    const {low, high} = bpsEstimateForStream(w, h, fps);
+    totalLowMBh  += bitsToMBPerHour(low);
+    totalHighMBh += bitsToMBPerHour(high);
+    active++;
+  }
+
+  if (!active) {
+    el.textContent = 'Start a camera to estimate disk usage per hour.';
+    return;
+  }
+  // Round nicely
+  const r = n => (n < 10 ? n.toFixed(1) : Math.round(n)).toString();
+  el.textContent = `Estimated disk use @ ${fps} fps for ${active} camera${active>1?'s':''}: ~ ${r(totalLowMBh)}–${r(totalHighMBh)} MB/hour`;
+}
+  
   function setButtonsEnabled(idx, running) {
     const block = document.querySelector(`.camctl[data-idx="${idx}"]`);
     const startBtn = block.querySelector('[data-action="start"]');
@@ -752,6 +807,7 @@ function normalizeButtonLabels() {
       alert(`${posName(idx)} failed: ${e.name || 'Error'} — ${e.message || e}`);
       setButtonsEnabled(idx, false);
     }
+    updateSpaceEstimate();
   }
 
   function stopOne(idx) {
@@ -770,6 +826,7 @@ function normalizeButtonLabels() {
     videos[idx].srcObject = null;
     infos[idx].textContent = 'Stopped';
     setButtonsEnabled(idx, false);
+    updateSpaceEstimate();
   }
 
   async function startAll() {
