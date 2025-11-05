@@ -294,6 +294,12 @@ function posName(i){
 
   const rememberedKey = 'quadcam-deviceIds-v1';
 
+  // >>> checkpoint: new globals for single-file commits
+  let currentDirHandle = null;
+  const segmentMs = 60_000; // commit interval (adjust as you like)
+  const segmentTimers = [null, null, null, null];
+  const fileHandles   = [null, null, null, null];
+
   // --- Elements ---
   const selects = [0,1,2,3].map(i => document.getElementById('sel-' + i));
   const infos   = [0,1,2,3].map(i => document.getElementById('info-' + i));
@@ -451,29 +457,72 @@ function normalizeButtonLabels() {
     writing[i] = false;
   }
 
+  // >>> checkpoint: create/open single file per pane and be ready to append
   async function setupFSAFiles(dirHandle, stamp) {
     usingFSA = !!(window.showDirectoryPicker && dirHandle);
+    currentDirHandle = usingFSA ? dirHandle : null;
     if (!usingFSA) return;
 
     for (let i = 0; i < 4; i++) {
-      if (!streams[i]) { writers[i] = null; continue; }
+      if (!streams[i]) { writers[i] = null; fileHandles[i] = null; continue; }
       const fileName = `${stamp}_${posName(i)}.webm`;
-      const fh = await dirHandle.getFileHandle(fileName, { create: true });
-      writers[i] = await fh.createWritable();
+      const fh = await currentDirHandle.getFileHandle(fileName, { create: true });
+      fileHandles[i] = fh;
+
+      // open writer in append mode (keepExistingData) and seek to end
+      const writer = await fh.createWritable({ keepExistingData: true });
+      const size = (await fh.getFile()).size;
+      await writer.seek(size);
+      writers[i] = writer;
+
       writeQ[i] = [];
       startWriterLoop(i);
       infos[i].textContent = 'Recording to folder…';
     }
   }
 
+  // >>> checkpoint: periodic commit (close) & re-open same file to append
+  async function checkpointCommit(i) {
+    if (!writers[i] || !fileHandles[i]) return;
+    try { await writers[i].close(); } catch {}
+    writers[i] = null;
+
+    const fh = fileHandles[i];
+    const newWriter = await fh.createWritable({ keepExistingData: true });
+    const size = (await fh.getFile()).size;
+    await newWriter.seek(size);
+    writers[i] = newWriter;
+    startWriterLoop(i);
+  }
+
+  function startCheckpointing() {
+    for (let i = 0; i < 4; i++) {
+      if (!streams[i] || !fileHandles[i]) continue;
+      if (segmentTimers[i]) clearInterval(segmentTimers[i]);
+      segmentTimers[i] = setInterval(() => {
+        checkpointCommit(i).catch(console.warn);
+      }, segmentMs);
+    }
+  }
+
+  function stopCheckpointing() {
+    for (let i = 0; i < 4; i++) {
+      if (segmentTimers[i]) { clearInterval(segmentTimers[i]); segmentTimers[i] = null; }
+    }
+  }
+
   async function closeFSAFiles() {
+    // >>> checkpoint: stop timers before closing writers
+    stopCheckpointing();
     for (let i = 0; i < 4; i++) {
       if (writers[i]) {
         try { await writers[i].close(); } catch {}
         writers[i] = null;
       }
       writeQ[i] = [];
+      fileHandles[i] = null; // >>> checkpoint
     }
+    currentDirHandle = null; // >>> checkpoint
   }
 
   // ---------- Save / Stop logic ----------
@@ -520,6 +569,9 @@ function normalizeButtonLabels() {
           infos[i].textContent = 'Recorder error';
         }
       }
+
+      // >>> checkpoint: begin periodic commits only in FSA mode
+      if (usingFSA) startCheckpointing();
 
       recording = true;
       saveBtn.textContent = 'Stop saving';
