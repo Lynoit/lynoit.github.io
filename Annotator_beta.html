@@ -1421,6 +1421,24 @@ geoWatchId = navigator.geolocation.watchPosition(showPosition, showError, {
   // initial build
   buildButtons(configSelect.value);
   startCamera();
+    
+// Page/tab visibility changes
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    resumeCameraIfNeeded();
+  }
+});
+
+// iOS Safari prefers pageshow (esp. after bfcache)
+window.addEventListener('pageshow', () => {
+  resumeCameraIfNeeded();
+});
+
+// When the video track ends (some Androids fire this)
+document.getElementById('camera')?.addEventListener('emptied', () => {
+  resumeCameraIfNeeded();
+});
+    
 }   
 
     let recognizer;  // Azure continuous recogniser
@@ -1617,16 +1635,104 @@ recognizer.recognizing = (_, e) => {
       speedChart=new Chart(document.getElementById('speedChart').getContext('2d'),{type:'line',data:{labels:distData,datasets:[{label:'Speed (km/h)',data:speedData,fill:false,tension:0.1}]},options:{responsive:true,scales:{x:{type:'linear',title:{display:true,text:'Distance (km)'}},y:{beginAtZero:true,title:{display:true,text:'Speed (km/h)'}}}}});
     }
 
-    function startCamera() {
-      const video = document.getElementById('camera');
-      if (!navigator.mediaDevices?.getUserMedia) {
-        console.warn('getUserMedia not supported');
-        return;
+function startCamera() {
+  const video = document.getElementById('camera');
+  if (!video) return;
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.warn('getUserMedia not supported');
+    return;
+  }
+
+  // Stop any old stream cleanly
+  const stopStream = () => {
+    try {
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+    } catch {}
+  };
+
+  const constraints = {
+    audio: false,
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:     { ideal: 1280 },
+      height:    { ideal: 720 },
+      frameRate: { ideal: 30, max: 30 },
+      advanced: [{ focusMode: 'continuous' }] // ignored if unsupported
     }
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      .then(stream => { video.srcObject = stream; })
-      .catch(err   => { console.error('Camera error', err); });
-   }
+  };
+
+  const restart = () => {
+    // small debounce to avoid rapid restarts
+    stopStream();
+    setTimeout(open, 200);
+  };
+
+  const open = () =>
+    navigator.mediaDevices.getUserMedia(constraints)
+      .then(stream => {
+        video.srcObject = stream;
+        video.setAttribute('playsinline', ''); // iOS: stay inline
+        video.muted = true;                    // be safe on autoplay policies
+        // restart if the track ends/goes inactive (common on app switch)
+        const vt = stream.getVideoTracks()[0];
+        if (vt) vt.addEventListener('ended', restart);
+        stream.addEventListener?.('inactive', restart);
+        return video.play().catch(() => {});   // ignore autoplay errors
+      })
+      .catch(err => {
+        console.error('Camera error', err);
+      });
+
+  // First open
+  open();
+
+  // Try to recover when returning to the tab/app
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') restart();
+  });
+
+  window.addEventListener('pageshow', () => restart());
+}
+    
+    function getCameraConstraints() {
+  return { video: { facingMode: 'environment' } };
+}
+
+function streamIsLive(stream) {
+  if (!stream) return false;
+  const v = stream.getVideoTracks?.()[0];
+  return !!(v && v.readyState === 'live' && !v.muted && !v.stopped);
+}
+
+async function restartCamera() {
+  try {
+    // stop old tracks first
+    const video = document.getElementById('camera');
+    if (video?.srcObject) {
+      video.srcObject.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    }
+  } catch {}
+  await startCamera(); // reuse your existing function
+}
+
+async function resumeCameraIfNeeded() {
+  const video = document.getElementById('camera');
+  if (!video) return;
+
+  // Case 1: track looks dead → hard restart
+  if (!streamIsLive(video.srcObject)) {
+    await restartCamera();
+    return;
+  }
+
+  // Case 2: track is live, but element is “stuck” → nudge play()
+  try { await video.play(); } catch {}
+}
     
   function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
