@@ -2015,6 +2015,112 @@ function getTotalKpis(){
     .catch(() => null);
 }
 
+function buildTruePositiveDistancesTableHTML(wb){
+  const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+  if (!samplingName) return '';
+
+  const sheet = wb.Sheets[samplingName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  if (!rows || rows.length < 2) return '';
+
+  const hdr = rows[0].map(v => String(v ?? '').trim());
+  // Distance (column E) is index 4; if missing, try to find a "distance" column
+  let distIdx = 4;
+  if (hdr.length <= distIdx || !hdr[distIdx]) {
+    const guess = hdr.findIndex(h => /distance|dist\b|km\b/i.test(h));
+    if (guess >= 0) distIdx = guess;
+  }
+
+  // Extract cumulative distance per row and compute per-row increments
+  const toNum = v => {
+    if (v == null) return null;
+    const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const cumDist = [];
+  for (let r = 1; r < rows.length; r++){
+    cumDist[r] = toNum(rows[r][distIdx]);
+  }
+  // last valid cumulative distance
+  let lastCum = null;
+  for (let r = rows.length - 1; r >= 1; r--){
+    if (Number.isFinite(cumDist[r])) { lastCum = cumDist[r]; break; }
+  }
+  if (lastCum == null) return '';
+
+  // per-row increments (delta of cumulative distance)
+  const inc = [];
+  let prev = null;
+  for (let r = 1; r < rows.length; r++){
+    const cur = cumDist[r];
+    if (Number.isFinite(cur) && Number.isFinite(prev)) {
+      inc[r] = Math.max(0, cur - prev);
+      prev = cur;
+    } else if (Number.isFinite(cur) && !Number.isFinite(prev)) {
+      inc[r] = Math.max(0, cur); // first numeric seen
+      prev = cur;
+    } else {
+      inc[r] = 0; // no change detectable
+    }
+  }
+
+  // Find _correct columns from I (index 8) and right
+  const candidates = [];
+  for (let c = 8; c < hdr.length; c++){
+    const name = hdr[c];
+    if (/_correct\s*$/i.test(String(name || '').trim())) {
+      candidates.push({ idx: c, name: String(name).trim() });
+    }
+  }
+  if (!candidates.length) return '';
+
+  // Compute tp% per candidate
+  const results = [];
+  for (const { idx, name } of candidates){
+    let tpDist = 0;
+    let firstTrueRow = null;
+
+    for (let r = 1; r < rows.length; r++){
+      const v = rows[r][idx];
+      const isTrue = (v === true) ||
+                     (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
+                     (v === 1 || v === '1');
+      if (!isTrue) continue;
+
+      if (firstTrueRow == null) firstTrueRow = r;
+      tpDist += (inc[r] || 0);
+    }
+
+    if (firstTrueRow == null) continue; // no True → skip
+
+    const distAtFirstTrue = cumDist[firstTrueRow];
+    if (!Number.isFinite(distAtFirstTrue)) continue;
+
+    const totalDist = Math.max(0, lastCum - distAtFirstTrue);
+    if (totalDist <= 0) continue;
+
+    const pct = (tpDist / totalDist) * 100;
+    results.push({ name, pct });
+  }
+
+  if (!results.length) return '';
+
+  // Build HTML table
+  const rowsHtml = results
+    .map(r => `<tr><td>${r.name}</td><td>${r.pct.toFixed(1)}%</td></tr>`)
+    .join('');
+
+  return `
+    <h2>True positive distances</h2>
+    <table>
+      <thead><tr><th>Column</th><th>Percentage</th></tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+  `;
+}
+
 // ---------- SESSION VIEWER ----------
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -2186,6 +2292,10 @@ function loadFile(filename) {
                 inserts.push(_renderScoringLegend(null));
                 inserts.push('<div class="score-legend-caption">Total KPIs unavailable — cannot compute average.</div>');
               }
+
+              const tpHtml = buildTruePositiveDistancesTableHTML(wb);
+              if (tpHtml) inserts.push(tpHtml);
+              
               if (inserts.length) kpiTable.insertAdjacentHTML('afterend', inserts.join(''));
             });
           }
@@ -2366,6 +2476,7 @@ function loadFile(filename) {
   </script>
 </body>
 </html>
+
 
 
 
