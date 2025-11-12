@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Annotator</title>
 
+  <link rel="icon" type="image/svg+xml" href="/favicon_speed_A_carbon_bold.svg">
+  <link rel="alternate icon" href="/favicon.ico">
+
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 
@@ -173,13 +176,6 @@ form.addEventListener('submit', async e => {
     #sidebar.expanded  ~ #mainContent { margin-left: 202px; }
     #sidebar.collapsed ~ #mainContent { margin-left: 45px; }
     
-    #toggleSidebar {
-      position: fixed; top: 10px; left: 10px;
-      background: #007bff; border: none; color: #fff;
-      font-size: 1.5em; padding: 4px 8px; cursor: pointer;
-      border-radius: 4px; z-index: 1100;
-    }
-
     .issue-label {
   background: rgba(255, 255, 255, 0.9);
   color: #000;
@@ -242,6 +238,23 @@ form.addEventListener('submit', async e => {
 .bigButton.greyButton:focus-visible{
   outline:2px solid #1f6feb;
   outline-offset:2px;
+}
+
+    /* Keep its position, but borrow the bigButton.blueButton styling */
+#toggleSidebar {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 1100;
+}
+
+/* Size it like a compact button (not full-width) */
+#toggleSidebar.bigButton {
+  min-width: 0;
+  width: auto;
+  padding: 6px 10px;
+  border-radius: 6px;
+  line-height: 1;
 }
     
   /* --- Toggle pill styles (dark mode friendly) --- */
@@ -348,6 +361,16 @@ form.addEventListener('submit', async e => {
       transition: margin-left .3s ease;
     }
 
+/* base transitions */
+#dayPhase, #temperature, #location, #roadType, #xlsxAgo, #totalDistance {
+  transition: opacity .25s;
+}
+/* nudge state */
+#dayPhase.updated, #temperature.updated, #location.updated,
+#roadType.updated, #xlsxAgo.updated, #totalDistance.updated {
+  opacity: 0.6;
+}
+    
     /* ── Manual Annotation Layout ── */
     #manualAnnotation {
   display: grid;
@@ -785,7 +808,8 @@ form.addEventListener('submit', async e => {
     </form>
     </div>
   
-  <button id="toggleSidebar" aria-expanded="true">☰</button>
+  <button id="toggleSidebar" class="bigButton blueButton" aria-expanded="true" title="Toggle sidebar">☰</button>
+
   <div id="sidebar" class="expanded">
     <div id="sidebarScroll">
     <p id="dateTime"></p>
@@ -1144,6 +1168,15 @@ let toggleDefs = [];      // list of { signal, onValue, offValue, label } built 
     let wakeLock = null;
     let lastSpeedKmh = 0;
 
+    // near other globals
+let uploadsEnabled = false;
+
+function checkUploadEligibility() {
+  uploadsEnabled = (totalDist >= 100) || (logTable.length > 0); // totalDist is meters
+  const btn = document.getElementById('uploadNowButton');
+  if (btn) btn.disabled = !uploadsEnabled; // optional UX: grey out button until allowed
+}
+
     function markDirty() { isDirty = true; }
     function markClean()  { isDirty = false; }
 
@@ -1169,10 +1202,17 @@ function formatMinutesAgo(ms) {
   return `${mins} minutes ago`;
 }
 
+function nudge(el) {
+  if (!el) return;
+  el.classList.add('updated');
+  setTimeout(() => el.classList.remove('updated'), 250);
+}
+
 function updateUploadAgo() {
   const el = document.getElementById('xlsxAgo');
   if (!el) return;
   el.textContent = `Last upload: ${formatMinutesAgo(lastXlsxUploadMs)}`;
+  nudge(el);
 }
 
     const reportBaseName = `Annotator_report_${formatAppStartTimestamp()}`; 
@@ -1392,6 +1432,24 @@ geoWatchId = navigator.geolocation.watchPosition(showPosition, showError, {
   // initial build
   buildButtons(configSelect.value);
   startCamera();
+    
+// Page/tab visibility changes
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    resumeCameraIfNeeded();
+  }
+});
+
+// iOS Safari prefers pageshow (esp. after bfcache)
+window.addEventListener('pageshow', () => {
+  resumeCameraIfNeeded();
+});
+
+// When the video track ends (some Androids fire this)
+document.getElementById('camera')?.addEventListener('emptied', () => {
+  resumeCameraIfNeeded();
+});
+    
 }   
 
     let recognizer;  // Azure continuous recogniser
@@ -1510,10 +1568,21 @@ async function initAzureSpeech() {
   };
 
   /* Hot‑word gate */
-  recognizer.recognizing = (_,e)=> {
-    const draft = stripHotWord(e.result.text);
-    if (draft) textBox.value = draft + ' [draft]';
-  };
+recognizer.recognizing = (_, e) => {
+  const draft = stripHotWord(e.result.text);
+
+  if (draft) {
+    // Show preview text
+    textBox.value = draft + ' [draft]';
+
+    // ⏱️ Early snapshot for voice (once per utterance)
+    if (!pendingSnapshotDataUrl) {
+      const snap = captureSnapshotFromCamera();
+      if (snap) pendingSnapshotDataUrl = snap;
+    }
+  }
+};
+
   recognizer.recognized  = (_,e)=> {
     if (e.result.reason !== SpeechSDK.ResultReason.RecognizedSpeech) return;
     const cleaned = stripHotWord(e.result.text);
@@ -1577,16 +1646,104 @@ async function initAzureSpeech() {
       speedChart=new Chart(document.getElementById('speedChart').getContext('2d'),{type:'line',data:{labels:distData,datasets:[{label:'Speed (km/h)',data:speedData,fill:false,tension:0.1}]},options:{responsive:true,scales:{x:{type:'linear',title:{display:true,text:'Distance (km)'}},y:{beginAtZero:true,title:{display:true,text:'Speed (km/h)'}}}}});
     }
 
-    function startCamera() {
-      const video = document.getElementById('camera');
-      if (!navigator.mediaDevices?.getUserMedia) {
-        console.warn('getUserMedia not supported');
-        return;
+function startCamera() {
+  const video = document.getElementById('camera');
+  if (!video) return;
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.warn('getUserMedia not supported');
+    return;
+  }
+
+  // Stop any old stream cleanly
+  const stopStream = () => {
+    try {
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+    } catch {}
+  };
+
+  const constraints = {
+    audio: false,
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:     { ideal: 1280 },
+      height:    { ideal: 720 },
+      frameRate: { ideal: 30, max: 30 },
+      advanced: [{ focusMode: 'continuous' }] // ignored if unsupported
     }
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      .then(stream => { video.srcObject = stream; })
-      .catch(err   => { console.error('Camera error', err); });
-   }
+  };
+
+  const restart = () => {
+    // small debounce to avoid rapid restarts
+    stopStream();
+    setTimeout(open, 200);
+  };
+
+  const open = () =>
+    navigator.mediaDevices.getUserMedia(constraints)
+      .then(stream => {
+        video.srcObject = stream;
+        video.setAttribute('playsinline', ''); // iOS: stay inline
+        video.muted = true;                    // be safe on autoplay policies
+        // restart if the track ends/goes inactive (common on app switch)
+        const vt = stream.getVideoTracks()[0];
+        if (vt) vt.addEventListener('ended', restart);
+        stream.addEventListener?.('inactive', restart);
+        return video.play().catch(() => {});   // ignore autoplay errors
+      })
+      .catch(err => {
+        console.error('Camera error', err);
+      });
+
+  // First open
+  open();
+
+  // Try to recover when returning to the tab/app
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') restart();
+  });
+
+  window.addEventListener('pageshow', () => restart());
+}
+    
+    function getCameraConstraints() {
+  return { video: { facingMode: 'environment' } };
+}
+
+function streamIsLive(stream) {
+  if (!stream) return false;
+  const v = stream.getVideoTracks?.()[0];
+  return !!(v && v.readyState === 'live' && !v.muted && !v.stopped);
+}
+
+async function restartCamera() {
+  try {
+    // stop old tracks first
+    const video = document.getElementById('camera');
+    if (video?.srcObject) {
+      video.srcObject.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    }
+  } catch {}
+  await startCamera(); // reuse your existing function
+}
+
+async function resumeCameraIfNeeded() {
+  const video = document.getElementById('camera');
+  if (!video) return;
+
+  // Case 1: track looks dead → hard restart
+  if (!streamIsLive(video.srcObject)) {
+    await restartCamera();
+    return;
+  }
+
+  // Case 2: track is live, but element is “stuck” → nudge play()
+  try { await video.play(); } catch {}
+}
     
   function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
@@ -1602,6 +1759,7 @@ async function initAzureSpeech() {
 
     // accumulate total and per‐weather
     totalDist += segDist;
+    checkUploadEligibility();
     const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
     phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
     const condition = iconEl.alt || 'Unknown';
@@ -1699,6 +1857,7 @@ if (Date.now() - lastChartTs > 5000) {
 
   // 5) Update raw lat/lon display
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
+  nudge(locEl);
 
   const now = Date.now();
   if (now - lastPhaseUpdate > PHASE_THROTTLE) {
@@ -1767,6 +1926,7 @@ if (limit !== null && limit !== lastLimit) {
 
       // update sidebar & sets
       roadTypeEl.textContent = `Road type: ${displayRt}`;
+      //nudge(roadTypeEl);
       if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
       // street & city display
@@ -2008,6 +2168,7 @@ let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
       lat, lon, dist, spd, rt,
       comment, camDataUrl
     ]);
+    checkUploadEligibility();
 
     try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
     
@@ -2361,16 +2522,14 @@ async function maybeUpdateTables() {
     lastTableUpdate = now;
   }
 
-  if (now - lastUploadTime > UPLOAD_THROTTLE) {
-    lastUploadTime = now;
+if (uploadsEnabled && (now - lastUploadTime > UPLOAD_THROTTLE)) {
+  lastUploadTime = now;
 
-    uploadWorkbookToAzure()
-      .then(() => console.log('Workbook auto-uploaded'))
-      .catch(err => console.error('Workbook upload failed:', err));
+  uploadWorkbookToAzure().then(() => console.log('Workbook auto-uploaded'))
+    .catch(err => console.error('Workbook upload failed:', err));
 
-    uploadSnapshotsZip()
-      .then(() => console.log('Snapshots ZIP uploaded'))
-      .catch(err => console.error('Snapshots ZIP upload failed:', err));
+  uploadSnapshotsZip().then(() => console.log('Snapshots ZIP uploaded'))
+    .catch(err => console.error('Snapshots ZIP upload failed:', err));
 
     //exportCustomSectionsToAzure()
     //  .then(() => console.log('PDF report uploaded'))
@@ -2940,7 +3099,6 @@ const stopBtn = document.getElementById('stopTestingBtn');
 if (stopBtn) {
   stopBtn.addEventListener('click', () => withSpinner(stopBtn, stopTesting));
 }
-
     
   </script>
 </body>
