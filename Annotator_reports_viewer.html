@@ -287,6 +287,7 @@
     </h1>
     <div id="overview" class="overview">
       <div><div id="heatmap-host"></div></div>
+      <div><div id="purpose-host"></div></div>
       <div><div id="country-host"></div></div>
       <div><div id="temp-host"></div></div>
       <div><div id="weather-host"></div></div>
@@ -875,6 +876,7 @@ function canonicalEU(raw){
         setTitleLoading(hEU, true, 'Loading');
 
         buildOverviewHeatmap(allFiles).finally(() => setTitleLoading(h1, false));
+        buildPurposeMonthChart(allFiles);
         buildCountryMonthChart(allFiles);
         buildTempMonthChart(allFiles);
         buildWeatherMonthChart(allFiles);
@@ -918,6 +920,7 @@ function canonicalEU(raw){
           setTitleLoading(hEU, true, 'Loading');
 
           buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false));
+          buildPurposeMonthChart(xlsxNames);
           buildCountryMonthChart(xlsxNames);
           buildTempMonthChart(xlsxNames);
           buildWeatherMonthChart(xlsxNames);
@@ -1370,6 +1373,169 @@ function ensureActiveBadgeUpdater(){
         More`;
       host.appendChild(legend);
     }
+
+    // ---------- Test purpose × Month (4 bins/month) ----------
+function buildPurposeMonthChart(files){
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+
+  // Treat placeholders / empty-ish values as missing
+  const isBadPurpose = (s) => {
+    if (!s) return true;
+    const v = String(s).trim();
+    if (!v) return true;
+    return /^(purpose|n\/?a|na|unknown|null|none)$/i.test(v);
+  };
+
+  // Light cleanup (compress spaces; keep original case since these are proper names)
+  const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  return Promise.all(
+    withDates.map(x =>
+      fetchSessionSummary(x.filename)
+        .then(s => ({...x, ...s}))
+    )
+  ).then(rows => {
+    // Keep sessions that count toward overview (≥ MIN_KM_FOR_OVERVIEW and > 0 issues) and have a purpose
+    const valid = rows.filter(r =>
+      r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
+      r.issueCount > 0 && !isBadPurpose(r.testPurpose)
+    );
+
+    const host = document.getElementById('purpose-host');
+    if (!host) return;
+    if (!valid.length){
+      host.innerHTML = '<div style="color:#666;">No test purpose data found.</div>';
+      return;
+    }
+
+    const counts = new Map();  // key: `${ym}|${wb}|${purpose}` -> n
+    const monthsSet = new Set();
+    const purposeSet = new Set();
+
+    valid.forEach(r => {
+      const ym  = r.dayStr.slice(0,7);
+      const day = parseInt(r.dayStr.slice(8,10), 10);
+      const wb  = Math.min(4, Math.max(1, Math.ceil(day/7))); // 1..4
+      monthsSet.add(ym);
+
+      const p = clean(r.testPurpose);
+      purposeSet.add(p);
+      const key = `${ym}|${wb}|${p}`;
+      counts.set(key, (counts.get(key)||0) + 1);
+    });
+
+    const months = Array.from(monthsSet).sort();
+
+    // Sort purposes by total activity desc, then A–Z
+    const purposes = Array.from(purposeSet).sort((a,b) => {
+      const totalA = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${a}`)||0), 0), 0);
+      const totalB = months.reduce((s, m) => s + [1,2,3,4].reduce((t,w)=> t + (counts.get(`${m}|${w}|${b}`)||0), 0), 0);
+      if (totalB !== totalA) return totalB - totalA;
+      return a.localeCompare(b);
+    });
+
+    renderPurposeMonthHeatmap({ months, purposes, counts });
+  });
+}
+
+function renderPurposeMonthHeatmap({months, purposes, counts}){
+  const host = document.getElementById('purpose-host');
+  host.innerHTML = '';
+
+  const cell = 14, gap = 4;
+  const leftLabelsW = 140;   // purposes can be longer
+  const topLabelsH  = 18;
+
+  const subColsPerMonth = 4;
+  const totalCols = months.length * subColsPerMonth;
+
+  const width  = leftLabelsW + totalCols * (cell + gap) + 8;
+  const height = topLabelsH  + purposes.length * (cell + gap) + 8;
+
+  const colors = ['#eaeef2','#c6e48b','#7bc96f','#239a3b','#196127'];
+  const maxVal = Math.max(1, ...months.flatMap(m => purposes.flatMap(p => [1,2,3,4].map(w => counts.get(`${m}|${w}|${p}`)||0))));
+  const bucket = v => {
+    if (v === 0) return 0;
+    const f = v / maxVal;
+    return (f < .2) ? 1 : (f < .4) ? 2 : (f < .7) ? 3 : 4;
+  };
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', width);
+  svg.setAttribute('height', height);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
+
+  // Month labels
+  const gMonths = document.createElementNS(NS, 'g');
+  for (let m = 0; m < months.length; m++){
+    const d = new Date(`${months[m]}-01`);
+    const label = d.toLocaleString(undefined, { month: 'short' });
+    const x = leftLabelsW + (m * subColsPerMonth) * (cell + gap);
+    const t = document.createElementNS(NS,'text');
+    t.textContent = label;
+    t.setAttribute('x', x);
+    t.setAttribute('y', 10);
+    t.setAttribute('font-size','12');
+    t.setAttribute('fill','#333');
+    gMonths.appendChild(t);
+  }
+  svg.appendChild(gMonths);
+
+  // Purpose labels (rows)
+  const gPurposes = document.createElementNS(NS, 'g');
+  for (let r = 0; r < purposes.length; r++){
+    const t = document.createElementNS(NS,'text');
+    t.textContent = purposes[r];
+    t.setAttribute('x', 4);
+    t.setAttribute('y', topLabelsH + r*(cell+gap) + cell - 2);
+    t.setAttribute('font-size','12');
+    t.setAttribute('fill','#333');
+    gPurposes.appendChild(t);
+  }
+  svg.appendChild(gPurposes);
+
+  // Cells
+  const gCells = document.createElementNS(NS, 'g');
+  for (let r = 0; r < purposes.length; r++){
+    const purpose = purposes[r];
+    for (let m = 0; m < months.length; m++){
+      for (let w = 1; w <= 4; w++){
+        const val = counts.get(`${months[m]}|${w}|${purpose}`) || 0;
+        const colIndex = m * 4 + (w - 1);
+        const rect = document.createElementNS(NS,'rect');
+        rect.setAttribute('x', leftLabelsW + colIndex*(cell+gap));
+        rect.setAttribute('y', topLabelsH  + r*(cell+gap));
+        rect.setAttribute('width', cell);
+        rect.setAttribute('height', cell);
+        rect.setAttribute('rx', 2); rect.setAttribute('ry', 2);
+        rect.setAttribute('fill', colors[bucket(val)]);
+        rect.setAttribute('stroke', '#ccd3d9');
+        rect.setAttribute('stroke-width', '1');
+        rect.setAttribute('data-val', String(val));
+        gCells.appendChild(rect);
+      }
+    }
+  }
+  svg.appendChild(gCells);
+
+  host.appendChild(svg);
+
+  const legend = document.createElement('div');
+  legend.className = 'legend';
+  legend.innerHTML = `Fewer
+    <span class="box" style="background:${colors[0]}"></span>
+    <span class="box" style="background:${colors[1]}"></span>
+    <span class="box" style="background:${colors[2]}"></span>
+    <span class="box" style="background:${colors[3]}"></span>
+    <span class="box" style="background:${colors[4]}"></span>
+    More`;
+  host.appendChild(legend);
+}
 
     // ---------- Temperature × Month (4 bins/month) ----------
     function buildTempMonthChart(files){
@@ -2565,6 +2731,7 @@ if (!/^\s*test\s*details\s*$/i.test(sheet)) {
   </script>
 </body>
 </html>
+
 
 
 
