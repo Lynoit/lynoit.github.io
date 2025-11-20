@@ -495,21 +495,35 @@ function normalizeButtonLabels() {
   }
 
   // ---------- File System Access helpers (continuous writing) ----------
-  async function startWriterLoop(i) {
-    if (writing[i]) return;
-    writing[i] = true;
-    while (writers[i]) {
-      const chunk = writeQ[i].shift();
-      if (!chunk) { await new Promise(r => setTimeout(r, 50)); continue; }
-      try {
-        await writers[i].write(chunk);
-      } catch (e) {
-        console.error(`Write error (${positionNames[i]}):`, e);
-        infos[i].textContent = 'Write error';
-      }
+async function startWriterLoop(i) {
+  if (writing[i]) return;
+  writing[i] = true;
+
+  while (recording || writeQ[i].length) {
+    const chunk = writeQ[i].shift();
+    if (!chunk) {
+      await new Promise(r => setTimeout(r, 50));
+      continue;
     }
-    writing[i] = false;
+
+    // If we’re between close() and re-open, wait until writers[i] exists
+    if (!writers[i]) {
+      // put the chunk back and wait
+      writeQ[i].unshift(chunk);
+      await new Promise(r => setTimeout(r, 50));
+      continue;
+    }
+
+    try {
+      await writers[i].write(chunk);
+    } catch (e) {
+      console.error(`Write error (${posName(i)}):`, e);
+      infos[i].textContent = 'Write error';
+    }
   }
+
+  writing[i] = false;
+}
 
   // >>> checkpoint: create/open single file per pane and be ready to append
   async function setupFSAFiles(dirHandle, stamp) {
@@ -536,18 +550,18 @@ function normalizeButtonLabels() {
   }
 
   // >>> checkpoint: periodic commit (close) & re-open same file to append
-  async function checkpointCommit(i) {
-    if (!writers[i] || !fileHandles[i]) return;
-    try { await writers[i].close(); } catch {}
-    writers[i] = null;
+ async function checkpointCommit(i) {
+  if (!writers[i] || !fileHandles[i]) return;
+  try { await writers[i].close(); } catch {}
+  writers[i] = null;
 
-    const fh = fileHandles[i];
-    const newWriter = await fh.createWritable({ keepExistingData: true });
-    const size = (await fh.getFile()).size;
-    await newWriter.seek(size);
-    writers[i] = newWriter;
-    startWriterLoop(i);
-  }
+  const fh = fileHandles[i];
+  const newWriter = await fh.createWritable({ keepExistingData: true });
+  const size = (await fh.getFile()).size;
+  await newWriter.seek(size);
+  writers[i] = newWriter;
+  // no need to call startWriterLoop(i) here
+}
 
   function startCheckpointing() {
     for (let i = 0; i < 4; i++) {
