@@ -270,6 +270,12 @@
   font-size:13px; color:#222;
 }
 
+/* True-positive distance chart */
+.tp-chart{ width:100%; height:340px; margin:-8px 0 26px; }
+.tp-legend{ display:flex; flex-wrap:wrap; gap:10px; font-size:12px; color:#333; margin-top:6px; }
+.tp-leg-item{ display:inline-flex; align-items:center; gap:6px; }
+.tp-swatch{ width:12px; height:12px; border-radius:2px; border:1px solid #999; }
+
   </style>
 </head>
 <body>
@@ -2021,6 +2027,260 @@ function getTotalKpis(){
     .catch(() => null);
 }
 
+/* --- Build series for TP distance per KPI, following the “decreasing allowed” logic --- */
+function buildTPDistanceSeries(wb){
+  const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+  if (!samplingName) return { series: [], totalDistMax: 0 };
+  const sheet = wb.Sheets[samplingName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  if (!rows || rows.length < 2) return { series: [], totalDistMax: 0 };
+
+  const hdr = rows[0].map(v => String(v ?? '').trim());
+
+  // ---- Distance column detect (E default, else fuzzy) ----
+  let distIdx = 4;
+  if (!hdr[distIdx]) {
+    const guess = hdr.findIndex(h => /(^|[^a-z])dist(ance)?([^a-z]|$)|\bkm\b/i.test(h));
+    if (guess >= 0) distIdx = guess;
+  }
+  const toNum = v => {
+    if (v == null) return null;
+    const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // Raw values from distance column (header included)
+  const dataVal = rows.slice(1).map(r => toNum(r?.[distIdx]));
+
+  // Heuristic: cumulative if ≥70% deltas are >= 0
+  let nonneg = 0, totalD = 0;
+  for (let i = 1; i < dataVal.length; i++){
+    if (Number.isFinite(dataVal[i]) && Number.isFinite(dataVal[i-1])) {
+      totalD++; if (dataVal[i] - dataVal[i-1] >= 0) nonneg++;
+    }
+  }
+  const isCumulative = (totalD > 0) ? (nonneg / totalD >= 0.7) : true;
+
+  const cum = []; // align to sheet row index (start at 1)
+  const inc = [];
+  if (isCumulative){
+    let prev = null;
+    for (let r = 1; r < rows.length; r++){
+      const cur = dataVal[r-1];
+      cum[r] = Number.isFinite(cur) ? cur : (Number.isFinite(cum[r-1]) ? cum[r-1] : null);
+      if (Number.isFinite(cur) && Number.isFinite(prev)) inc[r] = Math.max(0, cur - prev);
+      else if (Number.isFinite(cur) && !Number.isFinite(prev)) inc[r] = Math.max(0, cur);
+      else inc[r] = 0;
+      prev = Number.isFinite(cur) ? cur : prev;
+    }
+  } else {
+    let acc = 0;
+    for (let r = 1; r < rows.length; r++){
+      const v = dataVal[r-1];
+      const add = Number.isFinite(v) ? Math.max(0, v) : 0;
+      acc += add;
+      cum[r] = acc;
+      inc[r] = add;
+    }
+  }
+
+  // last cumulative distance
+  let lastCum = null;
+  for (let r = rows.length - 1; r >= 1; r--){
+    if (Number.isFinite(cum[r])) { lastCum = cum[r]; break; }
+  }
+  if (lastCum == null) return { series: [], totalDistMax: 0 };
+
+  // Candidate KPI columns: *_correct (from I and right)
+  const candidates = [];
+  for (let c = 8; c < hdr.length; c++){
+    const name = hdr[c];
+    if (/_correct\s*$/i.test(String(name || ''))) {
+      candidates.push({ idx: c, rawName: String(name).trim() });
+    }
+  }
+  const pretty = (raw) => String(raw || '')
+    .replace(/_?correct\s*$/i, '')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const series = [];
+  let totalDistMax = 0;
+
+  for (const kp of candidates){
+    // find first TRUE
+    let firstTrueRow = null;
+    for (let r = 1; r < rows.length; r++){
+      const v = rows[r]?.[kp.idx];
+      const isTrue = (v === true) || (typeof v === 'string' && v.trim().toLowerCase() === 'true') || (v === 1 || v === '1' || v === 'TRUE');
+      if (isTrue) { firstTrueRow = r; break; }
+    }
+    if (firstTrueRow == null) continue;
+    const startCum = cum[firstTrueRow];
+    if (!Number.isFinite(startCum)) continue;
+
+    const points = [];
+    let x = 0;                  // distance since first TRUE
+    let tp = 0;                 // true-positive distance
+    points.push([0, 0]);        // origin
+
+    for (let r = firstTrueRow; r < rows.length; r++){
+      const step = inc[r] || 0;
+      x += step;
+
+      const v = rows[r]?.[kp.idx];
+      const isTrue = (v === true) || (typeof v === 'string' && v.trim().toLowerCase() === 'true') || (v === 1 || v === '1' || v === 'TRUE');
+      if (isTrue) tp += step; else tp -= step;
+
+      // clamp: 0 .. distance since first TRUE
+      if (tp < 0) tp = 0;
+      if (tp > x) tp = x;
+
+      // only push when there is progress on x
+      if (step > 0) points.push([x, tp]);
+    }
+
+    const totalDist = Math.max(0, lastCum - startCum);
+    totalDistMax = Math.max(totalDistMax, totalDist);
+
+    // Skip empty lines
+    if (points.length >= 2) {
+      series.push({ name: pretty(kp.rawName), points, totalDist });
+    }
+  }
+
+  return { series, totalDistMax };
+}
+
+/* --- Render SVG line chart into #tp-distance-chart --- */
+function renderTPDistanceChart(wb){
+  const host = document.getElementById('tp-distance-chart');
+  if (!host) return;
+
+  const { series, totalDistMax } = buildTPDistanceSeries(wb);
+  if (!series.length || totalDistMax <= 0){
+    host.innerHTML = '<div style="color:#666;">No true-positive data to plot.</div>';
+    return;
+  }
+
+  host.innerHTML = ''; // clear
+  const W = host.clientWidth || 900;
+  const H = host.clientHeight || 320;
+
+  // Margins
+  const m = { top: 12, right: 12, bottom: 32, left: 44 };
+  const innerW = W - m.left - m.right;
+  const innerH = H - m.top - m.bottom;
+
+  // Scales
+  const xMax = Math.max(...series.map(s => Math.max(...s.points.map(p => p[0]))), totalDistMax);
+  const yMax = Math.max(...series.map(s => Math.max(...s.points.map(p => p[1]))), 1);
+
+  const xScale = x => m.left + (xMax ? (x / xMax) * innerW : 0);
+  const yScale = y => m.top  + innerH - (yMax ? (y / yMax) * innerH : 0);
+
+  // SVG base
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
+
+  // Axes/grid
+  const g = document.createElementNS(NS, 'g');
+
+  // Grid (x)
+  const xTicks = 6;
+  for (let i = 0; i <= xTicks; i++){
+    const vx = (xMax / xTicks) * i;
+    const X = xScale(vx);
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', X); line.setAttribute('x2', X);
+    line.setAttribute('y1', m.top); line.setAttribute('y2', m.top + innerH);
+    line.setAttribute('stroke', '#e5e5e5'); line.setAttribute('stroke-width', '1');
+    g.appendChild(line);
+
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', X); t.setAttribute('y', m.top + innerH + 18);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('font-size', '12');
+    t.setAttribute('fill', '#333');
+    t.textContent = Math.round(vx);
+    g.appendChild(t);
+  }
+  // Grid (y)
+  const yTicks = 6;
+  for (let i = 0; i <= yTicks; i++){
+    const vy = (yMax / yTicks) * i;
+    const Y = yScale(vy);
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', m.left); line.setAttribute('x2', m.left + innerW);
+    line.setAttribute('y1', Y); line.setAttribute('y2', Y);
+    line.setAttribute('stroke', '#e5e5e5'); line.setAttribute('stroke-width', '1');
+    g.appendChild(line);
+
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', m.left - 8); t.setAttribute('y', Y + 4);
+    t.setAttribute('text-anchor', 'end');
+    t.setAttribute('font-size', '12');
+    t.setAttribute('fill', '#333');
+    t.textContent = Math.round(vy);
+    g.appendChild(t);
+  }
+
+  // Axis titles
+  const xt = document.createElementNS(NS, 'text');
+  xt.setAttribute('x', m.left + innerW/2);
+  xt.setAttribute('y', H - 6);
+  xt.setAttribute('text-anchor', 'middle');
+  xt.setAttribute('font-size', '12');
+  xt.setAttribute('fill', '#333');
+  xt.textContent = 'Distance since first TRUE (km)';
+  g.appendChild(xt);
+
+  const yt = document.createElementNS(NS, 'text');
+  yt.setAttribute('transform', `translate(14 ${m.top + innerH/2}) rotate(-90)`);
+  yt.setAttribute('text-anchor', 'middle');
+  yt.setAttribute('font-size', '12');
+  yt.setAttribute('fill', '#333');
+  yt.textContent = 'Cumulative true-positive distance (km)';
+  g.appendChild(yt);
+
+  // Series lines
+  const pathColor = i => `hsl(${(i*67)%360} 80% 40%)`;  // varied hues
+  const strokeW = 2;
+
+  series.forEach((s, i) => {
+    // Build path
+    const d = s.points.map((p, j) => (j ? 'L' : 'M') + xScale(p[0]) + ' ' + yScale(p[1])).join(' ');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', pathColor(i));
+    path.setAttribute('stroke-width', String(strokeW));
+    path.setAttribute('stroke-linejoin', 'round');
+    path.setAttribute('stroke-linecap', 'round');
+    g.appendChild(path);
+  });
+
+  svg.appendChild(g);
+  host.appendChild(svg);
+
+  // Legend
+  const legend = document.createElement('div');
+  legend.className = 'tp-legend';
+  series.forEach((s, i) => {
+    const item = document.createElement('span');
+    item.className = 'tp-leg-item';
+    item.innerHTML = `<span class="tp-swatch" style="background:${pathColor(i)}"></span>${s.name}`;
+    legend.appendChild(item);
+  });
+  host.appendChild(legend);
+}
+
 function buildTruePositiveDistancesTableHTML(wb){
   const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
   if (!samplingName) return '';
@@ -2325,10 +2585,13 @@ wb.SheetNames.forEach(sheet => {
   if (sheet.toLowerCase() === 'sampling') return;
 
   // ⬇️ NEW: if this is the Statistics sheet, insert the TP section *before* it
-  if (!tpInserted && /statistics/i.test(sheet) && tpSectionHtml) {
-    content.insertAdjacentHTML('beforeend', tpSectionHtml);
-    tpInserted = true;
-  }
+if (!tpInserted && /statistics/i.test(sheet) && tpSectionHtml) {
+  // Insert the table, then the chart container right after it
+  content.insertAdjacentHTML('beforeend', tpSectionHtml + '<div id="tp-distance-chart" class="tp-chart"></div>');
+  // Render the chart using the same workbook
+  renderTPDistanceChart(wb);
+  tpInserted = true;
+}
 
   const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
   content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
