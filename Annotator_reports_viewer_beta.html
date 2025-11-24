@@ -2114,47 +2114,51 @@ function buildTPDistanceSeries(wb){
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Build per-KPI toggle + cumulative % over distance (same logic as table)
-  const series = [];
-  for (const { idx, name } of candidates){
-    // first row where toggle is true
-    let firstTrueRow = null;
-    for (let r = 1; r < rows.length; r++){
-      const v = rows[r]?.[idx];
-      const isTrue = (v === true) ||
-                     (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
-                     (v === 1 || v === '1' || v === 'TRUE');
-      if (isTrue){ firstTrueRow = r; break; }
-    }
-    if (firstTrueRow == null || !Number.isFinite(cum[firstTrueRow])) continue;
+ // Build per-KPI toggle + cumulative % over distance (match table logic)
+const series = [];
+for (const { idx, name } of candidates){
+  // first row where toggle is true
+  let firstTrueRow = null;
+  for (let r = 1; r < rows.length; r++){
+    const v = rows[r]?.[idx];
+    const isTrue = (v === true) ||
+                   (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
+                   (v === 1 || v === '1' || v === 'TRUE');
+    if (isTrue){ firstTrueRow = r; break; }
+  }
+  if (firstTrueRow == null || !Number.isFinite(cum[firstTrueRow])) continue;
 
-    const km0 = cum[firstTrueRow];
-    const totalDist = Math.max(0, lastCum - km0);
-    if (totalDist <= 0) continue;
+  const km0 = cum[firstTrueRow];
+  const totalDist = Math.max(0, lastCum - km0);
+  if (totalDist <= 0) continue;
 
-    const xs = [];          // km from firstTrue onward
-    const toggles = [];     // 0/1
-    const pctCum = [];      // cumulative % of TP distance
+  const xs = [];
+  const toggles = [];
+  const pctCum = [];
 
-    let tpSum = 0;
-    for (let r = firstTrueRow; r < rows.length; r++){
-      const v = rows[r]?.[idx];
-      const isTrue = (v === true) ||
-                     (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
-                     (v === 1 || v === '1' || v === 'TRUE');
+  let tpDist = 0;
+  for (let r = firstTrueRow; r < rows.length; r++){
+    const v = rows[r]?.[idx];
+    const isTrue = (v === true) ||
+                   (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
+                   (v === 1 || v === '1' || v === 'TRUE');
 
-      const kmHere = Number.isFinite(cum[r]) ? (cum[r] - km0) : (xs.length ? xs[xs.length-1] : 0);
-      xs.push(kmHere);
+    const kmHere = Number.isFinite(cum[r]) ? (cum[r] - km0) : (xs.length ? xs[xs.length-1] : 0);
+    xs.push(kmHere);
 
-      const add = inc[r] || 0;
-      if (isTrue) tpSum += add;
-      toggles.push(isTrue ? 1 : 0);
-      pctCum.push( (tpSum / totalDist) * 100 );
-    }
+    const d = inc[r] || 0;
+    tpDist += isTrue ? d : -d;                            // add when TRUE, subtract when FALSE
 
-    series.push({ name: pretty(name), xs, toggles, pctCum });
+    const distSinceFirst = Math.max(0, kmHere);           // same as (cum[r]-km0)
+    if (tpDist < 0) tpDist = 0;                           // clamp like table
+    if (tpDist > distSinceFirst) tpDist = distSinceFirst;
+
+    toggles.push(isTrue ? 1 : 0);
+    pctCum.push((tpDist / totalDist) * 100);              // identical denominator
   }
 
+  series.push({ name: pretty(name), xs, toggles, pctCum });
+}
   if (!series.length) return null;
   // Common x-axis: use the first KPI’s xs (all aligned by row)
   return { xs: series[0].xs, series };
