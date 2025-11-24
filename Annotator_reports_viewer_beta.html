@@ -2043,7 +2043,8 @@ function buildTPDistanceSeries(wb){
   if (!rows || rows.length < 2) return null;
 
   const hdr = rows[0].map(v => String(v ?? '').trim());
-  // --- distance column detection (defaults to E) ---
+
+  // Distance column detection
   let distIdx = 4;
   if (!hdr[distIdx]) {
     const guess = hdr.findIndex(h => /(^|[^a-z])dist(ance)?([^a-z]|$)|\bkm\b/i.test(h));
@@ -2057,10 +2058,9 @@ function buildTPDistanceSeries(wb){
     return Number.isFinite(n) ? n : null;
   };
 
-  const val = rows.map(r => toNum(r?.[distIdx]));
-  const dataVal = val.slice(1); // data rows only
+  const dataVal = rows.slice(1).map(r => toNum(r?.[distIdx]));
 
-  // Heuristic: cumulative if ≥70% of deltas are ≥0
+  // cumulative or incremental?
   let nonneg = 0, totalD = 0;
   for (let i = 1; i < dataVal.length; i++){
     if (Number.isFinite(dataVal[i]) && Number.isFinite(dataVal[i-1])) {
@@ -2070,8 +2070,7 @@ function buildTPDistanceSeries(wb){
   }
   const isCumulative = (totalD > 0) ? (nonneg / totalD >= 0.7) : true;
 
-  const cum = [];   // cumulative distance per data row index (aligned to rows[1..])
-  const inc = [];   // per-row increment (non-negative)
+  const cum = []; const inc = [];
   if (isCumulative){
     let prev = null;
     for (let r = 1; r < rows.length; r++){
@@ -2093,14 +2092,15 @@ function buildTPDistanceSeries(wb){
     }
   }
 
-  // Last cumulative distance
-  let lastCum = null;
-  for (let r = rows.length - 1; r >= 1; r--){
-    if (Number.isFinite(cum[r])) { lastCum = cum[r]; break; }
-  }
-  if (lastCum == null) return null;
+  // total distance = lastCum - firstCum
+  let firstCum = null, lastCum = null;
+  for (let r = 1; r < rows.length; r++){ if (Number.isFinite(cum[r])) { firstCum = cum[r]; break; } }
+  for (let r = rows.length - 1; r >= 1; r--){ if (Number.isFinite(cum[r])) { lastCum = cum[r]; break; } }
+  if (firstCum == null || lastCum == null) return null;
+  const totalDist = Math.max(0, lastCum - firstCum);
+  if (totalDist <= 0) return null;
 
-  // KPI true/false columns: *_correct
+  // KPI _correct columns
   const candidates = [];
   for (let c = 8; c < hdr.length; c++){
     const name = hdr[c];
@@ -2114,53 +2114,35 @@ function buildTPDistanceSeries(wb){
     .replace(/\s+/g, ' ')
     .trim();
 
-// Build per-KPI toggle + cumulative % over distance (match table logic)
-const series = [];
-for (const { idx, name } of candidates){
-  // first row where toggle is true
-  let firstTrueRow = null;
-  for (let r = 1; r < rows.length; r++){
-    const v = rows[r]?.[idx];
-    const isTrue = (v === true) ||
-                   (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
-                   (v === 1 || v === '1' || v === 'TRUE');
-    if (isTrue){ firstTrueRow = r; break; }
-  }
-  if (firstTrueRow == null || !Number.isFinite(cum[firstTrueRow])) continue;
+  const series = [];
+  for (const { idx, name } of candidates){
+    const xs = [];
+    const toggles = [];
+    const pctCum = [];
 
-  const km0 = cum[firstTrueRow];
-  const totalDist = Math.max(0, lastCum - km0);
-  if (totalDist <= 0) continue;
+    let tpFalseSoFar = 0;
+    for (let r = 1; r < rows.length; r++){
+      const v = rows[r]?.[idx];
+      const isTrue = (v === true) ||
+                     (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
+                     (v === 1 || v === '1' || v === 'TRUE');
 
-  const xs = [];
-  const toggles = [];
-  const pctCum = [];
+      // x = distance since the first finite cum
+      const kmHere = Number.isFinite(cum[r]) ? (cum[r] - firstCum) : (xs.length ? xs[xs.length-1] : 0);
+      xs.push(Math.max(0, kmHere));
 
-  let tpDist = 0;
-  for (let r = firstTrueRow; r < rows.length; r++){
-    const v = rows[r]?.[idx];
-    const isTrue = (v === true) ||
-                   (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
-                   (v === 1 || v === '1' || v === 'TRUE');
+      // accumulate FALSE increments
+      if (!isTrue) tpFalseSoFar += (inc[r] || 0);
 
-    const kmHere = Number.isFinite(cum[r]) ? (cum[r] - km0) : (xs.length ? xs[xs.length-1] : 0);
-    xs.push(kmHere);
+      toggles.push(isTrue ? 1 : 0);                       // first plot (True=1 / False=0)
+      pctCum.push((tpFalseSoFar / totalDist) * 100);      // second plot (running %)
+    }
 
-    const d = inc[r] || 0;
-    tpDist += isTrue ? d : -d;                            // add when TRUE, subtract when FALSE
-
-    const distSinceFirst = Math.max(0, kmHere);           // same as (cum[r]-km0)
-    if (tpDist < 0) tpDist = 0;                           // clamp like table
-    if (tpDist > distSinceFirst) tpDist = distSinceFirst;
-
-    toggles.push(isTrue ? 1 : 0);
-    pctCum.push((tpDist / totalDist) * 100);              // identical denominator
+    series.push({ name: pretty(name), xs, toggles, pctCum });
   }
 
-  series.push({ name: pretty(name), xs, toggles, pctCum });
-}
   if (!series.length) return null;
-  // Common x-axis: use the first KPI’s xs (all aligned by row)
+  // Common x-axis: use the first KPI’s xs (they’re aligned by row)
   return { xs: series[0].xs, series };
 }
 
@@ -2428,7 +2410,7 @@ function buildTruePositiveDistancesTableHTML(wb){
   const hdr = rows[0].map(v => String(v ?? '').trim());
 
   // ---- Distance column (E) detection ----
-  let distIdx = 4; // E by default
+  let distIdx = 4;
   if (!hdr[distIdx]) {
     const guess = hdr.findIndex(h => /(^|[^a-z])dist(ance)?([^a-z]|$)|\bkm\b/i.test(h));
     if (guess >= 0) distIdx = guess;
@@ -2441,9 +2423,7 @@ function buildTruePositiveDistancesTableHTML(wb){
     return Number.isFinite(n) ? n : null;
   };
 
-  // Raw values from distance column (could be cumulative OR per-row increments)
-  const val = rows.map(r => toNum(r?.[distIdx])); // includes header row as val[0]
-  const dataVal = val.slice(1); // data rows only
+  const dataVal = rows.slice(1).map(r => toNum(r?.[distIdx])); // data rows only
 
   // Heuristic: treat as cumulative if ≥70% of deltas are ≥0
   let nonneg = 0, totalD = 0;
@@ -2455,9 +2435,8 @@ function buildTruePositiveDistancesTableHTML(wb){
   }
   const isCumulative = (totalD > 0) ? (nonneg / totalD >= 0.7) : true;
 
-  const cum = [];
-  const inc = [];
-
+  // Build cumulative distance (cum[r]) and per-row increment (inc[r]) aligned to sheet rows (1..n)
+  const cum = []; const inc = [];
   if (isCumulative){
     let prev = null;
     for (let r = 1; r < rows.length; r++){
@@ -2469,7 +2448,6 @@ function buildTruePositiveDistancesTableHTML(wb){
       prev = Number.isFinite(cur) ? cur : prev;
     }
   } else {
-    // per-row increments → build cumulative by summing
     let acc = 0;
     for (let r = 1; r < rows.length; r++){
       const v = dataVal[r-1];
@@ -2480,12 +2458,17 @@ function buildTruePositiveDistancesTableHTML(wb){
     }
   }
 
-  // last cumulative distance
-  let lastCum = null;
+  // Determine total distance = lastCum - firstCum
+  let firstCum = null, lastCum = null;
+  for (let r = 1; r < rows.length; r++){
+    if (Number.isFinite(cum[r])) { firstCum = cum[r]; break; }
+  }
   for (let r = rows.length - 1; r >= 1; r--){
     if (Number.isFinite(cum[r])) { lastCum = cum[r]; break; }
   }
-  if (lastCum == null) return '';
+  if (firstCum == null || lastCum == null) return '';
+  const totalDist = Math.max(0, lastCum - firstCum);
+  if (totalDist <= 0) return '';
 
   // ---- Find _correct columns (from I and right) ----
   const candidates = [];
@@ -2495,53 +2478,26 @@ function buildTruePositiveDistancesTableHTML(wb){
   }
   if (!candidates.length) return '';
 
-  // Pretty-name transform: drop trailing "correct" or "_correct", replace underscores with space
   const pretty = (raw) => String(raw || '')
     .replace(/_?correct\s*$/i, '')
     .replace(/_/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
+  // For each KPI: true-positive distance = sum of increments where *_correct is FALSE
   const results = [];
-for (const { idx, name } of candidates){
-  let tpDist = 0;
-  let firstTrueRow = null;
-
-  for (let r = 1; r < rows.length; r++){
-    const v = rows[r]?.[idx];
-    const isTrue = (v === true) ||
-                   (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
-                   (v === 1 || v === '1' || v === 'TRUE');
-
-    // mark when we first ever see TRUE
-    if (isTrue && firstTrueRow == null) firstTrueRow = r;
-
-    // before the first TRUE, do nothing
-    if (firstTrueRow == null) continue;
-
-    const d = inc[r] || 0;
-    // add when TRUE, subtract when FALSE
-    tpDist += isTrue ? d : -d;
-
-    // clamp to [0, distance since first TRUE so far]
-    const distSinceFirst = Math.max(0, (Number.isFinite(cum[r]) && Number.isFinite(cum[firstTrueRow]))
-      ? (cum[r] - cum[firstTrueRow])
-      : 0);
-    if (tpDist < 0) tpDist = 0;
-    if (tpDist > distSinceFirst) tpDist = distSinceFirst;
+  for (const { idx, name } of candidates){
+    let tpFalseDist = 0;
+    for (let r = 1; r < rows.length; r++){
+      const v = rows[r]?.[idx];
+      const isTrue = (v === true) ||
+                     (typeof v === 'string' && v.trim().toLowerCase() === 'true') ||
+                     (v === 1 || v === '1' || v === 'TRUE');
+      if (!isTrue) tpFalseDist += (inc[r] || 0); // count FALSE increments
+    }
+    const pct = (tpFalseDist / totalDist) * 100;
+    results.push({ name: pretty(name), pct });
   }
-
-  if (firstTrueRow == null) continue;
-
-  const distAtFirstTrue = cum[firstTrueRow];
-  if (!Number.isFinite(distAtFirstTrue)) continue;
-
-  const totalDist = Math.max(0, lastCum - distAtFirstTrue);
-  if (totalDist <= 0) continue;
-
-  const pct = (tpDist / totalDist) * 100;
-  results.push({ name: pretty(name), pct });
-}
 
   if (!results.length) return '';
 
@@ -2549,7 +2505,6 @@ for (const { idx, name } of candidates){
     .map(r => `<tr><td>${r.name}</td><td>${r.pct.toFixed(1)}%</td></tr>`)
     .join('');
 
-  // Uses your global table styles (same as other tables)
   return `
     <h2>True positive distances</h2>
     <table class="report-table">
