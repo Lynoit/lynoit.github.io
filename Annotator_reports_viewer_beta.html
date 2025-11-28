@@ -2007,31 +2007,46 @@ function renderScoringLegend(selectedScore){
 // Build "Score per function" section based on KPI sheet + KPI_buttons.csv
 async function buildScorePerFunctionSection(wb){
   const meta = await getKpiButtonsMeta().catch(() => null);
-  if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0) return '';
+  if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0){
+    console.warn('[KPI] No KPI meta or groups from KPI_buttons.csv');
+    return '';
+  }
 
   const kpiSheetName = wb.SheetNames.find(n => /kpi/i.test(n));
-  if (!kpiSheetName) return '';
+  if (!kpiSheetName){
+    console.warn('[KPI] No sheet with "KPI" in the name found');
+    return '';
+  }
 
   const sheet = wb.Sheets[kpiSheetName];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-  if (!rows.length) return '';
+  const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  if (!rows.length){
+    console.warn('[KPI] KPI sheet is empty');
+    return '';
+  }
 
   const header = rows[0].map(v => String(v ?? '').trim());
   const lower  = header.map(h => h.toLowerCase());
 
   // "Events per 1000 km" column
   const kpiColIdx = lower.findIndex(h => /events?\s*(?:per|\/)\s*1000\s*km/.test(h));
-  if (kpiColIdx < 0) return '';
+  if (kpiColIdx < 0){
+    console.warn('[KPI] No "Events per 1000 km" column found in KPI sheet header:', header);
+    return '';
+  }
 
-  // "group" column (or fallback)
+  // "group / function / feature" column
   let groupIdx = lower.findIndex(h => h === 'group');
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h));
 
-  const functionNames = Array.from(meta.groups.keys()).sort((a,b) => a.localeCompare(b));
+  const csvFunctions = Array.from(meta.groups.keys());
+  const functionNames = csvFunctions.slice().sort((a,b) => a.localeCompare(b));
 
-  // If we cannot find group column at all → show rows as "No function"
   if (groupIdx < 0){
+    console.warn('[KPI] No "group/function/feature" column found in KPI sheet header:', header);
+
+    // Fall back: we at least render the functions as "No function"
     const body = functionNames.map(fn => `
       <tr>
         <td>${escapeHtml(fn)}</td>
@@ -2048,6 +2063,29 @@ async function buildScorePerFunctionSection(wb){
       </table>`;
   }
 
+  // Helper: find the CSV function name that best matches a value from KPI sheet
+  function findFunctionNameFromSheetValue(raw){
+    const s = String(raw ?? '').trim();
+    if (!s) return null;
+    const low = s.toLowerCase();
+
+    // 1) exact match against CSV key
+    for (const fn of csvFunctions){
+      if (fn === s || fn.toLowerCase() === low) return fn;
+    }
+    // 2) sheet cell starts with the CSV name (e.g., "ACC - something") 
+    for (const fn of csvFunctions){
+      const fLow = fn.toLowerCase();
+      if (low.startsWith(fLow)) return fn;
+    }
+    // 3) sheet cell contains the CSV name somewhere (e.g., "[ACC] use case")
+    for (const fn of csvFunctions){
+      const fLow = fn.toLowerCase();
+      if (low.includes(fLow)) return fn;
+    }
+    return null;
+  }
+
   const toNum = (v) => {
     if (v == null) return null;
     const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
@@ -2055,20 +2093,21 @@ async function buildScorePerFunctionSection(wb){
     return Number.isFinite(n) ? n : null;
   };
 
-  // Accumulate data per function
-  const data = new Map();
-  functionNames.forEach(fn => {
-    data.set(fn, { hasRow:false, hasNumeric:false, sum:0 });
-  });
+  // Accumulate per function
+  const data = new Map();  // fnName -> { hasRow, hasNumeric, sum }
+  functionNames.forEach(fn => data.set(fn, { hasRow:false, hasNumeric:false, sum:0 }));
+
+  const seenAnyMatch = new Set();  // for debugging
 
   for (let r = 1; r < rows.length; r++){
     const row = rows[r];
     const groupRaw = row[groupIdx];
-    const g = String(groupRaw ?? '').trim();
-    if (!g) continue;
-    if (!meta.groups.has(g)) continue; // only care about groups from KPI_buttons
+    const fnName = findFunctionNameFromSheetValue(groupRaw);
+    if (!fnName) continue;  // cannot map this row to any CSV group
 
-    const entry = data.get(g) || { hasRow:false, hasNumeric:false, sum:0 };
+    seenAnyMatch.add(fnName);
+
+    const entry = data.get(fnName) || { hasRow:false, hasNumeric:false, sum:0 };
     entry.hasRow = true;
 
     const rate = toNum(row[kpiColIdx]);
@@ -2076,7 +2115,14 @@ async function buildScorePerFunctionSection(wb){
       entry.hasNumeric = true;
       entry.sum += rate;
     }
-    data.set(g, entry);
+    data.set(fnName, entry);
+  }
+
+  // If absolutely no group values in the sheet matched any CSV group, log it
+  if (!seenAnyMatch.size){
+    console.warn('[KPI] No group values in KPI sheet matched any group from KPI_buttons.csv');
+    console.warn('[KPI] CSV groups:', csvFunctions);
+    console.warn('[KPI] KPI sheet header row:', header);
   }
 
   const bodyRows = functionNames.map(fn => {
@@ -2088,19 +2134,19 @@ async function buildScorePerFunctionSection(wb){
     let rateStr = '–';
 
     if (!entry.hasRow){
-      // No row at all → no function reported
+      // No row at all for this function
       score = 0;
       label = 'No function';
     } else if (!entry.hasNumeric){
-      // Function present in sheet, but no KPI values reported → explicit rule
+      // Function present, but no numeric KPI values reported
       score = 10;
       label = 'Exceptional';
     } else {
       const denom = expectedKpis > 0 ? expectedKpis : 1;
-      const avg = entry.sum / denom;
-      rateStr = avg.toFixed(1);
-      score = scoreFromRate(avg);
-      label = SCORE_LABEL[score] || '';
+      const avg   = entry.sum / denom;
+      rateStr     = avg.toFixed(1);
+      score       = scoreFromRate(avg);
+      label       = SCORE_LABEL[score] || '';
     }
 
     let scoreHtml;
