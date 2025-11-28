@@ -233,7 +233,8 @@
 .score-box small{display:block;font-size:11px;opacity:.95}
 .score-th{display:block;font-size:10px;background:#f5f5f5;color:#000;border-top:1px solid #ddd;padding:3px 0}
 
-/* colors 1..10 (red → green) */
+/* colors 0..10 (0 = no function, 1..10 red → green) */
+.s0{background:#808080}
 .s1{background:#c30000}.s2{background:#d62828}.s3{background:#e05d00}.s4{background:#ef8e00}.s5{background:#f4b400}
 .s6{background:#ffe24a;color:#111}.s7{background:#b8df4a}.s8{background:#33a653}.s9{background:#0f9d8c}.s10{background:#216e39}
 
@@ -349,6 +350,15 @@ function loadWorkbook(filename) {
     function cssSafeId(s){ return String(s).replace(/[^a-zA-Z0-9_-]/g,'_'); }
     function toDateOnly(d){ const t = new Date(d); t.setHours(0,0,0,0); return t; }
 
+function escapeHtml(str){
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+    
     // Append a timestamp so each request URL is unique → bypasses caches.
 function nc(url){
   return url + (url.includes('?') ? '&' : '?') + 'ts=' + Date.now();
@@ -1994,31 +2004,192 @@ function renderScoringLegend(selectedScore){
   return `<div class="score-legend">${boxes}</div>`;
 }
 
-// Count total KPIs from KPI_buttons.csv (cached after first load)
-function getTotalKpis(){
-  if (typeof window.__TOTAL_KPIS__ === 'number') {
-    return Promise.resolve(window.__TOTAL_KPIS__);
+// Build "Score per function" section based on KPI sheet + KPI_buttons.csv
+async function buildScorePerFunctionSection(wb){
+  const meta = await getKpiButtonsMeta().catch(() => null);
+  if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0) return '';
+
+  const kpiSheetName = wb.SheetNames.find(n => /kpi/i.test(n));
+  if (!kpiSheetName) return '';
+
+  const sheet = wb.Sheets[kpiSheetName];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  if (!rows.length) return '';
+
+  const header = rows[0].map(v => String(v ?? '').trim());
+  const lower  = header.map(h => h.toLowerCase());
+
+  // "Events per 1000 km" column
+  const kpiColIdx = lower.findIndex(h => /events?\s*(?:per|\/)\s*1000\s*km/.test(h));
+  if (kpiColIdx < 0) return '';
+
+  // "group" column (or fallback)
+  let groupIdx = lower.findIndex(h => h === 'group');
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h));
+
+  const functionNames = Array.from(meta.groups.keys()).sort((a,b) => a.localeCompare(b));
+
+  // If we cannot find group column at all → show rows as "No function"
+  if (groupIdx < 0){
+    const body = functionNames.map(fn => `
+      <tr>
+        <td>${escapeHtml(fn)}</td>
+        <td><span class="kpi-badge s0">0 — No function</span></td>
+      </tr>`).join('');
+
+    return `
+      <h2>Score per function</h2>
+      <table class="report-table">
+        <thead>
+          <tr><th>Function</th><th>Score</th></tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>`;
   }
+
+  const toNum = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // Accumulate data per function
+  const data = new Map();
+  functionNames.forEach(fn => {
+    data.set(fn, { hasRow:false, hasNumeric:false, sum:0 });
+  });
+
+  for (let r = 1; r < rows.length; r++){
+    const row = rows[r];
+    const groupRaw = row[groupIdx];
+    const g = String(groupRaw ?? '').trim();
+    if (!g) continue;
+    if (!meta.groups.has(g)) continue; // only care about groups from KPI_buttons
+
+    const entry = data.get(g) || { hasRow:false, hasNumeric:false, sum:0 };
+    entry.hasRow = true;
+
+    const rate = toNum(row[kpiColIdx]);
+    if (rate != null){
+      entry.hasNumeric = true;
+      entry.sum += rate;
+    }
+    data.set(g, entry);
+  }
+
+  const bodyRows = functionNames.map(fn => {
+    const entry = data.get(fn) || { hasRow:false, hasNumeric:false, sum:0 };
+    const expectedKpis = meta.groups.get(fn) || 0;
+
+    let score = null;
+    let label = '';
+    let rateStr = '–';
+
+    if (!entry.hasRow){
+      // No row at all → no function reported
+      score = 0;
+      label = 'No function';
+    } else if (!entry.hasNumeric){
+      // Function present in sheet, but no KPI values reported → explicit rule
+      score = 10;
+      label = 'Exceptional';
+    } else {
+      const denom = expectedKpis > 0 ? expectedKpis : 1;
+      const avg = entry.sum / denom;
+      rateStr = avg.toFixed(1);
+      score = scoreFromRate(avg);
+      label = SCORE_LABEL[score] || '';
+    }
+
+    let scoreHtml;
+    if (score === 0){
+      scoreHtml = `<span class="kpi-badge s0">0 — No function</span>`;
+    } else if (typeof score === 'number'){
+      scoreHtml = `<span class="kpi-badge s${score}">${score} — ${escapeHtml(label)}${rateStr !== '–' ? ` (${rateStr} /1000 km)` : ''}</span>`;
+    } else {
+      scoreHtml = `<span class="kpi-badge s0">N/A</span>`;
+    }
+
+    return `
+      <tr>
+        <td>${escapeHtml(fn)}</td>
+        <td>${scoreHtml}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <h2>Score per function</h2>
+    <table class="report-table">
+      <thead>
+        <tr><th>Function</th><th>Score</th></tr>
+      </thead>
+      <tbody>${bodyRows}</tbody>
+    </table>`;
+}
+
+// Parse KPI_buttons.csv once → total KPIs + per-function counts
+function getKpiButtonsMeta(){
+  if (window.__KPI_META__) return Promise.resolve(window.__KPI_META__);
 
   const relUrl   = 'KPI_buttons.csv';
   const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
 
-  const fetchAndCount = (url) =>
-    fetch(nc(url), { cache: 'default' })   // cacheable, it's the same for all sessions
+  const fetchAndParse = (url) =>
+    fetch(nc(url), { cache: 'default' })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.text();
       })
       .then(txt => {
-        const lines = txt.split(/\r?\n/);
-        const count = lines.reduce((n, line) => n + (line.indexOf('redButton') !== -1 ? 1 : 0), 0);
-        window.__TOTAL_KPIS__ = count;
-        return count;
+        const lines = txt.split(/\r?\n/).filter(l => l.trim() !== '');
+        if (!lines.length){
+          const meta = { totalKpis: 0, groups: new Map() };
+          window.__KPI_META__ = meta;
+          return meta;
+        }
+
+        const headerLine = lines[0];
+        const delim = headerLine.includes(';') ? ';' : ',';
+        const headers = headerLine.split(delim).map(h => h.trim().toLowerCase());
+        const groupIdx = headers.findIndex(h => h === 'group' || /group/.test(h));
+
+        let totalKpis = 0;
+        const groups = new Map();
+
+        for (let i = 1; i < lines.length; i++){
+          const line = lines[i];
+          if (!line.trim()) continue;
+
+          // original behaviour: a KPI row contains "redButton" text
+          const isKpiRow = line.indexOf('redButton') !== -1;
+          if (!isKpiRow) continue;
+
+          totalKpis++;
+
+          if (groupIdx >= 0){
+            const parts = line.split(delim);
+            const g = (parts[groupIdx] || '').trim();
+            if (g){
+              groups.set(g, (groups.get(g) || 0) + 1);
+            }
+          }
+        }
+
+        const meta = { totalKpis, groups };
+        window.__KPI_META__ = meta;
+        return meta;
       });
 
-  return fetchAndCount(relUrl)
-    .catch(() => fetchAndCount(azureUrl))
+  return fetchAndParse(relUrl)
+    .catch(() => fetchAndParse(azureUrl))
     .catch(() => null);
+}
+
+// Count total KPIs from KPI_buttons.csv (cached after first load)
+function getTotalKpis(){
+  return getKpiButtonsMeta().then(meta => meta ? meta.totalKpis : null);
 }
 
 function buildTruePositiveDistancesTableHTML(wb){
@@ -2293,7 +2464,7 @@ function loadFile(filename) {
 
   // === Use cached workbook ===
   loadWorkbook(filename)
-    .then(({ wb /*, buf*/ }) => {
+    .then(async ({ wb /*, buf*/ }) => {
       const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
       if (samplingName) parseSamplingSheet(wb.Sheets[samplingName]);
 
@@ -2302,28 +2473,34 @@ function loadFile(filename) {
 
       // Pre-fetch total KPIs once
       const totalKpisPromise = getTotalKpis();
-      
-      // Build once; we’ll insert it right before the Statistics sheet
+
+      // Build once; we'll insert these right before the Statistics sheet
       const tpSectionHtml = buildTruePositiveDistancesTableHTML(wb);
-      let tpInserted = false;
+      const scorePerFunctionHtml = await buildScorePerFunctionSection(wb);
+      let extraSectionsInserted = false;
 
-wb.SheetNames.forEach(sheet => {
-  if (sheet.toLowerCase() === 'sampling') return;
+      wb.SheetNames.forEach(sheet => {
+        if (sheet.toLowerCase() === 'sampling') return;
 
-  // ⬇️ NEW: if this is the Statistics sheet, insert the TP section *before* it
-  if (!tpInserted && /statistics/i.test(sheet) && tpSectionHtml) {
-    content.insertAdjacentHTML('beforeend', tpSectionHtml);
-    tpInserted = true;
-  }
+        // Insert [True positive distances] + [Score per function] BEFORE "Statistics" sheet
+        if (!extraSectionsInserted && /statistics/i.test(sheet)) {
+          let blockHtml = '';
+          if (tpSectionHtml) blockHtml += tpSectionHtml;
+          if (scorePerFunctionHtml) blockHtml += scorePerFunctionHtml;
+          if (blockHtml){
+            content.insertAdjacentHTML('beforeend', blockHtml);
+            extraSectionsInserted = true;
+          }
+        }
 
-  const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
-  content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
+        const html = XLSX.utils.sheet_to_html(wb.Sheets[sheet], { id: sheet });
+        content.insertAdjacentHTML('beforeend', `<h2>${sheet}</h2>${html}`);
 
-// Style all tables EXCEPT "Test details"
-if (!/^\s*test\s*details\s*$/i.test(sheet)) {
-  const tbl = document.getElementById(sheet);
-  if (tbl) unifyReportTableStyle(tbl);
-}
+        // Style all tables EXCEPT "Test details"
+        if (!/^\s*test\s*details\s*$/i.test(sheet)) {
+          const tbl = document.getElementById(sheet);
+          if (tbl) unifyReportTableStyle(tbl);
+        }
 
         // First sheet with lat/lon → collect issues + headers
         if (!issueTableInfo.sheetName) {
@@ -2377,9 +2554,8 @@ if (!/^\s*test\s*details\s*$/i.test(sheet)) {
                 const score = _scoreFromRate(avg1);
                 inserts.push(_renderScoringLegend(score));
                 inserts.push(
-  `<div class="score-legend-caption">Score: <strong>${score}</strong> — ${_SCORE_LABEL[score]} (sum ÷ total KPIs = ${(+sum).toLocaleString(undefined,{maximumFractionDigits:1})} ÷ ${totalKpis})</div>`
-);
-
+                  `<div class="score-legend-caption">Score: <strong>${score}</strong> — ${_SCORE_LABEL[score]} (sum ÷ total KPIs = ${(+sum).toLocaleString(undefined,{maximumFractionDigits:1})} ÷ ${totalKpis})</div>`
+                );
               } else {
                 inserts.push(_renderScoringLegend(null));
                 inserts.push('<div class="score-legend-caption">Total KPIs unavailable — cannot compute average.</div>');
