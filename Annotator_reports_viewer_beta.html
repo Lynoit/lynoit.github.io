@@ -2007,8 +2007,8 @@ function renderScoringLegend(selectedScore){
 // Build "Score per function" section based on KPI sheet + KPI_buttons.csv
 async function buildScorePerFunctionSection(wb){
   const meta = await getKpiButtonsMeta().catch(() => null);
-  if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0){
-    console.warn('[KPI] No KPI meta or groups from KPI_buttons.csv');
+  if (!meta || !meta.groups || !(meta.groups instanceof Map)){
+    console.warn('[KPI] No KPI meta or invalid KPI_buttons.csv structure');
     return '';
   }
 
@@ -2028,134 +2028,158 @@ async function buildScorePerFunctionSection(wb){
   const header = rows[0].map(v => String(v ?? '').trim());
   const lower  = header.map(h => h.toLowerCase());
 
-  // "Events per 1000 km" column
+  // ----- 1) Find the "Events per 1000 km" column -----
   const kpiColIdx = lower.findIndex(h => /events?\s*(?:per|\/)\s*1000\s*km/.test(h));
   if (kpiColIdx < 0){
     console.warn('[KPI] No "Events per 1000 km" column found in KPI sheet header:', header);
     return '';
   }
 
-  // "group / function / feature" column
-  let groupIdx = lower.findIndex(h => h === 'group');
-  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
-  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h));
+  // ----- 2) Find the group / function column -----
+  // Try several patterns so we are more robust to naming
+  let groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\b(function|feature)\b/.test(h));
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bsystem\b/.test(h)); // add more if needed
 
-  // Normalised CSV groups: lower-case key -> { name, count }
-  const csvEntries = Array.from(meta.groups.entries());   // [name, count]
-  const normGroups = new Map();
-  csvEntries.forEach(([name, count]) => {
-    const key = String(name ?? '').trim();
-    if (!key) return;
-    normGroups.set(key.toLowerCase(), { name: key, count });
-  });
-
-  // Display order: original names from CSV
-  const functionNames = csvEntries
-    .map(([name]) => String(name ?? '').trim())
-    .filter(Boolean)
-    .sort((a,b) => a.localeCompare(b));
-
-  // If we cannot find group column at all → show rows as "No function"
   if (groupIdx < 0){
-    console.warn('[KPI] No "group/function/feature" column found in KPI sheet header:', header);
-
-    const body = functionNames.map(fn => `
+    console.warn('[KPI] No "group/function/feature/system" column found in KPI sheet header:', header);
+    // We can’t do per-function scoring if we don’t know which KPI belongs to which function
+    const body = `
       <tr>
-        <td>${escapeHtml(fn)}</td>
-        <td><span class="kpi-badge s0">0 — No function</span></td>
-      </tr>`).join('');
-
+        <td colspan="2">
+          Could not find a function/group column in the KPI sheet.
+          Please ensure one header contains "group", "function", "feature" or "system".
+        </td>
+      </tr>`;
     return `
       <h2>Score per function</h2>
       <table class="report-table">
-        <thead>
-          <tr><th>Function</th><th>Score</th></tr>
-        </thead>
+        <thead><tr><th>Function</th><th>Score</th></tr></thead>
         <tbody>${body}</tbody>
       </table>`;
   }
 
   const toNum = (v) => {
     if (v == null) return null;
-    const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
+    const s = String(v).trim().replace(/[^\d,.\-]/g, '').replace(',', '.');
     const n = parseFloat(s);
     return Number.isFinite(n) ? n : null;
   };
 
-  // Find which CSV function a KPI-sheet group cell belongs to (case-insensitive, fuzzy)
-  function findFunctionNameFromSheetValue(raw){
-    const s = String(raw ?? '').trim();
-    if (!s) return null;
-    const low = s.toLowerCase();
+  const normName = (v) => String(v ?? '').trim().toLowerCase();
 
-    // 1) exact (case-insensitive) match
-    if (normGroups.has(low)) return normGroups.get(low).name;
-
-    // 2) startsWith
-    let best = null;
-    for (const [gLow, info] of normGroups.entries()){
-      if (low === gLow || low.startsWith(gLow) || low.includes(gLow)){
-        if (!best || gLow.length > best.key.length){
-          best = { key: gLow, name: info.name };
-        }
-      }
-    }
-    return best ? best.name : null;
-  }
-
-  // Accumulate data per function
-  const data = new Map();
-  functionNames.forEach(fn => {
-    data.set(fn, { hasRow:false, hasNumeric:false, sum:0 });
-  });
-
-  let anyMatch = false;
+  // ----- 3) Aggregate KPI data per function as written in the KPI sheet -----
+  // key = normalized function name
+  const sheetGroups = new Map();  // norm -> { displayName, rowCount, hasNumeric, sum }
 
   for (let r = 1; r < rows.length; r++){
     const row = rows[r];
-    const fnName = findFunctionNameFromSheetValue(row[groupIdx]);
-    if (!fnName) continue;            // this row doesn't map to any CSV group
+    const rawName = row[groupIdx];
+    const norm = normName(rawName);
+    if (!norm) continue;
 
-    anyMatch = true;
-    const entry = data.get(fnName) || { hasRow:false, hasNumeric:false, sum:0 };
-    entry.hasRow = true;
+    let entry = sheetGroups.get(norm);
+    if (!entry){
+      entry = {
+        displayName: String(rawName ?? '').trim() || '(unnamed)',
+        rowCount: 0,
+        hasNumeric: false,
+        sum: 0
+      };
+      sheetGroups.set(norm, entry);
+    }
 
+    entry.rowCount++;
     const rate = toNum(row[kpiColIdx]);
     if (rate != null){
       entry.hasNumeric = true;
       entry.sum += rate;
     }
-    data.set(fnName, entry);
   }
 
-  if (!anyMatch){
-    console.warn('[KPI] No group values in KPI sheet matched any group from KPI_buttons.csv');
-    console.warn('[KPI] CSV groups:', functionNames);
-    console.warn('[KPI] Example group column values:', rows.slice(1, 6).map(r => r[groupIdx]));
+  if (!sheetGroups.size){
+    console.warn('[KPI] No rows with a non-empty function/group value found in KPI sheet');
+    // Still show table, but everything is effectively “no function”
+    const body = Array.from(meta.groups.keys()).map(name => `
+      <tr>
+        <td>${escapeHtml(name)}</td>
+        <td><span class="kpi-badge s0">0 — No function</span></td>
+      </tr>`).join('');
+    return `
+      <h2>Score per function</h2>
+      <table class="report-table">
+        <thead><tr><th>Function</th><th>Score</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>`;
   }
 
-  const bodyRows = functionNames.map(fn => {
-    const entry = data.get(fn) || { hasRow:false, hasNumeric:false, sum:0 };
-    const expectedKpis = meta.groups.get(fn) || 0;
+  // ----- 4) Build a combined function map: CSV groups + groups actually present in sheet -----
+  // key = normalized name
+  const functionMap = new Map(); // norm -> entry { displayName, expectedKpis, rowCount, hasNumeric, sum }
 
+  // Start with CSV groups (ensures your canonical function list appears)
+  meta.groups.forEach((count, csvName) => {
+    const norm = normName(csvName);
+    if (!norm) return;
+    if (!functionMap.has(norm)){
+      functionMap.set(norm, {
+        displayName: String(csvName).trim() || '(unnamed)',
+        expectedKpis: count || 0,
+        rowCount: 0,
+        hasNumeric: false,
+        sum: 0
+      });
+    }
+  });
+
+  // Merge data from the KPI sheet
+  sheetGroups.forEach((gEntry, norm) => {
+    const existing = functionMap.get(norm);
+    if (existing){
+      existing.rowCount   = gEntry.rowCount;
+      existing.hasNumeric = gEntry.hasNumeric;
+      existing.sum        = gEntry.sum;
+      // Keep displayName from CSV (canonical), but you *could* prefer sheet label:
+      // existing.displayName = gEntry.displayName;
+    } else {
+      // Group exists in sheet but not in CSV → still show it
+      functionMap.set(norm, {
+        displayName: gEntry.displayName,
+        expectedKpis: 0,
+        rowCount: gEntry.rowCount,
+        hasNumeric: gEntry.hasNumeric,
+        sum: gEntry.sum
+      });
+    }
+  });
+
+  // ----- 5) Render rows -----
+  const entries = Array.from(functionMap.values())
+    .sort((a,b) => a.displayName.localeCompare(b.displayName));
+
+  const bodyRows = entries.map(entry => {
     let score = null;
     let label = '';
     let rateStr = '–';
 
-    if (!entry.hasRow){
-      // No row at all → no function reported
+    if (entry.rowCount === 0){
+      // Function in CSV but no row in sheet
       score = 0;
       label = 'No function';
     } else if (!entry.hasNumeric){
-      // Function present in sheet, but no KPI values reported → explicit rule
+      // Function present in sheet, but no numeric KPI values
       score = 10;
       label = 'Exceptional';
     } else {
-      const denom = expectedKpis > 0 ? expectedKpis : 1;
-      const avg = entry.sum / denom;
-      rateStr   = avg.toFixed(1);
-      score     = scoreFromRate(avg);
-      label     = SCORE_LABEL[score] || '';
+      // Use expected KPI count from CSV if it matches; fallback to rowCount
+      const denom = (entry.expectedKpis && entry.expectedKpis > 0)
+        ? entry.expectedKpis
+        : entry.rowCount;
+
+      const avg   = entry.sum / denom;
+      rateStr     = avg.toFixed(1);
+      score       = scoreFromRate(avg);
+      label       = SCORE_LABEL[score] || '';
     }
 
     let scoreHtml;
@@ -2169,7 +2193,7 @@ async function buildScorePerFunctionSection(wb){
 
     return `
       <tr>
-        <td>${escapeHtml(fn)}</td>
+        <td>${escapeHtml(entry.displayName)}</td>
         <td>${scoreHtml}</td>
       </tr>`;
   }).join('');
