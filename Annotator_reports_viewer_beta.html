@@ -989,6 +989,7 @@ if ('requestIdleCallback' in window) {
   function buildSidebar(files) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
+
   const header = document.createElement('h2');
   header.textContent = 'Test sessions';
   header.style.padding = '16px';
@@ -996,9 +997,13 @@ if ('requestIdleCallback' in window) {
   header.style.borderBottom = '1px solid #ddd';
   header.style.cursor = 'pointer';
   header.title = 'Back to overview';
-  header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
+  header.addEventListener('click', (e) => {
+    e.preventDefault();
+    renderOverview();
+  });
   sb.appendChild(header);
 
+  // Group files by day (YYYY-MM-DD)
   const groups = files.reduce((acc, f) => {
     const m = f.match(/(\d{4}-\d{2}-\d{2})/);
     if (!m) return acc;
@@ -1006,7 +1011,16 @@ if ('requestIdleCallback' in window) {
     return acc;
   }, {});
 
-  Object.keys(groups).sort().reverse().forEach(day => {
+  // Days sorted newest → oldest
+  const dayKeys = Object.keys(groups).sort().reverse();
+
+  // Show newest X days first, then older days after a tick
+  const MAX_RECENT_DAYS = 5;
+  const recentDays = dayKeys.slice(0, MAX_RECENT_DAYS);
+  const olderDays  = dayKeys.slice(MAX_RECENT_DAYS);
+
+  // Helper that builds one day block (header + list)
+  function addDayGroup(day) {
     const hdr = document.createElement('div');
     hdr.className = 'day-header';
     hdr.setAttribute('role','button');
@@ -1027,53 +1041,54 @@ if ('requestIdleCallback' in window) {
     lst.className = 'session-list';
     lst.style.display = 'none';
 
+    // Sort sessions within the day: newest last-modified first
     groups[day]
-  .sort((a, b) => {
-    const la = blobMeta.get(a) || 0;
-    const lb = blobMeta.get(b) || 0;
-    if (lb !== la) return lb - la;          // newer first
-    return b.localeCompare(a);              // tie-break: name DESC
-  })
-  .forEach(f => {
-      const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
-      const li = document.createElement('li');
-      li.className = 'session-item';
-      li.onclick = () => loadFile(f);
+      .sort((a, b) => {
+        const la = blobMeta.get(a) || 0;
+        const lb = blobMeta.get(b) || 0;
+        if (lb !== la) return lb - la;      // newer first
+        return b.localeCompare(a);          // tie-break
+      })
+      .forEach(f => {
+        const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
+        const li = document.createElement('li');
+        li.className = 'session-item';
+        li.onclick = () => loadFile(f);
 
-      const row = document.createElement('div');
-      row.className = 'session-title-row';
+        const row = document.createElement('div');
+        row.className = 'session-title-row';
 
-      const title = document.createElement('div');
-      title.textContent = namePretty;
+        const title = document.createElement('div');
+        title.textContent = namePretty;
 
-      // KPI badge (hidden until we calculate)
-      const kpiBadge = document.createElement('span');
-      kpiBadge.className = 'kpi-badge';
-      kpiBadge.id = `kpi_${cssSafeId(f)}`;
-      kpiBadge.style.display = 'none'; // will show when we have a score
+        // KPI badge (filled later)
+        const kpiBadge = document.createElement('span');
+        kpiBadge.className = 'kpi-badge';
+        kpiBadge.id = `kpi_${cssSafeId(f)}`;
+        kpiBadge.style.display = 'none';
 
-      // Active badge (kept as-is)
-      const lm = blobMeta.get(f) || 0;
-      const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
-      const activeBadge = document.createElement('span');
-      activeBadge.className = 'active-badge';
-      activeBadge.textContent = 'Active';
-      activeBadge.dataset.lm = String(lm);
-      if (!isActive) activeBadge.style.display = 'none';
+        // Active badge (kept as before)
+        const lm = blobMeta.get(f) || 0;
+        const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
+        const activeBadge = document.createElement('span');
+        activeBadge.className = 'active-badge';
+        activeBadge.textContent = 'Active';
+        activeBadge.dataset.lm = String(lm);
+        if (!isActive) activeBadge.style.display = 'none';
 
-      row.appendChild(title);
-      row.appendChild(kpiBadge);   // ← KPI badge first
-      row.appendChild(activeBadge);
+        row.appendChild(title);
+        row.appendChild(kpiBadge);
+        row.appendChild(activeBadge);
 
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.id = `meta_${cssSafeId(f)}`;
-      meta.textContent = 'Loading…';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.id = `meta_${cssSafeId(f)}`;
+        meta.textContent = 'Loading…';
 
-      li.appendChild(row);
-      li.appendChild(meta);
-      lst.appendChild(li);
-    });
+        li.appendChild(row);
+        li.appendChild(meta);
+        lst.appendChild(li);
+      });
 
     let loadedThisGroup = false;
     const toggle = () => {
@@ -1081,11 +1096,12 @@ if ('requestIdleCallback' in window) {
       lst.style.display = expand ? 'block' : 'none';
       hdr.setAttribute('aria-expanded', expand ? 'true' : 'false');
       hdr.title = expand ? 'Hide sessions' : 'Show sessions';
+
+      // Lazy-load per-session summary only when the day is expanded
       if (expand && !loadedThisGroup) {
         loadedThisGroup = true;
         groups[day].forEach(f => {
           fetchSessionSummary(f).then(({ mileageKm, issueCount, testObject, testPurpose, kpiScore }) => {
-            // Fill meta line
             const el = document.getElementById(`meta_${cssSafeId(f)}`);
             if (el) {
               const parts = [];
@@ -1096,12 +1112,11 @@ if ('requestIdleCallback' in window) {
               el.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
             }
 
-            // Fill KPI badge if we have a score
             const kb = document.getElementById(`kpi_${cssSafeId(f)}`);
             if (kb) {
               if (typeof kpiScore === 'number' && kpiScore >= 1 && kpiScore <= 10) {
                 kb.textContent = `KPI ${kpiScore}`;
-                kb.className = `kpi-badge s${kpiScore}`;   // color from .s1..s10
+                kb.className = `kpi-badge s${kpiScore}`;
                 kb.style.display = 'inline-flex';
               } else {
                 kb.style.display = 'none';
@@ -1114,12 +1129,25 @@ if ('requestIdleCallback' in window) {
 
     hdr.addEventListener('click', toggle);
     hdr.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
     });
 
     sb.appendChild(hdr);
     sb.appendChild(lst);
-  });
+  }
+
+  // Build newest days synchronously → appear & clickable ASAP
+  recentDays.forEach(addDayGroup);
+
+  // Build older days shortly after, without blocking first paint
+  if (olderDays.length) {
+    setTimeout(() => {
+      olderDays.forEach(addDayGroup);
+    }, 0);
+  }
 
   ensureActiveBadgeUpdater();
 }
