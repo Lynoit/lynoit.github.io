@@ -942,14 +942,13 @@ function canonicalEU(raw){
         return { name, lastModifiedMs: Date.parse(lm) || 0 };
       });
 
-      // Only .xlsx blobs
       const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
       if (xlsx.length === 0) {
         showError('No .xlsx files found.');
         return;
       }
 
-      // 🔹 Sort by Last-Modified DESC (youngest first)
+      // 🔹 newest → oldest
       xlsx.sort((a, b) => {
         const la = a.lastModifiedMs || 0;
         const lb = b.lastModifiedMs || 0;
@@ -957,50 +956,50 @@ function canonicalEU(raw){
         return b.name.localeCompare(a.name);
       });
 
-      // Cache strict chronological metadata for other parts (latest routes, etc.)
+      // cache metadata
       blobMeta.clear();
       xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
 
       const xlsxNames = xlsx.map(b => b.name);
       allFiles = xlsxNames;
 
-      // Sidebar first, strictly youngest → oldest, one session at a time
-      buildSidebar(xlsxNames);
+      // 1) Build sidebar first, fully
+      // 2) Then start the heavy overview work
+      buildSidebar(xlsxNames, () => {
+        const startOverview = () => {
+          const h1  = document.getElementById('title-overview');
+          const h2  = document.getElementById('title-latest-routes');
+          const hEU = document.getElementById('title-eu-mileage');
+          if (!h1 || !h2 || !hEU) return;
 
-      // Then, in idle time, build the heavy overview charts
-      const startOverview = () => {
-        const h1  = document.getElementById('title-overview');
-        const h2  = document.getElementById('title-latest-routes');
-        const hEU = document.getElementById('title-eu-mileage');
-        if (!h1 || !h2 || !hEU) return;
+          setTitleLoading(h1, true, 'Loading');
+          setTitleLoading(h2, true, 'Loading');
+          setTitleLoading(hEU, true, 'Loading');
 
-        setTitleLoading(h1, true, 'Loading');
-        setTitleLoading(h2, true, 'Loading');
-        setTitleLoading(hEU, true, 'Loading');
+          buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false));
+          buildCountryMonthChart(xlsxNames);
+          buildTempMonthChart(xlsxNames);
+          buildWeatherMonthChart(xlsxNames);
+          buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false));
+          buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false));
+        };
 
-        buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false));
-        buildCountryMonthChart(xlsxNames);
-        buildTempMonthChart(xlsxNames);
-        buildWeatherMonthChart(xlsxNames);
-        buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false));
-        buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false));
-      };
-
-      if ('requestIdleCallback' in window) {
-        requestIdleCallback(startOverview);
-      } else {
-        setTimeout(startOverview, 0);
-      }
+        if ('requestIdleCallback' in window) {
+          requestIdleCallback(startOverview);
+        } else {
+          setTimeout(startOverview, 0);
+        }
+      });
     })
     .catch(err => showError('Failed to list blobs: ' + err));
 }
 
     // ---------- SIDEBAR ----------
-  function buildSidebar(files) {
+  function buildSidebar(files, onDone) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
 
-  // Header that navigates back to overview
+  // Header → back to overview
   const header = document.createElement('h2');
   header.textContent = 'Test sessions';
   header.style.padding = '16px';
@@ -1014,8 +1013,8 @@ function canonicalEU(raw){
   });
   sb.appendChild(header);
 
-  // Per-day state: created lazily the first time we see a file from that day
-  const dayMap = new Map(); // dayStr -> { headerEl, listEl, countEl, files: [], summariesLoaded: false }
+  // Per-day containers (created lazily)
+  const dayMap = new Map(); // dayStr -> { headerEl, listEl, countEl, files: [], summariesLoaded:false }
 
   function ensureDay(dayStr) {
     if (dayMap.has(dayStr)) return dayMap.get(dayStr);
@@ -1049,7 +1048,7 @@ function canonicalEU(raw){
     };
     dayMap.set(dayStr, info);
 
-    // Toggle expand/collapse + lazy summary loading for this day
+    // Toggle expand/collapse + lazy summary loading when user expands that day
     const toggle = () => {
       const expand = list.style.display !== 'block';
       list.style.display = expand ? 'block' : 'none';
@@ -1093,27 +1092,24 @@ function canonicalEU(raw){
       }
     });
 
-    // Append in the order days are first seen (files are already newest → oldest)
+    // Days appear in the order we first see them (files are newest → oldest)
     sb.appendChild(dayHeader);
     sb.appendChild(list);
-
     return info;
   }
 
-  // 🔹 Strictly sequential session processing (youngest file first)
   let index = 0;
 
   function addNextSession() {
     if (index >= files.length) {
-      // After all sessions exist, start updating "Active" badges periodically
       ensureActiveBadgeUpdater();
+      if (typeof onDone === 'function') onDone();
       return;
     }
 
     const filename = files[index++];
     const m = filename.match(/(\d{4}-\d{2}-\d{2})/);
     if (!m) {
-      // no valid date in filename → skip, but keep processing order
       setTimeout(addNextSession, 0);
       return;
     }
@@ -1122,7 +1118,6 @@ function canonicalEU(raw){
     const info = ensureDay(dayStr);
     info.files.push(filename);
 
-    // Pretty name (strip date_ prefix + .xlsx)
     const niceName = filename.replace(`${dayStr}_`, '').replace('.xlsx', '');
 
     const li = document.createElement('li');
@@ -1162,25 +1157,24 @@ function canonicalEU(raw){
     li.appendChild(meta);
     info.listEl.appendChild(li);
 
-    // Increment day "tests" counter
+    // Update "X tests" pill
     const currentCount = parseInt(info.countEl.textContent, 10) || 0;
     info.countEl.textContent = String(currentCount + 1);
 
-    // For the very first session we:
-    //  - expand its day so it's visible
-    //  - DO NOT yet load all summaries (that still waits for user interaction)
+    // 🔹 For the very first session only: auto-expand its day so it's visible immediately
     if (index === 1) {
       info.listEl.style.display = 'block';
       info.headerEl.setAttribute('aria-expanded', 'true');
       info.headerEl.title = 'Hide sessions';
+      // Note: we do NOT trigger summary loading here – that still waits for user
     }
 
-    // 🔹 Yield after each single session so the youngest is clickable
+    // Yield between each session → first (youngest) row becomes clickable
     setTimeout(addNextSession, 0);
   }
 
-  // Kick off sequential building
-  addNextSession();
+  // Start async; lets browser paint header immediately
+  setTimeout(addNextSession, 0);
 }
 
     let _activeBadgeTimer = null;
