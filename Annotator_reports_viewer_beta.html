@@ -2005,105 +2005,149 @@ function renderScoringLegend(selectedScore){
 }
 
 // Build "Score per function" section based on KPI sheet + KPI_buttons.csv
+// Build "Score per function" section based on KPI sheet + KPI_buttons.csv
 async function buildScorePerFunctionSection(wb){
   const meta = await getKpiButtonsMeta().catch(() => null);
-  if (!meta || !meta.groups || !(meta.groups instanceof Map)){
-    console.warn('[KPI] No KPI meta or invalid KPI_buttons.csv structure');
+  if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0) {
     return '';
   }
 
   const kpiSheetName = wb.SheetNames.find(n => /kpi/i.test(n));
-  if (!kpiSheetName){
-    console.warn('[KPI] No sheet with "KPI" in the name found');
-    return '';
-  }
+  if (!kpiSheetName) return '';
 
   const sheet = wb.Sheets[kpiSheetName];
-  const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-  if (!rows.length){
-    console.warn('[KPI] KPI sheet is empty');
-    return '';
-  }
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  if (!rows.length) return '';
 
   const header = rows[0].map(v => String(v ?? '').trim());
   const lower  = header.map(h => h.toLowerCase());
 
-  // ----- 1) Find the "Events per 1000 km" column -----
-  const kpiColIdx = lower.findIndex(h => /events?\s*(?:per|\/)\s*1000\s*km/.test(h));
-  if (kpiColIdx < 0){
-    console.warn('[KPI] No "Events per 1000 km" column found in KPI sheet header:', header);
-    return '';
-  }
+  // "Events per 1000 km" column
+  const kpiColIdx = lower.findIndex(h =>
+    /events?\s*(?:per|\/)\s*1000\s*km/.test(h)
+  );
+  if (kpiColIdx < 0) return '';
+
+  // Optional explicit group column (if you ever add one later)
+  let groupIdx = lower.findIndex(h => h === 'group');
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
+  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h) || /\bsystem\b/.test(h));
+
+  // Issue column — used to join with KPI_buttons.csv
+  let issueIdx = lower.findIndex(h => h === 'issue');
+  if (issueIdx < 0) issueIdx = lower.findIndex(h => /\bissue\b/.test(h) || /kpi.*id/.test(h) || /\bid\b/.test(h));
+
+  const functionNames = Array.from(meta.groups.keys()).sort((a,b) => a.localeCompare(b));
+  const issueToGroup = meta.issueToGroup || new Map();
 
   const toNum = (v) => {
     if (v == null) return null;
-    const s = String(v).trim().replace(/[^\d,.\-]/g, '').replace(',', '.');
+    const s = String(v).trim().replace(/[^\d,.\-]/g,'').replace(',', '.');
     const n = parseFloat(s);
     return Number.isFinite(n) ? n : null;
   };
-  const normName = (v) => String(v ?? '').trim().toLowerCase();
 
-  // ----- 2) Try to find the group / function column by header text -----
-  let groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
-  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\b(function|feature)\b/.test(h));
-  if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bsystem\b/.test(h));
+  // Accumulate data per function
+  const data = new Map();
+  functionNames.forEach(fn => {
+    data.set(fn, { hasRow:false, hasNumeric:false, sum:0 });
+  });
 
-  // ----- 2b) If header search failed, try to infer by content -----
-  if (groupIdx < 0){
-    console.warn('[KPI] No obvious group/function header, trying to infer by content…');
+  for (let r = 1; r < rows.length; r++){
+    const row = rows[r];
 
-    // Known function names from KPI_buttons.csv
-    const knownFns = new Set(
-      Array.from(meta.groups.keys()).map(normName).filter(Boolean)
-    );
+    let fnName = null;
 
-    let bestCol = -1;
-    let bestMatches = 0;
-
-    for (let c = 0; c < header.length; c++){
-      let matches = 0;
-      let nonEmpty = 0;
-
-      for (let r = 1; r < rows.length; r++){
-        const cell = rows[r]?.[c];
-        if (cell == null || String(cell).trim() === '') continue;
-        nonEmpty++;
-
-        if (knownFns.has(normName(cell))) {
-          matches++;
+    // 1) If there is a real group column and it already has ACC/LCC/… → use that
+    if (groupIdx >= 0){
+      const raw = row[groupIdx];
+      if (raw != null){
+        const txt = String(raw).trim();
+        if (meta.groups.has(txt)){
+          fnName = txt;
+        } else {
+          // maybe "ACC – Cut in" → see if any known function is contained
+          for (const candidate of functionNames){
+            const re = new RegExp(`\\b${candidate}\\b`, 'i');
+            if (re.test(txt)) { fnName = candidate; break; }
+          }
         }
       }
+    }
 
-      // Heuristic: at least 1 match, and keep the column with most matches
-      if (matches > 0 && matches >= bestMatches){
-        bestMatches = matches;
-        bestCol = c;
+    // 2) If still unknown, join via Issue → Group from KPI_buttons.csv
+    if (!fnName && issueIdx >= 0 && issueToGroup.size){
+      const issueVal = row[issueIdx];
+      if (issueVal != null){
+        const key = String(issueVal).trim();
+        if (issueToGroup.has(key)){
+          fnName = issueToGroup.get(key);
+        }
       }
     }
 
-    if (bestCol >= 0){
-      groupIdx = bestCol;
-      console.warn(`[KPI] Inferred function/group column at index ${groupIdx} (header="${header[groupIdx]}") with ${bestMatches} matches.`);
+    if (!fnName || !data.has(fnName)) continue;
+
+    const entry = data.get(fnName);
+    entry.hasRow = true;
+
+    const rate = toNum(row[kpiColIdx]);
+    if (rate != null){
+      entry.hasNumeric = true;
+      entry.sum += rate;
     }
   }
 
-  // Still nothing → we really can’t do per-function scoring
-  if (groupIdx < 0){
-    console.warn('[KPI] Could not infer a function/group column in KPI sheet. Headers:', header);
-    const body = `
-      <tr>
-        <td colspan="2">
-          Could not find a function/group column in the KPI sheet.
-          Make sure at least one column contains values like the function names in KPI_buttons.csv (ACC, LCC, …).
-        </td>
-      </tr>`;
+  // Now build the table rows
+  const bodyRows = functionNames.map(fn => {
+    const entry = data.get(fn) || { hasRow:false, hasNumeric:false, sum:0 };
+    const expectedKpis = meta.groups.get(fn) || 0;
+
+    let score = null;
+    let label = '';
+    let rateStr = '–';
+
+    if (!entry.hasRow){
+      // KPI_buttons says this function exists, but there is no row in KPI sheet
+      score = 0;
+      label = 'No function';
+    } else if (!entry.hasNumeric){
+      // Function present in KPI sheet but no numeric values → treat as perfect
+      score = 10;
+      label = 'Exceptional';
+    } else {
+      const denom = expectedKpis > 0 ? expectedKpis : 1;
+      const avg = entry.sum / denom;
+      rateStr = avg.toFixed(1);
+      score = scoreFromRate(avg);
+      label = SCORE_LABEL[score] || '';
+    }
+
+    let scoreHtml;
+    if (score === 0){
+      scoreHtml = `<span class="kpi-badge s0">0 — No function</span>`;
+    } else if (typeof score === 'number'){
+      scoreHtml = `<span class="kpi-badge s${score}">${score} — ${escapeHtml(label)}${rateStr !== '–' ? ` (${rateStr} /1000 km)` : ''}</span>`;
+    } else {
+      scoreHtml = `<span class="kpi-badge s0">N/A</span>`;
+    }
+
     return `
-      <h2>Score per function</h2>
-      <table class="report-table">
-        <thead><tr><th>Function</th><th>Score</th></tr></thead>
-        <tbody>${body}</tbody>
-      </table>`;
-  }
+      <tr>
+        <td>${escapeHtml(fn)}</td>
+        <td>${scoreHtml}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <h2>Score per function</h2>
+    <table class="report-table">
+      <thead>
+        <tr><th>Function</th><th>Score</th></tr>
+      </thead>
+      <tbody>${bodyRows}</tbody>
+    </table>`;
+}
 
   // ----- 3) Aggregate KPI data per function as written in the KPI sheet -----
   const sheetGroups = new Map();  // norm -> { displayName, rowCount, hasNumeric, sum }
@@ -2243,12 +2287,67 @@ async function buildScorePerFunctionSection(wb){
 }
 
 
-// Parse KPI_buttons.csv once → total KPIs + per-function counts
+// Parse KPI_buttons.csv once → total KPIs + per-function counts + Issue→Group map
 function getKpiButtonsMeta(){
   if (window.__KPI_META__) return Promise.resolve(window.__KPI_META__);
 
   const relUrl   = 'KPI_buttons.csv';
   const azureUrl = `${BASE_URL}/KPI_buttons.csv?${SAS_TOKEN}`;
+
+  const parseText = (txt) => {
+    const lines = txt.split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length){
+      const meta = { totalKpis: 0, groups: new Map(), issueToGroup: new Map() };
+      window.__KPI_META__ = meta;
+      return meta;
+    }
+
+    const headerLine = lines[0];
+    const delim = headerLine.includes(';') ? ';' : ',';
+    const headers = headerLine.split(delim).map(h => h.trim().toLowerCase());
+
+    const groupIdx = headers.findIndex(h =>
+      h === 'group' || /group/.test(h)
+    );
+    const issueIdx = headers.findIndex(h =>
+      h === 'issue' || /issue/.test(h) || /^kpi ?id$/.test(h) || /kpi.*id/.test(h)
+    );
+
+    let totalKpis = 0;
+    const groups = new Map();
+    const issueToGroup = new Map();
+
+    for (let i = 1; i < lines.length; i++){
+      const line = lines[i];
+      if (!line.trim()) continue;
+
+      // original behaviour: a KPI row contains "redButton" text
+      const isKpiRow = line.indexOf('redButton') !== -1;
+      if (!isKpiRow) continue;
+
+      const parts = line.split(delim);
+      totalKpis++;
+
+      if (groupIdx >= 0){
+        const g = (parts[groupIdx] || '').trim();
+        if (g){
+          groups.set(g, (groups.get(g) || 0) + 1);
+        }
+      }
+
+      if (groupIdx >= 0 && issueIdx >= 0){
+        const g = (parts[groupIdx] || '').trim();
+        const issue = (parts[issueIdx] || '').trim();
+        if (g && issue){
+          issueToGroup.set(issue, g);
+        }
+      }
+    }
+
+    const meta = { totalKpis, groups, issueToGroup };
+    window.__KPI_META__ = meta;
+    return meta;
+  };
 
   const fetchAndParse = (url) =>
     fetch(nc(url), { cache: 'default' })
@@ -2256,45 +2355,7 @@ function getKpiButtonsMeta(){
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.text();
       })
-      .then(txt => {
-        const lines = txt.split(/\r?\n/).filter(l => l.trim() !== '');
-        if (!lines.length){
-          const meta = { totalKpis: 0, groups: new Map() };
-          window.__KPI_META__ = meta;
-          return meta;
-        }
-
-        const headerLine = lines[0];
-        const delim = headerLine.includes(';') ? ';' : ',';
-        const headers = headerLine.split(delim).map(h => h.trim().toLowerCase());
-        const groupIdx = headers.findIndex(h => h === 'group' || /group/.test(h));
-
-        let totalKpis = 0;
-        const groups = new Map();
-
-        for (let i = 1; i < lines.length; i++){
-          const line = lines[i];
-          if (!line.trim()) continue;
-
-          // original behaviour: a KPI row contains "redButton" text
-          const isKpiRow = line.indexOf('redButton') !== -1;
-          if (!isKpiRow) continue;
-
-          totalKpis++;
-
-          if (groupIdx >= 0){
-            const parts = line.split(delim);
-            const g = (parts[groupIdx] || '').trim();
-            if (g){
-              groups.set(g, (groups.get(g) || 0) + 1);
-            }
-          }
-        }
-
-        const meta = { totalKpis, groups };
-        window.__KPI_META__ = meta;
-        return meta;
-      });
+      .then(parseText);
 
   return fetchAndParse(relUrl)
     .catch(() => fetchAndParse(azureUrl))
