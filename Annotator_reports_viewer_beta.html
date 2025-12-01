@@ -2005,18 +2005,21 @@ function renderScoringLegend(selectedScore){
 }
 
 // Build "Score per function" section based on KPI sheet + KPI_buttons.csv
-// Build "Score per function" section based on KPI sheet + KPI_buttons.csv
 async function buildScorePerFunctionSection(wb){
   const meta = await getKpiButtonsMeta().catch(() => null);
   if (!meta || !meta.groups || !(meta.groups instanceof Map) || meta.groups.size === 0) {
+    console.warn('[KPI] No KPI_buttons.csv meta (groups) found');
     return '';
   }
 
   const kpiSheetName = wb.SheetNames.find(n => /kpi/i.test(n));
-  if (!kpiSheetName) return '';
+  if (!kpiSheetName) {
+    console.warn('[KPI] No KPI sheet found in workbook');
+    return '';
+  }
 
   const sheet = wb.Sheets[kpiSheetName];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
   if (!rows.length) return '';
 
   const header = rows[0].map(v => String(v ?? '').trim());
@@ -2026,19 +2029,25 @@ async function buildScorePerFunctionSection(wb){
   const kpiColIdx = lower.findIndex(h =>
     /events?\s*(?:per|\/)\s*1000\s*km/.test(h)
   );
-  if (kpiColIdx < 0) return '';
+  if (kpiColIdx < 0) {
+    console.warn('[KPI] No "Events per 1000 km" column in KPI sheet');
+    return '';
+  }
 
-  // Optional explicit group column (if you ever add one later)
+  // Optional explicit group column
   let groupIdx = lower.findIndex(h => h === 'group');
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h) || /\bsystem\b/.test(h));
 
-  // Issue column — used to join with KPI_buttons.csv
+  // Issue column – we will infer function from this text
   let issueIdx = lower.findIndex(h => h === 'issue');
   if (issueIdx < 0) issueIdx = lower.findIndex(h => /\bissue\b/.test(h) || /kpi.*id/.test(h) || /\bid\b/.test(h));
 
-  const functionNames = Array.from(meta.groups.keys()).sort((a,b) => a.localeCompare(b));
-  const issueToGroup = meta.issueToGroup || new Map();
+  const functionNames = Array.from(meta.groups.keys());
+  const issueToGroup  = meta.issueToGroup || new Map();
+
+  // Sort by length desc so "LCC+" matches before "LCC"
+  const fnSortedByLen = [...functionNames].sort((a, b) => b.length - a.length);
 
   const toNum = (v) => {
     if (v == null) return null;
@@ -2046,6 +2055,27 @@ async function buildScorePerFunctionSection(wb){
     const n = parseFloat(s);
     return Number.isFinite(n) ? n : null;
   };
+
+  // Normalise any string (group cell or issue text) to one of our function names
+  function normalizeFunctionName(raw){
+    if (raw == null) return null;
+    const txt = String(raw).trim();
+    if (!txt) return null;
+
+    const low = txt.toLowerCase();
+
+    // 1) exact case-insensitive match against our function names
+    for (const fn of functionNames){
+      if (low === fn.toLowerCase()) return fn;
+    }
+
+    // 2) substring match (e.g. "ACC – Cut in" → "ACC")
+    for (const fn of fnSortedByLen){
+      if (low.includes(fn.toLowerCase())) return fn;
+    }
+
+    return null;
+  }
 
   // Accumulate data per function
   const data = new Map();
@@ -2055,35 +2085,25 @@ async function buildScorePerFunctionSection(wb){
 
   for (let r = 1; r < rows.length; r++){
     const row = rows[r];
-
     let fnName = null;
 
-    // 1) If there is a real group column and it already has ACC/LCC/… → use that
+    // 1) Explicit group column (if present)
     if (groupIdx >= 0){
-      const raw = row[groupIdx];
-      if (raw != null){
-        const txt = String(raw).trim();
-        if (meta.groups.has(txt)){
-          fnName = txt;
-        } else {
-          // maybe "ACC – Cut in" → see if any known function is contained
-          for (const candidate of functionNames){
-            const re = new RegExp(`\\b${candidate}\\b`, 'i');
-            if (re.test(txt)) { fnName = candidate; break; }
-          }
-        }
+      fnName = normalizeFunctionName(row[groupIdx]);
+    }
+
+    // 2) Join via Issue→Group from KPI_buttons.csv
+    if (!fnName && issueIdx >= 0 && issueToGroup.size){
+      const issueVal = row[issueIdx];
+      const key = issueVal == null ? '' : String(issueVal).trim();
+      if (issueToGroup.has(key)){
+        fnName = issueToGroup.get(key);
       }
     }
 
-    // 2) If still unknown, join via Issue → Group from KPI_buttons.csv
-    if (!fnName && issueIdx >= 0 && issueToGroup.size){
-      const issueVal = row[issueIdx];
-      if (issueVal != null){
-        const key = String(issueVal).trim();
-        if (issueToGroup.has(key)){
-          fnName = issueToGroup.get(key);
-        }
-      }
+    // 3) Infer directly from Issue text (most important for your sheet)
+    if (!fnName && issueIdx >= 0){
+      fnName = normalizeFunctionName(row[issueIdx]);
     }
 
     if (!fnName || !data.has(fnName)) continue;
@@ -2098,8 +2118,8 @@ async function buildScorePerFunctionSection(wb){
     }
   }
 
-  // Now build the table rows
-  const bodyRows = functionNames.map(fn => {
+  // Build table rows
+  const bodyRows = functionNames.sort((a,b) => a.localeCompare(b)).map(fn => {
     const entry = data.get(fn) || { hasRow:false, hasNumeric:false, sum:0 };
     const expectedKpis = meta.groups.get(fn) || 0;
 
@@ -2108,19 +2128,19 @@ async function buildScorePerFunctionSection(wb){
     let rateStr = '–';
 
     if (!entry.hasRow){
-      // KPI_buttons says this function exists, but there is no row in KPI sheet
+      // Function exists in KPI_buttons, but never appears in this session
       score = 0;
       label = 'No function';
     } else if (!entry.hasNumeric){
-      // Function present in KPI sheet but no numeric values → treat as perfect
+      // Function present but without numeric values – treat as perfect
       score = 10;
       label = 'Exceptional';
     } else {
       const denom = expectedKpis > 0 ? expectedKpis : 1;
-      const avg = entry.sum / denom;
-      rateStr = avg.toFixed(1);
-      score = scoreFromRate(avg);
-      label = SCORE_LABEL[score] || '';
+      const avg   = entry.sum / denom;
+      rateStr     = avg.toFixed(1);
+      score       = scoreFromRate(avg);
+      label       = SCORE_LABEL[score] || '';
     }
 
     let scoreHtml;
