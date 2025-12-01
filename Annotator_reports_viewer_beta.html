@@ -2034,12 +2034,12 @@ async function buildScorePerFunctionSection(wb){
     return '';
   }
 
-  // Optional explicit group column
+  // Optional explicit group/function/feature/system column
   let groupIdx = lower.findIndex(h => h === 'group');
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bgroup\b/.test(h));
   if (groupIdx < 0) groupIdx = lower.findIndex(h => /\bfunction\b/.test(h) || /\bfeature\b/.test(h) || /\bsystem\b/.test(h));
 
-  // Issue column – we will infer function from this text
+  // Issue column – used both for inference and to detect "No function" KPI
   let issueIdx = lower.findIndex(h => h === 'issue');
   if (issueIdx < 0) issueIdx = lower.findIndex(h => /\bissue\b/.test(h) || /kpi.*id/.test(h) || /\bid\b/.test(h));
 
@@ -2064,7 +2064,7 @@ async function buildScorePerFunctionSection(wb){
 
     const low = txt.toLowerCase();
 
-    // 1) exact case-insensitive match against our function names
+    // 1) exact case-insensitive match
     for (const fn of functionNames){
       if (low === fn.toLowerCase()) return fn;
     }
@@ -2080,7 +2080,12 @@ async function buildScorePerFunctionSection(wb){
   // Accumulate data per function
   const data = new Map();
   functionNames.forEach(fn => {
-    data.set(fn, { hasRow:false, hasNumeric:false, sum:0 });
+    data.set(fn, {
+      hasRow: false,
+      hasNumeric: false,
+      sum: 0,
+      hasNoFunctionKpi: false   // <-- NEW flag
+    });
   });
 
   for (let r = 1; r < rows.length; r++){
@@ -2101,7 +2106,7 @@ async function buildScorePerFunctionSection(wb){
       }
     }
 
-    // 3) Infer directly from Issue text (most important for your sheet)
+    // 3) Infer directly from Issue text
     if (!fnName && issueIdx >= 0){
       fnName = normalizeFunctionName(row[issueIdx]);
     }
@@ -2111,6 +2116,19 @@ async function buildScorePerFunctionSection(wb){
     const entry = data.get(fnName);
     entry.hasRow = true;
 
+    // --- Detect "No function" KPI for this function ---
+    const issueText = (issueIdx >= 0 && row[issueIdx] != null)
+      ? String(row[issueIdx]).trim().toLowerCase()
+      : '';
+    const groupText = (groupIdx >= 0 && row[groupIdx] != null)
+      ? String(row[groupIdx]).trim().toLowerCase()
+      : '';
+
+    if (issueText.startsWith('no function') || groupText.startsWith('no function')){
+      entry.hasNoFunctionKpi = true;
+    }
+
+    // Sum numeric KPI values
     const rate = toNum(row[kpiColIdx]);
     if (rate != null){
       entry.hasNumeric = true;
@@ -2118,46 +2136,58 @@ async function buildScorePerFunctionSection(wb){
     }
   }
 
-  // Build table rows
-  const bodyRows = functionNames.sort((a,b) => a.localeCompare(b)).map(fn => {
-    const entry = data.get(fn) || { hasRow:false, hasNumeric:false, sum:0 };
-    const expectedKpis = meta.groups.get(fn) || 0;
+  // Build table rows with new scoring rules:
+  // - If hasNoFunctionKpi → score 0 (No function)
+  // - Else if no rows at all → 10 (Exceptional)
+  // - Else if rows but no numeric KPI → 10 (Exceptional)
+  // - Else → normal scoreFromRate(avg)
+  const bodyRows = functionNames
+    .sort((a,b) => a.localeCompare(b))
+    .map(fn => {
+      const entry = data.get(fn) || {
+        hasRow:false, hasNumeric:false, sum:0, hasNoFunctionKpi:false
+      };
+      const expectedKpis = meta.groups.get(fn) || 0;
 
-    let score = null;
-    let label = '';
-    let rateStr = '–';
+      let score = null;
+      let label = '';
+      let rateStr = '–';
 
-    if (!entry.hasRow){
-      // Function exists in KPI_buttons, but never appears in this session
-      score = 0;
-      label = 'No function';
-    } else if (!entry.hasNumeric){
-      // Function present but without numeric values – treat as perfect
-      score = 10;
-      label = 'Exceptional';
-    } else {
-      const denom = expectedKpis > 0 ? expectedKpis : 1;
-      const avg   = entry.sum / denom;
-      rateStr     = avg.toFixed(1);
-      score       = scoreFromRate(avg);
-      label       = SCORE_LABEL[score] || '';
-    }
+      if (entry.hasNoFunctionKpi){
+        // Explicit KPI "No function" for this function
+        score = 0;
+        label = 'No function';
+      } else if (!entry.hasRow){
+        // Function exists in global KPI list but not used in this session
+        score = 10;
+        label = 'Exceptional';
+      } else if (!entry.hasNumeric){
+        // Used but no numeric events → treat as perfect
+        score = 10;
+        label = 'Exceptional';
+      } else {
+        const denom = expectedKpis > 0 ? expectedKpis : 1;
+        const avg   = entry.sum / denom;
+        rateStr     = avg.toFixed(1);
+        score       = scoreFromRate(avg);
+        label       = SCORE_LABEL[score] || '';
+      }
 
-    let scoreHtml;
-    if (score === 0){
-      scoreHtml = `<span class="kpi-badge s0">0 — No function</span>`;
-    } else if (typeof score === 'number'){
-      scoreHtml = `<span class="kpi-badge s${score}">${score} — ${escapeHtml(label)}${rateStr !== '–' ? ` (${rateStr} /1000 km)` : ''}</span>`;
-    } else {
-      scoreHtml = `<span class="kpi-badge s0">N/A</span>`;
-    }
+      let scoreHtml;
+      if (score === 0){
+        scoreHtml = `<span class="kpi-badge s0">0 — No function</span>`;
+      } else if (typeof score === 'number'){
+        scoreHtml = `<span class="kpi-badge s${score}">${score} — ${escapeHtml(label)}${rateStr !== '–' ? ` (${rateStr} /1000 km)` : ''}</span>`;
+      } else {
+        scoreHtml = `<span class="kpi-badge s0">N/A</span>`;
+      }
 
-    return `
-      <tr>
-        <td>${escapeHtml(fn)}</td>
-        <td>${scoreHtml}</td>
-      </tr>`;
-  }).join('');
+      return `
+        <tr>
+          <td>${escapeHtml(fn)}</td>
+          <td>${scoreHtml}</td>
+        </tr>`;
+    }).join('');
 
   return `
     <h2>Score per function</h2>
