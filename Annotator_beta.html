@@ -2699,7 +2699,7 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded ${blobName}`);
 }
 
-    async function uploadWorkbookToAzure() {
+async function uploadWorkbookToAzure() {
   // 1. Create a new workbook
   const wb = XLSX.utils.book_new();
 
@@ -2718,7 +2718,7 @@ async function uploadCSVtoAzure(tableId) {
     if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
       const range = XLSX.utils.decode_range(ws['!ref']);
       for (let row = range.s.r + 1; row <= range.e.r; ++row) {
-        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 });
+        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 }); // column C
         const cell = ws[cellRef];
         if (cell && typeof cell.v === 'number') {
           cell.v = cell.v * 100;
@@ -2730,61 +2730,81 @@ async function uploadCSVtoAzure(tableId) {
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-// --- Build Sampling AoA (with dynamic toggle columns) ---
-const samplingHeader = [
-  "No","Timestamp","Latitude","Longitude",
-  "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
-];
-// one column per configured toggle signal (order = CSV order)
-toggleDefs.forEach(def => samplingHeader.push(def.signal));
-
-const samplingAoA = [ samplingHeader ];
-
-samplingTable.forEach(entry => {
-  const row = [
-    entry.no,
-    entry.timestamp,
-    entry.lat,
-    entry.lon,
-    entry.distance,
-    entry.speed,
-    entry.legalSpeed,
-    entry.issue || ''
+  // 3. --- Sampling sheet (as before, but toggle-aware) ---
+  const samplingHeader = [
+    "No","Timestamp","Latitude","Longitude",
+    "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
   ];
-  toggleDefs.forEach(def => {
-    const valFromEntry = entry.toggles?.[def.signal];
-    if (def.kind === 'tri') {
-      const fallback = def.states?.[0] || 'Not tested';
-      row.push(valFromEntry ?? fallback);
-    } else {
-      row.push(valFromEntry ?? def.offValue);
-    }
+  // one column per configured toggle signal (order = CSV order)
+  toggleDefs.forEach(def => samplingHeader.push(def.signal));
+
+  const samplingAoA = [ samplingHeader ];
+
+  samplingTable.forEach(entry => {
+    const row = [
+      entry.no,
+      entry.timestamp,
+      entry.lat,
+      entry.lon,
+      entry.distance,
+      entry.speed,
+      entry.legalSpeed,
+      entry.issue || ''
+    ];
+    toggleDefs.forEach(def => {
+      const valFromEntry = entry.toggles?.[def.signal];
+      if (def.kind === 'tri') {
+        const fallback = def.states?.[0] || 'Not tested';
+        row.push(valFromEntry ?? fallback);
+      } else {
+        row.push(valFromEntry ?? def.offValue);
+      }
+    });
+    samplingAoA.push(row);
   });
-  samplingAoA.push(row);
-});
 
-const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
-XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
+  const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
+  XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-  // 4. Generate the binary workbook
+  // 4. --- NEW: Benchmark sheet with current toggle values ---
+  // One row per toggle button, latest value only
+  const benchmarkAoA = [
+    ["Label", "Signal", "Type", "Current value"]
+  ];
+
+  toggleDefs.forEach(def => {
+    const type = def.kind === 'tri' ? '3-state' : '2-state';
+    const value = toggleState[def.signal];
+    benchmarkAoA.push([
+      def.label || def.signal,
+      def.signal,
+      type,
+      value
+    ]);
+  });
+
+  const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
+  XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
+
+  // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
     bookType: 'xlsx',
     type:      'array'
   });
 
-  // 5. Wrap in a Blob
+  // 6. Wrap in a Blob
   const blob = new Blob([wbout], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
 
-  // 6. Determine filename using your appStartTime helper
+  // 7. Determine filename using your appStartTime helper
   const blobName = `${reportBaseName}.xlsx`;
 
-  // 7. Build upload URL from containerSasUrl
+  // 8. Build upload URL from containerSasUrl
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  // 8. PUT to Azure Blob Storage
+  // 9. PUT to Azure Blob Storage
   const resp = await fetch(uploadUrl, {
     method: 'PUT',
     headers: {
@@ -2799,8 +2819,8 @@ XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
   }
 
   console.log(`✔ Uploaded workbook: ${blobName}`);
-lastXlsxUploadMs = Date.now();
-updateUploadAgo();
+  lastXlsxUploadMs = Date.now();
+  updateUploadAgo();
 }
     
   async function exportMainContentToAzure() {
