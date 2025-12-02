@@ -990,6 +990,12 @@ form.addEventListener('submit', async e => {
 /* --- Chime audio setup --- */
 let audioCtx = null;
 let chimeBus = null; // master gain for chimes
+// --- Toggle system ---
+const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
+let toggleDefs = [];      // list of { signal, onValue, offValue, label } built from CSV
+
+// NEW: stable ordering for tri-state buttons (per creation order)
+let triOrderSeed = 0;
 
 function initAudioOnce() {
   if (audioCtx) return;
@@ -2354,9 +2360,114 @@ function renderLatestSnapshots(limit = 5) {
   container.appendChild(table);
 }
 
-  function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
+function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
-    // Build buttons from CSV using fetch + PapaParse
+function resortTriToggles(groupEl) {
+  if (!groupEl) return;
+
+  const triBtns = Array.from(
+    groupEl.querySelectorAll('button[data-toggle-type="tri"]')
+  );
+  if (triBtns.length === 0) return;
+
+  triBtns.sort((a, b) => {
+    const aIdx   = Number(a.dataset.stateIdx  || 0);   // 0 = Not tested
+    const bIdx   = Number(b.dataset.stateIdx  || 0);
+    const aOrder = Number(a.dataset.order     || 0);   // original creation order
+    const bOrder = Number(b.dataset.order     || 0);
+
+    if (aIdx !== bIdx) return aIdx - bIdx;   // all “Not tested” (0) first
+    return aOrder - bOrder;                  // stable within the same state
+  });
+
+  // Re-append in sorted order (keeps any non-tri elements – headers, 2-state toggles – where they are)
+  triBtns.forEach(btn => groupEl.appendChild(btn));
+}
+
+function createTriToggleButton(groupEl, { label, cssClass, signal, def }) {
+  const states = ['Not tested', 'No', 'Yes'];
+
+  // Figure out initial state index
+  let stateIdx = 0;  // default = Not tested
+  if (def) {
+    const lower = def.toLowerCase();
+    const found = states.findIndex(s => s.toLowerCase() === lower);
+    if (found >= 0) {
+      stateIdx = found;
+    } else if (def === '1') {
+      stateIdx = 1;
+    } else if (def === '2') {
+      stateIdx = 2;
+    }
+  }
+
+  // Store state in the shared toggleState map
+  toggleState[signal] = states[stateIdx];
+
+  // Keep using toggleDefs for export (Sampling / Benchmark sheets)
+  toggleDefs.push({
+    signal,
+    onValue:  states[2],   // “Yes”
+    offValue: states[0],   // “Not tested” for fallback
+    label,
+    mode:    'tri',
+    states
+  });
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `toggleButton bigButton ${cssClass}`.trim();
+  btn.dataset.toggleType = 'tri';
+  btn.dataset.stateIdx   = String(stateIdx);
+  btn.dataset.order      = String(triOrderSeed++);
+
+  // 3-state => role="button" (not a binary switch)
+  btn.setAttribute('role', 'button');
+
+  const text  = document.createElement('span');
+  const track = document.createElement('span');
+  const thumb = document.createElement('span');
+  track.className = 'track';
+  thumb.className = 'thumb';
+  track.appendChild(thumb);
+  btn.append(text, track);
+
+  function applyVisual() {
+    const idx = Number(btn.dataset.stateIdx || 0);
+    const stateLabel = states[idx] || states[0];
+
+    text.textContent = `${label}: ${stateLabel}`;
+    toggleState[signal] = stateLabel;
+
+    // Optional: state-specific classes for styling
+    btn.classList.toggle('tri-not-tested', idx === 0);
+    btn.classList.toggle('tri-no',         idx === 1);
+    btn.classList.toggle('tri-yes',        idx === 2);
+  }
+
+  function advanceState() {
+    let idx = Number(btn.dataset.stateIdx || 0);
+    idx = (idx + 1) % states.length;          // cycle 0→1→2→0
+    btn.dataset.stateIdx = String(idx);
+    applyVisual();
+
+    // ⬇️ Re-sort this group so all “Not tested” stay above Yes/No
+    resortTriToggles(groupEl);
+  }
+
+  btn.addEventListener('click', advanceState);
+  btn.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      advanceState();
+    }
+  });
+
+  applyVisual();
+  groupEl.appendChild(btn);
+}
+    
+// Build buttons from CSV using fetch + PapaParse
 // Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
@@ -2388,12 +2499,62 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
 
         if (!groupKey || !label) return;
 
-        // one column per group (header item will be just another row in the group)
         if (!groups[groupKey]) {
           const wrap = document.createElement('div');
           wrap.className = 'button-group';
           groups[groupKey] = wrap;
           buttonGroups.appendChild(wrap);
+        }
+
+        const groupEl = groups[groupKey];
+
+        // NEW: 3-state toggle (Not tested / No / Yes)
+        if (type === 'toggle3' && signal) {
+          createTriToggleButton(groupEl, { label, cssClass, signal, def });
+          return;
+        }
+
+        // EXISTING: 2-state toggle (unchanged)
+        if (type === 'toggle' && signal) {
+          const isOn =
+            def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
+
+          toggleState[signal] = isOn ? onValue : offValue;
+          toggleDefs.push({ signal, onValue, offValue, label });
+
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `toggleButton bigButton ${cssClass}`.trim();
+          btn.setAttribute('role', 'switch');
+          btn.setAttribute('aria-checked', String(isOn));
+
+          const text  = document.createElement('span');
+          const track = document.createElement('span');
+          const thumb = document.createElement('span');
+          track.className = 'track';
+          thumb.className = 'thumb';
+          track.appendChild(thumb);
+          btn.append(text, track);
+
+          const render = () => {
+            const on = btn.getAttribute('aria-checked') === 'true';
+            const current = on ? onValue : offValue;
+            text.textContent = `${label}: ${current}`;
+          };
+          const flip = () => {
+            const on = btn.getAttribute('aria-checked') === 'true';
+            btn.setAttribute('aria-checked', String(!on));
+            toggleState[signal] = !on ? onValue : offValue;
+            render();
+          };
+          render();
+          btn.addEventListener('click', flip);
+          btn.addEventListener('keydown', e => {
+            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
+          });
+
+          groupEl.appendChild(btn);
+          return;
         }
 
         // ─────────────────────────────────────────────
