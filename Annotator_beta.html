@@ -11,8 +11,6 @@
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-
   <!-- PapaParse for CSV parsing -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   
@@ -116,15 +114,7 @@ form.addEventListener('submit', async e => {
 <script defer src="https://cdn.jsdelivr.net/npm/microsoft-cognitiveservices-speech-sdk@1.31.0/distrib/browser/microsoft.cognitiveservices.speech.sdk.bundle.js"></script>
 
   <style>
-    
-    html, body {
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-  padding: 0;
-  font-family: "Noto Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
+    html, body { height: 100%; margin: 0; overflow: hidden; padding: 0; font-family: Arial, sans-serif; }
     #sidebar {
       position: fixed; top: 0; left: 0; height: 100%; width: 182px;
       transform: translateX(-152px); transition: transform .3s ease;
@@ -2125,7 +2115,14 @@ function recordSample(issueText = '') {
   // snapshot current toggles (so export is time-accurate)
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
-    toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
+    if (def.kind === 'tri') {
+      // tri-state: Not tested / No / Yes
+      const fallback = def.states?.[0] || 'Not tested';
+      toggleSnapshot[def.signal] = toggleState[def.signal] ?? fallback;
+    } else {
+      // binary legacy toggle
+      toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
+    }
   });
 
   samplingTable.push({
@@ -2360,13 +2357,17 @@ function renderLatestSnapshots(limit = 5) {
   function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
     // Build buttons from CSV using fetch + PapaParse
+// Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
 
   fetch(csvFile)
-    .then(r => { if (!r.ok) throw new Error(`Failed to load ${csvFile}: ${r.status} ${r.statusText}`); return r.text(); })
+    .then(r => {
+      if (!r.ok) throw new Error(`Failed to load ${csvFile}: ${r.status} ${r.statusText}`);
+      return r.text();
+    })
     .then(csvText => {
       const { data, errors } = Papa.parse(csvText, { header: true, skipEmptyLines: true });
       if (errors?.length) console.error('CSV parse errors:', errors);
@@ -2395,12 +2396,15 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           buttonGroups.appendChild(wrap);
         }
 
+        // ─────────────────────────────────────────────
+        // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
+        // ─────────────────────────────────────────────
         if (type === 'toggle' && signal) {
           const isOn =
             def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
 
           toggleState[signal] = isOn ? onValue : offValue;
-          toggleDefs.push({ signal, onValue, offValue, label });
+          toggleDefs.push({ signal, onValue, offValue, label, kind: 'binary' });
 
           const btn = document.createElement('button');
           btn.type = 'button';
@@ -2437,7 +2441,71 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           return;
         }
 
-        // normal press-to-log buttons (including grey headers)
+        // ─────────────────────────────────────────────
+        // 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
+        // ─────────────────────────────────────────────
+        if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
+          // UI states are fixed as requested:
+          const states = ['Not tested', 'No', 'Yes'];
+
+          // decide default index from CSV "default" column
+          let defaultIndex = 0; // Not tested
+          const d = def.toLowerCase();
+          if (d === 'no' || d === '0') defaultIndex = 1;
+          if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
+
+          let stateIndex = defaultIndex;
+          toggleState[signal] = states[stateIndex];
+
+          // stash in toggleDefs so sampling/export sees it
+          toggleDefs.push({
+            signal,
+            label,
+            kind: 'tri',
+            states
+          });
+
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `toggleButton bigButton ${cssClass}`.trim();
+          btn.setAttribute('role', 'button');
+
+          const text = document.createElement('span');
+          btn.appendChild(text);
+
+          const render = () => {
+            const state = states[stateIndex];
+            text.textContent = `${label}: ${state}`;
+
+            // subtle colour hint by state
+            if (state === 'Yes') {
+              btn.style.backgroundColor = '#2e7d32';
+            } else if (state === 'No') {
+              btn.style.backgroundColor = '#8b0000';
+            } else {
+              btn.style.backgroundColor = '#2a2a2a';
+            }
+          };
+
+          const cycle = () => {
+            stateIndex = (stateIndex + 1) % states.length; // 0 → 1 → 2 → 0 → …
+            toggleState[signal] = states[stateIndex];
+            render();
+          };
+
+          render();
+          btn.addEventListener('click', cycle);
+          btn.addEventListener('keydown', e => {
+            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
+          });
+
+          groups[groupKey].appendChild(btn);
+          return;
+        }
+
+        // ─────────────────────────────────────────────
+        // Normal press-to-log buttons (including grey headers)
+        // ─────────────────────────────────────────────
         const btn = document.createElement('button');
         btn.textContent = label;
         btn.className = `bigButton ${cssClass}`.trim();
@@ -2684,7 +2752,13 @@ samplingTable.forEach(entry => {
     entry.issue || ''
   ];
   toggleDefs.forEach(def => {
-    row.push(entry.toggles?.[def.signal] ?? def.offValue);
+    const valFromEntry = entry.toggles?.[def.signal];
+    if (def.kind === 'tri') {
+      const fallback = def.states?.[0] || 'Not tested';
+      row.push(valFromEntry ?? fallback);
+    } else {
+      row.push(valFromEntry ?? def.offValue);
+    }
   });
   samplingAoA.push(row);
 });
