@@ -927,51 +927,36 @@ function canonicalEU(raw){
       }
     }
 
-  function listBlobs() {
-  fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache:'default' })
-    .then(r => r.text())
-    .then(xml => {
-      const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    function listBlobs() {
+      fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache:'default' })
+        .then(r => r.text())
+        .then(xml => {
+          const doc = new DOMParser().parseFromString(xml, 'application/xml');
 
-      // Read blobs with their Last-Modified timestamps
-      const blobs = Array.from(doc.getElementsByTagName('Blob')).map(b => {
-        const name = b.getElementsByTagName('Name')[0]?.textContent || '';
-        const lmEl = b.getElementsByTagName('Last-Modified')[0] ||
-                     b.getElementsByTagName('Properties')[0]?.getElementsByTagName('Last-Modified')[0];
-        const lm   = lmEl?.textContent || '';
-        return { name, lastModifiedMs: Date.parse(lm) || 0 };
-      });
+          // Read blobs with their Last-Modified timestamps
+          const blobs = Array.from(doc.getElementsByTagName('Blob')).map(b => {
+            const name = b.getElementsByTagName('Name')[0]?.textContent || '';
+            const lmEl = b.getElementsByTagName('Last-Modified')[0] ||
+                         b.getElementsByTagName('Properties')[0]?.getElementsByTagName('Last-Modified')[0];
+            const lm   = lmEl?.textContent || '';
+            return { name, lastModifiedMs: Date.parse(lm) || 0 };
+          });
 
-      const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
-      if (xlsx.length === 0) {
-        showError('No .xlsx files found.');
-        return;
-      }
+          const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
+          if (xlsx.length === 0) { showError('No .xlsx files found.'); return; }
 
-      // 🔹 newest → oldest
-      xlsx.sort((a, b) => {
-        const la = a.lastModifiedMs || 0;
-        const lb = b.lastModifiedMs || 0;
-        if (lb !== la) return lb - la;      // newer first
-        return b.name.localeCompare(a.name);
-      });
+          // Cache for strict chronological sorting
+          blobMeta.clear();
+          xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
 
-      // cache metadata
-      blobMeta.clear();
-      xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
+          const xlsxNames = xlsx.map(b => b.name);
+          allFiles = xlsxNames; // remember for overview re-render
 
-      const xlsxNames = xlsx.map(b => b.name);
-      allFiles = xlsxNames;
+          buildSidebar(xlsxNames);
 
-      // 1) Build sidebar first, fully
-      // 2) Then start the heavy overview work
-      buildSidebar(xlsxNames, () => {
-        const startOverview = () => {
-          const h1  = document.getElementById('title-overview');
-          const h2  = document.getElementById('title-latest-routes');
+          const h1 = document.getElementById('title-overview');
+          const h2 = document.getElementById('title-latest-routes');
           const hEU = document.getElementById('title-eu-mileage');
-          if (!h1 || !h2 || !hEU) return;
-
           setTitleLoading(h1, true, 'Loading');
           setTitleLoading(h2, true, 'Loading');
           setTitleLoading(hEU, true, 'Loading');
@@ -982,24 +967,14 @@ function canonicalEU(raw){
           buildWeatherMonthChart(xlsxNames);
           buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false));
           buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false));
-        };
-
-        if ('requestIdleCallback' in window) {
-          requestIdleCallback(startOverview);
-        } else {
-          setTimeout(startOverview, 0);
-        }
-      });
-    })
-    .catch(err => showError('Failed to list blobs: ' + err));
-}
+        })
+        .catch(err => showError('Failed to list blobs: ' + err));
+    }
 
     // ---------- SIDEBAR ----------
-  function buildSidebar(files, onDone) {
+  function buildSidebar(files) {
   const sb = document.getElementById('sidebar');
   sb.innerHTML = '';
-
-  // Header → back to overview
   const header = document.createElement('h2');
   header.textContent = 'Test sessions';
   header.style.padding = '16px';
@@ -1007,76 +982,115 @@ function canonicalEU(raw){
   header.style.borderBottom = '1px solid #ddd';
   header.style.cursor = 'pointer';
   header.title = 'Back to overview';
-  header.addEventListener('click', (e) => {
-    e.preventDefault();
-    renderOverview();
-  });
+  header.addEventListener('click', (e) => { e.preventDefault(); renderOverview(); });
   sb.appendChild(header);
 
-  // Per-day containers (created lazily)
-  const dayMap = new Map(); // dayStr -> { headerEl, listEl, countEl, files: [], summariesLoaded:false }
+  const groups = files.reduce((acc, f) => {
+    const m = f.match(/(\d{4}-\d{2}-\d{2})/);
+    if (!m) return acc;
+    (acc[m[1]] ||= []).push(f);
+    return acc;
+  }, {});
 
-  function ensureDay(dayStr) {
-    if (dayMap.has(dayStr)) return dayMap.get(dayStr);
-
-    const dayHeader = document.createElement('div');
-    dayHeader.className = 'day-header';
-    dayHeader.setAttribute('role', 'button');
-    dayHeader.setAttribute('aria-expanded', 'false');
-    dayHeader.tabIndex = 0;
-    dayHeader.title = 'Show sessions';
+  Object.keys(groups).sort().reverse().forEach(day => {
+    const hdr = document.createElement('div');
+    hdr.className = 'day-header';
+    hdr.setAttribute('role','button');
+    hdr.setAttribute('aria-expanded','false');
+    hdr.tabIndex = 0;
+    hdr.title = 'Show sessions';
 
     const label = document.createElement('span');
-    label.textContent = dayStr;
-    dayHeader.appendChild(label);
+    label.textContent = day;
+    hdr.appendChild(label);
 
     const count = document.createElement('span');
     count.className = 'day-count';
-    count.textContent = '0';
-    dayHeader.appendChild(count);
+    count.textContent = String(groups[day].length);
+    hdr.appendChild(count);
 
-    const list = document.createElement('ul');
-    list.className = 'session-list';
-    list.style.display = 'none';
+    const lst = document.createElement('ul');
+    lst.className = 'session-list';
+    lst.style.display = 'none';
 
-    const info = {
-      headerEl: dayHeader,
-      listEl: list,
-      countEl: count,
-      files: [],
-      summariesLoaded: false
-    };
-    dayMap.set(dayStr, info);
+    groups[day]
+  .sort((a, b) => {
+    const la = blobMeta.get(a) || 0;
+    const lb = blobMeta.get(b) || 0;
+    if (lb !== la) return lb - la;          // newer first
+    return b.localeCompare(a);              // tie-break: name DESC
+  })
+  .forEach(f => {
+      const namePretty = f.replace(`${day}_`, '').replace('.xlsx','');
+      const li = document.createElement('li');
+      li.className = 'session-item';
+      li.onclick = () => loadFile(f);
 
-    // Toggle expand/collapse + lazy summary loading when user expands that day
+      const row = document.createElement('div');
+      row.className = 'session-title-row';
+
+      const title = document.createElement('div');
+      title.textContent = namePretty;
+
+      // KPI badge (hidden until we calculate)
+      const kpiBadge = document.createElement('span');
+      kpiBadge.className = 'kpi-badge';
+      kpiBadge.id = `kpi_${cssSafeId(f)}`;
+      kpiBadge.style.display = 'none'; // will show when we have a score
+
+      // Active badge (kept as-is)
+      const lm = blobMeta.get(f) || 0;
+      const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
+      const activeBadge = document.createElement('span');
+      activeBadge.className = 'active-badge';
+      activeBadge.textContent = 'Active';
+      activeBadge.dataset.lm = String(lm);
+      if (!isActive) activeBadge.style.display = 'none';
+
+      row.appendChild(title);
+      row.appendChild(kpiBadge);   // ← KPI badge first
+      row.appendChild(activeBadge);
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.id = `meta_${cssSafeId(f)}`;
+      meta.textContent = 'Loading…';
+
+      li.appendChild(row);
+      li.appendChild(meta);
+      lst.appendChild(li);
+    });
+
+    let loadedThisGroup = false;
     const toggle = () => {
-      const expand = list.style.display !== 'block';
-      list.style.display = expand ? 'block' : 'none';
-      dayHeader.setAttribute('aria-expanded', expand ? 'true' : 'false');
-      dayHeader.title = expand ? 'Hide sessions' : 'Show sessions';
-
-      if (expand && !info.summariesLoaded) {
-        info.summariesLoaded = true;
-        info.files.forEach(f => {
+      const expand = lst.style.display !== 'block';
+      lst.style.display = expand ? 'block' : 'none';
+      hdr.setAttribute('aria-expanded', expand ? 'true' : 'false');
+      hdr.title = expand ? 'Hide sessions' : 'Show sessions';
+      if (expand && !loadedThisGroup) {
+        loadedThisGroup = true;
+        groups[day].forEach(f => {
           fetchSessionSummary(f).then(({ mileageKm, issueCount, testObject, testPurpose, kpiScore }) => {
-            const metaEl = document.getElementById(`meta_${cssSafeId(f)}`);
-            if (metaEl) {
+            // Fill meta line
+            const el = document.getElementById(`meta_${cssSafeId(f)}`);
+            if (el) {
               const parts = [];
               if (testPurpose) parts.push(String(testPurpose));
               if (testObject)  parts.push(String(testObject));
               const left = parts.length ? parts.join('  •  ') + '  •  ' : '';
               const mileageText = (mileageKm ?? '–') + (mileageKm != null ? 'km' : '');
-              metaEl.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
+              el.textContent = `${left}Mileage: ${mileageText}  No of issues: ${issueCount}`;
             }
 
-            const kpiEl = document.getElementById(`kpi_${cssSafeId(f)}`);
-            if (kpiEl) {
+            // Fill KPI badge if we have a score
+            const kb = document.getElementById(`kpi_${cssSafeId(f)}`);
+            if (kb) {
               if (typeof kpiScore === 'number' && kpiScore >= 1 && kpiScore <= 10) {
-                kpiEl.textContent = `KPI ${kpiScore}`;
-                kpiEl.className = `kpi-badge s${kpiScore}`;
-                kpiEl.style.display = 'inline-flex';
+                kb.textContent = `KPI ${kpiScore}`;
+                kb.className = `kpi-badge s${kpiScore}`;   // color from .s1..s10
+                kb.style.display = 'inline-flex';
               } else {
-                kpiEl.style.display = 'none';
+                kb.style.display = 'none';
               }
             }
           });
@@ -1084,97 +1098,16 @@ function canonicalEU(raw){
       }
     };
 
-    dayHeader.addEventListener('click', toggle);
-    dayHeader.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        toggle();
-      }
+    hdr.addEventListener('click', toggle);
+    hdr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
     });
 
-    // Days appear in the order we first see them (files are newest → oldest)
-    sb.appendChild(dayHeader);
-    sb.appendChild(list);
-    return info;
-  }
+    sb.appendChild(hdr);
+    sb.appendChild(lst);
+  });
 
-  let index = 0;
-
-  function addNextSession() {
-    if (index >= files.length) {
-      ensureActiveBadgeUpdater();
-      if (typeof onDone === 'function') onDone();
-      return;
-    }
-
-    const filename = files[index++];
-    const m = filename.match(/(\d{4}-\d{2}-\d{2})/);
-    if (!m) {
-      setTimeout(addNextSession, 0);
-      return;
-    }
-    const dayStr = m[1];
-
-    const info = ensureDay(dayStr);
-    info.files.push(filename);
-
-    const niceName = filename.replace(`${dayStr}_`, '').replace('.xlsx', '');
-
-    const li = document.createElement('li');
-    li.className = 'session-item';
-    li.onclick = () => loadFile(filename);
-
-    const row = document.createElement('div');
-    row.className = 'session-title-row';
-
-    const title = document.createElement('div');
-    title.textContent = niceName;
-
-    const kpiBadge = document.createElement('span');
-    kpiBadge.className = 'kpi-badge';
-    kpiBadge.id = `kpi_${cssSafeId(filename)}`;
-    kpiBadge.style.display = 'none';
-
-    const activeBadge = document.createElement('span');
-    activeBadge.className = 'active-badge';
-    activeBadge.textContent = 'Active';
-
-    const lm = blobMeta.get(filename) || 0;
-    const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
-    activeBadge.dataset.lm = String(lm);
-    if (!isActive) activeBadge.style.display = 'none';
-
-    row.appendChild(title);
-    row.appendChild(kpiBadge);
-    row.appendChild(activeBadge);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.id = `meta_${cssSafeId(filename)}`;
-    meta.textContent = 'Loading…';
-
-    li.appendChild(row);
-    li.appendChild(meta);
-    info.listEl.appendChild(li);
-
-    // Update "X tests" pill
-    const currentCount = parseInt(info.countEl.textContent, 10) || 0;
-    info.countEl.textContent = String(currentCount + 1);
-
-    // 🔹 For the very first session only: auto-expand its day so it's visible immediately
-    if (index === 1) {
-      info.listEl.style.display = 'block';
-      info.headerEl.setAttribute('aria-expanded', 'true');
-      info.headerEl.title = 'Hide sessions';
-      // Note: we do NOT trigger summary loading here – that still waits for user
-    }
-
-    // Yield between each session → first (youngest) row becomes clickable
-    setTimeout(addNextSession, 0);
-  }
-
-  // Start async; lets browser paint header immediately
-  setTimeout(addNextSession, 0);
+  ensureActiveBadgeUpdater();
 }
 
     let _activeBadgeTimer = null;
