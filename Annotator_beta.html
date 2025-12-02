@@ -1101,10 +1101,6 @@ textBox.addEventListener('input', () => {
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
 
-    // --- Toggle system ---
-const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
-let toggleDefs = [];      // list of { signal, onValue, offValue, label } built from CSV
-
     let lastLimit = null;
     let limitChanges = 0;
     let roundaboutCount     = 0;
@@ -2468,11 +2464,13 @@ function createTriToggleButton(groupEl, { label, cssClass, signal, def }) {
 }
     
 // Build buttons from CSV using fetch + PapaParse
-// Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
-  toggleDefs = []; // reset on rebuild
+
+  // reset on rebuild
+  toggleDefs = [];
+  triOrderSeed = 0;
 
   fetch(csvFile)
     .then(r => {
@@ -2486,7 +2484,6 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
       const groups = {};  // { groupKey: <div.button-group> }
 
       data.forEach(row => {
-        // --- normalize all CSV fields (trim + sane defaults) ---
         const groupKey = String(row.group ?? '').trim();
         const label    = String(row.label ?? '').trim();
         const cssClass = String(row.cssClass ?? '').trim();
@@ -2508,58 +2505,13 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
 
         const groupEl = groups[groupKey];
 
-        // NEW: 3-state toggle (Not tested / No / Yes)
-        if (type === 'toggle3' && signal) {
+        // ───────────── 3-STATE TOGGLE (Not tested / No / Yes) ─────────────
+        if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
           createTriToggleButton(groupEl, { label, cssClass, signal, def });
           return;
         }
 
-        // EXISTING: 2-state toggle (unchanged)
-        if (type === 'toggle' && signal) {
-          const isOn =
-            def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
-
-          toggleState[signal] = isOn ? onValue : offValue;
-          toggleDefs.push({ signal, onValue, offValue, label });
-
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `toggleButton bigButton ${cssClass}`.trim();
-          btn.setAttribute('role', 'switch');
-          btn.setAttribute('aria-checked', String(isOn));
-
-          const text  = document.createElement('span');
-          const track = document.createElement('span');
-          const thumb = document.createElement('span');
-          track.className = 'track';
-          thumb.className = 'thumb';
-          track.appendChild(thumb);
-          btn.append(text, track);
-
-          const render = () => {
-            const on = btn.getAttribute('aria-checked') === 'true';
-            const current = on ? onValue : offValue;
-            text.textContent = `${label}: ${current}`;
-          };
-          const flip = () => {
-            const on = btn.getAttribute('aria-checked') === 'true';
-            btn.setAttribute('aria-checked', String(!on));
-            toggleState[signal] = !on ? onValue : offValue;
-            render();
-          };
-          render();
-          btn.addEventListener('click', flip);
-          btn.addEventListener('keydown', e => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
-          });
-
-          groupEl.appendChild(btn);
-          return;
-        }
-
-        // ─────────────────────────────────────────────
-        // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
-        // ─────────────────────────────────────────────
+        // ───────────── 2-STATE TOGGLE (legacy) ─────────────
         if (type === 'toggle' && signal) {
           const isOn =
             def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
@@ -2586,93 +2538,31 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
             const current = on ? onValue : offValue;
             text.textContent = `${label}: ${current}`;
           };
+
           const flip = () => {
             const on = btn.getAttribute('aria-checked') === 'true';
             btn.setAttribute('aria-checked', String(!on));
             toggleState[signal] = !on ? onValue : offValue;
             render();
           };
+
           render();
           btn.addEventListener('click', flip);
           btn.addEventListener('keydown', e => {
             if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
           });
 
-          groups[groupKey].appendChild(btn);
+          groupEl.appendChild(btn);
           return;
         }
 
-        // ─────────────────────────────────────────────
-        // 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
-        // ─────────────────────────────────────────────
-        if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
-          // UI states are fixed as requested:
-          const states = ['Not tested', 'No', 'Yes'];
-
-          // decide default index from CSV "default" column
-          let defaultIndex = 0; // Not tested
-          const d = def.toLowerCase();
-          if (d === 'no' || d === '0') defaultIndex = 1;
-          if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
-
-          let stateIndex = defaultIndex;
-          toggleState[signal] = states[stateIndex];
-
-          // stash in toggleDefs so sampling/export sees it
-          toggleDefs.push({
-            signal,
-            label,
-            kind: 'tri',
-            states
-          });
-
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `toggleButton bigButton ${cssClass}`.trim();
-          btn.setAttribute('role', 'button');
-
-          const text = document.createElement('span');
-          btn.appendChild(text);
-
-          const render = () => {
-            const state = states[stateIndex];
-            text.textContent = `${label}: ${state}`;
-
-            // subtle colour hint by state
-            if (state === 'Yes') {
-              btn.style.backgroundColor = '#2e7d32';
-            } else if (state === 'No') {
-              btn.style.backgroundColor = '#8b0000';
-            } else {
-              btn.style.backgroundColor = '#2a2a2a';
-            }
-          };
-
-          const cycle = () => {
-            stateIndex = (stateIndex + 1) % states.length; // 0 → 1 → 2 → 0 → …
-            toggleState[signal] = states[stateIndex];
-            render();
-          };
-
-          render();
-          btn.addEventListener('click', cycle);
-          btn.addEventListener('keydown', e => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
-          });
-
-          groups[groupKey].appendChild(btn);
-          return;
-        }
-
-        // ─────────────────────────────────────────────
-        // Normal press-to-log buttons (including grey headers)
-        // ─────────────────────────────────────────────
+        // ───────────── Normal press-to-log buttons ─────────────
         const btn = document.createElement('button');
         btn.textContent = label;
         btn.className = `bigButton ${cssClass}`.trim();
         const isRed = btn.classList.contains('redButton');
         btn.addEventListener('click', () => logButton(logName, isRed));
-        groups[groupKey].appendChild(btn);
+        groupEl.appendChild(btn);
       });
     })
     .catch(err => console.error('Error building buttons:', err));
