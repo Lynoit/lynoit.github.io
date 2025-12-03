@@ -151,7 +151,7 @@ form.addEventListener('submit', async e => {
   transform: translateX(-152px); transition: transform .3s ease;
   background: #121212; box-shadow: 2px 0 5px rgba(0,0,0,0.1);
   padding: 50px 10px 10px; z-index: 1000;
-  /* IMPORTANT:  the inner element handle scrolling */
+  /* IMPORTANT: let the inner element handle scrolling */
   overflow: hidden;
 }
 
@@ -889,7 +889,7 @@ form.addEventListener('submit', async e => {
     <option value="Tuning_buttons.csv">China tuning 25w23</option>
     <option value="annotator_gt_buttons.csv">KPI groundtruth</option>
     <option value="annotator_gt_buttons_YN.csv">KPI groundtruth YN</option>
-    <option value="tab_annotator_2025week37_buttons.csv">Benchmark_25w37_buttons</option>    
+    <option value="tablet_annotator_2025week37_buttons.csv">Benchmark_25w37_buttons</option>    
     <option value="annotator_layout.csv">Experimental_buttons</option>    
     <option value="Toggle_buttons.csv">Toggle_buttons</option>    
   </select>
@@ -983,8 +983,8 @@ form.addEventListener('submit', async e => {
     </footer>
   </div>
 
-    <script src="https://unpkg.com/leaf/dist/leaf.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/leaf-image@0.4.0/leaf-image.js"></script>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-image@0.4.0/leaflet-image.js"></script>
 
   <script>
 /* --- Chime audio setup --- */
@@ -1068,18 +1068,6 @@ function playSuccess(kind = 'normal') {
     const buttonGroups = document.getElementById('buttonGroups');
     const micLamp   = document.getElementById('micLamp');
     const textBox   = document.getElementById('textBox');
-
-    // --- button sorting for tri-state toggles ---
-let triToggleSerial = 0;   // stable original order among tri toggles
-let sortTimeoutId   = null;
-
-if (buttonGroups) {
-  // any click on a KPI button restarts the 5s timer
-  buttonGroups.addEventListener('click', () => {
-    if (sortTimeoutId) clearTimeout(sortTimeoutId);
-    sortTimeoutId = setTimeout(resortTriToggles, 5000);
-  });
-}    
 
     // Clear any previous pending snapshot when the user focuses the box
 textBox.addEventListener('focus', () => {
@@ -2368,41 +2356,7 @@ function renderLatestSnapshots(limit = 5) {
 
   function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
-function resortTriToggles() {
-  const groups = document.querySelectorAll('#buttonGroups .button-group');
-
-  groups.forEach(group => {
-    // only tri-state toggles (we’ll tag them in buildButtons)
-    const triButtons = Array.from(
-      group.querySelectorAll('button[data-toggle-kind="tri"]')
-    );
-    if (triButtons.length === 0) return;
-
-    triButtons.sort((a, b) => {
-      const sigA = a.dataset.signal;
-      const sigB = b.dataset.signal;
-
-      const stateA = toggleState[sigA]; // "Not tested" / "No" / "Yes"
-      const stateB = toggleState[sigB];
-
-      const rankA = stateA === 'Not tested' ? 0 : 1;
-      const rankB = stateB === 'Not tested' ? 0 : 1;
-
-      if (rankA !== rankB) return rankA - rankB;
-
-      // same rank → keep original CSV order
-      const orderA = Number(a.dataset.order || 0);
-      const orderB = Number(b.dataset.order || 0);
-      return orderA - orderB;
-    });
-
-    // remove and append back in sorted order
-    triButtons.forEach(btn => group.removeChild(btn));
-    triButtons.forEach(btn => group.appendChild(btn));
-  });
-}
-    
-// Build buttons from CSV using fetch + PapaParse
+    // Build buttons from CSV using fetch + PapaParse
 // Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
@@ -2491,16 +2445,19 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
         // 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
         // ─────────────────────────────────────────────
         if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
+          // UI states are fixed as requested:
           const states = ['Not tested', 'No', 'Yes'];
 
-          let defaultIndex = 0;
+          // decide default index from CSV "default" column
+          let defaultIndex = 0; // Not tested
           const d = def.toLowerCase();
-          if (d === 'no'  || d === '0')      defaultIndex = 1;
+          if (d === 'no' || d === '0') defaultIndex = 1;
           if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
 
           let stateIndex = defaultIndex;
           toggleState[signal] = states[stateIndex];
 
+          // stash in toggleDefs so sampling/export sees it
           toggleDefs.push({
             signal,
             label,
@@ -2513,11 +2470,6 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           btn.className = `toggleButton bigButton ${cssClass}`.trim();
           btn.setAttribute('role', 'button');
 
-          // 🔹 tag for sorting
-          btn.dataset.toggleKind = 'tri';
-          btn.dataset.signal     = signal;
-          btn.dataset.order      = String(triToggleSerial++);
-
           const text = document.createElement('span');
           btn.appendChild(text);
 
@@ -2525,6 +2477,7 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
             const state = states[stateIndex];
             text.textContent = `${label}: ${state}`;
 
+            // subtle colour hint by state
             if (state === 'Yes') {
               btn.style.backgroundColor = '#2e7d32';
             } else if (state === 'No') {
@@ -2535,13 +2488,13 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           };
 
           const cycle = () => {
-            stateIndex = (stateIndex + 1) % states.length;
+            stateIndex = (stateIndex + 1) % states.length; // 0 → 1 → 2 → 0 → …
             toggleState[signal] = states[stateIndex];
             render();
           };
 
           render();
-          btn.addEventListener('click',   cycle);
+          btn.addEventListener('click', cycle);
           btn.addEventListener('keydown', e => {
             if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
           });
