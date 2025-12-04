@@ -1114,9 +1114,9 @@ textBox.addEventListener('input', () => {
     const samplingTable = [];
 
 // --- Toggle system ---
-const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
-let   toggleDefs  = [];   // list of { signal, kind, label, ... } built from CSV
-let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
+const toggleState = {};
+let   toggleDefs  = [];
+const toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -2497,13 +2497,16 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
         // ─────────────────────────────────────────────
 // 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
+// ─────────────────────────────────────────────
 if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
   const states = ['Not tested', 'No', 'Yes'];
 
   let defaultIndex = 0;
   const d = def.toLowerCase();
-  if (d === 'no'  || d === '0')                      defaultIndex = 1;
-  if (d === 'yes' || d === '1' || d === 'true')      defaultIndex = 2;
+  if (d === 'no'  || d === '0')                     defaultIndex = 1;
+  if (d === 'yes' || d === '1' || d === 'true')     defaultIndex = 2;
 
   let stateIndex = defaultIndex;
   toggleState[signal] = states[stateIndex];
@@ -2511,7 +2514,7 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   toggleDefs.push({
     signal,
     label,
-    kind:   'tri',
+    kind: 'tri',
     states
   });
 
@@ -2520,7 +2523,7 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   btn.className = `toggleButton bigButton ${cssClass}`.trim();
   btn.setAttribute('role', 'button');
 
-  // 🔹 tag for sorting
+  // 🔹 tags for sorting
   btn.dataset.toggleKind = 'tri';
   btn.dataset.signal     = signal;
   btn.dataset.order      = String(triToggleSerial++);
@@ -2528,21 +2531,14 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   const text = document.createElement('span');
   btn.appendChild(text);
 
-  // --- note badge helper ---
-  const refreshNoteBadge = () => {
-    const note = (toggleNotes[signal] || '').trim();
-    if (note) {
-      btn.setAttribute('data-has-note', '1');
-      btn.title = `${label}\nNote: ${note}`;
-    } else {
-      btn.removeAttribute('data-has-note');
-      btn.title = label;
-    }
-  };
-
+  // 👁️ show 📝 when this toggle has a custom note
   const render = () => {
     const state = states[stateIndex];
-    text.textContent = `${label}: ${state}`;
+    const note  = toggleNotes[signal];
+
+    text.textContent = note
+      ? `${label}: ${state} 📝`
+      : `${label}: ${state}`;
 
     if (state === 'Yes') {
       btn.style.backgroundColor = '#2e7d32';
@@ -2551,8 +2547,56 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
     } else {
       btn.style.backgroundColor = '#2a2a2a';
     }
-    refreshNoteBadge();
   };
+
+  // 📝 open / edit note for this toggle
+  function openNotePrompt() {
+    const prev = toggleNotes[signal] || '';
+    const next = prompt(`Custom annotation for "${label}":`, prev);
+    if (next === null) return;      // cancelled
+
+    const trimmed = next.trim();
+    if (trimmed) {
+      toggleNotes[signal] = trimmed;
+    } else {
+      // empty string → remove note
+      delete toggleNotes[signal];
+    }
+    render();
+  }
+
+  // 💻 Desktop: right-click still works
+  btn.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    openNotePrompt();
+  });
+
+  // 📱 Tablet / touch: long-press to open note dialog
+  let longPressTimer = null;
+  let longPressTriggered = false;
+
+  function startLongPress(e) {
+    if (e.type === 'touchstart') {
+      longPressTriggered = false;
+      longPressTimer = setTimeout(() => {
+        longPressTriggered = true;
+        openNotePrompt();
+      }, 600); // 600ms press = "long-press"
+    }
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+
+  btn.addEventListener('touchstart', startLongPress, { passive: true });
+  btn.addEventListener('touchend',   cancelLongPress);
+  btn.addEventListener('touchmove',  cancelLongPress);
+  btn.addEventListener('touchcancel',cancelLongPress);
 
   const cycle = () => {
     stateIndex = (stateIndex + 1) % states.length;
@@ -2560,24 +2604,24 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
     render();
   };
 
-  // left-click / Enter / Space: cycle state
-  btn.addEventListener('click',   cycle);
-  btn.addEventListener('keydown', e => {
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
-  });
-
-  // RIGHT-CLICK: edit note for this tri-button
-  btn.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    e.stopPropagation();
-    const prev = toggleNotes[signal] || '';
-    const next = prompt(`Custom annotation for "${label}":`, prev);
-    if (next === null) return;           // user cancelled
-    toggleNotes[signal] = next.trim();
-    refreshNoteBadge();
-  });
-
   render();
+
+  // normal click cycles, *unless* it was the release after a long-press
+  btn.addEventListener('click', e => {
+    if (longPressTriggered) {
+      longPressTriggered = false; // swallow the click
+      return;
+    }
+    cycle();
+  });
+
+  btn.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      cycle();
+    }
+  });
+
   groups[groupKey].appendChild(btn);
   return;
 }
