@@ -240,6 +240,13 @@ form.addEventListener('submit', async e => {
   outline-offset:2px;
 }
 
+/* Small note icon on tri-toggles that have a custom annotation */
+.toggleButton[data-has-note="1"]::after {
+  content: "📝";
+  margin-left: 6px;
+  font-size: 0.85em;
+}
+
     /* Keep its position, but borrow the bigButton.blueButton styling */
 #toggleSidebar {
   position: fixed;
@@ -1106,9 +1113,10 @@ textBox.addEventListener('input', () => {
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
 
-    // --- Toggle system ---
+// --- Toggle system ---
 const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
-let toggleDefs = [];      // list of { signal, onValue, offValue, label } built from CSV
+let   toggleDefs  = [];   // list of { signal, kind, label, ... } built from CSV
+let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -2406,6 +2414,7 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
+  toggleNotes = {}; // reset all notes when loading a new button config
 
   fetch(csvFile)
     .then(r => {
@@ -2486,67 +2495,92 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
         }
 
         // ─────────────────────────────────────────────
-        // 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
-        // ─────────────────────────────────────────────
-        if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
-          const states = ['Not tested', 'No', 'Yes'];
+// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
+// ─────────────────────────────────────────────
+if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
+  const states = ['Not tested', 'No', 'Yes'];
 
-          let defaultIndex = 0;
-          const d = def.toLowerCase();
-          if (d === 'no'  || d === '0')      defaultIndex = 1;
-          if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
+  let defaultIndex = 0;
+  const d = def.toLowerCase();
+  if (d === 'no'  || d === '0')                      defaultIndex = 1;
+  if (d === 'yes' || d === '1' || d === 'true')      defaultIndex = 2;
 
-          let stateIndex = defaultIndex;
-          toggleState[signal] = states[stateIndex];
+  let stateIndex = defaultIndex;
+  toggleState[signal] = states[stateIndex];
 
-          toggleDefs.push({
-            signal,
-            label,
-            kind: 'tri',
-            states
-          });
+  toggleDefs.push({
+    signal,
+    label,
+    kind:   'tri',
+    states
+  });
 
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `toggleButton bigButton ${cssClass}`.trim();
-          btn.setAttribute('role', 'button');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `toggleButton bigButton ${cssClass}`.trim();
+  btn.setAttribute('role', 'button');
 
-          // 🔹 tag for sorting
-          btn.dataset.toggleKind = 'tri';
-          btn.dataset.signal     = signal;
-          btn.dataset.order      = String(triToggleSerial++);
+  // 🔹 tag for sorting
+  btn.dataset.toggleKind = 'tri';
+  btn.dataset.signal     = signal;
+  btn.dataset.order      = String(triToggleSerial++);
 
-          const text = document.createElement('span');
-          btn.appendChild(text);
+  const text = document.createElement('span');
+  btn.appendChild(text);
 
-          const render = () => {
-            const state = states[stateIndex];
-            text.textContent = `${label}: ${state}`;
+  // --- note badge helper ---
+  const refreshNoteBadge = () => {
+    const note = (toggleNotes[signal] || '').trim();
+    if (note) {
+      btn.setAttribute('data-has-note', '1');
+      btn.title = `${label}\nNote: ${note}`;
+    } else {
+      btn.removeAttribute('data-has-note');
+      btn.title = label;
+    }
+  };
 
-            if (state === 'Yes') {
-              btn.style.backgroundColor = '#2e7d32';
-            } else if (state === 'No') {
-              btn.style.backgroundColor = '#8b0000';
-            } else {
-              btn.style.backgroundColor = '#2a2a2a';
-            }
-          };
+  const render = () => {
+    const state = states[stateIndex];
+    text.textContent = `${label}: ${state}`;
 
-          const cycle = () => {
-            stateIndex = (stateIndex + 1) % states.length;
-            toggleState[signal] = states[stateIndex];
-            render();
-          };
+    if (state === 'Yes') {
+      btn.style.backgroundColor = '#2e7d32';
+    } else if (state === 'No') {
+      btn.style.backgroundColor = '#8b0000';
+    } else {
+      btn.style.backgroundColor = '#2a2a2a';
+    }
+    refreshNoteBadge();
+  };
 
-          render();
-          btn.addEventListener('click',   cycle);
-          btn.addEventListener('keydown', e => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
-          });
+  const cycle = () => {
+    stateIndex = (stateIndex + 1) % states.length;
+    toggleState[signal] = states[stateIndex];
+    render();
+  };
 
-          groups[groupKey].appendChild(btn);
-          return;
-        }
+  // left-click / Enter / Space: cycle state
+  btn.addEventListener('click',   cycle);
+  btn.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); cycle(); }
+  });
+
+  // RIGHT-CLICK: edit note for this tri-button
+  btn.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const prev = toggleNotes[signal] || '';
+    const next = prompt(`Custom annotation for "${label}":`, prev);
+    if (next === null) return;           // user cancelled
+    toggleNotes[signal] = next.trim();
+    refreshNoteBadge();
+  });
+
+  render();
+  groups[groupKey].appendChild(btn);
+  return;
+}
 
         // ─────────────────────────────────────────────
         // Normal press-to-log buttons (including grey headers)
@@ -2811,25 +2845,27 @@ async function uploadWorkbookToAzure() {
   const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
   XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-  // 4. --- NEW: Benchmark sheet with current toggle values ---
-  // One row per toggle button, latest value only
-  const benchmarkAoA = [
-    ["Label", "Signal", "Type", "Current value"]
-  ];
+// 4. --- Benchmark sheet with current toggle values + notes ---
+const benchmarkAoA = [
+  ["Label", "Signal", "Type", "Current value", "Comment"]
+];
 
-  toggleDefs.forEach(def => {
-    const type = def.kind === 'tri' ? '3-state' : '2-state';
-    const value = toggleState[def.signal];
-    benchmarkAoA.push([
-      def.label || def.signal,
-      def.signal,
-      type,
-      value
-    ]);
-  });
+toggleDefs.forEach(def => {
+  const type  = def.kind === 'tri' ? '3-state' : '2-state';
+  const value = toggleState[def.signal];
+  const note  = (toggleNotes[def.signal] || '').trim();
 
-  const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
-  XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
+  benchmarkAoA.push([
+    def.label || def.signal,
+    def.signal,
+    type,
+    value,
+    note
+  ]);
+});
+
+const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
+XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
 
   // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
