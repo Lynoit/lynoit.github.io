@@ -1122,6 +1122,8 @@ textBox.addEventListener('input', () => {
 
 // --- Toggle system ---
 const toggleState = {};
+const triToggleTouched = {};   // signals for tri-toggles that have been changed
+
 let   toggleDefs  = [];
 let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
@@ -2422,6 +2424,7 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
   toggleNotes = {}; // reset all notes when loading a new button config
+  Object.keys(triToggleTouched).forEach(k => delete triToggleTouched[k]);
 
   fetch(csvFile)
     .then(r => {
@@ -2603,8 +2606,18 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   btn.addEventListener('touchcancel',cancelLongPress);
 
   const cycle = () => {
+    // remember index before the click
+    const prevIndex = stateIndex;
+
+    // advance state
     stateIndex = (stateIndex + 1) % states.length;
     toggleState[signal] = states[stateIndex];
+
+    // mark this tri-toggle as "touched" once it ever leaves its default state
+    if (stateIndex !== defaultIndex || prevIndex !== defaultIndex) {
+      triToggleTouched[signal] = true;
+    }
+
     render();
   };
 
@@ -2892,27 +2905,35 @@ async function uploadWorkbookToAzure() {
   const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
   XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-// 4. --- Benchmark sheet with current toggle values + notes ---
-const benchmarkAoA = [
-  ["Label", "Signal", "Type", "Current value", "Comment"]
-];
+  // 4. --- Benchmark sheet: ONLY tri-state toggles, and ONLY if at least one was used ---
+  const triDefs = toggleDefs.filter(def => def.kind === 'tri');
 
-toggleDefs.forEach(def => {
-  const type  = def.kind === 'tri' ? '3-state' : '2-state';
-  const value = toggleState[def.signal];
-  const note  = (toggleNotes[def.signal] || '').trim();
+  // keep only tri-toggles that have been changed from default at least once
+  const changedTriDefs = triDefs.filter(def => triToggleTouched[def.signal]);
 
-  benchmarkAoA.push([
-    def.label || def.signal,
-    def.signal,
-    type,
-    value,
-    note
-  ]);
-});
+  if (changedTriDefs.length > 0) {
+    const benchmarkAoA = [
+      ["Label", "Signal", "Type", "Current value", "Comment"]
+    ];
 
-const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
-XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
+    changedTriDefs.forEach(def => {
+      const value = toggleState[def.signal];
+      const note  = (toggleNotes[def.signal] || '').trim();
+
+      benchmarkAoA.push([
+        def.label || def.signal,
+        def.signal,
+        "3-state",
+        value,
+        note
+      ]);
+    });
+
+    const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
+    XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
+  } else {
+    console.log('No tri-state buttons pressed – skipping Benchmark sheet.');
+  }
 
   // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
