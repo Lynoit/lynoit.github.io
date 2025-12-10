@@ -2805,6 +2805,28 @@ function updatePhaseTable() {
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 // const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sp=r&st=2025-07-01T05:31:09Z&se=2025-11-30T14:31:09Z&spr=https&sv=2024-11-04&sr=c&sig=HaISxUqexWhVDtK6zfpvsW3DbYzS21yFYu2YTCozd5U%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
+
+const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
+
+function saveBlobLocally(blob, filename) {
+  try {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href        = url;
+    a.download    = filename;
+    a.style.display = 'none';
+
+    document.body.appendChild(a);
+    a.click();
+
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  } catch (e) {
+    console.error('Failed to trigger local download:', e);
+  }
+}
     
 async function uploadCSVtoAzure(tableId) {
   // 1. Grab the table and convert to CSV
@@ -2953,23 +2975,32 @@ async function uploadWorkbookToAzure() {
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  // 9. PUT to Azure Blob Storage
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    },
-    body: blob
-  });
+  // 9. Try cloud upload, fallback to local download if offline / failed
+  try {
+    if (!navigator.onLine) {
+      throw new Error('Offline – skipping cloud upload');
+    }
 
-  if (!resp.ok) {
-    throw new Error(`Workbook upload failed: ${resp.status} ${resp.statusText}`);
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      },
+      body: blob
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Workbook upload failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    console.log(`✔ Uploaded workbook: ${blobName}`);
+    lastXlsxUploadMs = Date.now();
+    updateUploadAgo();
+  } catch (err) {
+    console.error('Cloud workbook upload failed, saving locally instead:', err);
+    saveBlobLocally(blob, blobName);
   }
-
-  console.log(`✔ Uploaded workbook: ${blobName}`);
-  lastXlsxUploadMs = Date.now();
-  updateUploadAgo();
 }
     
   async function exportMainContentToAzure() {
@@ -3301,18 +3332,29 @@ async function uploadSnapshotsZip() {
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/zip'
-    },
-    body: content
-  });
-  if (!resp.ok) {
-    throw new Error(`Snapshot ZIP upload failed: ${resp.status} ${resp.statusText}`);
+  try {
+    if (!navigator.onLine) {
+      throw new Error('Offline – skipping cloud upload');
+    }
+
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/zip'
+      },
+      body: content
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Snapshot ZIP upload failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
+  } catch (err) {
+    console.error('Cloud ZIP upload failed, saving locally instead:', err);
+    saveBlobLocally(content, blobName);
   }
-  console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
 }
     
 // 1) Grab the existing Upload button
