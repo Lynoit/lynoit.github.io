@@ -820,6 +820,7 @@ form.addEventListener('submit', async e => {
   <div id="sidebar" class="expanded">
     <div id="sidebarScroll">
     <p id="dateTime"></p>
+    <p id="clockOffset">Clock offset vs Azure: checking…</p>
     <p id="dayPhase">Phase: N/A</p>
     <div class="weatherSection">
       <img id="weatherIcon" src="" alt="Weather">
@@ -1424,6 +1425,12 @@ async function stopTesting() {
   //initMap2();
   updateDateTime();
   dateTimeIntervalId = setInterval(updateDateTime, 1000);
+
+  measureAzureClockOffset();
+
+  // Optional: re-check every 30 min
+  setInterval(measureAzureClockOffset, 30 * 60 * 1000);  
+    
 updateUploadAgo();
 setInterval(updateUploadAgo, 60 * 1000); // every 60 seconds
 
@@ -2822,6 +2829,59 @@ function updateDateTime() {
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 
+async function measureAzureClockOffset() {
+  const label = document.getElementById('clockOffset');
+  if (!label) return;
+
+  try {
+    label.textContent = 'Clock offset vs Azure: checking…';
+
+    // Use your existing SAS container URL
+    const [baseUrl, token] = containerSasUrl.split('?');
+
+    // Ask the container for *anything* lightweight; HEAD is enough.
+    // restype=container makes it address the container, not a blob.
+    const url = `${baseUrl}?restype=container&${token}`;
+
+    const t0 = Date.now();
+    const resp = await fetch(url, { method: 'HEAD' });
+    const t1 = Date.now();
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+
+    const dateHeader = resp.headers.get('Date');
+    if (!dateHeader) {
+      throw new Error('No Date header from Azure');
+    }
+
+    const serverMs = Date.parse(dateHeader); // Azure UTC
+    const rttMs    = t1 - t0;
+    const approxServerAtMidpoint = serverMs + rttMs / 2;
+
+    const deviceMs = t1; // our best device time near that midpoint
+
+    const offsetMs = deviceMs - approxServerAtMidpoint;
+    showClockOffset(offsetMs);
+  } catch (err) {
+    console.error('Clock offset check failed:', err);
+    label.textContent = 'Clock offset vs Azure: error';
+  }
+}
+
+function showClockOffset(offsetMs) {
+  const label = document.getElementById('clockOffset');
+  if (!label) return;
+
+  const seconds = (offsetMs / 1000).toFixed(2);
+  const sign    = offsetMs > 0 ? '+' : '';
+  const dir     = offsetMs > 0 ? 'ahead' : 'behind';
+
+  label.textContent =
+    `Clock offset vs Azure: ${sign}${seconds} s (device ${dir})`;
+}
+    
 function saveBlobLocally(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
