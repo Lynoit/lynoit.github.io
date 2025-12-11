@@ -820,7 +820,6 @@ form.addEventListener('submit', async e => {
   <div id="sidebar" class="expanded">
     <div id="sidebarScroll">
     <p id="dateTime"></p>
-    <p id="clockOffset">Clock offset vs Azure: checking…</p>
     <p id="dayPhase">Phase: N/A</p>
     <div class="weatherSection">
       <img id="weatherIcon" src="" alt="Weather">
@@ -1198,7 +1197,6 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let isDirty = false;
     let wakeLock = null;
     let lastSpeedKmh = 0;
-    let azureClockOffsetMs = null;   // offset vs Azure in milliseconds
 
     // near other globals
 let uploadsEnabled = false;
@@ -1426,12 +1424,6 @@ async function stopTesting() {
   //initMap2();
   updateDateTime();
   dateTimeIntervalId = setInterval(updateDateTime, 1000);
-
-  measureAzureClockOffset();
-
-  // Optional: re-check every 30 min
-  setInterval(measureAzureClockOffset, 30 * 60 * 1000);  
-    
 updateUploadAgo();
 setInterval(updateUploadAgo, 60 * 1000); // every 60 seconds
 
@@ -2075,29 +2067,22 @@ function updateStatsTable () {
   const hrs       = totalMs / 3_600_000;
   const meanSpd   = hrs > 0 ? (km / hrs).toFixed(1) : '—';
 
-  // ③ clock offset vs Azure
-  let offsetStr = 'Not measured';
-  if (azureClockOffsetMs !== null) {
-    const seconds = (azureClockOffsetMs / 1000).toFixed(2);
-    const sign    = azureClockOffsetMs > 0 ? '+' : '';
-    const dir     = azureClockOffsetMs > 0 ? 'device ahead' : 'device behind';
-    offsetStr     = `${sign}${seconds} s (${dir})`;
-  }
-
-  // ④ city & country lists
+  // ③ build a “City1 - City2 - …” list
   const citiesList    = Array.from(citySet).join(' - ') || '—';
+
+  // ④ build a “Country1 - Country2 - …” list
   const countriesList = Object.keys(countryDistances).join(' - ') || '—';
 
+  // render the table
   document.getElementById('statsTable').innerHTML = `
     <tr><th>Metric</th><th>Value</th></tr>
     <tr><td>Total test time</td>            <td>${timeStr}</td></tr>
-    <tr><td>Clock offset vs Azure</td>      <td>${offsetStr}</td></tr>
     <tr><td>Total test distance</td>        <td>${km} km</td></tr>
     <tr><td>Max speed</td>                  <td>${maxSpeed.toFixed(1)} km/h</td></tr>
     <tr><td>Mean speed</td>                 <td>${meanSpd} km/h</td></tr>
     <tr><td>Speed limit changes</td>        <td>${limitChanges}</td></tr>
     <tr><td>Roundabouts</td>                <td>${roundaboutCount}</td></tr>
-    <tr><td>Traffic-light junctions</td>    <td>${trafficLightCount}</td></tr>
+    <tr><td>Traffic-light junctions</td>     <td>${trafficLightCount}</td></tr>
     <tr><td>Bridges</td>                    <td>${bridgeCount}</td></tr>
     <tr><td>Tunnels</td>                    <td>${tunnelCount}</td></tr>
     <tr><td>Cities</td>                     <td>${citiesList}</td></tr>
@@ -2837,71 +2822,6 @@ function updateDateTime() {
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 
-async function measureAzureClockOffset() {
-  try {
-    const t0 = Date.now();
-
-    // Use Azure Blob as a time source (Date header)
-    const resp = await fetch(containerSasUrl, {
-      method: 'HEAD',
-      cache: 'no-store'
-    });
-
-    if (!resp.ok) {
-      throw new Error(`HEAD ${resp.status} ${resp.statusText}`);
-    }
-
-    const dateHeader =
-      resp.headers.get('Date') ||
-      resp.headers.get('date');
-
-    if (!dateHeader) {
-      throw new Error('No Date header from Azure');
-    }
-
-    const serverTimeMs = new Date(dateHeader).getTime();
-    const t1 = Date.now();
-
-    // Estimate one-way latency
-    const rttMs    = t1 - t0;
-    const halfRtt  = rttMs / 2;
-
-    // Client time at the moment of the server timestamp
-    const clientAtServerStamp = t1 - halfRtt;
-
-    // Positive = device ahead of Azure, negative = behind
-    const offsetMs = clientAtServerStamp - serverTimeMs;
-
-    // Store in global so updateStatsTable can use it
-    azureClockOffsetMs = offsetMs;
-
-    // Optional: show raw info in console
-    console.log('Azure Date header:', dateHeader);
-    console.log('Estimated clock offset (ms):', offsetMs);
-
-    // If you want, update a sidebar element if it exists
-    const sidebarEl = document.getElementById('azureClockOffset');
-    if (sidebarEl) {
-      const sec  = (offsetMs / 1000).toFixed(2);
-      const sign = offsetMs > 0 ? '+' : '';
-      const dir  = offsetMs > 0
-        ? 'device ahead of Azure'
-        : offsetMs < 0
-          ? 'device behind Azure'
-          : 'in sync with Azure';
-
-      sidebarEl.textContent = `Clock offset vs Azure: ${sign}${sec} s (${dir})`;
-    }
-
-    // Refresh stats table so it picks up the new value
-    if (typeof updateStatsTable === 'function') {
-      updateStatsTable();
-    }
-  } catch (err) {
-    console.error('measureAzureClockOffset failed:', err);
-  }
-}
-    
 function saveBlobLocally(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
