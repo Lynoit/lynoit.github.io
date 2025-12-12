@@ -1183,6 +1183,7 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
+    let issueMarkers = [];   // one Leaflet marker per issue row
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
     let roadTypes=new Set(), lastChartTs=0, posCount=0, lastCity=null;
@@ -2191,86 +2192,91 @@ function recordSample(issueText = '') {
   });
 }
     
-  function logButton(name, isRed) {
-    // ① Timestamp
-    const dt   = new Date();
-    const date = dt.toLocaleDateString();
-    const time = dt.toLocaleTimeString();
+function logButton(name, isRed) {
+  // ① Timestamp
+  const dt   = new Date();
+  const date = dt.toLocaleDateString();
+  const time = dt.toLocaleTimeString();
 
-    // ② Phase & weather
-    const fullPhase = document.getElementById('dayPhase').textContent;
-    const phase     = fullPhase.split(': ')[1] || fullPhase;
-    const condition = iconEl.alt || 'Unknown';
+  // ② Phase & weather
+  const fullPhase = document.getElementById('dayPhase').textContent;
+  const phase     = fullPhase.split(': ')[1] || fullPhase;
+  const condition = iconEl.alt || 'Unknown';
 
-    // ③ Location
-    const [lat, lon] = locEl.innerHTML
-      .split('<br>')
-      .map(l => l.split(': ')[1]);
+  // ③ Location (lat/lon text from sidebar)
+  const [lat, lon] = locEl.innerHTML
+    .split('<br>')
+    .map(l => l.split(': ')[1]);
 
-    // ④ Distance, speed, road type
-    const dist = (totalDist / 1000).toFixed(1);
-    const spd  = speedEl.textContent.split(' ')[1];
-    const rt   = roadTypeEl.textContent.split(': ')[1];
+  // ④ Distance, speed, road type, country
+  const dist    = (totalDist / 1000).toFixed(1);
+  const spd     = speedEl.textContent.split(' ')[1];
+  const rt      = roadTypeEl.textContent.split(': ')[1];
+  const country = lastCountry || 'Unknown';
 
-    // ⑤ Comment (apply corrections just once)
-    let comment = document.getElementById('textBox').value;
-    comment = applyCorrections(comment);
+  // ⑤ Comment (apply corrections just once)
+  let comment = document.getElementById('textBox').value;
+  comment = applyCorrections(comment);
 
-    // ⑥ Optional camera snapshot
-// Prefer the early snapshot captured when typing; fall back to capturing now.
-let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
+  // ⑥ Optional camera snapshot
+  // Prefer the early snapshot captured when typing; fall back to capturing now.
+  let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
 
-    // ⑦ Push into the log array
-    logTable.push([
-      name, date, time, phase,
-      tempEl.textContent, condition,
-      lat, lon, dist, spd, rt,
-      comment, camDataUrl
-    ]);
-    checkUploadEligibility();
+  // ⑦ Push into the log array as an OBJECT (not raw array anymore)
+  const row = {
+    issue:     name,
+    date,
+    time,
+    phase,
+    temp:      tempEl.textContent,
+    condition,
+    lat,
+    lon,
+    dist,
+    speed:     spd,
+    roadType:  rt,
+    comment,
+    snapshot:  camDataUrl,
+    isRed:     !!isRed,
+    country
+  };
+  logTable.push(row);
+  checkUploadEligibility();
 
-    try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
-    
-    recordSample(name);
-    displayLogTable();        // renders Issue list only
-    renderLatestSnapshots(5); // renders only the latest 5 snapshots
+  try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
-    markDirty();
+  // still record a sampling row with the issue text
+  recordSample(name);
 
-    displayCameraTable();
-
-      const issueNumber = logTable.length;
-
-  // add marker with number instead of text
-  L.marker([+lat, +lon], {
+  // ⑧ Map marker for this issue (numbered)
+  const issueNumber = logTable.length;
+  const marker = L.marker([+lat, +lon], {
     icon: L.divIcon({
       className: 'issue-label',
       html: `<strong>${issueNumber}</strong>`
     })
   }).addTo(map);
+  issueMarkers.push(marker);
 
-    // ⑨ If it’s a “red” KPI event, update counts & tables
-    if (isRed) {
-      redCounts[name]                    = (redCounts[name]                     || 0) + 1;
-      roadRedCounts[rt]                  = (roadRedCounts[rt]                   || 0) + 1;
-      countryRedCounts[lastCountry]      = (countryRedCounts[lastCountry]       || 0) + 1;
-      weatherRedCounts[condition]        = (weatherRedCounts[condition]         || 0) + 1;
-      weatherDistances[condition]        = weatherDistances[condition]         || 0;
-      phaseRedCounts[phase]              = (phaseRedCounts[phase]               || 0) + 1;
-      phaseDistances[phase]              = phaseDistances[phase]               || 0;
+  // ⑨ Recompute KPI counts from the whole log (so deletions will also work)
+  recomputeAggregatesFromLog();
+  updateStreetTable();
+  updateCountryTable();
+  updateWeatherTable();
+  updatePhaseTable();
+  updateCountTable();
 
-      updateStreetTable();
-      updateCountryTable();
-      updateWeatherTable();
-      updatePhaseTable();
-      updateCountTable();
-    }
+  // ⑩ Refresh tables & snapshots
+  displayLogTable();        // renders Issue list only
+  renderLatestSnapshots(5); // renders only the latest 5 snapshots
+  displayCameraTable();
 
-    // ⑩ Clear the textbox
-    document.getElementById('textBox').value = '';
-    // reset the cached early snapshot for the next entry
-    pendingSnapshotDataUrl = null;
-  }
+  markDirty();
+
+  // ⑪ Clear the textbox and snapshot cache
+  document.getElementById('textBox').value = '';
+  pendingSnapshotDataUrl = null;
+}
 
 function displayCameraTable() {
   const target = document.getElementById('cameraTableContainer');
@@ -2280,7 +2286,7 @@ function displayCameraTable() {
     <table>
       <tr><th>No.</th><th>Snapshot</th></tr>`;
   logTable.forEach((row, i) => {
-    const img = row[12];          // index of the picture we just added
+    const img = row.snapshot;
     const cell = img
       ? `<img src="${img}"
               alt="Camera ${i+1}"
@@ -2296,16 +2302,49 @@ function displayLogTable() {
   let mainHtml = `
     <table id="logTable">
       <tr>
-        <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
-        <th>Phase</th><th>Temp</th><th>Weather</th>
-        <th>Lat</th><th>Lon</th><th>Distance (km)</th>
-        <th>Speed (km/h)</th><th>Road</th><th>Comment</th>
+        <th>No.</th>
+        <th>Issue</th>
+        <th>Date</th>
+        <th>Time</th>
+        <th>Phase</th>
+        <th>Temp</th>
+        <th>Weather</th>
+        <th>Lat</th>
+        <th>Lon</th>
+        <th>Distance (km)</th>
+        <th>Speed (km/h)</th>
+        <th>Road</th>
+        <th>Comment</th>
+        <th data-export="no">Remove</th>
       </tr>`;
+
   logTable.forEach((row, i) => {
-    mainHtml += `<tr><td>${i + 1}</td>` +
-                row.slice(0, 12).map(v => `<td>${v ?? '—'}</td>`).join('') +
-                `</tr>`;
+    mainHtml += `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${row.issue ?? '—'}</td>
+        <td>${row.date ?? '—'}</td>
+        <td>${row.time ?? '—'}</td>
+        <td>${row.phase ?? '—'}</td>
+        <td>${row.temp ?? '—'}</td>
+        <td>${row.condition ?? '—'}</td>
+        <td>${row.lat ?? '—'}</td>
+        <td>${row.lon ?? '—'}</td>
+        <td>${row.dist ?? '—'}</td>
+        <td>${row.speed ?? '—'}</td>
+        <td>${row.roadType ?? '—'}</td>
+        <td>${row.comment ?? '—'}</td>
+        <td data-export="no">
+          <button type="button"
+                  class="bigButton redButton"
+                  style="min-width:0;padding:2px 6px;font-size:11px;"
+                  onclick="deleteIssue(${i})">
+            ✕
+          </button>
+        </td>
+      </tr>`;
   });
+
   mainHtml += `</table>`;
   document.getElementById('logTableContainer').innerHTML = mainHtml;
 }
@@ -2314,11 +2353,9 @@ function renderLatestSnapshots(limit = 5) {
   const container = document.getElementById('snapshotTableContainer');
   if (!container) return;
 
-  // slice: only keep the latest N rows
   const start = Math.max(0, logTable.length - limit);
   const rows  = logTable.slice(start);
 
-  // Build the table shell
   const table = document.createElement('table');
   table.id = 'snapshotTable';
   table.style.cssText = 'width:100%;border-collapse:collapse;border:1px solid #444;margin-bottom:80px;';
@@ -2335,27 +2372,23 @@ function renderLatestSnapshots(limit = 5) {
     const tr = document.createElement('tr');
     const globalIndex = start + i;
 
-    // Parse/sanitize coords
-    const rawLat = String(row[6] ?? '').trim().replace(',', '.');
-    const rawLon = String(row[7] ?? '').trim().replace(',', '.');
+    const rawLat = String(row.lat ?? '').trim().replace(',', '.');
+    const rawLon = String(row.lon ?? '').trim().replace(',', '.');
     const lat    = Number(rawLat);
     const lon    = Number(rawLon);
-    const issue  = row[0];
-    const camUrl = row[12];
+    const issue  = row.issue;
+    const camUrl = row.snapshot;
 
-    // cells: No. + Issue
     const tdNo    = document.createElement('td');
     const tdIssue = document.createElement('td');
     tdNo.style.cssText = tdIssue.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     tdNo.textContent    = String(globalIndex + 1);
     tdIssue.textContent = issue ?? '—';
 
-    // Map cell (iframe embed if coords are valid)
     const tdMap = document.createElement('td');
     tdMap.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      // Build a tiny bbox around the point so the embed centers correctly
-      const dLat = 0.003, dLon = 0.005; // ~ few hundred meters
+      const dLat = 0.003, dLon = 0.005;
       const bbox = [
         (lon - dLon).toFixed(6),
         (lat - dLat).toFixed(6),
@@ -2379,7 +2412,6 @@ function renderLatestSnapshots(limit = 5) {
         `<div style="width:300px;height:200px;display:flex;align-items:center;justify-content:center;border:1px solid #444;color:#bbb;">Bad lat/lon</div>`;
     }
 
-    // Photo cell
     const tdPhoto = document.createElement('td');
     tdPhoto.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     if (camUrl) {
@@ -2401,12 +2433,85 @@ function renderLatestSnapshots(limit = 5) {
     table.appendChild(tr);
   });
 
-  // Replace container content
   container.innerHTML = '';
   container.appendChild(table);
 }
 
-  function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
+function recomputeAggregatesFromLog() {
+  // Reset all per-issue counters
+  redCounts        = {};
+  roadRedCounts    = {};
+  countryRedCounts = {};
+  weatherRedCounts = {};
+  phaseRedCounts   = {};
+
+  logTable.forEach(row => {
+    if (!row || !row.isRed) return;
+
+    const issue   = row.issue;
+    const rt      = row.roadType || 'Unknown';
+    const country = row.country  || 'Unknown';
+    const cond    = row.condition || 'Unknown';
+    const phase   = row.phase || 'Unknown';
+
+    redCounts[issue]          = (redCounts[issue]          || 0) + 1;
+    roadRedCounts[rt]         = (roadRedCounts[rt]         || 0) + 1;
+    countryRedCounts[country] = (countryRedCounts[country] || 0) + 1;
+    weatherRedCounts[cond]    = (weatherRedCounts[cond]    || 0) + 1;
+    phaseRedCounts[phase]     = (phaseRedCounts[phase]     || 0) + 1;
+  });
+}
+
+function deleteIssue(index) {
+  if (index < 0 || index >= logTable.length) return;
+
+  const row = logTable[index];
+  const label =
+    row && row.issue
+      ? `#${index + 1} – "${row.issue}"`
+      : `issue #${index + 1}`;
+
+  if (!confirm(`Remove ${label}?`)) return;
+
+  // 1) Remove from log
+  logTable.splice(index, 1);
+
+  // 2) Remove matching marker if present
+  if (issueMarkers[index]) {
+    try {
+      map.removeLayer(issueMarkers[index]);
+    } catch (e) {
+      console.warn('Failed to remove marker', e);
+    }
+    issueMarkers.splice(index, 1);
+  }
+
+  // 3) Re-number marker labels so they match the new indices
+  issueMarkers.forEach((marker, i) => {
+    marker.setIcon(L.divIcon({
+      className: 'issue-label',
+      html: `<strong>${i + 1}</strong>`
+    }));
+  });
+
+  // 4) Recompute counts and refresh KPI tables
+  recomputeAggregatesFromLog();
+  updateCountTable();
+  updateStreetTable();
+  updateCountryTable();
+  updateWeatherTable();
+  updatePhaseTable();
+
+  // 5) Refresh UI tables & snapshots
+  displayLogTable();
+  renderLatestSnapshots(5);
+  displayCameraTable();
+
+  checkUploadEligibility();
+  markDirty();
+}
+
+function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
 
 function resortTriToggles() {
   const groups = document.querySelectorAll('#buttonGroups .button-group');
@@ -2825,21 +2930,22 @@ function updateDateTime() {
   }
 }
 
-        function tableToCSV(tableEl) {
-      const rows = Array.from(tableEl.querySelectorAll('tr'));
-      return rows
-        .map(row => {
-          const cells = Array.from(row.querySelectorAll('th,td'));
-          return cells
-            .map(cell => {
-              // escape quotes, wrap in quotes
-              const txt = cell.textContent.replace(/"/g, '""');
-              return `"${txt}"`;
-            })
-            .join(',');
+function tableToCSV(tableEl) {
+  const rows = Array.from(tableEl.querySelectorAll('tr'));
+  return rows
+    .map(row => {
+      const cells = Array.from(row.querySelectorAll('th,td'))
+        .filter(cell => cell.dataset.export !== 'no');   // ⬅ skip Delete column
+      return cells
+        .map(cell => {
+          // escape quotes, wrap in quotes
+          const txt = cell.textContent.replace(/"/g, '""');
+          return `"${txt}"`;
         })
-        .join('\n');
-    }
+        .join(',');
+    })
+    .join('\n');
+}
 
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
@@ -3394,7 +3500,7 @@ async function uploadSnapshotsZip() {
   const zip = new JSZip();
 
   logTable.forEach((row, i) => {
-    const dataUrl = row[12];
+    const dataUrl = row.snapshot;
     if (!dataUrl) return;   // skip if no snapshot
 
     const [meta, base64] = dataUrl.split(',');
