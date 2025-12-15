@@ -2579,6 +2579,143 @@ function unifyReportTableStyle(tbl){
     });
   }
 }
+
+// --- Save "Post-hoc comment" back into the XLSX on Azure --------------------
+async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
+  // Get existing sheet or create a minimal one
+  let sheet = wb.Sheets[sheetName];
+  let rows = [];
+  if (sheet){
+    rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  }
+  if (!rows.length){
+    // create simple 2-col header if sheet was empty
+    rows = [['Label', 'Value']];
+  }
+
+  // Find or append "Post-hoc comment" row
+  const idx = rows.findIndex(r =>
+    String(r[0] ?? '').trim().toLowerCase() === 'post-hoc comment'
+  );
+  if (idx >= 0){
+    rows[idx][1] = commentText;
+  } else {
+    rows.push(['Post-hoc comment', commentText]);
+  }
+
+  // Write rows back into the sheet
+  sheet = XLSX.utils.aoa_to_sheet(rows);
+  wb.Sheets[sheetName] = sheet;
+  if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
+
+  // Serialize workbook again
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+
+  // Upload back to Azure using the existing SAS (must allow PUT in CORS)
+  const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!res.ok){
+    throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
+  }
+}
+
+// Inject UI under the Test details table
+function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
+  const safeId    = cssSafeId(filename + '_posthoc');
+  const taId      = 'phc_text_'   + safeId;
+  const btnId     = 'phc_btn_'    + safeId;
+  const statusId  = 'phc_status_' + safeId;
+
+  // Try to read existing comment from the sheet
+  let existingComment = '';
+  try{
+    const sheet = wb.Sheets[sheetName];
+    const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+    const idx   = rows.findIndex(r =>
+      String(r[0] ?? '').trim().toLowerCase() === 'post-hoc comment'
+    );
+    if (idx >= 0 && rows[idx][1] != null){
+      existingComment = String(rows[idx][1]);
+    }
+  } catch(e){ /* ignore */ }
+
+  const container = document.createElement('div');
+  container.style.margin = '12px 0 24px';
+  container.innerHTML = `
+    <h3>Post-hoc comment</h3>
+    <textarea id="${taId}"
+              rows="3"
+              style="width:100%;max-width:800px;">${existingComment || 'Add your comment here...'}</textarea>
+    <br>
+    <button id="${btnId}" style="margin-top:6px;">Save comment to XLSX</button>
+    <span id="${statusId}" style="margin-left:10px;font-size:12px;color:#555;"></span>
+  `;
+  contentEl.appendChild(container);
+
+  const textarea = document.getElementById(taId);
+  const button   = document.getElementById(btnId);
+  const status   = document.getElementById(statusId);
+
+  // Clear the default text on first focus
+  textarea.addEventListener('focus', () => {
+    if (textarea.value === 'Add your comment here...'){
+      textarea.value = '';
+    }
+  });
+
+  button.addEventListener('click', async () => {
+    const txt = (textarea.value || '').trim();
+    if (!txt){
+      status.textContent = 'Please write a comment before saving.';
+      return;
+    }
+    status.textContent = 'Saving…';
+
+    try{
+      await savePostHocCommentToXlsx(filename, wb, sheetName, txt);
+
+      // Update the rendered Test details table so it matches the XLSX
+      const tbl = document.getElementById(sheetName);
+      if (tbl){
+        let foundRow = null;
+        Array.from(tbl.rows).forEach(row => {
+          if (!row.cells.length) return;
+          const c0 = row.cells[0];
+          if (c0 && c0.textContent.trim().toLowerCase() === 'post-hoc comment'){
+            foundRow = row;
+          }
+        });
+
+        if (foundRow){
+          if (foundRow.cells[1]) foundRow.cells[1].textContent = txt;
+        } else {
+          const tr  = tbl.insertRow(-1);
+          const c1  = tr.insertCell(0);
+          const c2  = tr.insertCell(1);
+          c1.textContent = 'Post-hoc comment';
+          c2.textContent = txt;
+        }
+      }
+
+      status.textContent = 'Saved to XLSX.';
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Save failed: ' + err.message;
+    }
+  });
+}
     
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -2712,7 +2849,12 @@ function loadFile(filename) {
           const tbl = document.getElementById(sheet);
           if (tbl) unifyReportTableStyle(tbl);
         }
-
+        
+        // For "Test details" sheet: attach Post-hoc comment editor
+        if (/^\s*test\s*details\s*$/i.test(sheet)) {
+          injectPostHocCommentUI(filename, wb, sheet, content);
+        }
+        
         // First sheet with lat/lon → collect issues + headers
         if (!issueTableInfo.sheetName) {
           const tbl = document.getElementById(sheet);
@@ -2985,6 +3127,7 @@ table.appendChild(row);
   </script>
 </body>
 </html>
+
 
 
 
