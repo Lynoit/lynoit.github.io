@@ -240,6 +240,13 @@ form.addEventListener('submit', async e => {
   outline-offset:2px;
 }
 
+/* Small note icon on tri-toggles that have a custom annotation */
+.toggleButton[data-has-note="1"]::after {
+  content: "📝";
+  margin-left: 6px;
+  font-size: 0.85em;
+}
+
     /* Keep its position, but borrow the bigButton.blueButton styling */
 #toggleSidebar {
   position: fixed;
@@ -434,6 +441,24 @@ form.addEventListener('submit', async e => {
       padding: 6px 8px;
       text-align: center;
     }
+/* Placeholder-style hint inside editable comment cells */
+.commentCell {
+  position: relative;
+}
+
+/* Show hint text only when the cell is marked .empty */
+.commentCell.empty::before {
+  content: "Click to add/edit comment";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #888;
+  font-size: 11px;
+  font-style: italic;
+  pointer-events: none;   /* don’t block clicks */
+  white-space: nowrap;
+}
     #countTable {
       width: 100%;
       border-collapse: collapse;
@@ -848,9 +873,8 @@ form.addEventListener('submit', async e => {
   Start voice control
 </button>
 
-  <textarea id="textBox" rows="2"
-            placeholder="Speak after you say “Annotator”…">
-  </textarea>
+<textarea id="textBox" rows="2" placeholder="Write your annotation here..."></textarea>
+
 <button class="bigButton blueButton manualAnnBtn"
         onclick="logButton('Manual annotation', false)">
   Manual annotation
@@ -885,13 +909,10 @@ form.addEventListener('submit', async e => {
   <label for="buttonConfig" style="margin-left:8px;">Button setup:</label>
   <select id="buttonConfig">
     <option value="KPI_buttons.csv">ADAS KPI</option>
-    <option value="buttons.csv">ADAS KPI (old)</option>
+    <option value="Benchmark_capability_buttons.csv">Benchmark Capability</option>
     <option value="Tuning_buttons.csv">China tuning 25w23</option>
     <option value="annotator_gt_buttons.csv">KPI groundtruth</option>
     <option value="annotator_gt_buttons_YN.csv">KPI groundtruth YN</option>
-    <option value="tablet_annotator_2025week37_buttons.csv">Benchmark_25w37_buttons</option>    
-    <option value="annotator_layout.csv">Experimental_buttons</option>    
-    <option value="Toggle_buttons.csv">Toggle_buttons</option>    
   </select>
   <!-- buildButtons will populate this directly -->
   <div id="buttonGroups" class="center-groups" style="margin-top:6px; margin-bottom:30px;">
@@ -1048,10 +1069,20 @@ function playSuccess(kind = 'normal') {
   <script>
 
     console.log('main script executing');
-    
+
+const isTouchDevice =
+  ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+if (isTouchDevice) {
+  document.addEventListener('contextmenu', e => {
+    e.preventDefault();
+  }, { passive: false });
+}    
     // DOM refs
-    const appStartTime = new Date();
-    const metaAnswers = {};
+const appStartTime    = new Date();
+const appStartDateStr = appStartTime.toISOString().slice(0,10); // "YYYY-MM-DD"
+const metaAnswers     = {};
+
     const toggleBtn = document.getElementById('toggleSidebar');
     const sidebar   = document.getElementById('sidebar');
     const locEl     = document.getElementById('location');
@@ -1069,6 +1100,19 @@ function playSuccess(kind = 'normal') {
     const micLamp   = document.getElementById('micLamp');
     const textBox   = document.getElementById('textBox');
 
+// --- button sorting for tri-state toggles ---
+let triToggleSerial = 0;   // stable original order among tri toggles
+let sortTimeoutId   = null;
+const SORT_DELAY_MS = 30000;  // 30 seconds before resorting
+
+if (buttonGroups) {
+  // any click on a KPI button restarts the timer
+  buttonGroups.addEventListener('click', () => {
+    if (sortTimeoutId) clearTimeout(sortTimeoutId);
+    sortTimeoutId = setTimeout(resortTriToggles, SORT_DELAY_MS);
+  });
+}
+  
     // Clear any previous pending snapshot when the user focuses the box
 textBox.addEventListener('focus', () => {
   pendingSnapshotDataUrl = null;
@@ -1095,9 +1139,12 @@ textBox.addEventListener('input', () => {
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
 
-    // --- Toggle system ---
-const toggleState = {};   // current values by signal name, e.g. { ACC_active: 1 }
-let toggleDefs = [];      // list of { signal, onValue, offValue, label } built from CSV
+// --- Toggle system ---
+const toggleState = {};
+const triToggleTouched = {};   // signals for tri-toggles that have been changed
+
+let   toggleDefs  = [];
+let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
     let lastLimit = null;
     let limitChanges = 0;
@@ -1153,6 +1200,7 @@ let toggleDefs = [];      // list of { signal, onValue, offValue, label } built 
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
     let logTable=[], redCounts={}, lastPos=null, totalDist=0;
+    let issueMarkers = [];   // one Leaflet marker per issue row
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
     let roadTypes=new Set(), lastChartTs=0, posCount=0, lastCity=null;
@@ -1167,6 +1215,7 @@ let toggleDefs = [];      // list of { signal, onValue, offValue, label } built 
     let isDirty = false;
     let wakeLock = null;
     let lastSpeedKmh = 0;
+    let azureClockOffsetMs = null;  // device vs Azure time (ms, + = device ahead)
 
     // near other globals
 let uploadsEnabled = false;
@@ -1396,7 +1445,10 @@ async function stopTesting() {
   dateTimeIntervalId = setInterval(updateDateTime, 1000);
 updateUploadAgo();
 setInterval(updateUploadAgo, 60 * 1000); // every 60 seconds
-
+    
+// 🔹 one-time clock offset measurement vs Azure
+measureAzureClockOffset();
+    
 let lastSampleMeters = 0;
 let lastSampleTimeMs = 0;
 
@@ -2027,6 +2079,20 @@ function updateStreetTable() {
   streetTbl.innerHTML = html;
 }
 
+function formatAzureOffsetForStats(offsetMs) {
+  if (offsetMs == null) return 'Not measured';
+
+  const seconds = (offsetMs / 1000).toFixed(2);
+  const sign    = offsetMs > 0 ? '+' : '';
+  let dir;
+
+  if (offsetMs > 0)      dir = 'device ahead of Azure';
+  else if (offsetMs < 0) dir = 'device behind Azure';
+  else                   dir = 'in sync with Azure';
+
+  return `${sign}${seconds} s (${dir})`;
+}  
+
 function updateStatsTable () {
   // ① total test time hh:mm:ss
   const totalMs   = startTime ? (lastPos.ts - startTime) : 0;
@@ -2043,16 +2109,20 @@ function updateStatsTable () {
   // ④ build a “Country1 - Country2 - …” list
   const countriesList = Object.keys(countryDistances).join(' - ') || '—';
 
+  // ⑤ format Azure offset text
+  const clockOffsetText = formatAzureOffsetForStats(azureClockOffsetMs);
+
   // render the table
   document.getElementById('statsTable').innerHTML = `
     <tr><th>Metric</th><th>Value</th></tr>
     <tr><td>Total test time</td>            <td>${timeStr}</td></tr>
+    <tr><td>Clock offset vs Azure</td>      <td>${clockOffsetText}</td></tr>
     <tr><td>Total test distance</td>        <td>${km} km</td></tr>
     <tr><td>Max speed</td>                  <td>${maxSpeed.toFixed(1)} km/h</td></tr>
     <tr><td>Mean speed</td>                 <td>${meanSpd} km/h</td></tr>
     <tr><td>Speed limit changes</td>        <td>${limitChanges}</td></tr>
     <tr><td>Roundabouts</td>                <td>${roundaboutCount}</td></tr>
-    <tr><td>Traffic-light junctions</td>     <td>${trafficLightCount}</td></tr>
+    <tr><td>Traffic-light junctions</td>    <td>${trafficLightCount}</td></tr>
     <tr><td>Bridges</td>                    <td>${bridgeCount}</td></tr>
     <tr><td>Tunnels</td>                    <td>${tunnelCount}</td></tr>
     <tr><td>Cities</td>                     <td>${citiesList}</td></tr>
@@ -2115,7 +2185,14 @@ function recordSample(issueText = '') {
   // snapshot current toggles (so export is time-accurate)
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
-    toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
+    if (def.kind === 'tri') {
+      // tri-state: Not tested / No / Yes
+      const fallback = def.states?.[0] || 'Not tested';
+      toggleSnapshot[def.signal] = toggleState[def.signal] ?? fallback;
+    } else {
+      // binary legacy toggle
+      toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
+    }
   });
 
   samplingTable.push({
@@ -2132,86 +2209,91 @@ function recordSample(issueText = '') {
   });
 }
     
-  function logButton(name, isRed) {
-    // ① Timestamp
-    const dt   = new Date();
-    const date = dt.toLocaleDateString();
-    const time = dt.toLocaleTimeString();
+function logButton(name, isRed) {
+  // ① Timestamp
+  const dt   = new Date();
+  const date = dt.toLocaleDateString();
+  const time = dt.toLocaleTimeString();
 
-    // ② Phase & weather
-    const fullPhase = document.getElementById('dayPhase').textContent;
-    const phase     = fullPhase.split(': ')[1] || fullPhase;
-    const condition = iconEl.alt || 'Unknown';
+  // ② Phase & weather
+  const fullPhase = document.getElementById('dayPhase').textContent;
+  const phase     = fullPhase.split(': ')[1] || fullPhase;
+  const condition = iconEl.alt || 'Unknown';
 
-    // ③ Location
-    const [lat, lon] = locEl.innerHTML
-      .split('<br>')
-      .map(l => l.split(': ')[1]);
+  // ③ Location (lat/lon text from sidebar)
+  const [lat, lon] = locEl.innerHTML
+    .split('<br>')
+    .map(l => l.split(': ')[1]);
 
-    // ④ Distance, speed, road type
-    const dist = (totalDist / 1000).toFixed(1);
-    const spd  = speedEl.textContent.split(' ')[1];
-    const rt   = roadTypeEl.textContent.split(': ')[1];
+  // ④ Distance, speed, road type, country
+  const dist    = (totalDist / 1000).toFixed(1);
+  const spd     = speedEl.textContent.split(' ')[1];
+  const rt      = roadTypeEl.textContent.split(': ')[1];
+  const country = lastCountry || 'Unknown';
 
-    // ⑤ Comment (apply corrections just once)
-    let comment = document.getElementById('textBox').value;
-    comment = applyCorrections(comment);
+  // ⑤ Comment (apply corrections just once)
+  let comment = document.getElementById('textBox').value;
+  comment = applyCorrections(comment);
 
-    // ⑥ Optional camera snapshot
-// Prefer the early snapshot captured when typing; fall back to capturing now.
-let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
+  // ⑥ Optional camera snapshot
+  // Prefer the early snapshot captured when typing; fall back to capturing now.
+  let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
 
-    // ⑦ Push into the log array
-    logTable.push([
-      name, date, time, phase,
-      tempEl.textContent, condition,
-      lat, lon, dist, spd, rt,
-      comment, camDataUrl
-    ]);
-    checkUploadEligibility();
+  // ⑦ Push into the log array as an OBJECT (not raw array anymore)
+  const row = {
+    issue:     name,
+    date,
+    time,
+    phase,
+    temp:      tempEl.textContent,
+    condition,
+    lat,
+    lon,
+    dist,
+    speed:     spd,
+    roadType:  rt,
+    comment,
+    snapshot:  camDataUrl,
+    isRed:     !!isRed,
+    country
+  };
+  logTable.push(row);
+  checkUploadEligibility();
 
-    try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
-    
-    recordSample(name);
-    displayLogTable();        // renders Issue list only
-    renderLatestSnapshots(5); // renders only the latest 5 snapshots
+  try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
-    markDirty();
+  // still record a sampling row with the issue text
+  recordSample(name);
 
-    displayCameraTable();
-
-      const issueNumber = logTable.length;
-
-  // add marker with number instead of text
-  L.marker([+lat, +lon], {
+  // ⑧ Map marker for this issue (numbered)
+  const issueNumber = logTable.length;
+  const marker = L.marker([+lat, +lon], {
     icon: L.divIcon({
       className: 'issue-label',
       html: `<strong>${issueNumber}</strong>`
     })
   }).addTo(map);
+  issueMarkers.push(marker);
 
-    // ⑨ If it’s a “red” KPI event, update counts & tables
-    if (isRed) {
-      redCounts[name]                    = (redCounts[name]                     || 0) + 1;
-      roadRedCounts[rt]                  = (roadRedCounts[rt]                   || 0) + 1;
-      countryRedCounts[lastCountry]      = (countryRedCounts[lastCountry]       || 0) + 1;
-      weatherRedCounts[condition]        = (weatherRedCounts[condition]         || 0) + 1;
-      weatherDistances[condition]        = weatherDistances[condition]         || 0;
-      phaseRedCounts[phase]              = (phaseRedCounts[phase]               || 0) + 1;
-      phaseDistances[phase]              = phaseDistances[phase]               || 0;
+  // ⑨ Recompute KPI counts from the whole log (so deletions will also work)
+  recomputeAggregatesFromLog();
+  updateStreetTable();
+  updateCountryTable();
+  updateWeatherTable();
+  updatePhaseTable();
+  updateCountTable();
 
-      updateStreetTable();
-      updateCountryTable();
-      updateWeatherTable();
-      updatePhaseTable();
-      updateCountTable();
-    }
+  // ⑩ Refresh tables & snapshots
+  displayLogTable();        // renders Issue list only
+  renderLatestSnapshots(5); // renders only the latest 5 snapshots
+  displayCameraTable();
 
-    // ⑩ Clear the textbox
-    document.getElementById('textBox').value = '';
-    // reset the cached early snapshot for the next entry
-    pendingSnapshotDataUrl = null;
-  }
+  markDirty();
+
+  // ⑪ Clear the textbox and snapshot cache
+  document.getElementById('textBox').value = '';
+  pendingSnapshotDataUrl = null;
+}
 
 function displayCameraTable() {
   const target = document.getElementById('cameraTableContainer');
@@ -2221,7 +2303,7 @@ function displayCameraTable() {
     <table>
       <tr><th>No.</th><th>Snapshot</th></tr>`;
   logTable.forEach((row, i) => {
-    const img = row[12];          // index of the picture we just added
+    const img = row.snapshot;
     const cell = img
       ? `<img src="${img}"
               alt="Camera ${i+1}"
@@ -2237,29 +2319,108 @@ function displayLogTable() {
   let mainHtml = `
     <table id="logTable">
       <tr>
-        <th>No.</th><th>Issue</th><th>Date</th><th>Time</th>
-        <th>Phase</th><th>Temp</th><th>Weather</th>
-        <th>Lat</th><th>Lon</th><th>Distance (km)</th>
-        <th>Speed (km/h)</th><th>Road</th><th>Comment</th>
+        <th>No.</th>
+        <th>Issue</th>
+        <th>Date</th>
+        <th>Time</th>
+        <th>Phase</th>
+        <th>Temp</th>
+        <th>Weather</th>
+        <th>Lat</th>
+        <th>Lon</th>
+        <th>Distance (km)</th>
+        <th>Speed (km/h)</th>
+        <th>Road</th>
+        <th>Comment</th>
+        <th data-export="no">Remove</th>
       </tr>`;
+
   logTable.forEach((row, i) => {
-    mainHtml += `<tr><td>${i + 1}</td>` +
-                row.slice(0, 12).map(v => `<td>${v ?? '—'}</td>`).join('') +
-                `</tr>`;
+    // treat this row as an object as in your current version:
+    // { issue, date, time, phase, temp, condition, lat, lon, dist, speed, roadType, comment, camDataUrl }
+    const hasComment = !!(row.comment && row.comment.trim());
+
+    mainHtml += `
+      <tr data-log-index="${i}">
+        <td>${i + 1}</td>
+        <td>${row.issue      ?? '—'}</td>
+        <td>${row.date       ?? '—'}</td>
+        <td>${row.time       ?? '—'}</td>
+        <td>${row.phase      ?? '—'}</td>
+        <td>${row.temp       ?? '—'}</td>
+        <td>${row.condition  ?? '—'}</td>
+        <td>${row.lat        ?? '—'}</td>
+        <td>${row.lon        ?? '—'}</td>
+        <td>${row.dist       ?? '—'}</td>
+        <td>${row.speed      ?? '—'}</td>
+        <td>${row.roadType   ?? '—'}</td>
+
+        <!-- editable comment cell with placeholder behaviour -->
+        <td class="commentCell ${hasComment ? '' : 'empty'}" contenteditable="true">
+          ${hasComment ? row.comment : ''}
+        </td>
+
+        <td data-export="no">
+          <button type="button"
+                  class="bigButton redButton"
+                  style="min-width:0;padding:2px 6px;font-size:11px;"
+                  onclick="deleteIssue(${i})">
+            ✕
+          </button>
+        </td>
+      </tr>`;
   });
+
   mainHtml += `</table>`;
   document.getElementById('logTableContainer').innerHTML = mainHtml;
+
+  // attach handlers for editing comments
+  attachCommentEditHandlers();
+}
+
+function attachCommentEditHandlers() {
+  const container = document.getElementById('logTableContainer');
+  if (!container) return;
+
+  const cells = container.querySelectorAll('.commentCell');
+  cells.forEach(cell => {
+    cell.addEventListener('blur', onCommentCellBlur);
+  });
+}
+
+function onCommentCellBlur(e) {
+  const cell  = e.target;
+  const rowEl = cell.closest('tr');
+  if (!rowEl) return;
+
+  const index = Number(rowEl.dataset.logIndex);
+  if (!Number.isInteger(index) || !logTable[index]) return;
+
+  // Normalize text
+  const newText = cell.textContent.replace(/\s+/g, ' ').trim();
+
+  // Update model
+  logTable[index].comment = newText;
+
+  // Toggle placeholder style
+  if (newText) {
+    cell.classList.remove('empty');
+  } else {
+    cell.classList.add('empty');
+  }
+
+  if (typeof markDirty === 'function') {
+    markDirty();
+  }
 }
 
 function renderLatestSnapshots(limit = 5) {
   const container = document.getElementById('snapshotTableContainer');
   if (!container) return;
 
-  // slice: only keep the latest N rows
   const start = Math.max(0, logTable.length - limit);
   const rows  = logTable.slice(start);
 
-  // Build the table shell
   const table = document.createElement('table');
   table.id = 'snapshotTable';
   table.style.cssText = 'width:100%;border-collapse:collapse;border:1px solid #444;margin-bottom:80px;';
@@ -2276,27 +2437,23 @@ function renderLatestSnapshots(limit = 5) {
     const tr = document.createElement('tr');
     const globalIndex = start + i;
 
-    // Parse/sanitize coords
-    const rawLat = String(row[6] ?? '').trim().replace(',', '.');
-    const rawLon = String(row[7] ?? '').trim().replace(',', '.');
+    const rawLat = String(row.lat ?? '').trim().replace(',', '.');
+    const rawLon = String(row.lon ?? '').trim().replace(',', '.');
     const lat    = Number(rawLat);
     const lon    = Number(rawLon);
-    const issue  = row[0];
-    const camUrl = row[12];
+    const issue  = row.issue;
+    const camUrl = row.snapshot;
 
-    // cells: No. + Issue
     const tdNo    = document.createElement('td');
     const tdIssue = document.createElement('td');
     tdNo.style.cssText = tdIssue.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     tdNo.textContent    = String(globalIndex + 1);
     tdIssue.textContent = issue ?? '—';
 
-    // Map cell (iframe embed if coords are valid)
     const tdMap = document.createElement('td');
     tdMap.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      // Build a tiny bbox around the point so the embed centers correctly
-      const dLat = 0.003, dLon = 0.005; // ~ few hundred meters
+      const dLat = 0.003, dLon = 0.005;
       const bbox = [
         (lon - dLon).toFixed(6),
         (lat - dLat).toFixed(6),
@@ -2320,7 +2477,6 @@ function renderLatestSnapshots(limit = 5) {
         `<div style="width:300px;height:200px;display:flex;align-items:center;justify-content:center;border:1px solid #444;color:#bbb;">Bad lat/lon</div>`;
     }
 
-    // Photo cell
     const tdPhoto = document.createElement('td');
     tdPhoto.style.cssText = 'border:1px solid #444;padding:6px 8px;';
     if (camUrl) {
@@ -2342,21 +2498,133 @@ function renderLatestSnapshots(limit = 5) {
     table.appendChild(tr);
   });
 
-  // Replace container content
   container.innerHTML = '';
   container.appendChild(table);
 }
 
-  function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
+function recomputeAggregatesFromLog() {
+  // Reset all per-issue counters
+  redCounts        = {};
+  roadRedCounts    = {};
+  countryRedCounts = {};
+  weatherRedCounts = {};
+  phaseRedCounts   = {};
 
-    // Build buttons from CSV using fetch + PapaParse
+  logTable.forEach(row => {
+    if (!row || !row.isRed) return;
+
+    const issue   = row.issue;
+    const rt      = row.roadType || 'Unknown';
+    const country = row.country  || 'Unknown';
+    const cond    = row.condition || 'Unknown';
+    const phase   = row.phase || 'Unknown';
+
+    redCounts[issue]          = (redCounts[issue]          || 0) + 1;
+    roadRedCounts[rt]         = (roadRedCounts[rt]         || 0) + 1;
+    countryRedCounts[country] = (countryRedCounts[country] || 0) + 1;
+    weatherRedCounts[cond]    = (weatherRedCounts[cond]    || 0) + 1;
+    phaseRedCounts[phase]     = (phaseRedCounts[phase]     || 0) + 1;
+  });
+}
+
+function deleteIssue(index) {
+  if (index < 0 || index >= logTable.length) return;
+
+  const row = logTable[index];
+  const label =
+    row && row.issue
+      ? `#${index + 1} – "${row.issue}"`
+      : `issue #${index + 1}`;
+
+  if (!confirm(`Remove ${label}?`)) return;
+
+  // 1) Remove from log
+  logTable.splice(index, 1);
+
+  // 2) Remove matching marker if present
+  if (issueMarkers[index]) {
+    try {
+      map.removeLayer(issueMarkers[index]);
+    } catch (e) {
+      console.warn('Failed to remove marker', e);
+    }
+    issueMarkers.splice(index, 1);
+  }
+
+  // 3) Re-number marker labels so they match the new indices
+  issueMarkers.forEach((marker, i) => {
+    marker.setIcon(L.divIcon({
+      className: 'issue-label',
+      html: `<strong>${i + 1}</strong>`
+    }));
+  });
+
+  // 4) Recompute counts and refresh KPI tables
+  recomputeAggregatesFromLog();
+  updateCountTable();
+  updateStreetTable();
+  updateCountryTable();
+  updateWeatherTable();
+  updatePhaseTable();
+
+  // 5) Refresh UI tables & snapshots
+  displayLogTable();
+  renderLatestSnapshots(5);
+  displayCameraTable();
+
+  checkUploadEligibility();
+  markDirty();
+}
+
+function updateCountTable(){let html='<tr><th>Issue</th><th>Total No of events</th><th>Events per 1000 km</th></tr>';const km=totalDist/1000;for(let issue in redCounts){const c=redCounts[issue];const per=km>0?((c/km)*1000).toFixed(1):'—';html+=`<tr><td>${issue}</td><td>${c}</td><td>${per}</td></tr>`;}countTbl.innerHTML=html;}
+
+function resortTriToggles() {
+  const groups = document.querySelectorAll('#buttonGroups .button-group');
+
+  groups.forEach(group => {
+    // only tri-state toggles (we’ll tag them in buildButtons)
+    const triButtons = Array.from(
+      group.querySelectorAll('button[data-toggle-kind="tri"]')
+    );
+    if (triButtons.length === 0) return;
+
+    triButtons.sort((a, b) => {
+      const sigA = a.dataset.signal;
+      const sigB = b.dataset.signal;
+
+      const stateA = toggleState[sigA]; // "Not tested" / "No" / "Yes"
+      const stateB = toggleState[sigB];
+
+      const rankA = stateA === 'Not tested' ? 0 : 1;
+      const rankB = stateB === 'Not tested' ? 0 : 1;
+
+      if (rankA !== rankB) return rankA - rankB;
+
+      // same rank → keep original CSV order
+      const orderA = Number(a.dataset.order || 0);
+      const orderB = Number(b.dataset.order || 0);
+      return orderA - orderB;
+    });
+
+    // remove and append back in sorted order
+    triButtons.forEach(btn => group.removeChild(btn));
+    triButtons.forEach(btn => group.appendChild(btn));
+  });
+}
+    
+// Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
+  toggleNotes = {}; // reset all notes when loading a new button config
+  Object.keys(triToggleTouched).forEach(k => delete triToggleTouched[k]);
 
   fetch(csvFile)
-    .then(r => { if (!r.ok) throw new Error(`Failed to load ${csvFile}: ${r.status} ${r.statusText}`); return r.text(); })
+    .then(r => {
+      if (!r.ok) throw new Error(`Failed to load ${csvFile}: ${r.status} ${r.statusText}`);
+      return r.text();
+    })
     .then(csvText => {
       const { data, errors } = Papa.parse(csvText, { header: true, skipEmptyLines: true });
       if (errors?.length) console.error('CSV parse errors:', errors);
@@ -2385,12 +2653,15 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           buttonGroups.appendChild(wrap);
         }
 
+        // ─────────────────────────────────────────────
+        // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
+        // ─────────────────────────────────────────────
         if (type === 'toggle' && signal) {
           const isOn =
             def === '1' || def.toLowerCase() === 'true' || def.toLowerCase() === 'on';
 
           toggleState[signal] = isOn ? onValue : offValue;
-          toggleDefs.push({ signal, onValue, offValue, label });
+          toggleDefs.push({ signal, onValue, offValue, label, kind: 'binary' });
 
           const btn = document.createElement('button');
           btn.type = 'button';
@@ -2427,7 +2698,147 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
           return;
         }
 
-        // normal press-to-log buttons (including grey headers)
+        // ─────────────────────────────────────────────
+// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
+// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
+// ─────────────────────────────────────────────
+if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
+  const states = ['Not tested', 'No', 'Yes'];
+
+  let defaultIndex = 0;
+  const d = def.toLowerCase();
+  if (d === 'no'  || d === '0')                 defaultIndex = 1;
+  if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
+
+  let stateIndex = defaultIndex;
+  toggleState[signal] = states[stateIndex];
+
+  toggleDefs.push({
+    signal,
+    label,
+    kind: 'tri',
+    states
+  });
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `toggleButton bigButton ${cssClass}`.trim();
+  btn.setAttribute('role', 'button');
+
+  btn.dataset.toggleKind = 'tri';
+  btn.dataset.signal     = signal;
+  btn.dataset.order      = String(triToggleSerial++);
+
+  const text = document.createElement('span');
+  btn.appendChild(text);
+
+  const render = () => {
+    const state = states[stateIndex];
+    const note  = toggleNotes[signal];
+    text.textContent = note
+      ? `${label}: ${state} 📝`
+      : `${label}: ${state}`;
+
+    if (state === 'Yes') {
+      btn.style.backgroundColor = '#2e7d32';
+    } else if (state === 'No') {
+      btn.style.backgroundColor = '#8b0000';
+    } else {
+      btn.style.backgroundColor = '#2a2a2a';
+    }
+  };
+
+  function openNotePrompt() {
+    const prev = toggleNotes[signal] || '';
+    const next = prompt(`Custom annotation for "${label}":`, prev);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (trimmed) {
+      toggleNotes[signal] = trimmed;
+    } else {
+      delete toggleNotes[signal];
+    }
+    render();
+  }
+
+  // 📱 / 💻 note trigger wiring
+  let longPressTimer = null;
+  let longPressTriggered = false;
+
+  // Desktop: right-click only if NOT touch
+  if (!isTouchDevice) {
+    btn.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      openNotePrompt();
+    });
+  }
+
+  // Touch: long-press
+  function startLongPress(e) {
+    if (e.type === 'touchstart') {
+      longPressTriggered = false;
+      longPressTimer = setTimeout(() => {
+        longPressTriggered = true;
+        openNotePrompt();
+      }, 600);
+    }
+  }
+
+  function cancelLongPress() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+
+  btn.addEventListener('touchstart', startLongPress, { passive: true });
+  btn.addEventListener('touchend',   cancelLongPress);
+  btn.addEventListener('touchmove',  cancelLongPress);
+  btn.addEventListener('touchcancel',cancelLongPress);
+
+  const cycle = () => {
+    // remember index before the click
+    const prevIndex = stateIndex;
+
+    // advance state
+    stateIndex = (stateIndex + 1) % states.length;
+    toggleState[signal] = states[stateIndex];
+
+    // mark this tri-toggle as "touched" once it ever leaves its default state
+    if (stateIndex !== defaultIndex || prevIndex !== defaultIndex) {
+      triToggleTouched[signal] = true;
+    }
+
+    render();
+  };
+
+  render();
+
+  btn.addEventListener('click', e => {
+    if (longPressTriggered) {
+      longPressTriggered = false; // swallow click after long-press
+      return;
+    }
+    cycle();
+  });
+
+  btn.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      cycle();
+    }
+  });
+
+  groups[groupKey].appendChild(btn);
+  return;
+}
+
+        // ─────────────────────────────────────────────
+        // Normal press-to-log buttons (including grey headers)
+        // ─────────────────────────────────────────────
         const btn = document.createElement('button');
         btn.textContent = label;
         btn.className = `bigButton ${cssClass}`.trim();
@@ -2566,28 +2977,107 @@ function updatePhaseTable() {
   document.getElementById('phaseTable').innerHTML = html;
 }
 
-    function updateDateTime() { document.getElementById('dateTime').textContent = new Date().toLocaleString();
-    }
+function updateDateTime() {
+  const now = new Date();
+  document.getElementById('dateTime').textContent = now.toLocaleString();
 
-        function tableToCSV(tableEl) {
-      const rows = Array.from(tableEl.querySelectorAll('tr'));
-      return rows
-        .map(row => {
-          const cells = Array.from(row.querySelectorAll('th,td'));
-          return cells
-            .map(cell => {
-              // escape quotes, wrap in quotes
-              const txt = cell.textContent.replace(/"/g, '""');
-              return `"${txt}"`;
-            })
-            .join(',');
+  const todayStr = now.toISOString().slice(0,10); // "YYYY-MM-DD"
+
+  // If a new calendar day has started while the page is still open,
+  // automatically end the old session so a new test will start next time.
+  if (
+    !sessionEnded &&                       // not already ended
+    todayStr !== appStartDateStr &&        // date changed
+    (totalDist > 0 || logTable.length > 0) // there *was* a test running
+  ) {
+    console.log('New day detected → auto-ending previous session');
+    stopTesting(); // uses your existing shutdown + upload logic
+  }
+}
+
+function tableToCSV(tableEl) {
+  const rows = Array.from(tableEl.querySelectorAll('tr'));
+  return rows
+    .map(row => {
+      const cells = Array.from(row.querySelectorAll('th,td'))
+        .filter(cell => cell.dataset.export !== 'no');   // ⬅ skip Delete column
+      return cells
+        .map(cell => {
+          // escape quotes, wrap in quotes
+          const txt = cell.textContent.replace(/"/g, '""');
+          return `"${txt}"`;
         })
-        .join('\n');
-    }
+        .join(',');
+    })
+    .join('\n');
+}
 
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
-// const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sp=r&st=2025-07-01T05:31:09Z&se=2025-11-30T14:31:09Z&spr=https&sv=2024-11-04&sr=c&sig=HaISxUqexWhVDtK6zfpvsW3DbYzS21yFYu2YTCozd5U%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
+
+async function measureAzureClockOffset() {
+  try {
+    if (!containerSasUrl) {
+      throw new Error('containerSasUrl not set');
+    }
+
+    // Use the container itself as a lightweight time source
+    const [baseUrl, token] = containerSasUrl.split('?');
+    const url = `${baseUrl}?restype=container&${token}`;
+
+    const t0 = Date.now();
+    const resp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    const t1 = Date.now();
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+
+    const dateHeader =
+      resp.headers.get('Date') ||
+      resp.headers.get('date');
+
+    if (!dateHeader) {
+      throw new Error('No Date header from Azure');
+    }
+
+    const serverMs = Date.parse(dateHeader);  // Azure time (UTC)
+    const clientAtMidpoint = (t0 + t1) / 2;   // our best guess of local time
+    // Positive = device is ahead of Azure, negative = behind
+    azureClockOffsetMs = clientAtMidpoint - serverMs;
+
+    console.log(
+      '[ClockOffset] Azure Date =', dateHeader,
+      'offsetMs =', azureClockOffsetMs
+    );
+
+    // Refresh stats so the row stops saying "Not measured"
+    updateStatsTable();
+  } catch (err) {
+    console.error('measureAzureClockOffset failed:', err);
+    // leave azureClockOffsetMs as-is (null or previous value)
+  }
+}
+    
+function saveBlobLocally(blob, filename) {
+  try {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href        = url;
+    a.download    = filename;
+    a.style.display = 'none';
+
+    document.body.appendChild(a);
+    a.click();
+
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  } catch (e) {
+    console.error('Failed to trigger local download:', e);
+  }
+}
     
 async function uploadCSVtoAzure(tableId) {
   // 1. Grab the table and convert to CSV
@@ -2621,7 +3111,7 @@ async function uploadCSVtoAzure(tableId) {
   console.log(`✔ Uploaded ${blobName}`);
 }
 
-    async function uploadWorkbookToAzure() {
+async function uploadWorkbookToAzure() {
   // 1. Create a new workbook
   const wb = XLSX.utils.book_new();
 
@@ -2633,14 +3123,26 @@ async function uploadCSVtoAzure(tableId) {
       return;
     }
 
-    // 2.1) Convert the HTML table into a worksheet
-    const ws = XLSX.utils.table_to_sheet(tblEl);
+    let ws;
 
-    // 2.2) If it’s one of the “percent” sheets, multiply column C by 100
+    if (id === 'logTable') {
+      // 🔹 Build Issues sheet manually, skipping cells with data-export="no"
+      const rows = Array.from(tblEl.querySelectorAll('tr')).map(tr => {
+        const cells = Array.from(tr.querySelectorAll('th,td'))
+          .filter(cell => cell.dataset.export !== 'no'); // ⬅ skip Remove column
+        return cells.map(cell => cell.textContent);
+      });
+      ws = XLSX.utils.aoa_to_sheet(rows);
+    } else {
+      // default path for all other tables
+      ws = XLSX.utils.table_to_sheet(tblEl);
+    }
+
+    // 🔸 Percent sheets: multiply column C by 100 (unchanged)
     if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
       const range = XLSX.utils.decode_range(ws['!ref']);
       for (let row = range.s.r + 1; row <= range.e.r; ++row) {
-        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 });
+        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 }); // column C
         const cell = ws[cellRef];
         if (cell && typeof cell.v === 'number') {
           cell.v = cell.v * 100;
@@ -2648,75 +3150,119 @@ async function uploadCSVtoAzure(tableId) {
       }
     }
 
-    // 2.3) Append that sheet under its given name
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-// --- Build Sampling AoA (with dynamic toggle columns) ---
-const samplingHeader = [
-  "No","Timestamp","Latitude","Longitude",
-  "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
-];
-// one column per configured toggle signal (order = CSV order)
-toggleDefs.forEach(def => samplingHeader.push(def.signal));
-
-const samplingAoA = [ samplingHeader ];
-
-samplingTable.forEach(entry => {
-  const row = [
-    entry.no,
-    entry.timestamp,
-    entry.lat,
-    entry.lon,
-    entry.distance,
-    entry.speed,
-    entry.legalSpeed,
-    entry.issue || ''
+  // 3. --- Sampling sheet (as before, but toggle-aware) ---
+  const samplingHeader = [
+    "No","Timestamp","Latitude","Longitude",
+    "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
   ];
-  toggleDefs.forEach(def => {
-    row.push(entry.toggles?.[def.signal] ?? def.offValue);
+  // one column per configured toggle signal (order = CSV order)
+  toggleDefs.forEach(def => samplingHeader.push(def.signal));
+
+  const samplingAoA = [ samplingHeader ];
+
+  samplingTable.forEach(entry => {
+    const row = [
+      entry.no,
+      entry.timestamp,
+      entry.lat,
+      entry.lon,
+      entry.distance,
+      entry.speed,
+      entry.legalSpeed,
+      entry.issue || ''
+    ];
+    toggleDefs.forEach(def => {
+      const valFromEntry = entry.toggles?.[def.signal];
+      if (def.kind === 'tri') {
+        const fallback = def.states?.[0] || 'Not tested';
+        row.push(valFromEntry ?? fallback);
+      } else {
+        row.push(valFromEntry ?? def.offValue);
+      }
+    });
+    samplingAoA.push(row);
   });
-  samplingAoA.push(row);
-});
 
-const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
-XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
+  const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
+  XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-  // 4. Generate the binary workbook
+  // 4. --- Benchmark sheet: ONLY tri-state toggles, and ONLY if at least one was used ---
+  const triDefs = toggleDefs.filter(def => def.kind === 'tri');
+
+  // keep only tri-toggles that have been changed from default at least once
+  const changedTriDefs = triDefs.filter(def => triToggleTouched[def.signal]);
+
+  if (changedTriDefs.length > 0) {
+    const benchmarkAoA = [
+      ["Label", "Signal", "Type", "Current value", "Comment"]
+    ];
+
+    changedTriDefs.forEach(def => {
+      const value = toggleState[def.signal];
+      const note  = (toggleNotes[def.signal] || '').trim();
+
+      benchmarkAoA.push([
+        def.label || def.signal,
+        def.signal,
+        "3-state",
+        value,
+        note
+      ]);
+    });
+
+    const wsBenchmark = XLSX.utils.aoa_to_sheet(benchmarkAoA);
+    XLSX.utils.book_append_sheet(wb, wsBenchmark, "Benchmark");
+  } else {
+    console.log('No tri-state buttons pressed – skipping Benchmark sheet.');
+  }
+
+  // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
     bookType: 'xlsx',
     type:      'array'
   });
 
-  // 5. Wrap in a Blob
+  // 6. Wrap in a Blob
   const blob = new Blob([wbout], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
 
-  // 6. Determine filename using your appStartTime helper
+  // 7. Determine filename using your appStartTime helper
   const blobName = `${reportBaseName}.xlsx`;
 
-  // 7. Build upload URL from containerSasUrl
+  // 8. Build upload URL from containerSasUrl
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  // 8. PUT to Azure Blob Storage
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    },
-    body: blob
-  });
+  // 9. Try cloud upload, fallback to local download if offline / failed
+  try {
+    if (!navigator.onLine) {
+      throw new Error('Offline – skipping cloud upload');
+    }
 
-  if (!resp.ok) {
-    throw new Error(`Workbook upload failed: ${resp.status} ${resp.statusText}`);
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      },
+      body: blob
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Workbook upload failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    console.log(`✔ Uploaded workbook: ${blobName}`);
+    lastXlsxUploadMs = Date.now();
+    updateUploadAgo();
+  } catch (err) {
+    console.error('Cloud workbook upload failed, saving locally instead:', err);
+    saveBlobLocally(blob, blobName);
   }
-
-  console.log(`✔ Uploaded workbook: ${blobName}`);
-lastXlsxUploadMs = Date.now();
-updateUploadAgo();
 }
     
   async function exportMainContentToAzure() {
@@ -3030,7 +3576,7 @@ async function uploadSnapshotsZip() {
   const zip = new JSZip();
 
   logTable.forEach((row, i) => {
-    const dataUrl = row[12];
+    const dataUrl = row.snapshot;
     if (!dataUrl) return;   // skip if no snapshot
 
     const [meta, base64] = dataUrl.split(',');
@@ -3048,18 +3594,29 @@ async function uploadSnapshotsZip() {
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
-  const resp = await fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'x-ms-blob-type': 'BlockBlob',
-      'Content-Type':   'application/zip'
-    },
-    body: content
-  });
-  if (!resp.ok) {
-    throw new Error(`Snapshot ZIP upload failed: ${resp.status} ${resp.statusText}`);
+  try {
+    if (!navigator.onLine) {
+      throw new Error('Offline – skipping cloud upload');
+    }
+
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type':   'application/zip'
+      },
+      body: content
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Snapshot ZIP upload failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
+  } catch (err) {
+    console.error('Cloud ZIP upload failed, saving locally instead:', err);
+    saveBlobLocally(content, blobName);
   }
-  console.log(`✔ Uploaded snapshots ZIP as ${blobName}`);
 }
     
 // 1) Grab the existing Upload button
