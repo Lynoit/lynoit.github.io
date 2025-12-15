@@ -2623,12 +2623,11 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
     rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
   }
   if (!rows.length){
-    // create simple 2-col header if sheet was empty
     rows = [['Label', 'Value']];
   }
 
-  // Always append a new row with timestamp
-  const label = `Additional comments (${formatTimestampForLabel()})`;
+  // Append a new row with timestamped label
+  const label = `Follow-up comments (${formatTimestampForLabel()})`;
   rows.push([label, commentText]);
 
   // Write rows back into the sheet
@@ -2636,14 +2635,12 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
   wb.Sheets[sheetName] = sheet;
   if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
 
-  // Serialize workbook again
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob(
     [out],
     { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
   );
 
-  // Upload back to Azure using the existing SAS
   const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
   const res = await fetch(url, {
     method: 'PUT',
@@ -2658,7 +2655,7 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
     throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
   }
 
-  // 🔹 After a successful upload, rebuild the Test details table from the sheet
+  // Rebuild Test details table from updated sheet
   rerenderTestDetailsTable(wb);
 }
 
@@ -2669,25 +2666,16 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   const btnId     = 'phc_btn_'    + safeId;
   const statusId  = 'phc_status_' + safeId;
 
-  // We could try to read an existing comment, but since we're appending
-  // timestamped rows, we'll just default to placeholder.
-  let existingComment = '';
-  try{
-    const sheet = wb.Sheets[sheetName];
-    const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-    // If you ever want the last comment back, you can scan rows here.
-    // For now we keep textarea empty -> placeholder text.
-  } catch(e){ /* ignore */ }
-
   const container = document.createElement('div');
   container.style.margin = '12px 0 24px';
   container.innerHTML = `
-    <h3>Additional comments</h3>
+    <h3>Follow-up comments</h3>
     <textarea id="${taId}"
               rows="3"
-              style="width:100%;max-width:800px;">${existingComment || 'Add your comment here...'}</textarea>
+              style="width:100%;max-width:800px;"
+              placeholder="Add your comment here..."></textarea>
     <br>
-    <button id="${btnId}" style="margin-top:6px;">Add comment</button>
+    <button id="${btnId}" style="margin-top:6px;">Save comment to XLSX</button>
     <span id="${statusId}" style="margin-left:10px;font-size:12px;color:#555;"></span>
   `;
   contentEl.appendChild(container);
@@ -2696,19 +2684,9 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   const button   = document.getElementById(btnId);
   const status   = document.getElementById(statusId);
 
-  // Clear the default text on first focus
-  textarea.addEventListener('focus', () => {
-    if (textarea.value === 'Add your comment here...'){
-      textarea.value = '';
-    }
-  });
-
   button.addEventListener('click', async () => {
-    const txtRaw = textarea.value || '';
-    const txt = txtRaw.trim();
-
-    // Treat placeholder as "empty"
-    if (!txt || txtRaw === 'Add your comment here...'){
+    const txt = (textarea.value || '').trim();
+    if (!txt){
       status.textContent = 'Please write a comment before saving.';
       return;
     }
@@ -2718,8 +2696,8 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
     try{
       await savePostHocCommentToXlsx(filename, wb, sheetName, txt);
 
-      // ✅ Reset textarea to default placeholder text
-      textarea.value = 'Add your comment here...';
+      // reset field → only ghost text from placeholder is visible
+      textarea.value = '';
 
       status.textContent = 'Saved to XLSX.';
     } catch(err){
@@ -3139,6 +3117,7 @@ table.appendChild(row);
   </script>
 </body>
 </html>
+
 
 
 
