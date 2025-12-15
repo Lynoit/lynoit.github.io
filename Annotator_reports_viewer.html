@@ -2627,16 +2627,9 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
     rows = [['Label', 'Value']];
   }
 
-  // Find or append "Follow-up comments" row
-  const idx = rows.findIndex(r =>
-    String(r[0] ?? '').trim().toLowerCase() === 'Follow-up comments'
-  );
-  if (idx >= 0){
-    rows[idx][1] = commentText;
-  } else {
-    const label = `Follow-up comments (${formatTimestampForLabel()})`;
-    rows.push([label, commentText]);
-  }
+  // Always append a new row with timestamp
+  const label = `Follow-up comments (${formatTimestampForLabel()})`;
+  rows.push([label, commentText]);
 
   // Write rows back into the sheet
   sheet = XLSX.utils.aoa_to_sheet(rows);
@@ -2650,7 +2643,7 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
     { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
   );
 
-  // Upload back to Azure using the existing SAS (must allow PUT in CORS)
+  // Upload back to Azure using the existing SAS
   const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
   const res = await fetch(url, {
     method: 'PUT',
@@ -2664,9 +2657,9 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
   if (!res.ok){
     throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
   }
-  
-  rerenderTestDetailsTable(wb);
 
+  // 🔹 After a successful upload, rebuild the Test details table from the sheet
+  rerenderTestDetailsTable(wb);
 }
 
 // Inject UI under the Test details table
@@ -2676,17 +2669,14 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   const btnId     = 'phc_btn_'    + safeId;
   const statusId  = 'phc_status_' + safeId;
 
-  // Try to read existing comment from the sheet
+  // We could try to read an existing comment, but since we're appending
+  // timestamped rows, we'll just default to placeholder.
   let existingComment = '';
   try{
     const sheet = wb.Sheets[sheetName];
     const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
-    const idx   = rows.findIndex(r =>
-      String(r[0] ?? '').trim().toLowerCase() === 'follow-up comments'
-    );
-    if (idx >= 0 && rows[idx][1] != null){
-      existingComment = String(rows[idx][1]);
-    }
+    // If you ever want the last comment back, you can scan rows here.
+    // For now we keep textarea empty -> placeholder text.
   } catch(e){ /* ignore */ }
 
   const container = document.createElement('div');
@@ -2714,38 +2704,22 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   });
 
   button.addEventListener('click', async () => {
-    const txt = (textarea.value || '').trim();
-    if (!txt){
+    const txtRaw = textarea.value || '';
+    const txt = txtRaw.trim();
+
+    // Treat placeholder as "empty"
+    if (!txt || txtRaw === 'Add your comment here...'){
       status.textContent = 'Please write a comment before saving.';
       return;
     }
+
     status.textContent = 'Saving…';
 
     try{
       await savePostHocCommentToXlsx(filename, wb, sheetName, txt);
 
-      // Update the rendered Test details table so it matches the XLSX
-      const tbl = document.getElementById(sheetName);
-      if (tbl){
-        let foundRow = null;
-        Array.from(tbl.rows).forEach(row => {
-          if (!row.cells.length) return;
-          const c0 = row.cells[0];
-          if (c0 && c0.textContent.trim().toLowerCase() === 'follow-up comments'){
-            foundRow = row;
-          }
-        });
-
-        if (foundRow){
-          if (foundRow.cells[1]) foundRow.cells[1].textContent = txt;
-        } else {
-          const tr  = tbl.insertRow(-1);
-          const c1  = tr.insertCell(0);
-          const c2  = tr.insertCell(1);
-          c1.textContent = 'Follow-up comments';
-          c2.textContent = txt;
-        }
-      }
+      // ✅ Reset textarea to default placeholder text
+      textarea.value = 'Add your comment here...';
 
       status.textContent = 'Saved to XLSX.';
     } catch(err){
@@ -3165,6 +3139,7 @@ table.appendChild(row);
   </script>
 </body>
 </html>
+
 
 
 
