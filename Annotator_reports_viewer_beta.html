@@ -4,12 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Annotator Reports Viewer</title>
-  <link rel="icon" type="image/svg+xml" href="./favicon_speed_R_carbon_bold.svg">
+  <link rel="icon" href="./favicon_speed_R_carbon_bold.svg" type="image/svg+xml" sizes="any">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     body { margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; background: #fff; color: #000; }
 #sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 320px; background: #f5f5f5; overflow-y: auto; border-right: 1px solid #ddd; }
-#content { margin-left: 320px; padding: 20px; }
+#content {
+  margin-left: 320px;
+  padding: 16px 20px 20px 20px; /* top right bottom left */
+}
 
 /* Sidebar accordion affordance */
 .day-header{
@@ -94,7 +97,7 @@
     .legend .box { width: 12px; height: 12px; border: 1px solid #ccd3d9; }
 
     /* Latest routes grid */
-    .routes-wrap { margin-top: 18px; }
+    .routes-wrap { margin-top: 0px; }
     .route-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 14px; max-width: none; width: 100%; }
     .route-card { border: 1px solid #ddd; border-radius: 8px; padding: 10px; }
     .route-title { font-size: 13px; color: #333; margin-bottom: 8px; }
@@ -292,7 +295,7 @@
 /* A bit more vertical separation between rows inside the overview grid */
 .overview{
   row-gap: 28px;                    /* vertical spacing between tiles */
-}   
+}  
 
   </style>
 </head>
@@ -304,7 +307,7 @@
 <div id="content">
   <!-- Latest routes FIRST -->
   <div class="routes-wrap" style="grid-column: 1 / -1;">
-    <h2 id="title-latest-routes" data-title="Latest routes" data-loading="1" style="margin-top:0;">
+    <h2 id="title-latest-routes" data-title="Latest tests" data-loading="1" style="margin-top:0;">
       <span>Loading</span>
       <span class="title-thinking">
         <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
@@ -394,6 +397,17 @@ const APP_PASSWORD = 'adasfleet'; // change to your own
 })();
     
 const workbookCache = new Map(); // filename -> Promise<{ wb, buf }>
+
+function formatTimestampForLabel(d = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const mm   = pad(d.getMonth() + 1);
+  const dd   = pad(d.getDate());
+  const hh   = pad(d.getHours());
+  const mi   = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+}
+    
 function loadWorkbook(filename) {
   if (workbookCache.has(filename)) return workbookCache.get(filename);
   const p = (async () => {
@@ -743,7 +757,30 @@ function extractTestDetails(wb){
   return details;
 }
 
-    // --- Countries parser (from "Country" sheet or fallback Test details) ---
+function rerenderTestDetailsTable(wb) {
+  // Find the Test details sheet
+  const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+  if (!sheetName) return;
+
+  const ws = wb.Sheets[sheetName];
+
+  // Generate fresh HTML for that sheet
+  const html = XLSX.utils.sheet_to_html(ws, { id: sheetName });
+
+  // Parse HTML into a temporary container so we can grab the <table>
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  const newTable = tmp.querySelector('table');
+  if (!newTable) return;
+
+  // Find the existing table in the DOM and replace it
+  const oldTable = document.getElementById(sheetName);
+  if (oldTable) {
+    oldTable.replaceWith(newTable);
+  }
+}
+    
+// --- Countries parser (from "Country" sheet or fallback Test details) ---
 // Uses loadWorkbook(filename) → Promise<{ wb, buf }>
 function fetchCountriesForFile(filename){
   if (countryCache.has(filename)) {
@@ -904,7 +941,7 @@ function canonicalEU(raw){
   content.innerHTML = `
     <!-- Latest routes FIRST -->
     <div class="routes-wrap" style="grid-column: 1 / -1;">
-      <h2 id="title-latest-routes" data-title="Latest routes" data-loading="1" style="margin-top:0;">
+      <h2 id="title-latest-routes" data-title="Latest tests" data-loading="1" style="margin-top:0;">
         <span>Loading</span>
         <span class="title-thinking">
           <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
@@ -2576,6 +2613,99 @@ function unifyReportTableStyle(tbl){
     });
   }
 }
+
+// --- Save "Additional comments" back into the XLSX on Azure --------------------
+async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
+  // Get existing sheet or create a minimal one
+  let sheet = wb.Sheets[sheetName];
+  let rows = [];
+  if (sheet){
+    rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  }
+  if (!rows.length){
+    rows = [['Label', 'Value']];
+  }
+
+  // Append a new row with timestamped label
+  const label = `Additional comment (${formatTimestampForLabel()})`;
+  rows.push([label, commentText]);
+
+  // Write rows back into the sheet
+  sheet = XLSX.utils.aoa_to_sheet(rows);
+  wb.Sheets[sheetName] = sheet;
+  if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
+
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+
+  const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!res.ok){
+    throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
+  }
+
+  // Rebuild Test details table from updated sheet
+  rerenderTestDetailsTable(wb);
+}
+
+// Inject UI under the Test details table
+function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
+  const safeId    = cssSafeId(filename + '_posthoc');
+  const taId      = 'phc_text_'   + safeId;
+  const btnId     = 'phc_btn_'    + safeId;
+  const statusId  = 'phc_status_' + safeId;
+
+  const container = document.createElement('div');
+  container.style.margin = '12px 0 24px';
+  container.innerHTML = `
+    <h3>Additional comment</h3>
+    <textarea id="${taId}"
+              rows="3"
+              style="width:100%;max-width:800px;"
+              placeholder="Add your comment here..."></textarea>
+    <br>
+    <button id="${btnId}" style="margin-top:6px;">Add comment</button>
+    <span id="${statusId}" style="margin-left:10px;font-size:12px;color:#555;"></span>
+  `;
+  contentEl.appendChild(container);
+
+  const textarea = document.getElementById(taId);
+  const button   = document.getElementById(btnId);
+  const status   = document.getElementById(statusId);
+
+  button.addEventListener('click', async () => {
+    const txt = (textarea.value || '').trim();
+    if (!txt){
+      status.textContent = 'Please write a comment before saving.';
+      return;
+    }
+
+    status.textContent = 'Saving…';
+
+    try{
+      await savePostHocCommentToXlsx(filename, wb, sheetName, txt);
+
+      // reset field → only ghost text from placeholder is visible
+      textarea.value = '';
+
+      status.textContent = 'Saved to XLSX.';
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Save failed: ' + err.message;
+    }
+  });
+}
     
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -2709,7 +2839,12 @@ function loadFile(filename) {
           const tbl = document.getElementById(sheet);
           if (tbl) unifyReportTableStyle(tbl);
         }
-
+        
+        // For "Test details" sheet: attach Additional comments editor
+        if (/^\s*test\s*details\s*$/i.test(sheet)) {
+          injectPostHocCommentUI(filename, wb, sheet, content);
+        }
+        
         // First sheet with lat/lon → collect issues + headers
         if (!issueTableInfo.sheetName) {
           const tbl = document.getElementById(sheet);
