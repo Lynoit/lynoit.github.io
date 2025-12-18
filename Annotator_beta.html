@@ -2216,6 +2216,227 @@ function recordSample(issueText = '', eventId = null) {
     toggles:   toggleSnapshot
   });
 }
+
+function getIssueWindowData(issueIndex, preMs = 10_000, postMs = 5_000) {
+  const issue = logTable[issueIndex];
+  if (!issue || !issue.ts) return null;
+
+  const tIssue = Date.parse(issue.ts);
+  if (isNaN(tIssue)) return null;
+
+  const tStart = tIssue - preMs;
+  const tEnd   = tIssue + postMs;
+
+  const tSec      = []; // x-axis (seconds relative to issue)
+  const speedKmh  = []; // y-axis for subplot 2
+  const accMs2    = []; // y-axis for subplot 1
+
+  // 1) collect all sampling rows in the window
+  samplingTable.forEach(row => {
+    const tRow = Date.parse(row.timestamp);
+    if (isNaN(tRow)) return;
+    if (tRow < tStart || tRow > tEnd) return;
+
+    const relSec = (tRow - tIssue) / 1000;            // -10 .. +5
+    const vKmh   = Number(row.speed || 0);            // km/h
+
+    tSec.push(relSec);
+    speedKmh.push(vKmh);
+  });
+
+  if (tSec.length < 2) {
+    // too few points to calculate acceleration
+    return { tSec, speedKmh, accMs2: [] };
+  }
+
+  // 2) compute acceleration from speed differences
+  //    convert km/h → m/s, then a = Δv / Δt
+  accMs2.length = tSec.length;
+  accMs2[0] = 0;  // or copy accMs2[1] later
+
+  for (let i = 1; i < tSec.length; i++) {
+    const dt = tSec[i] - tSec[i - 1];       // seconds
+    if (dt <= 0) {
+      accMs2[i] = accMs2[i - 1] ?? 0;
+      continue;
+    }
+
+    const v1 = speedKmh[i - 1] * 1000 / 3600; // m/s
+    const v2 = speedKmh[i]     * 1000 / 3600; // m/s
+
+    const a  = (v2 - v1) / dt;                // m/s²
+    accMs2[i] = a;
+  }
+
+  // Optional: make the first element non-weird
+  if (tSec.length > 1) accMs2[0] = accMs2[1];
+
+  return { tSec, speedKmh, accMs2 };
+}
+
+function drawIssuePlotToCanvas(issueIndex, canvas) {
+  const data = getIssueWindowData(issueIndex);
+  if (!data || data.tSec.length === 0) return;
+
+  const { tSec, speedKmh, accMs2 } = data;
+  const ctx = canvas.getContext('2d');
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#000000';
+  ctx.fillStyle = '#000000';
+  ctx.font = '10px Arial';
+
+  // Layout: top subplot = acceleration, bottom = speed
+  const marginLeft   = 40;
+  const marginRight  = 10;
+  const marginTop    = 10;
+  const marginBottom = 15;
+  const midGap       = 20;
+
+  const plotWidth  = W - marginLeft - marginRight;
+  const subHeight  = (H - marginTop - marginBottom - midGap) / 2;
+
+  const tMin = -10;
+  const tMax =  5;
+
+  function xFromT(t) {
+    return marginLeft + ( (t - tMin) / (tMax - tMin) ) * plotWidth;
+  }
+
+  // === Acceleration subplot (m/s²) ===
+  const aMin = Math.min(...accMs2, 0);
+  const aMax = Math.max(...accMs2, 0);
+  const aPad = 0.2 * (aMax - aMin || 1);
+  const yAmin = aMin - aPad;
+  const yAmax = aMax + aPad;
+
+  const topY0 = marginTop;
+  const topY1 = marginTop + subHeight;
+
+  function yFromA(a) {
+    return topY1 - ( (a - yAmin) / (yAmax - yAmin || 1) ) * (subHeight - 5);
+  }
+
+  // axes
+  ctx.strokeStyle = '#000';
+  ctx.beginPath();
+  ctx.moveTo(marginLeft, topY0);
+  ctx.lineTo(marginLeft, topY1);
+  ctx.lineTo(W - marginRight, topY1);
+  ctx.stroke();
+
+  // Y ticks for acceleration
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const aTicks = 5;
+  for (let i = 0; i <= aTicks; i++) {
+    const frac = i / aTicks;
+    const aVal = yAmin + frac * (yAmax - yAmin);
+    const y    = topY1 - frac * (subHeight - 5);
+    ctx.beginPath();
+    ctx.moveTo(marginLeft - 3, y);
+    ctx.lineTo(marginLeft, y);
+    ctx.stroke();
+    ctx.fillText(aVal.toFixed(2), marginLeft - 5, y);
+  }
+  // label
+  ctx.save();
+  ctx.translate(10, (topY0 + topY1) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Acceleration (m/s²)', 0, 0);
+  ctx.restore();
+
+  // acceleration curve
+  ctx.strokeStyle = '#d1242f';
+  ctx.beginPath();
+  let first = true;
+  for (let i = 0; i < tSec.length; i++) {
+    const x = xFromT(tSec[i]);
+    const y = yFromA(accMs2[i]);
+    if (first) { ctx.moveTo(x,y); first = false; }
+    else       { ctx.lineTo(x,y); }
+  }
+  ctx.stroke();
+
+  // === Speed subplot (km/h) ===
+  const sMin = Math.min(...speedKmh, 0);
+  const sMax = Math.max(...speedKmh, 1);
+  const sPad = 0.1 * (sMax - sMin || 1);
+  const ySmin = sMin - sPad;
+  const ySmax = sMax + sPad;
+
+  const botY0 = topY1 + midGap;
+  const botY1 = botY0 + subHeight;
+
+  function yFromS(v) {
+    return botY1 - ( (v - ySmin) / (ySmax - ySmin || 1) ) * (subHeight - 5);
+  }
+
+  // axes
+  ctx.strokeStyle = '#000';
+  ctx.beginPath();
+  ctx.moveTo(marginLeft, botY0);
+  ctx.lineTo(marginLeft, botY1);
+  ctx.lineTo(W - marginRight, botY1);
+  ctx.stroke();
+
+  // Y ticks for speed
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const sTicks = 5;
+  for (let i = 0; i <= sTicks; i++) {
+    const frac = i / sTicks;
+    const vVal = ySmin + frac * (ySmax - ySmin);
+    const y    = botY1 - frac * (subHeight - 5);
+    ctx.beginPath();
+    ctx.moveTo(marginLeft - 3, y);
+    ctx.lineTo(marginLeft, y);
+    ctx.stroke();
+    ctx.fillText(vVal.toFixed(1), marginLeft - 5, y);
+  }
+  // label
+  ctx.save();
+  ctx.translate(10, (botY0 + botY1) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Speed (km/h)', 0, 0);
+  ctx.restore();
+
+  // speed curve
+  ctx.strokeStyle = '#1f6feb';
+  ctx.beginPath();
+  first = true;
+  for (let i = 0; i < tSec.length; i++) {
+    const x = xFromT(tSec[i]);
+    const y = yFromS(speedKmh[i]);
+    if (first) { ctx.moveTo(x,y); first = false; }
+    else       { ctx.lineTo(x,y); }
+  }
+  ctx.stroke();
+
+  // X-axis ticks and label (shared)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xTicks = 5;
+  for (let i = 0; i <= xTicks; i++) {
+    const frac = i / xTicks;
+    const tVal = tMin + frac * (tMax - tMin);
+    const x    = xFromT(tVal);
+    ctx.beginPath();
+    ctx.moveTo(x, botY1);
+    ctx.lineTo(x, botY1 + 3);
+    ctx.stroke();
+    ctx.fillText(tVal.toFixed(0), x, botY1 + 5);
+  }
+  ctx.fillText('Time relative to issue (s)', marginLeft + plotWidth / 2, H - 10);
+}  
     
 function logButton(name, isRed) {
   // ① Timestamp
@@ -2254,6 +2475,7 @@ function logButton(name, isRed) {
     issue:     name,
     date,
     time,
+    ts:        tsIso,                 // <--- store precise timestamp
     phase,
     temp:      tempEl.textContent,
     condition,
@@ -4085,55 +4307,52 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
 }
 
 async function uploadIssuePlotsZip() {
-  console.log('💾 uploadIssuePlotsZip() called; logTable.length =', logTable.length);
-  if (!logTable.length || !samplingTable.length) return;
-
   const zip = new JSZip();
+  const canvas = document.createElement('canvas');
+  canvas.width  = 600;
+  canvas.height = 400;
 
   logTable.forEach((row, i) => {
-    const dataUrl = generateIssuePlotDataUrl(row, i);
-    if (!dataUrl) return;
+    const data = getIssueWindowData(i);
+    if (!data || data.tSec.length === 0) return;
 
-    const [meta, base64] = dataUrl.split(',');
-    const safeIssue = (row.issue || 'issue')
-      .toString()
-      .slice(0, 40)              // limit filename length
-      .replace(/[^a-z0-9_-]+/gi, '_');
+    drawIssuePlotToCanvas(i, canvas);
 
-    const filename = `${String(i + 1).padStart(3, '0')}_${safeIssue}.png`;
+    const pngDataUrl = canvas.toDataURL('image/png');
+    const base64 = pngDataUrl.split(',')[1];
+
+    // e.g. "Issue_1_Manual annotation.png"
+    const safeIssue = (row.issue || 'Issue').replace(/[^\w\-]+/g, '_');
+    const filename  = `Issue_${i+1}_${safeIssue}.png`;
+
     zip.file(filename, base64, { base64: true });
   });
 
-  const content = await zip.generateAsync({ type: 'blob' });
+  const blob = await zip.generateAsync({ type: 'blob' });
 
-  const blobName = `${reportBaseName}_2.zip`; // 🔹 same base name, "_2"
+  const blobNameBase = reportBaseName; // same as your XLSX/ZIP base
+  const blobName     = `${blobNameBase}_2.zip`;  // <--- suffix _2
+
   const [baseUrl, token] = containerSasUrl.split('?');
   const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
 
   try {
-    if (!navigator.onLine) {
-      throw new Error('Offline – skipping cloud upload');
-    }
-
+    if (!navigator.onLine) throw new Error('Offline');
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
         'x-ms-blob-type': 'BlockBlob',
         'Content-Type':   'application/zip'
       },
-      body: content
+      body: blob
     });
-
-    if (!resp.ok) {
-      throw new Error(`Issue plots ZIP upload failed: ${resp.status} ${resp.statusText}`);
-    }
-
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
     console.log(`✔ Uploaded issue plots ZIP as ${blobName}`);
   } catch (err) {
-    console.error('Cloud issue-plot ZIP upload failed, saving locally instead:', err);
-    saveBlobLocally(content, blobName);
+    console.error('Upload failed, saving locally instead:', err);
+    saveBlobLocally(blob, blobName);
   }
-} 
+}
     
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
