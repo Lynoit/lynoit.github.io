@@ -3063,17 +3063,26 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   // outline box
   ctx.strokeRect(margin.left, accTop, plotWidth, accHeight);
 
-  // X ticks at -10, -5, 0, 5
+  // --- Y-axis ticks for acceleration (m/s²) ---
   ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  [-10, -5, 0, 5].forEach(t => {
-    const x = xFromT(t);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+
+  const accTicks = 5; // number of intervals
+  for (let i = 0; i <= accTicks; i++) {
+    const frac = i / accTicks;
+    const val  = accMin + frac * accSpan; // real acceleration value
+    const y    = yAccFromA(val);
+
+    // small tick mark
     ctx.beginPath();
-    ctx.moveTo(x, accBottom);
-    ctx.lineTo(x, accBottom + 5);
+    ctx.moveTo(margin.left - 5, y);
+    ctx.lineTo(margin.left,     y);
     ctx.stroke();
-    ctx.fillText(`${t}s`, x, accBottom + 7);
+
+    // numeric label
+    ctx.fillText(val.toFixed(2), margin.left - 8, y);
+  }
   });
 
   // NEW: Y ticks for acceleration
@@ -3940,15 +3949,13 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     .filter(o => Number.isFinite(o.t) && o.t >= windowStart && o.t <= windowEnd)
     .sort((a, b) => a.t - b.t);
 
-  if (samples.length < 2) return null; // not enough data for a curve
+  if (samples.length < 2) return null;
 
-  const times  = samples.map(o => (o.t - tEvent) / 1000); // seconds relative to issue
-  const speeds = samples.map(o => Number(o.s.speed || 0)); // km/h
+  const times  = samples.map(o => (o.t - tEvent) / 1000);          // s relative to issue
+  const speeds = samples.map(o => Number(o.s.speed || 0));         // km/h
+  const vMs    = speeds.map(v => v * (1000 / 3600));               // m/s
 
-  // Convert to m/s
-  const vMs = speeds.map(v => v * (1000 / 3600));
-
-  // Compute acceleration (m/s²) as finite diff
+  // Acceleration (m/s²)
   const acc = [];
   for (let i = 0; i < vMs.length; i++) {
     if (i === 0) {
@@ -3984,49 +3991,45 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   const plotWidth  = canvas.width  - margin.left - margin.right;
   const plotHeight = (canvas.height - margin.top - margin.bottom - margin.midGap) / 2;
 
+  // Title
   const title = `Issue #${issueIndex + 1} – ${issueRow.issue || ''}`;
   ctx.font = '18px Arial';
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillText(title, margin.left, 20);
 
-  // Fixed x range [-10, +5]
-  const xMin = -10;
-  const xMax = 5;
+  // Common X transform: t in [-10, +5] → pixels
+  const xMin  = -10;
+  const xMax  = 5;
   const xSpan = xMax - xMin;
-
-  function xFromT(t) {
-    return margin.left + ((t - xMin) / xSpan) * plotWidth;
-  }
+  const xFromT = t => margin.left + ((t - xMin) / xSpan) * plotWidth;
 
   // ---------- subplot 1: acceleration ----------
-  const accTop = margin.top;
-  const accBottom = margin.top + plotHeight;
+  const accTop    = margin.top;
   const accHeight = plotHeight;
+  const accBottom = accTop + accHeight;
 
   const maxAbsAcc = Math.max(0.1, ...acc.map(a => Math.abs(a)));
-  const accMax = maxAbsAcc;
-  const accMin = -maxAbsAcc;
+  const accMax  = maxAbsAcc;
+  const accMin  = -maxAbsAcc;
   const accSpan = accMax - accMin;
 
-  function yAccFromA(a) {
-    return accTop + ((accMax - a) / accSpan) * accHeight;
-  }
+  const yAccFromA = a =>
+    accTop + ((accMax - a) / accSpan) * accHeight;
 
-  // axes
+  // Axes & box
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 1;
+  ctx.lineWidth   = 1;
 
-  // horizontal axis at a=0
   const yZeroAcc = yAccFromA(0);
   ctx.beginPath();
   ctx.moveTo(margin.left, yZeroAcc);
   ctx.lineTo(margin.left + plotWidth, yZeroAcc);
   ctx.stroke();
 
-  // outline box
   ctx.strokeRect(margin.left, accTop, plotWidth, accHeight);
 
-  // ticks at -10, -5, 0, 5
+  // X ticks at -10, -5, 0, 5 (seconds)
   ctx.font = '11px Arial';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -4039,7 +4042,23 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     ctx.fillText(`${t}s`, x, accBottom + 7);
   });
 
-  // label
+  // Y ticks for acceleration (m/s²)
+  ctx.textAlign   = 'right';
+  ctx.textBaseline= 'middle';
+  const accTicks = 5;
+  for (let i = 0; i <= accTicks; i++) {
+    const frac = i / accTicks;
+    const val  = accMin + frac * accSpan;
+    const y    = yAccFromA(val);
+
+    ctx.beginPath();
+    ctx.moveTo(margin.left - 5, y);
+    ctx.lineTo(margin.left,     y);
+    ctx.stroke();
+    ctx.fillText(val.toFixed(2), margin.left - 8, y);
+  }
+
+  // Y label for acceleration
   ctx.save();
   ctx.translate(20, accTop + accHeight / 2);
   ctx.rotate(-Math.PI / 2);
@@ -4048,36 +4067,34 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   ctx.fillText('Acceleration (m/s²)', 0, 0);
   ctx.restore();
 
-  // curve
+  // Acc curve
   ctx.strokeStyle = '#d1242f';
-  ctx.lineWidth = 2;
+  ctx.lineWidth   = 2;
   ctx.beginPath();
   times.forEach((t, i) => {
     const x = xFromT(t);
     const y = yAccFromA(acc[i]);
     if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    else         ctx.lineTo(x, y);
   });
   ctx.stroke();
 
   // ---------- subplot 2: speed ----------
-  const spTop = accBottom + margin.midGap;
-  const spBottom = spTop + plotHeight;
+  const spTop    = accBottom + margin.midGap;
   const spHeight = plotHeight;
+  const spBottom = spTop + spHeight;
 
-  const spMin = 0;
-  const spMax = Math.max(10, ...speeds) * 1.1;
+  const spMin  = 0;
+  const spMax  = Math.max(10, ...speeds) * 1.1;
   const spSpan = spMax - spMin;
 
-  function ySpFromV(v) {
-    return spTop + ((spMax - v) / spSpan) * spHeight;
-  }
+  const ySpFromV = v =>
+    spTop + ((spMax - v) / spSpan) * spHeight;
 
-  // axes + box
+  // Axes & box
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 1;
+  ctx.lineWidth   = 1;
 
-  // x-axis (speed=0 line)
   const yZeroSp = ySpFromV(0);
   ctx.beginPath();
   ctx.moveTo(margin.left, yZeroSp);
@@ -4086,7 +4103,10 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
 
   ctx.strokeRect(margin.left, spTop, plotWidth, spHeight);
 
-  // ticks shared (re-draw, but fine)
+  // X ticks again at -10, -5, 0, 5
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
   [-10, -5, 0, 5].forEach(t => {
     const x = xFromT(t);
     ctx.beginPath();
@@ -4096,7 +4116,23 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     ctx.fillText(`${t}s`, x, spBottom + 7);
   });
 
-  // y label
+  // Y ticks for speed (km/h)
+  ctx.textAlign   = 'right';
+  ctx.textBaseline= 'middle';
+  const spTicks = 5;
+  for (let i = 0; i <= spTicks; i++) {
+    const frac = i / spTicks;
+    const val  = spMin + frac * spSpan;
+    const y    = ySpFromV(val);
+
+    ctx.beginPath();
+    ctx.moveTo(margin.left - 5, y);
+    ctx.lineTo(margin.left,     y);
+    ctx.stroke();
+    ctx.fillText(val.toFixed(1), margin.left - 8, y);
+  }
+
+  // Y label for speed
   ctx.save();
   ctx.translate(20, spTop + spHeight / 2);
   ctx.rotate(-Math.PI / 2);
@@ -4105,15 +4141,15 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   ctx.fillText('Speed (km/h)', 0, 0);
   ctx.restore();
 
-  // curve
+  // Speed curve
   ctx.strokeStyle = '#1f6feb';
-  ctx.lineWidth = 2;
+  ctx.lineWidth   = 2;
   ctx.beginPath();
   times.forEach((t, i) => {
     const x = xFromT(t);
     const y = ySpFromV(speeds[i]);
     if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    else         ctx.lineTo(x, y);
   });
   ctx.stroke();
 
