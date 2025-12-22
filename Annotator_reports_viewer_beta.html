@@ -431,8 +431,72 @@ function escapeHtml(str){
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
 }
+
+// Map OSM highway types → your three categories
+function classifyRoadType(osmType) {
+  const t = String(osmType || '').toLowerCase();
+
+  // High-speed roads
+  if (
+    t === 'motorway'      || t === 'motorway_link' ||
+    t === 'trunk'         || t === 'trunk_link'
+  ) {
+    return 'Highway';
+  }
+
+  // Typical city / urban roads
+  if (
+    t === 'residential'   || t === 'living_street' ||
+    t === 'service'       || t === 'track'
+  ) {
+    return 'City road';
+  }
+
+  // construction road
+  if (
+    t === 'construction'
+  ) {
+    return 'Construction road';
+  }
+
+  // unclassified road
+  if (
+    t === 'unclassified'
+  ) {
+    return 'Unclassified road';
+  }
+  
+  // Everything else → treat as “Country road”
+  // (primary/secondary/tertiary, *_link, unclassified, construction, etc.)
+  return 'Country road';
+}   
+
+// Map OSM highway types → your three categories
+function classifyRoadType(osmType) {
+  const t = String(osmType || '').toLowerCase();
+
+  // High-speed roads
+  if (
+    t === 'motorway'      || t === 'motorway_link' ||
+    t === 'trunk'         || t === 'trunk_link'
+  ) {
+    return 'Highway';
+  }
+
+  // Typical city / urban roads
+  if (
+    t === 'residential'   || t === 'living_street' ||
+    t === 'service'       || t === 'track'
+  ) {
+    return 'City road';
+  }
+
+  // Everything else → treat as “Country road”
+  // (primary/secondary/tertiary, *_link, unclassified, construction, etc.)
+  return 'Country road';
+}
     
-    // Append a timestamp so each request URL is unique → bypasses caches.
+// Append a timestamp so each request URL is unique → bypasses caches.
 function nc(url){
   return url + (url.includes('?') ? '&' : '?') + 'ts=' + Date.now();
 }
@@ -2706,6 +2770,93 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
     }
   });
 }
+
+function buildRoadCategoryTableFromRoadTypesTable(tbl) {
+  if (!tbl || tbl.dataset.hasCategoryTable === '1') return;
+  tbl.dataset.hasCategoryTable = '1';   // prevent duplicates if loadFile is called again
+
+  const rows = Array.from(tbl.querySelectorAll('tr'));
+  if (rows.length < 2) return; // no data
+
+  const catStats = new Map();  // "Highway" → { distanceKm, issues }
+  let totalKm = 0;
+
+  for (let i = 1; i < rows.length; i++) {
+    const cells = rows[i].cells;
+    if (cells.length < 4) continue;
+
+    const type   = cells[0].textContent.trim();
+    if (!type) continue;
+
+    // Distance (km) is column 2
+    const distKmRaw = cells[1].textContent || '';
+    const distKm = parseFloat(
+      distKmRaw.replace(/[^\d,.\-]/g, '').replace(',', '.')
+    ) || 0;
+
+    // No of issues is column 4
+    const issuesRaw = cells[3].textContent || '';
+    const issues = parseInt(issuesRaw.replace(/[^\d\-]/g, ''), 10) || 0;
+
+    // Ignore rows that are completely empty
+    if (distKm === 0 && issues === 0) continue;
+
+    const cat = classifyRoadType(type);
+    if (!catStats.has(cat)) {
+      catStats.set(cat, { distanceKm: 0, issues: 0 });
+    }
+    const entry = catStats.get(cat);
+    entry.distanceKm += distKm;
+    entry.issues     += issues;
+    totalKm          += distKm;
+  }
+
+  if (totalKm <= 0 || !catStats.size) return;
+
+  // Create heading
+  const heading = document.createElement('h3');
+  heading.textContent = 'Road categories';
+
+  // Create table
+  const newTable = document.createElement('table');
+  newTable.className = 'report-table';
+  newTable.id = 'Road categories';
+
+  const bodyRowsHtml = Array.from(catStats.entries())
+    // Optional: enforce display order Highway / Country road / City road
+    .sort(([a], [b]) => {
+      const order = { 'Highway': 0, 'Country road': 1, 'City road': 2 };
+      return (order[a] ?? 99) - (order[b] ?? 99);
+    })
+    .map(([cat, { distanceKm, issues }]) => {
+      const pct = totalKm ? (distanceKm / totalKm) * 100 : 0;
+      return `
+        <tr>
+          <td>${escapeHtml(cat)}</td>
+          <td>${distanceKm.toFixed(1)}</td>
+          <td>${pct.toFixed(1)}</td>
+          <td>${issues}</td>
+        </tr>`;
+    }).join('');
+
+  newTable.innerHTML = `
+    <thead>
+      <tr>
+        <th>Road category</th>
+        <th>Distance (km)</th>
+        <th>Distance (%)</th>
+        <th>No of issues</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${bodyRowsHtml}
+    </tbody>
+  `;
+
+  // Insert heading + new table *below* the original Road types table
+  tbl.insertAdjacentElement('afterend', newTable);
+  tbl.insertAdjacentElement('afterend', heading);
+}   
     
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -2856,6 +3007,14 @@ function loadFile(filename) {
         // For "Test details" sheet: attach Additional comments editor
         if (/^\s*test\s*details\s*$/i.test(sheet)) {
           injectPostHocCommentUI(filename, wb, sheet, content);
+        }
+
+        // For "Road types" sheet: build aggregated Road categories table below it
+        if (/^\s*road\s*types?\s*$/i.test(sheet)) {
+          const tbl = document.getElementById(sheet);
+          if (tbl) {
+            buildRoadCategoryTableFromRoadTypesTable(tbl);
+          }
         }
         
         // First sheet with lat/lon → collect issues + headers
