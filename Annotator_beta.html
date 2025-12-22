@@ -2957,16 +2957,64 @@ if (uploadsEnabled && (now - lastUploadTime > UPLOAD_THROTTLE)) {
     .catch(err => console.error('Issue plots ZIP upload failed:', err));
 
 function generateIssuePlotDataUrl(issueRow, issueIndex) {
-  if (!issueRow || !issueRow.eventId) return null;
+  // helper: simple text-only image
+  function createFallbackPlot(message) {
+    const canvas = document.createElement('canvas');
+    canvas.width  = 800;
+    canvas.height = 600;
+    const ctx = canvas.getContext('2d');
+
+    // background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#000000';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '20px Arial';
+
+    const title = `Issue #${issueIndex + 1}${
+      issueRow && issueRow.issue ? ' – ' + issueRow.issue : ''
+    }`;
+
+    const lines = [
+      title,
+      '',
+      message || 'Plot could not be generated'
+    ];
+
+    const lineHeight = 28;
+    const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+
+    lines.forEach((line, i) => {
+      ctx.fillText(line, canvas.width / 2, startY + i * lineHeight);
+    });
+
+    return canvas.toDataURL('image/png', 0.9);
+  }
+
+  // ---- safety checks → fallback image instead of null ----
+  if (!issueRow) {
+    return createFallbackPlot('No issue data available');
+  }
+
+  if (!issueRow.eventId) {
+    return createFallbackPlot('No eventId linked to this issue.');
+  }
 
   const eventSample = samplingTable.find(s => s.issueId === issueRow.eventId);
-  if (!eventSample) return null;
+  if (!eventSample) {
+    return createFallbackPlot('No sampling row linked to this issue.');
+  }
 
   const tEvent = Date.parse(eventSample.timestamp);
-  if (!Number.isFinite(tEvent)) return null;
+  if (!Number.isFinite(tEvent)) {
+    return createFallbackPlot('Invalid timestamp for this issue.');
+  }
 
-  const windowStart = tEvent - 10_000; // -10 s
-  const windowEnd   = tEvent + 5_000;  // +5 s
+  // ---- collect samples in [-10s, +5s] window ----
+  const windowStart = tEvent - 10_000;
+  const windowEnd   = tEvent + 5_000;
 
   const samples = samplingTable
     .map(s => {
@@ -2976,15 +3024,20 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     .filter(o => Number.isFinite(o.t) && o.t >= windowStart && o.t <= windowEnd)
     .sort((a, b) => a.t - b.t);
 
-  if (samples.length < 2) return null; // not enough data for a curve
+  if (samples.length === 0) {
+    return createFallbackPlot('No samples in ±10 seconds around this issue.');
+  }
 
-  const times  = samples.map(o => (o.t - tEvent) / 1000); // seconds relative to issue
-  const speeds = samples.map(o => Number(o.s.speed || 0)); // km/h
+  // if only 1 sample: duplicate it so we can still draw a tiny line
+  if (samples.length === 1) {
+    samples.push({ ...samples[0], t: samples[0].t + 100 });
+  }
 
-  // Convert to m/s
-  const vMs = speeds.map(v => v * (1000 / 3600));
+  const times  = samples.map(o => (o.t - tEvent) / 1000);      // seconds rel. to issue
+  const speeds = samples.map(o => Number(o.s.speed || 0));     // km/h
+  const vMs    = speeds.map(v => v * (1000 / 3600));           // m/s
 
-  // Compute acceleration (m/s²) as finite diff
+  // Acceleration (m/s²)
   const acc = [];
   for (let i = 0; i < vMs.length; i++) {
     if (i === 0) {
@@ -2999,7 +3052,7 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     }
   }
 
-  // ---- drawing on offscreen canvas ----
+  // ---- drawing on offscreen canvas (same as before) ----
   const canvas = document.createElement('canvas');
   canvas.width  = 800;
   canvas.height = 600;
@@ -3022,84 +3075,67 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
 
   const title = `Issue #${issueIndex + 1} – ${issueRow.issue || ''}`;
   ctx.font = '18px Arial';
-  ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
   ctx.fillText(title, margin.left, 20);
 
-  // Fixed x range [-10, +5]
-  const xMin = -10;
-  const xMax = 5;
+  // Common X scaling
+  const xMin  = -10;
+  const xMax  = 5;
   const xSpan = xMax - xMin;
+  const xFromT = t => margin.left + ((t - xMin) / xSpan) * plotWidth;
 
-  function xFromT(t) {
-    return margin.left + ((t - xMin) / xSpan) * plotWidth;
-  }
-
-  // ---------- subplot 1: acceleration ----------
-  const accTop = margin.top;
-  const accBottom = margin.top + plotHeight;
+  // ---------- Acceleration subplot ----------
+  const accTop    = margin.top;
   const accHeight = plotHeight;
+  const accBottom = accTop + accHeight;
 
   const maxAbsAcc = Math.max(0.1, ...acc.map(a => Math.abs(a)));
-  const accMax = maxAbsAcc;
-  const accMin = -maxAbsAcc;
+  const accMax  = maxAbsAcc;
+  const accMin  = -maxAbsAcc;
   const accSpan = accMax - accMin;
 
-  function yAccFromA(a) {
-    return accTop + ((accMax - a) / accSpan) * accHeight;
-  }
+  const yAccFromA = a =>
+    accTop + ((accMax - a) / accSpan) * accHeight;
 
-  // axes
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 1;
+  ctx.lineWidth   = 1;
 
-  // horizontal axis at a=0
   const yZeroAcc = yAccFromA(0);
   ctx.beginPath();
   ctx.moveTo(margin.left, yZeroAcc);
   ctx.lineTo(margin.left + plotWidth, yZeroAcc);
   ctx.stroke();
 
-  // outline box
   ctx.strokeRect(margin.left, accTop, plotWidth, accHeight);
 
-  // --- Y-axis ticks for acceleration (m/s²) ---
   ctx.font = '11px Arial';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  [-10, -5, 0, 5].forEach(t => {
+    const x = xFromT(t);
+    ctx.beginPath();
+    ctx.moveTo(x, accBottom);
+    ctx.lineTo(x, accBottom + 5);
+    ctx.stroke();
+    ctx.fillText(`${t}s`, x, accBottom + 7);
+  });
 
-  const accTicks = 5; // number of intervals
+  ctx.textAlign   = 'right';
+  ctx.textBaseline= 'middle';
+  const accTicks = 5;
   for (let i = 0; i <= accTicks; i++) {
     const frac = i / accTicks;
-    const val  = accMin + frac * accSpan; // real acceleration value
+    const val  = accMin + frac * accSpan;
     const y    = yAccFromA(val);
 
-    // small tick mark
     ctx.beginPath();
     ctx.moveTo(margin.left - 5, y);
     ctx.lineTo(margin.left,     y);
     ctx.stroke();
-
-    // numeric label
-    ctx.fillText(val.toFixed(2), margin.left - 8, y);
-  }
-  
-  // NEW: Y ticks for acceleration
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= accTicks; i++) {
-    const frac = i / accTicks;
-    const val  = accMin + frac * (accSpan);
-    const y    = yAccFromA(val);
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left, y);
-    ctx.stroke();
     ctx.fillText(val.toFixed(2), margin.left - 8, y);
   }
 
-  // label
   ctx.save();
   ctx.translate(20, accTop + accHeight / 2);
   ctx.rotate(-Math.PI / 2);
@@ -3108,36 +3144,32 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   ctx.fillText('Acceleration (m/s²)', 0, 0);
   ctx.restore();
 
-  // curve
   ctx.strokeStyle = '#d1242f';
-  ctx.lineWidth = 2;
+  ctx.lineWidth   = 2;
   ctx.beginPath();
   times.forEach((t, i) => {
     const x = xFromT(t);
     const y = yAccFromA(acc[i]);
     if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    else         ctx.lineTo(x, y);
   });
   ctx.stroke();
 
-  // ---------- subplot 2: speed ----------
-  const spTop = accBottom + margin.midGap;
-  const spBottom = spTop + plotHeight;
+  // ---------- Speed subplot ----------
+  const spTop    = accBottom + margin.midGap;
   const spHeight = plotHeight;
+  const spBottom = spTop + spHeight;
 
-  const spMin = 0;
-  const spMax = Math.max(10, ...speeds) * 1.1;
+  const spMin  = 0;
+  const spMax  = Math.max(10, ...speeds) * 1.1;
   const spSpan = spMax - spMin;
 
-  function ySpFromV(v) {
-    return spTop + ((spMax - v) / spSpan) * spHeight;
-  }
+  const ySpFromV = v =>
+    spTop + ((spMax - v) / spSpan) * spHeight;
 
-  // axes + box
   ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 1;
+  ctx.lineWidth   = 1;
 
-  // x-axis (speed=0 line)
   const yZeroSp = ySpFromV(0);
   ctx.beginPath();
   ctx.moveTo(margin.left, yZeroSp);
@@ -3146,7 +3178,6 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
 
   ctx.strokeRect(margin.left, spTop, plotWidth, spHeight);
 
-  // X ticks (again) at -10, -5, 0, 5
   ctx.font = '11px Arial';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -3159,9 +3190,8 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
     ctx.fillText(`${t}s`, x, spBottom + 7);
   });
 
-  // NEW: Y ticks for speed
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
+  ctx.textAlign   = 'right';
+  ctx.textBaseline= 'middle';
   const spTicks = 5;
   for (let i = 0; i <= spTicks; i++) {
     const frac = i / spTicks;
@@ -3170,12 +3200,11 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
 
     ctx.beginPath();
     ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left, y);
+    ctx.lineTo(margin.left,     y);
     ctx.stroke();
     ctx.fillText(val.toFixed(1), margin.left - 8, y);
   }
 
-  // y label
   ctx.save();
   ctx.translate(20, spTop + spHeight / 2);
   ctx.rotate(-Math.PI / 2);
@@ -3184,15 +3213,14 @@ function generateIssuePlotDataUrl(issueRow, issueIndex) {
   ctx.fillText('Speed (km/h)', 0, 0);
   ctx.restore();
 
-  // curve
   ctx.strokeStyle = '#1f6feb';
-  ctx.lineWidth = 2;
+  ctx.lineWidth   = 2;
   ctx.beginPath();
   times.forEach((t, i) => {
     const x = xFromT(t);
     const y = ySpFromV(speeds[i]);
     if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
+    else         ctx.lineTo(x, y);
   });
   ctx.stroke();
 
