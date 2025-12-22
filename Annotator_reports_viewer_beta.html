@@ -68,6 +68,84 @@
     .download-button { display: inline-block; margin-right: 12px; margin-bottom: 16px; padding: 8px 12px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; font-size: 14px; }
     .download-button:hover { background: #0056b3; }
 
+.download-button.danger-button {
+  background: #dc3545;
+}
+.download-button.danger-button:hover {
+  background: #b02a37;
+}
+
+/* Simple modal overlay + dialog */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+.modal-dialog {
+  background: #fff;
+  padding: 16px 20px;
+  border-radius: 8px;
+  max-width: 420px;
+  width: 90%;
+  box-shadow: 0 4px 12px rgba(0,0,0,.2);
+  font-size: 14px;
+}
+.modal-dialog h3 {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+.modal-dialog p {
+  margin: 0 0 8px;
+}
+.modal-dialog ul {
+  margin: 8px 0 12px 20px;
+  padding: 0;
+}
+.modal-dialog .modal-buttons {
+  margin-top: 12px;
+  text-align: right;
+}
+.modal-dialog button {
+  margin-left: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.modal-dialog .danger-button {
+  background: #dc3545;
+  color: #fff;
+  border: none;
+}
+.modal-dialog .danger-button:hover {
+  background: #b02a37;
+}
+.modal-dialog .secondary-button {
+  background: #e0e0e0;
+  border: none;
+}
+.modal-dialog .secondary-button:hover {
+  background: #cfcfcf;
+}
+.modal-dialog .modal-error {
+  color: #c00;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.modal-dialog label {
+  display: block;
+  font-size: 13px;
+  margin: 6px 0 4px;
+}
+.modal-dialog input {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
     /* Unified report tables (applies to all xlsx-rendered tables + TP table) */
 .report-table{ width:100%; border-collapse:collapse; margin-bottom:2em; }
 .report-table th, .report-table td{ border:1px solid #ccc; padding:8px; }
@@ -2828,6 +2906,116 @@ function buildRoadCategoryTableFromRoadTypesTable(tbl) {
   tbl.insertAdjacentElement('afterend', newTable);
   tbl.insertAdjacentElement('afterend', heading);
 }   
+
+// ---------- MODAL HELPERS FOR DELETE SESSION ----------
+
+function createModal(innerHtml) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-dialog">${innerHtml}</div>`;
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function showDeleteAuthDialog(filename, filesToDelete) {
+  const overlay = createModal(`
+    <h3>Delete session</h3>
+    <p>Enter admin credentials to delete this session.</p>
+    <label>Username</label>
+    <input type="text" name="username" autocomplete="off">
+    <label>Password</label>
+    <input type="password" name="password" autocomplete="off">
+    <div class="modal-buttons">
+      <button type="button" class="secondary-button cancel-btn">Cancel</button>
+      <button type="button" class="danger-button auth-ok-btn">Continue</button>
+    </div>
+    <p class="modal-error" style="display:none;"></p>
+  `);
+
+  const dialog    = overlay.querySelector('.modal-dialog');
+  const userInput = dialog.querySelector('input[name="username"]');
+  const passInput = dialog.querySelector('input[name="password"]');
+  const cancelBtn = dialog.querySelector('.cancel-btn');
+  const okBtn     = dialog.querySelector('.auth-ok-btn');
+  const errEl     = dialog.querySelector('.modal-error');
+
+  cancelBtn.addEventListener('click', () => {
+    document.body.removeChild(overlay);
+  });
+
+  okBtn.addEventListener('click', () => {
+    const u = (userInput.value || '').trim();
+    const p = passInput.value || '';
+
+    if (u === 'admin' && p === 'password') {
+      document.body.removeChild(overlay);
+      showDeleteConfirmDialog(filename, filesToDelete);
+    } else {
+      errEl.textContent = 'Invalid username or password.';
+      errEl.style.display = 'block';
+    }
+  });
+
+  userInput.focus();
+}
+
+function showDeleteConfirmDialog(filename, filesToDelete) {
+  const listHtml = filesToDelete
+    .map(f => `<li>${escapeHtml(f)}</li>`)
+    .join('');
+
+  const overlay = createModal(`
+    <h3>Confirm deletion</h3>
+    <p>The following files will be permanently deleted from Azure:</p>
+    <ul>${listHtml}</ul>
+    <div class="modal-buttons">
+      <button type="button" class="secondary-button cancel-btn">Cancel</button>
+      <button type="button" class="danger-button confirm-delete-btn">Yes, OK to delete</button>
+    </div>
+    <p class="modal-error modal-status" style="display:none;"></p>
+  `);
+
+  const dialog    = overlay.querySelector('.modal-dialog');
+  const cancelBtn = dialog.querySelector('.cancel-btn');
+  const confirmBtn = dialog.querySelector('.confirm-delete-btn');
+  const statusEl   = dialog.querySelector('.modal-status');
+
+  cancelBtn.addEventListener('click', () => {
+    document.body.removeChild(overlay);
+  });
+
+  confirmBtn.addEventListener('click', () => {
+    confirmBtn.disabled = true;
+    cancelBtn.disabled  = true;
+    statusEl.style.display = 'block';
+    statusEl.textContent   = 'Deleting...';
+
+    const deleteOne = (blobName) =>
+      fetch(`${BASE_URL}/${blobName}?${SAS_TOKEN}`, { method: 'DELETE' })
+        .then(res => {
+          // treat 404 as "already gone", not an error
+          if (!res.ok && res.status !== 404) {
+            throw new Error(`Failed to delete ${blobName} (HTTP ${res.status})`);
+          }
+        });
+
+    Promise.all(filesToDelete.map(deleteOne))
+      .then(() => {
+        statusEl.textContent = 'Session deleted. Reloading...';
+        setTimeout(() => {
+          document.body.removeChild(overlay);
+          // Reload to refresh blob list + sidebar
+          location.reload();
+        }, 800);
+      })
+      .catch(err => {
+        console.error(err);
+        statusEl.textContent = 'Delete failed: ' + err.message;
+        confirmBtn.disabled = false;
+        cancelBtn.disabled  = false;
+      });
+  });
+}
     
 function loadFile(filename) {
   const content = document.getElementById('content');
@@ -2906,6 +3094,26 @@ function loadFile(filename) {
     issueInfo: {}
   };
 
+    // Base name without extension, e.g. "Annotator_report_2025-12-17_091939"
+  const baseNoExt = filename.replace(/\.xlsx$/i, '');
+
+  // Files that belong to this session
+  const filesToDelete = [
+    filename,
+    `${baseNoExt}.zip`,
+    `${baseNoExt}_2.zip`
+  ];
+
+  // 🔴 Delete session button (before download links)
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.textContent = 'Delete session';
+  deleteBtn.className = 'download-button danger-button';
+  deleteBtn.addEventListener('click', () => {
+    showDeleteAuthDialog(filename, filesToDelete);
+  });
+  content.appendChild(deleteBtn);
+  
   // Download XLSX
   const xlsxLink = document.createElement('a');
   xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
