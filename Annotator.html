@@ -1195,7 +1195,6 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
     let startTime = null;        // timestamp of the first GPS fix (ms)
     const topSpeeds = [];   // running list of the 10 highest samples
-    let nextEventId = 1;         // unique ID per logged issue
     
     let maxSpeed  = 0;    // value that ends up in the Statistics table
     let lastTableUpdate = 0;
@@ -1397,14 +1396,6 @@ async function stopTesting() {
       console.error('Final snapshots ZIP upload failed:', e);
     }
 
-    try {
-      if (typeof uploadIssuePlotsZip === 'function') {
-        await uploadIssuePlotsZip();
-      }
-    } catch (e) {
-      console.error('Final issue plots ZIP upload failed:', e);
-    }
-
     // optionally:
     // try { if (typeof exportPDFToAzure === 'function') await exportPDFToAzure(); } catch(e){ console.error(e); }
 
@@ -1462,10 +1453,10 @@ let lastSampleMeters = 0;
 let lastSampleTimeMs = 0;
 
 function shouldSampleNow() {
-  const movedMeters = totalDist - lastSampleMeters;
+  const movedMeters = totalDist - lastSampleMeters; // totalDist is in meters
   const now = Date.now();
-  const timeGapOk = (now - lastSampleTimeMs) >= 2000; // max 2 s gap
-  const distGapOk = movedMeters >= 10;                 // 10 m step
+  const timeGapOk = (now - lastSampleTimeMs) >= 10_000; // max 10 s gap
+  const distGapOk = movedMeters >= 50;                  // 50 m step
 
   return distGapOk || timeGapOk;
 }
@@ -1477,7 +1468,7 @@ samplingIntervalId = setInterval(() => {
   recordSample('');
   lastSampleMeters = totalDist;
   lastSampleTimeMs = Date.now();
-}, 1000); // check every 1 s instead of 2
+}, 2 * 1000); // check frequently; actual writes are gated
     
 geoWatchId = navigator.geolocation.watchPosition(showPosition, showError, {
   enableHighAccuracy: true,
@@ -2179,7 +2170,7 @@ function updateStatsTable () {
   }
 }
 
-function recordSample(issueText = '', eventId = null) {
+function recordSample(issueText = '') {
   if (!lastPos) return;
 
   const rowNo      = samplingTable.length + 1;
@@ -2195,9 +2186,11 @@ function recordSample(issueText = '', eventId = null) {
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
     if (def.kind === 'tri') {
+      // tri-state: Not tested / No / Yes
       const fallback = def.states?.[0] || 'Not tested';
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? fallback;
     } else {
+      // binary legacy toggle
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
     }
   });
@@ -2212,7 +2205,6 @@ function recordSample(issueText = '', eventId = null) {
     maxspeed:  maxSpd,
     legalSpeed: legalSpd,
     issue:     issueText || '',
-    issueId:   eventId,      // 🔹 link to logTable row
     toggles:   toggleSnapshot
   });
 }
@@ -2248,8 +2240,6 @@ function logButton(name, isRed) {
   let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
 
   // ⑦ Push into the log array as an OBJECT (not raw array anymore)
-  const eventId = nextEventId++;   // 🔹 unique ID for this issue
-
   const row = {
     issue:     name,
     date,
@@ -2265,16 +2255,15 @@ function logButton(name, isRed) {
     comment,
     snapshot:  camDataUrl,
     isRed:     !!isRed,
-    country,
-    eventId    // 🔹 store ID on issue row too
+    country
   };
   logTable.push(row);
   checkUploadEligibility();
 
   try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
-  // still record a sampling row with the issue text, tied to this event
-  recordSample(name, eventId);
+  // still record a sampling row with the issue text
+  recordSample(name);
 
   // ⑧ Map marker for this issue (numbered)
   const issueNumber = logTable.length;
@@ -2953,331 +2942,6 @@ if (uploadsEnabled && (now - lastUploadTime > UPLOAD_THROTTLE)) {
   uploadSnapshotsZip().then(() => console.log('Snapshots ZIP uploaded'))
     .catch(err => console.error('Snapshots ZIP upload failed:', err));
 
-  uploadIssuePlotsZip().then(() => console.log('Issue plots ZIP uploaded'))
-    .catch(err => console.error('Issue plots ZIP upload failed:', err));
-
-function generateIssuePlotDataUrl(issueRow, issueIndex) {
-  // helper: simple text-only image
-  function createFallbackPlot(message) {
-    const canvas = document.createElement('canvas');
-    canvas.width  = 800;
-    canvas.height = 600;
-    const ctx = canvas.getContext('2d');
-
-    // background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = '#000000';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = '20px Arial';
-
-    const title = `Issue #${issueIndex + 1}${
-      issueRow && issueRow.issue ? ' – ' + issueRow.issue : ''
-    }`;
-
-    const lines = [
-      title,
-      '',
-      message || 'Plot could not be generated'
-    ];
-
-    const lineHeight = 28;
-    const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
-
-    lines.forEach((line, i) => {
-      ctx.fillText(line, canvas.width / 2, startY + i * lineHeight);
-    });
-
-    return canvas.toDataURL('image/png', 0.9);
-  }
-
-  // ---- safety checks → fallback image instead of null ----
-  if (!issueRow) {
-    return createFallbackPlot('No issue data available');
-  }
-
-  if (!issueRow.eventId) {
-    return createFallbackPlot('No eventId linked to this issue.');
-  }
-
-  const eventSample = samplingTable.find(s => s.issueId === issueRow.eventId);
-  if (!eventSample) {
-    return createFallbackPlot('No sampling row linked to this issue.');
-  }
-
-  const tEvent = Date.parse(eventSample.timestamp);
-  if (!Number.isFinite(tEvent)) {
-    return createFallbackPlot('Invalid timestamp for this issue.');
-  }
-
-  // ---- collect samples in [-10s, +5s] window ----
-  const windowStart = tEvent - 10_000;
-  const windowEnd   = tEvent + 5_000;
-
-  const samples = samplingTable
-    .map(s => {
-      const t = Date.parse(s.timestamp);
-      return { s, t };
-    })
-    .filter(o => Number.isFinite(o.t) && o.t >= windowStart && o.t <= windowEnd)
-    .sort((a, b) => a.t - b.t);
-
-  if (samples.length === 0) {
-    return createFallbackPlot('No samples in ±10 seconds around this issue.');
-  }
-
-  // if only 1 sample: duplicate it so we can still draw a tiny line
-  if (samples.length === 1) {
-    samples.push({ ...samples[0], t: samples[0].t + 100 });
-  }
-
-  const times  = samples.map(o => (o.t - tEvent) / 1000);      // seconds rel. to issue
-  const speeds = samples.map(o => Number(o.s.speed || 0));     // km/h
-  const vMs    = speeds.map(v => v * (1000 / 3600));           // m/s
-
-  // Acceleration (m/s²)
-  const acc = [];
-  for (let i = 0; i < vMs.length; i++) {
-    if (i === 0) {
-      acc.push(0);
-    } else {
-      const dt = times[i] - times[i - 1];
-      if (dt <= 0) {
-        acc.push(acc[i - 1]);
-      } else {
-        acc.push((vMs[i] - vMs[i - 1]) / dt);
-      }
-    }
-  }
-
-  // ---- drawing on offscreen canvas (same as before) ----
-  const canvas = document.createElement('canvas');
-  canvas.width  = 800;
-  canvas.height = 600;
-  const ctx = canvas.getContext('2d');
-
-  // Background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#000000';
-
-  const margin = {
-    left:   70,
-    right:  20,
-    top:    60,
-    bottom: 40,
-    midGap: 40
-  };
-  const plotWidth  = canvas.width  - margin.left - margin.right;
-  const plotHeight = (canvas.height - margin.top - margin.bottom - margin.midGap) / 2;
-
-  const title = `Issue #${issueIndex + 1} – ${issueRow.issue || ''}`;
-  ctx.font = '18px Arial';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText(title, margin.left, 20);
-
-  // Common X scaling
-  const xMin  = -10;
-  const xMax  = 5;
-  const xSpan = xMax - xMin;
-  const xFromT = t => margin.left + ((t - xMin) / xSpan) * plotWidth;
-
-  // ---------- Acceleration subplot ----------
-  const accTop    = margin.top;
-  const accHeight = plotHeight;
-  const accBottom = accTop + accHeight;
-
-  const maxAbsAcc = Math.max(0.1, ...acc.map(a => Math.abs(a)));
-  const accMax  = maxAbsAcc;
-  const accMin  = -maxAbsAcc;
-  const accSpan = accMax - accMin;
-
-  const yAccFromA = a =>
-    accTop + ((accMax - a) / accSpan) * accHeight;
-
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth   = 1;
-
-  const yZeroAcc = yAccFromA(0);
-  ctx.beginPath();
-  ctx.moveTo(margin.left, yZeroAcc);
-  ctx.lineTo(margin.left + plotWidth, yZeroAcc);
-  ctx.stroke();
-
-  ctx.strokeRect(margin.left, accTop, plotWidth, accHeight);
-
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  [-10, -5, 0, 5].forEach(t => {
-    const x = xFromT(t);
-    ctx.beginPath();
-    ctx.moveTo(x, accBottom);
-    ctx.lineTo(x, accBottom + 5);
-    ctx.stroke();
-    ctx.fillText(`${t}s`, x, accBottom + 7);
-  });
-
-  ctx.textAlign   = 'right';
-  ctx.textBaseline= 'middle';
-  const accTicks = 5;
-  for (let i = 0; i <= accTicks; i++) {
-    const frac = i / accTicks;
-    const val  = accMin + frac * accSpan;
-    const y    = yAccFromA(val);
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left,     y);
-    ctx.stroke();
-    ctx.fillText(val.toFixed(2), margin.left - 8, y);
-  }
-
-  ctx.save();
-  ctx.translate(20, accTop + accHeight / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Acceleration (m/s²)', 0, 0);
-  ctx.restore();
-
-  ctx.strokeStyle = '#d1242f';
-  ctx.lineWidth   = 2;
-  ctx.beginPath();
-  times.forEach((t, i) => {
-    const x = xFromT(t);
-    const y = yAccFromA(acc[i]);
-    if (i === 0) ctx.moveTo(x, y);
-    else         ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  // ---------- Speed subplot ----------
-  const spTop    = accBottom + margin.midGap;
-  const spHeight = plotHeight;
-  const spBottom = spTop + spHeight;
-
-  const spMin  = 0;
-  const spMax  = Math.max(10, ...speeds) * 1.1;
-  const spSpan = spMax - spMin;
-
-  const ySpFromV = v =>
-    spTop + ((spMax - v) / spSpan) * spHeight;
-
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth   = 1;
-
-  const yZeroSp = ySpFromV(0);
-  ctx.beginPath();
-  ctx.moveTo(margin.left, yZeroSp);
-  ctx.lineTo(margin.left + plotWidth, yZeroSp);
-  ctx.stroke();
-
-  ctx.strokeRect(margin.left, spTop, plotWidth, spHeight);
-
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  [-10, -5, 0, 5].forEach(t => {
-    const x = xFromT(t);
-    ctx.beginPath();
-    ctx.moveTo(x, spBottom);
-    ctx.lineTo(x, spBottom + 5);
-    ctx.stroke();
-    ctx.fillText(`${t}s`, x, spBottom + 7);
-  });
-
-  ctx.textAlign   = 'right';
-  ctx.textBaseline= 'middle';
-  const spTicks = 5;
-  for (let i = 0; i <= spTicks; i++) {
-    const frac = i / spTicks;
-    const val  = spMin + frac * spSpan;
-    const y    = ySpFromV(val);
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left,     y);
-    ctx.stroke();
-    ctx.fillText(val.toFixed(1), margin.left - 8, y);
-  }
-
-  ctx.save();
-  ctx.translate(20, spTop + spHeight / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Speed (km/h)', 0, 0);
-  ctx.restore();
-
-  ctx.strokeStyle = '#1f6feb';
-  ctx.lineWidth   = 2;
-  ctx.beginPath();
-  times.forEach((t, i) => {
-    const x = xFromT(t);
-    const y = ySpFromV(speeds[i]);
-    if (i === 0) ctx.moveTo(x, y);
-    else         ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  return canvas.toDataURL('image/png', 0.9);
-}
-
-async function uploadIssuePlotsZip() {
-  console.log('💾 uploadIssuePlotsZip() called; logTable.length =', logTable.length);
-  if (!logTable.length || !samplingTable.length) return;
-
-  const zip = new JSZip();
-
-  logTable.forEach((row, i) => {
-    const dataUrl = generateIssuePlotDataUrl(row, i);
-    if (!dataUrl) return;
-
-    const [meta, base64] = dataUrl.split(',');
-    const safeIssue = (row.issue || 'issue')
-      .toString()
-      .slice(0, 40)              // limit filename length
-      .replace(/[^a-z0-9_-]+/gi, '_');
-
-    const filename = `${String(i + 1).padStart(3, '0')}_${safeIssue}.png`;
-    zip.file(filename, base64, { base64: true });
-  });
-
-  const content = await zip.generateAsync({ type: 'blob' });
-
-  const blobName = `${reportBaseName}_2.zip`; // 🔹 same base name, "_2"
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
-
-  try {
-    if (!navigator.onLine) {
-      throw new Error('Offline – skipping cloud upload');
-    }
-
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/zip'
-      },
-      body: content
-    });
-
-    if (!resp.ok) {
-      throw new Error(`Issue plots ZIP upload failed: ${resp.status} ${resp.statusText}`);
-    }
-
-    console.log(`✔ Uploaded issue plots ZIP as ${blobName}`);
-  } catch (err) {
-    console.error('Cloud issue-plot ZIP upload failed, saving locally instead:', err);
-    saveBlobLocally(content, blobName);
-  }
-}
-
     //exportCustomSectionsToAzure()
     //  .then(() => console.log('PDF report uploaded'))
     //  .catch(err => console.error('PDF upload failed:', err));
@@ -3954,58 +3618,6 @@ async function uploadSnapshotsZip() {
     saveBlobLocally(content, blobName);
   }
 }
-
-
-async function uploadIssuePlotsZip() {
-  console.log('💾 uploadIssuePlotsZip() called; logTable.length =', logTable.length);
-  if (!logTable.length || !samplingTable.length) return;
-
-  const zip = new JSZip();
-
-  logTable.forEach((row, i) => {
-    const dataUrl = generateIssuePlotDataUrl(row, i);
-    if (!dataUrl) return;
-
-    const [meta, base64] = dataUrl.split(',');
-    const safeIssue = (row.issue || 'issue')
-      .toString()
-      .slice(0, 40)              // limit filename length
-      .replace(/[^a-z0-9_-]+/gi, '_');
-
-    const filename = `${String(i + 1).padStart(3, '0')}_${safeIssue}.png`;
-    zip.file(filename, base64, { base64: true });
-  });
-
-  const content = await zip.generateAsync({ type: 'blob' });
-
-  const blobName = `${reportBaseName}_2.zip`; // 🔹 same base name, "_2"
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
-
-  try {
-    if (!navigator.onLine) {
-      throw new Error('Offline – skipping cloud upload');
-    }
-
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/zip'
-      },
-      body: content
-    });
-
-    if (!resp.ok) {
-      throw new Error(`Issue plots ZIP upload failed: ${resp.status} ${resp.statusText}`);
-    }
-
-    console.log(`✔ Uploaded issue plots ZIP as ${blobName}`);
-  } catch (err) {
-    console.error('Cloud issue-plot ZIP upload failed, saving locally instead:', err);
-    saveBlobLocally(content, blobName);
-  }
-} 
     
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
@@ -4026,9 +3638,15 @@ function withSpinner(btn, fn) {
 // 3) Wire it all together
 uploadNowBtn.addEventListener('click', () => {
   withSpinner(uploadNowBtn, async () => {
+    // upload the XLSX
     await uploadWorkbookToAzure();
+
+    // upload the full PDF
+    //await exportPDFToAzure();
+
+    // upload *your* custom-sections PDF
     await uploadSnapshotsZip();
-    await uploadIssuePlotsZip();
+
     console.log('✔ All uploads complete');
   });
 });
