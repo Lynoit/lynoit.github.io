@@ -998,6 +998,16 @@ form.addEventListener('submit', async e => {
       </table>
     </div>
 
+ <div id="aiAnalysisContainer" class="section">
+  <h3>AI analysis</h3>
+  <button id="runAiAnalysisBtn" class="bigButton blueButton">
+    Generate AI summary
+  </button>
+  <pre id="aiAnalysisOutput" 
+       style="white-space:pre-wrap;font-size:13px;border:1px solid #444;padding:8px;margin-top:8px;min-height:40px;">
+  </pre>
+</div>
+
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
       Ver 1.16
       © Lynoit Tech 2025
@@ -1138,6 +1148,8 @@ textBox.addEventListener('input', () => {
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
+    const OPENAI_API_KEY = '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';
+    const AI_MODEL_NAME = 'gpt-4.1-mini';
 
 // --- Toggle system ---
 const toggleState = {};
@@ -3024,8 +3036,8 @@ function tableToCSV(tableEl) {
 }
 
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
-const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
-
+//const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
+onst containerSasUrl = "https://annotationcsv.blob.core.windows.net/?sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-12-30T23:33:30Z&st=2026-01-02T15:18:30Z&spr=https&sig=BoWBgheeFkDsFQk8Ckq1xwO3mbqtUZSdMey0pWWkzGk%3D";
 async function measureAzureClockOffset() {
   try {
     if (!containerSasUrl) {
@@ -3984,7 +3996,148 @@ const stopBtn = document.getElementById('stopTestingBtn');
 if (stopBtn) {
   stopBtn.addEventListener('click', () => withSpinner(stopBtn, stopTesting));
 }
+
+// =============== AI ANALYTICS AGENT ===============
+
+// Small helper to turn a table into an array of rows (arrays of cell texts)
+function readTableById(tableId, { skipDataExportNo = true } = {}) {
+  const table = document.getElementById(tableId);
+  if (!table) return [];
+
+  const rows = [];
+  table.querySelectorAll('tr').forEach(tr => {
+    const cells = Array.from(tr.querySelectorAll('th,td'))
+      .filter(td => !skipDataExportNo || td.dataset.export !== 'no')
+      .map(td => td.textContent.trim());
+    if (cells.length) rows.push(cells);
+  });
+  return rows;
+}
+
+// Build a compact JSON-like object with all relevant info
+function buildAnalysisPayload() {
+  const stats      = readTableById('statsTable');
+  const kpi        = readTableById('countTable');
+  const issues     = readTableById('logTable', { skipDataExportNo: true });
+  const countries  = readTableById('countryTable');
+  const weather    = readTableById('weatherTable');
+  const phases     = readTableById('phaseTable');
+  const roads      = readTableById('streetTable');
+  const meta       = readTableById('metaTable');
+
+  return {
+    meta,
+    stats,
+    kpi,
+    issues,
+    countries,
+    weather,
+    phases,
+    roads
+  };
+}
+
+// Turn the payload into a short, readable text so we don’t send crazy JSON
+function formatPayloadForPrompt(payload) {
+  const fmtTable = (name, rows) => {
+    if (!rows || rows.length === 0) return `\n[${name}: empty]\n`;
+    const [header, ...body] = rows;
+    const headerLine = header.join(' | ');
+    const bodyLines  = body.map(r => r.join(' | ')).join('\n');
+    return `\n[${name}]\n${headerLine}\n${bodyLines}\n`;
+  };
+
+  return [
+    fmtTable('Meta',      payload.meta),
+    fmtTable('Statistics',payload.stats),
+    fmtTable('KPI',       payload.kpi),
+    fmtTable('Issues',    payload.issues),
+    fmtTable('Countries', payload.countries),
+    fmtTable('Weather',   payload.weather),
+    fmtTable('Phase',     payload.phases),
+    fmtTable('Road types',payload.roads),
+  ].join('\n');
+}
+
+// Call OpenAI from the browser
+async function callOpenAIAgent(promptText) {
+  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'YOUR_API_KEY_HERE') {
+    throw new Error('OPENAI_API_KEY is not set in the HTML.');
+  }
+
+  const body = {
+    model: AI_MODEL_NAME,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are an expert ADAS/KPI test engineer. ' +
+          'You receive structured tables from a test drive and must write a concise, ' +
+          'actionable summary for engineers and managers. ' +
+          'Highlight main problems, patterns, and any safety-critical findings. ' +
+          'Use bullet points and short paragraphs. Avoid repeating raw numbers unless needed.'
+      },
+      {
+        role: 'user',
+        content:
+          'Here is data from a single test drive. ' +
+          'The format is simple text tables. Please analyse it:\n\n' +
+          promptText
+      }
+    ],
+    max_tokens: 1000,
+    temperature: 0.3
+  };
+
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`OpenAI error ${resp.status}: ${text}`);
+  }
+
+  const data = await resp.json();
+  const choice = data.choices && data.choices[0];
+  const msg = choice && choice.message && choice.message.content;
+  return msg || '(No content returned)';
+}
+
+// Wire up the button
+(function initAiAgent() {
+  const btn    = document.getElementById('runAiAnalysisBtn');
+  const output = document.getElementById('aiAnalysisOutput');
+  if (!btn || !output) return;
+
+  btn.addEventListener('click', async () => {
+    try {
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Analysing…';
+      output.textContent = 'Contacting AI…';
+
+      const payload = buildAnalysisPayload();
+      const prompt  = formatPayloadForPrompt(payload);
+      const result  = await callOpenAIAgent(prompt);
+
+      output.textContent = result;
+      btn.textContent = original;
+      btn.disabled = false;
+    } catch (err) {
+      console.error(err);
+      output.textContent = 'Error: ' + err.message;
+      btn.disabled = false;
+      btn.textContent = 'Generate AI summary';
+    }
+  });
+})();
     
-  </script>
+</script>
 </body>
 </html>
