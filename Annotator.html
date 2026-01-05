@@ -3015,6 +3015,7 @@ function tableToCSV(tableEl) {
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/?sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-12-30T23:33:30Z&st=2026-01-02T15:18:30Z&spr=https&sig=BoWBgheeFkDsFQk8Ckq1xwO3mbqtUZSdMey0pWWkzGk%3D";
+const BLOB_CONTAINER = 'csv';   // <-- your container name
     
 async function measureAzureClockOffset() {
   try {
@@ -3022,11 +3023,16 @@ async function measureAzureClockOffset() {
       throw new Error('containerSasUrl not set');
     }
 
-    // ✅ Use the SAS URL exactly as provided (works for both account SAS and container SAS)
-    const url = containerSasUrl;
+    // For an *account* SAS, use comp=list (list containers)
+    const url = containerSasUrl.includes('?')
+      ? containerSasUrl + '&comp=list&maxresults=1'
+      : containerSasUrl + '?comp=list&maxresults=1';
 
     const t0 = Date.now();
-    const resp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    const resp = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store'
+    });
 
     const t1 = Date.now();
 
@@ -3042,19 +3048,16 @@ async function measureAzureClockOffset() {
       throw new Error('No Date header from Azure');
     }
 
-    const serverMs = Date.parse(dateHeader);  // Azure time (UTC)
-    const clientAtMidpoint = (t0 + t1) / 2;   // local time around the request
-
-    // Positive = device ahead of Azure, negative = behind
-    azureClockOffsetMs = clientAtMidpoint - serverMs;
+    const serverMs          = Date.parse(dateHeader);
+    const clientAtMidpoint  = (t0 + t1) / 2;
+    azureClockOffsetMs      = clientAtMidpoint - serverMs;
 
     console.log(
       '[ClockOffset] Azure Date =', dateHeader,
       'offsetMs =', azureClockOffsetMs
     );
 
-    // Refresh stats so the row stops saying "Not measured"
-    updateStatsTable();
+    updateStatsTable(); // so "Clock offset vs Azure" row updates
   } catch (err) {
     console.error('measureAzureClockOffset failed:', err);
     // leave azureClockOffsetMs as-is (null or previous value)
@@ -3090,11 +3093,10 @@ async function uploadCSVtoAzure(tableId) {
   const ts       = formatAppStartTimestamp();          // e.g. "2025-05-19_084215"
   const blobName = `${tableId}-${ts}.csv`;             // e.g. "statsTable-2025-05-19_084215.csv"
 
-  // 3. Split the SAS URL into base and token
-  const [baseUrl, token] = containerSasUrl.split('?');
-
-  // 4. Construct the full PUT URL
-  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+// 3. Split the SAS URL into base and token
+const [accountUrl, token] = containerSasUrl.split('?');
+// accountUrl already ends with a trailing '/', so no extra slash before container
+const uploadUrl           = `${accountUrl}${BLOB_CONTAINER}/${blobName}?${token}`;
 
   // 5. Perform the upload
   const resp = await fetch(uploadUrl, {
@@ -3662,5 +3664,6 @@ if (stopBtn) {
   </script>
 </body>
 </html>
+
 
 
