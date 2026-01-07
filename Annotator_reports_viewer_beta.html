@@ -1043,6 +1043,89 @@ function canonicalEU(raw){
 
     document.addEventListener('DOMContentLoaded', listBlobs);
 
+    // Track which report is currently open (for AI summary .txt)
+    let currentReportFileName = null;
+
+    // Open the AI summary .txt in a modal popup
+    function openAiSummaryPopup() {
+      if (!currentReportFileName) {
+        alert('No report selected for AI summary.');
+        return;
+      }
+
+      // Replace .xlsx/.xls with .txt
+      const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
+      const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
+
+      fetch(url, { cache: 'no-store' })
+        .then(res => {
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          return res.text();
+        })
+        .then(text => {
+          // Re-use escapeHtml + createModal that you already have
+          const escaped = escapeHtml(text);
+          const overlay = createModal(`
+            <h3>AI summary</h3>
+            <pre style="max-height:60vh;overflow:auto;white-space:pre-wrap;font-size:13px;">${escaped}</pre>
+            <div class="modal-buttons">
+              <button type="button" class="secondary-button close-btn">Close</button>
+            </div>
+          `);
+          const closeBtn = overlay.querySelector('.close-btn');
+          if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+              document.body.removeChild(overlay);
+            });
+          }
+        })
+        .catch(err => {
+          alert(
+            'Could not load AI summary file (.txt).\n' +
+            'It may not exist yet for this session.\n\n' +
+            err.message
+          );
+        });
+    }
+
+    // Add a row "AI summary | [Open report]" to the Test details table
+    function addAiSummaryRow(testDetailsTableEl) {
+      if (!testDetailsTableEl) return;
+
+      const tbl = testDetailsTableEl;
+      const tbody = tbl.tBodies[0] || tbl;
+
+      // Avoid duplicate row if something calls this twice
+      const existing = Array.from(tbody.rows).some(row => {
+        return row.cells[0] && row.cells[0].textContent.trim().toLowerCase() === 'ai summary';
+      });
+      if (existing) return;
+
+      const tr = document.createElement('tr');
+
+      const labelTd = document.createElement('td');
+      labelTd.textContent = 'AI summary';
+
+      const valueTd = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Open report';
+      btn.addEventListener('click', openAiSummaryPopup);
+      valueTd.appendChild(btn);
+
+      // If table has more than 2 columns, span the rest with the button cell
+      const colCount = tbody.rows[0]?.cells.length || 2;
+      if (colCount > 2) {
+        valueTd.colSpan = colCount - 1;
+      }
+
+      tr.appendChild(labelTd);
+      tr.appendChild(valueTd);
+      tbody.appendChild(tr);
+    }
+    
     // Helper to render the default overview page
     function renderOverview(){
   const content = document.getElementById('content');
@@ -3018,6 +3101,7 @@ function showDeleteConfirmDialog(filename, filesToDelete) {
 }
     
 function loadFile(filename) {
+  currentReportFileName = filename;
   const content = document.getElementById('content');
   content.innerHTML = '';
   issueCoords = [];
@@ -3180,8 +3264,12 @@ function loadFile(filename) {
           if (tbl) unifyReportTableStyle(tbl);
         }
         
-        // For "Test details" sheet: attach Additional comments editor
+        // For "Test details" sheet: add AI summary row + Additional comments editor
         if (/^\s*test\s*details\s*$/i.test(sheet)) {
+          const tbl = document.getElementById(sheet);
+          if (tbl) {
+            addAiSummaryRow(tbl);  // <--- AI summary row
+          }
           injectPostHocCommentUI(filename, wb, sheet, content);
         }
 
