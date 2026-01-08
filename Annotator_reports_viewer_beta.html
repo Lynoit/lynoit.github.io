@@ -542,6 +542,97 @@ function escapeHtml(str){
     .replace(/'/g,'&#39;');
 }
 
+// Turn **bold** into <strong>bold</strong> and escape everything safely
+function renderInlineWithBold(line) {
+  const parts = String(line).split('**');
+  if (parts.length === 1) return escapeHtml(line);
+
+  let out = '';
+  for (let i = 0; i < parts.length; i++) {
+    const esc = escapeHtml(parts[i]);
+    if (i % 2 === 1) {
+      out += '<strong>' + esc + '</strong>';
+    } else {
+      out += esc;
+    }
+  }
+  return out;
+}
+
+// Detect headings vs bullets and build HTML
+function formatAiSummary(text) {
+  const rawLines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+
+  const SECTION_TITLES = [
+    'session overview',
+    'key tester notes',
+    'overall results / intensity',
+    'key conclusions (what stands out)',
+    'main failure modes (by kpi, sheet "kpi")',
+    'main failure modes',
+    'other notes'
+  ];
+
+  const blocks = [];
+  let listItems = [];
+
+  function flushList() {
+    if (!listItems.length) return;
+    blocks.push('<ul>' + listItems.join('') + '</ul>');
+    listItems = [];
+  }
+
+  for (let raw of rawLines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      flushList();
+      continue;
+    }
+
+    const trimmed = line.trim();
+
+    // --- Try to see if this is a bullet-style heading ---
+    let headingText = null;
+
+    // Case 1: "- **Heading text**" (optional colon at the end)
+    const boldHead = trimmed.match(/^[-*]\s+\*\*(.+?)\*\*\s*[:：]*\s*$/);
+    if (boldHead) {
+      headingText = boldHead[1];
+    } else if (/^[-*]\s+/.test(trimmed)) {
+      // Case 2: "- Session overview ..." → check against known titles
+      const withoutBullet = trimmed.replace(/^[-*]\s+/, '');
+      const noStars = withoutBullet.replace(/\*\*/g, '');
+      const baseForMatch = noStars.split(/[:(]/)[0].trim().toLowerCase();
+      if (SECTION_TITLES.some(t => baseForMatch.startsWith(t))) {
+        headingText = noStars;
+      }
+    }
+
+    if (headingText) {
+      flushList();
+      blocks.push(
+        `<p class="ai-section-title">${renderInlineWithBold(headingText)}</p>`
+      );
+      continue;
+    }
+
+    // --- Real bullets ---
+    const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    if (bulletMatch) {
+      const itemText = bulletMatch[1].trim();
+      listItems.push('<li>' + renderInlineWithBold(itemText) + '</li>');
+      continue;
+    }
+
+    // --- Plain paragraph line ---
+    flushList();
+    blocks.push('<p>' + renderInlineWithBold(trimmed) + '</p>');
+  }
+
+  flushList();
+  return blocks.join('\n');
+}
+    
 function formatInlineWithBold(str){
   // Turn **bold** into <strong>bold</strong>, keeping HTML escaping safe.
   const parts = [];
@@ -1304,12 +1395,31 @@ function openAiSummaryPopup() {
       return res.text();
     })
     .then(text => {
-      const { timestampHtml, bodyHtml } = formatAiSummary(text);
+      // Split out optional first line "AI summary generated at ..."
+      const lines = text.replace(/\r\n/g, '\n').split('\n');
+      let timestamp = '';
+      let body = text;
+
+      if (
+        lines.length &&
+        /^ai summary generated at/i.test(lines[0].trim())
+      ) {
+        timestamp = lines[0].trim();
+        body = lines.slice(1).join('\n');
+      }
+
+      const bodyHtml = formatAiSummary(body);
 
       const overlay = createModal(`
         <h3>AI summary</h3>
+        ${
+          timestamp
+            ? `<div class="ai-summary-timestamp">${escapeHtml(
+                timestamp
+              )}</div>`
+            : ''
+        }
         <div class="ai-summary-body">
-          ${timestampHtml}
           ${bodyHtml}
         </div>
         <div class="modal-buttons">
