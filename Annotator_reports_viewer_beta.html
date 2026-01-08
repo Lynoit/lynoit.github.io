@@ -542,187 +542,6 @@ function escapeHtml(str){
     .replace(/'/g,'&#39;');
 }
 
-// Turn **bold** into <strong>bold</strong> and escape everything safely
-function renderInlineWithBold(line) {
-  const parts = String(line).split('**');
-  if (parts.length === 1) return escapeHtml(line);
-
-  let out = '';
-  for (let i = 0; i < parts.length; i++) {
-    const esc = escapeHtml(parts[i]);
-    if (i % 2 === 1) {
-      out += '<strong>' + esc + '</strong>';
-    } else {
-      out += esc;
-    }
-  }
-  return out;
-}
-
-// Detect headings vs bullets and build HTML
-function formatAiSummary(text) {
-  const rawLines = String(text || '').replace(/\r\n/g, '\n').split('\n');
-
-  const SECTION_TITLES = [
-    'session overview',
-    'key tester notes',
-    'overall results / intensity',
-    'key conclusions (what stands out)',
-    'main failure modes (by kpi, sheet "kpi")',
-    'main failure modes',
-    'other notes'
-  ];
-
-  const blocks = [];
-  let listItems = [];
-
-  function flushList() {
-    if (!listItems.length) return;
-    blocks.push('<ul>' + listItems.join('') + '</ul>');
-    listItems = [];
-  }
-
-  for (let raw of rawLines) {
-    const line = raw.trimEnd();
-    if (!line.trim()) {
-      flushList();
-      continue;
-    }
-
-    const trimmed = line.trim();
-
-    // --- Try to see if this is a bullet-style heading ---
-    let headingText = null;
-
-    // Case 1: "- **Heading text**" (optional colon at the end)
-    const boldHead = trimmed.match(/^[-*]\s+\*\*(.+?)\*\*\s*[:：]*\s*$/);
-    if (boldHead) {
-      headingText = boldHead[1];
-    } else if (/^[-*]\s+/.test(trimmed)) {
-      // Case 2: "- Session overview ..." → check against known titles
-      const withoutBullet = trimmed.replace(/^[-*]\s+/, '');
-      const noStars = withoutBullet.replace(/\*\*/g, '');
-      const baseForMatch = noStars.split(/[:(]/)[0].trim().toLowerCase();
-      if (SECTION_TITLES.some(t => baseForMatch.startsWith(t))) {
-        headingText = noStars;
-      }
-    }
-
-    if (headingText) {
-      flushList();
-      blocks.push(
-        `<p class="ai-section-title">${renderInlineWithBold(headingText)}</p>`
-      );
-      continue;
-    }
-
-    // --- Real bullets ---
-    const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
-    if (bulletMatch) {
-      const itemText = bulletMatch[1].trim();
-      listItems.push('<li>' + renderInlineWithBold(itemText) + '</li>');
-      continue;
-    }
-
-    // --- Plain paragraph line ---
-    flushList();
-    blocks.push('<p>' + renderInlineWithBold(trimmed) + '</p>');
-  }
-
-  flushList();
-  return blocks.join('\n');
-}
-    
-function formatInlineWithBold(str){
-  // Turn **bold** into <strong>bold</strong>, keeping HTML escaping safe.
-  const parts = [];
-  let i = 0;
-  while (i < str.length) {
-    const start = str.indexOf('**', i);
-    if (start === -1) {
-      parts.push({ type: 'text', text: str.slice(i) });
-      break;
-    }
-    if (start > i) {
-      parts.push({ type: 'text', text: str.slice(i, start) });
-    }
-    const end = str.indexOf('**', start + 2);
-    if (end === -1) {
-      // unmatched **; treat rest as plain text
-      parts.push({ type: 'text', text: str.slice(start) });
-      break;
-    }
-    parts.push({ type: 'bold', text: str.slice(start + 2, end) });
-    i = end + 2;
-  }
-
-  return parts.map(p => {
-    const esc = escapeHtml(p.text);
-    return p.type === 'bold' ? `<strong>${esc}</strong>` : esc;
-  }).join('');
-}
-
-function formatAiSummary(rawText){
-  const lines = rawText.replace(/\r\n/g, '\n').split('\n');
-
-  // Optional timestamp line at top
-  let timestampHtml = '';
-  if (lines.length && /^AI summary generated at/i.test(lines[0].trim())) {
-    timestampHtml = `<div class="ai-summary-timestamp">${escapeHtml(lines[0].trim())}</div>`;
-    lines.shift();
-  }
-
-  // Group into blocks separated by blank lines
-  const blocks = [];
-  let block = [];
-  for (const line of lines) {
-    if (/^\s*$/.test(line)) {
-      if (block.length) {
-        blocks.push(block);
-        block = [];
-      }
-    } else {
-      block.push(line);
-    }
-  }
-  if (block.length) blocks.push(block);
-
-  // Heuristic: does a line (with optional leading bullet) look like a section heading?
-  const looksLikeHeading = (line) => {
-    const t = line.trim().replace(/^[-•]\s+/, '');
-    return /^(session overview|key tester notes|overall results|overall results\s*\/\s*intensity|key conclusions|main failure modes)/i.test(t);
-  };
-
-  const htmlBlocks = blocks.map(linesBlock => {
-    const trimmed = linesBlock.map(l => l.trim());
-    const allBullets = trimmed.every(l => /^[-•]\s+/.test(l));
-
-    // If they are bullets but look like section headings → render as headings, not list
-    if (allBullets && trimmed.some(looksLikeHeading)) {
-      return trimmed.map(l => {
-        const t = l.replace(/^[-•]\s+/, '');
-        // make headings bold paragraphs
-        return `<p><strong>${formatInlineWithBold(t)}</strong></p>`;
-      }).join('');
-    }
-
-    // Normal bullet list
-    if (allBullets) {
-      const items = trimmed.map(l => l.replace(/^[-•]\s+/, ''));
-      return `<ul>${items.map(it => `<li>${formatInlineWithBold(it)}</li>`).join('')}</ul>`;
-    }
-
-    // Plain paragraph block
-    const text = trimmed.join(' ');
-    return `<p>${formatInlineWithBold(text)}</p>`;
-  });
-
-  return {
-    timestampHtml,
-    bodyHtml: htmlBlocks.join('')
-  };
-}
-    
 function renderAiSummaryHtml(raw) {
   if (!raw) {
     return '<div class="ai-summary-body"><p>(No content)</p></div>';
@@ -1378,13 +1197,13 @@ function renderAiSummaryHtml(rawText) {
 }
     
 // Open the AI summary .txt in a modal popup
-// Open the AI summary .txt in a modal popup (simple heading + bold styling)
 function openAiSummaryPopup() {
   if (!currentReportFileName) {
     alert('No report selected for AI summary.');
     return;
   }
 
+  // Replace .xlsx/.xls with .txt
   const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
   const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
 
@@ -1396,52 +1215,12 @@ function openAiSummaryPopup() {
       return res.text();
     })
     .then(text => {
-      // Normalise newlines
-      const all = text.replace(/\r\n/g, '\n');
-      const lines = all.split('\n');
-
-      // Optional first line: "AI summary generated at ..."
-      let timestampLine = '';
-      if (lines[0] && /^ai summary generated at/i.test(lines[0])) {
-        timestampLine = lines.shift();
-        if (lines[0] === '') lines.shift(); // remove following blank line
-      }
-
-      const bodyText = lines.join('\n');
-
-      // 1) Escape HTML once
-      let html = escapeHtml(bodyText);
-
-      // 2) Turn certain bullet lines into headings (no bullet)
-      const headingLabels = [
-        'Session overview',
-        'Key tester notes',
-        'Overall results',
-        'Key conclusions',
-        'Main failure modes',
-        'Other observations'
-      ];
-
-      headingLabels.forEach(label => {
-        // Match: newline + optional spaces + "- " + label...
-        const re = new RegExp(`(^|\\n)\\s*[-*]\\s*(${label}[^\\n]*)`, 'gi');
-        html = html.replace(re, '$1<strong>$2</strong>');
-      });
-
-      // 3) Simple inline markdown for bold / italic
-      //    (works on the escaped string; <strong>/<em> are inserted as real tags)
-      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+      const { timestampHtml, bodyHtml } = renderAiSummaryHtml(text);
 
       const overlay = createModal(`
         <h3>AI summary</h3>
-        ${timestampLine
-          ? `<div class="ai-summary-timestamp">${escapeHtml(timestampLine)}</div>`
-          : ''
-        }
-        <div class="ai-summary-body">
-          <pre style="max-height:70vh;overflow:auto;white-space:pre-wrap;font-size:13px;margin:0;">${html}</pre>
-        </div>
+        ${timestampHtml}
+        <div class="ai-summary-body">${bodyHtml}</div>
         <div class="modal-buttons">
           <button type="button" class="secondary-button close-btn">Close</button>
         </div>
