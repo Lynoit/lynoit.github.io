@@ -146,6 +146,33 @@
   box-sizing: border-box;
 }
 
+.ai-summary-body {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 8px 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ai-summary-body ul {
+  padding-left: 20px;
+  margin: 4px 0 8px;
+}
+
+.ai-summary-body li {
+  margin: 2px 0;
+}
+
+.ai-summary-body p {
+  margin: 4px 0;
+}
+
+.ai-summary-timestamp {
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 6px;
+}
+    
     /* Unified report tables (applies to all xlsx-rendered tables + TP table) */
 .report-table{ width:100%; border-collapse:collapse; margin-bottom:2em; }
 .report-table th, .report-table td{ border:1px solid #ccc; padding:8px; }
@@ -510,6 +537,66 @@ function escapeHtml(str){
     .replace(/'/g,'&#39;');
 }
 
+function renderAiSummaryHtml(raw) {
+  if (!raw) {
+    return '<div class="ai-summary-body"><p>(No content)</p></div>';
+  }
+
+  const lines = raw.split(/\r?\n/);
+  let timestampLine = '';
+
+  // First line like "AI summary generated at 2026-01-07 ..." → separate grey line
+  if (lines.length && /^AI summary generated at/i.test(lines[0])) {
+    timestampLine = lines.shift();
+  }
+
+  const parts = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (inList) {
+      parts.push('</ul>');
+      inList = false;
+    }
+  };
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      // blank line => paragraph break
+      closeList();
+      parts.push('<br>');
+      continue;
+    }
+
+    if (trimmed.startsWith('- ')) {
+      // Bullet line
+      if (!inList) {
+        parts.push('<ul>');
+        inList = true;
+      }
+      let item = trimmed.slice(2);          // drop "- "
+      item = escapeHtml(item);              // escape HTML
+      item = item.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'); // **bold**
+      parts.push('<li>' + item + '</li>');
+    } else {
+      // Normal text
+      closeList();
+      let text = escapeHtml(trimmed);
+      text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      parts.push('<p>' + text + '</p>');
+    }
+  }
+  closeList();
+
+  const tsHtml = timestampLine
+    ? '<div class="ai-summary-timestamp">' + escapeHtml(timestampLine) + '</div>'
+    : '';
+
+  return tsHtml + '<div class="ai-summary-body">' + parts.join('') + '</div>';
+}
+    
 // Map OSM highway types → 5 categories:
 // Highway, Country road, City road, Construction, Unclassified
 function classifyRoadType(osmType) {
@@ -1046,49 +1133,56 @@ function canonicalEU(raw){
     // Track which report is currently open (for AI summary .txt)
     let currentReportFileName = null;
 
-    // Open the AI summary .txt in a modal popup
-    function openAiSummaryPopup() {
-      if (!currentReportFileName) {
-        alert('No report selected for AI summary.');
-        return;
+// Open the AI summary .txt in a modal popup
+function openAiSummaryPopup() {
+  if (!currentReportFileName) {
+    alert('No report selected for AI summary.');
+    return;
+  }
+
+  // Replace .xlsx/.xls with .txt
+  const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
+  const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
+
+  fetch(url, { cache: 'no-store' })
+    .then(res => {
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return res.text();
+    })
+    .then(text => {
+      const summaryHtml = renderAiSummaryHtml(text);
+      const overlay = createModal(`
+        <h3>AI summary</h3>
+        ${summaryHtml}
+        <div class="modal-buttons">
+          <button type="button" class="secondary-button close-btn">Close</button>
+        </div>
+      `);
+
+      const closeBtn = overlay.querySelector('.close-btn');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          document.body.removeChild(overlay);
+        });
       }
 
-      // Replace .xlsx/.xls with .txt
-      const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
-      const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
-
-      fetch(url, { cache: 'no-store' })
-        .then(res => {
-          if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-          }
-          return res.text();
-        })
-        .then(text => {
-          // Re-use escapeHtml + createModal that you already have
-          const escaped = escapeHtml(text);
-          const overlay = createModal(`
-            <h3>AI summary</h3>
-            <pre style="max-height:60vh;overflow:auto;white-space:pre-wrap;font-size:13px;">${escaped}</pre>
-            <div class="modal-buttons">
-              <button type="button" class="secondary-button close-btn">Close</button>
-            </div>
-          `);
-          const closeBtn = overlay.querySelector('.close-btn');
-          if (closeBtn) {
-            closeBtn.addEventListener('click', () => {
-              document.body.removeChild(overlay);
-            });
-          }
-        })
-        .catch(err => {
-          alert(
-            'Could not load AI summary file (.txt).\n' +
-            'It may not exist yet for this session.\n\n' +
-            err.message
-          );
-        });
-    }
+      // Close when clicking outside the dialog
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) {
+          document.body.removeChild(overlay);
+        }
+      });
+    })
+    .catch(err => {
+      alert(
+        'Could not load AI summary file (.txt).\n' +
+        'It may not exist yet for this session.\n\n' +
+        err.message
+      );
+    });
+}
 
 // Add a row "AI summary | [Open report]" to the Test details table,
 // inserted directly below the "Participant" row if present.
