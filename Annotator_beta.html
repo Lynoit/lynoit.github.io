@@ -998,16 +998,6 @@ form.addEventListener('submit', async e => {
       </table>
     </div>
 
- <div id="aiAnalysisContainer" class="section">
-  <h3>AI analysis</h3>
-  <button id="runAiAnalysisBtn" class="bigButton blueButton">
-    Generate AI summary
-  </button>
-  <pre id="aiAnalysisOutput" 
-       style="white-space:pre-wrap;font-size:13px;border:1px solid #444;padding:8px;margin-top:8px;min-height:40px;">
-  </pre>
-</div>
-
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
       Ver 1.16
       © Lynoit Tech 2025
@@ -1148,8 +1138,6 @@ textBox.addEventListener('input', () => {
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
     const samplingTable = [];
-    const OPENAI_API_KEY = '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';
-    const AI_MODEL_NAME = 'gpt-4.1-mini';
 
 // --- Toggle system ---
 const toggleState = {};
@@ -1207,7 +1195,6 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
     let startTime = null;        // timestamp of the first GPS fix (ms)
     const topSpeeds = [];   // running list of the 10 highest samples
-    let nextEventId = 1;         // unique ID per logged issue
     
     let maxSpeed  = 0;    // value that ends up in the Statistics table
     let lastTableUpdate = 0;
@@ -1409,14 +1396,6 @@ async function stopTesting() {
       console.error('Final snapshots ZIP upload failed:', e);
     }
 
-    try {
-      if (typeof uploadIssuePlotsZip === 'function') {
-        await uploadIssuePlotsZip();
-      }
-    } catch (e) {
-      console.error('Final issue plots ZIP upload failed:', e);
-    }
-
     // optionally:
     // try { if (typeof exportPDFToAzure === 'function') await exportPDFToAzure(); } catch(e){ console.error(e); }
 
@@ -1474,10 +1453,10 @@ let lastSampleMeters = 0;
 let lastSampleTimeMs = 0;
 
 function shouldSampleNow() {
-  const movedMeters = totalDist - lastSampleMeters;
+  const movedMeters = totalDist - lastSampleMeters; // totalDist is in meters
   const now = Date.now();
-  const timeGapOk = (now - lastSampleTimeMs) >= 2000; // max 2 s gap
-  const distGapOk = movedMeters >= 10;                 // 10 m step
+  const timeGapOk = (now - lastSampleTimeMs) >= 10_000; // max 10 s gap
+  const distGapOk = movedMeters >= 50;                  // 50 m step
 
   return distGapOk || timeGapOk;
 }
@@ -1489,7 +1468,7 @@ samplingIntervalId = setInterval(() => {
   recordSample('');
   lastSampleMeters = totalDist;
   lastSampleTimeMs = Date.now();
-}, 1000); // check every 1 s instead of 2
+}, 2 * 1000); // check frequently; actual writes are gated
     
 geoWatchId = navigator.geolocation.watchPosition(showPosition, showError, {
   enableHighAccuracy: true,
@@ -2191,7 +2170,7 @@ function updateStatsTable () {
   }
 }
 
-function recordSample(issueText = '', eventId = null) {
+function recordSample(issueText = '') {
   if (!lastPos) return;
 
   const rowNo      = samplingTable.length + 1;
@@ -2203,29 +2182,39 @@ function recordSample(issueText = '', eventId = null) {
   const maxSpd     = maxSpeed.toFixed(1);
   const legalSpd   = (currentLegalSpeed ?? '');
 
+  // 🔹 get current road type from sidebar
+  let roadTypeText = '';
+  if (roadTypeEl && roadTypeEl.textContent) {
+    // "Road type: motorway" → "motorway"
+    const parts = roadTypeEl.textContent.split(': ');
+    roadTypeText = (parts[1] || parts[0] || '').trim();
+  }
+
   // snapshot current toggles (so export is time-accurate)
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
     if (def.kind === 'tri') {
+      // tri-state: Not tested / No / Yes
       const fallback = def.states?.[0] || 'Not tested';
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? fallback;
     } else {
+      // binary legacy toggle
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
     }
   });
 
   samplingTable.push({
-    no:        rowNo,
+    no:         rowNo,
     timestamp,
-    lat:       latitude,
-    lon:       longitude,
-    distance:  distanceKm,
-    speed:     speed,
-    maxspeed:  maxSpd,
+    lat:        latitude,
+    lon:        longitude,
+    distance:   distanceKm,
+    speed:      speed,
+    maxspeed:   maxSpd,
     legalSpeed: legalSpd,
-    issue:     issueText || '',
-    issueId:   eventId,      // 🔹 link to logTable row
-    toggles:   toggleSnapshot
+    roadType:   roadTypeText,       // ✅ new field
+    issue:      issueText || '',
+    toggles:    toggleSnapshot
   });
 }
     
@@ -2260,8 +2249,6 @@ function logButton(name, isRed) {
   let camDataUrl = pendingSnapshotDataUrl || captureSnapshotFromCamera();
 
   // ⑦ Push into the log array as an OBJECT (not raw array anymore)
-  const eventId = nextEventId++;   // 🔹 unique ID for this issue
-
   const row = {
     issue:     name,
     date,
@@ -2277,16 +2264,15 @@ function logButton(name, isRed) {
     comment,
     snapshot:  camDataUrl,
     isRed:     !!isRed,
-    country,
-    eventId    // 🔹 store ID on issue row too
+    country
   };
   logTable.push(row);
   checkUploadEligibility();
 
   try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
-  // still record a sampling row with the issue text, tied to this event
-  recordSample(name, eventId);
+  // still record a sampling row with the issue text
+  recordSample(name);
 
   // ⑧ Map marker for this issue (numbered)
   const issueNumber = logTable.length;
@@ -2965,11 +2951,11 @@ if (uploadsEnabled && (now - lastUploadTime > UPLOAD_THROTTLE)) {
   uploadSnapshotsZip().then(() => console.log('Snapshots ZIP uploaded'))
     .catch(err => console.error('Snapshots ZIP upload failed:', err));
 
-  uploadIssuePlotsZip().then(() => console.log('Issue plots ZIP uploaded'))
-    .catch(err => console.error('Issue plots ZIP upload failed:', err));
-
+    //exportCustomSectionsToAzure()
+    //  .then(() => console.log('PDF report uploaded'))
+    //  .catch(err => console.error('PDF upload failed:', err));
   }
-}  
+}
 
 function updatePhaseTable() {
   let html = `
@@ -3038,18 +3024,25 @@ function tableToCSV(tableEl) {
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/?sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-12-30T23:33:30Z&st=2026-01-02T15:18:30Z&spr=https&sig=BoWBgheeFkDsFQk8Ckq1xwO3mbqtUZSdMey0pWWkzGk%3D";
+const BLOB_CONTAINER = 'csv';   // <-- your container name
+    
 async function measureAzureClockOffset() {
   try {
     if (!containerSasUrl) {
       throw new Error('containerSasUrl not set');
     }
 
-    // Use the container itself as a lightweight time source
-    const [baseUrl, token] = containerSasUrl.split('?');
-    const url = `${baseUrl}?restype=container&${token}`;
+    // For an *account* SAS, use comp=list (list containers)
+    const url = containerSasUrl.includes('?')
+      ? containerSasUrl + '&comp=list&maxresults=1'
+      : containerSasUrl + '?comp=list&maxresults=1';
 
     const t0 = Date.now();
-    const resp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    const resp = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store'
+    });
+
     const t1 = Date.now();
 
     if (!resp.ok) {
@@ -3064,18 +3057,16 @@ async function measureAzureClockOffset() {
       throw new Error('No Date header from Azure');
     }
 
-    const serverMs = Date.parse(dateHeader);  // Azure time (UTC)
-    const clientAtMidpoint = (t0 + t1) / 2;   // our best guess of local time
-    // Positive = device is ahead of Azure, negative = behind
-    azureClockOffsetMs = clientAtMidpoint - serverMs;
+    const serverMs          = Date.parse(dateHeader);
+    const clientAtMidpoint  = (t0 + t1) / 2;
+    azureClockOffsetMs      = clientAtMidpoint - serverMs;
 
     console.log(
       '[ClockOffset] Azure Date =', dateHeader,
       'offsetMs =', azureClockOffsetMs
     );
 
-    // Refresh stats so the row stops saying "Not measured"
-    updateStatsTable();
+    updateStatsTable(); // so "Clock offset vs Azure" row updates
   } catch (err) {
     console.error('measureAzureClockOffset failed:', err);
     // leave azureClockOffsetMs as-is (null or previous value)
@@ -3111,11 +3102,13 @@ async function uploadCSVtoAzure(tableId) {
   const ts       = formatAppStartTimestamp();          // e.g. "2025-05-19_084215"
   const blobName = `${tableId}-${ts}.csv`;             // e.g. "statsTable-2025-05-19_084215.csv"
 
-  // 3. Split the SAS URL into base and token
-  const [baseUrl, token] = containerSasUrl.split('?');
+const [rawBaseUrl, token] = containerSasUrl.split('?');
 
-  // 4. Construct the full PUT URL
-  const uploadUrl = `${baseUrl}/${blobName}?${token}`;
+// remove trailing slash from account url, just in case
+const baseUrl = rawBaseUrl.replace(/\/$/, '');
+
+// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
+const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
   // 5. Perform the upload
   const resp = await fetch(uploadUrl, {
@@ -3177,37 +3170,7 @@ async function uploadWorkbookToAzure() {
   });
 
   // 3. --- Sampling sheet (as before, but toggle-aware) ---
-  const samplingHeader = [
-    "No","Timestamp","Latitude","Longitude",
-    "Distance (km)","Speed (km/h)","Legal Speed (km/h)","Issue"
-  ];
-  // one column per configured toggle signal (order = CSV order)
-  toggleDefs.forEach(def => samplingHeader.push(def.signal));
-
-  const samplingAoA = [ samplingHeader ];
-
-  samplingTable.forEach(entry => {
-    const row = [
-      entry.no,
-      entry.timestamp,
-      entry.lat,
-      entry.lon,
-      entry.distance,
-      entry.speed,
-      entry.legalSpeed,
-      entry.issue || ''
-    ];
-    toggleDefs.forEach(def => {
-      const valFromEntry = entry.toggles?.[def.signal];
-      if (def.kind === 'tri') {
-        const fallback = def.states?.[0] || 'Not tested';
-        row.push(valFromEntry ?? fallback);
-      } else {
-        row.push(valFromEntry ?? def.offValue);
-      }
-    });
-    samplingAoA.push(row);
-  });
+const samplingHeader
 
   const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
   XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
@@ -3256,9 +3219,13 @@ async function uploadWorkbookToAzure() {
   // 7. Determine filename using your appStartTime helper
   const blobName = `${reportBaseName}.xlsx`;
 
-  // 8. Build upload URL from containerSasUrl
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+const [rawBaseUrl, token] = containerSasUrl.split('?');
+
+// remove trailing slash from account url, just in case
+const baseUrl = rawBaseUrl.replace(/\/$/, '');
+
+// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
+const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
   // 9. Try cloud upload, fallback to local download if offline / failed
   try {
@@ -3308,8 +3275,13 @@ async function uploadWorkbookToAzure() {
   const blobName = `${reportBaseName}.html`;  // same base, different extension
 
   // build uploadUrl from your containerSasUrl
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+const [rawBaseUrl, token] = containerSasUrl.split('?');
+
+// remove trailing slash from account url, just in case
+const baseUrl = rawBaseUrl.replace(/\/$/, '');
+
+// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
+const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
   const resp = await fetch(uploadUrl, {
     method: 'PUT',
@@ -3328,8 +3300,12 @@ async function uploadWorkbookToAzure() {
 
 async function exportPDFToAzure() {
   // 0) Locate the live map and its parent wrapper
-  const map2El     = document.getElementById('map2');
-  const wrapper    = map2El.parentElement;  
+  const map2El  = document.getElementById('map2');
+  if (!map2El) {
+    console.warn('exportPDFToAzure: #map2 not found, skipping PDF export.');
+    return;
+  }
+  const wrapper = map2El.parentElement;
   const reportName = `${reportBaseName}.pdf`;
 
   // 1) Ensure there’s a hidden snapshot container alongside #map2
@@ -3338,8 +3314,8 @@ async function exportPDFToAzure() {
     snapEl = document.createElement('div');
     snapEl.id = 'map2-snapshot';
     snapEl.style.display = 'none';
-    snapEl.style.width  = map2El.style.width  || '100%';
-    snapEl.style.height = map2El.style.height || 'auto';
+    snapEl.style.width   = map2El.style.width  || '100%';
+    snapEl.style.height  = map2El.style.height || 'auto';
     wrapper.appendChild(snapEl);
   }
 
@@ -3361,13 +3337,13 @@ async function exportPDFToAzure() {
   });
 
   // 3) Swap visibility: hide live map, show snapshot
-  map2El.style.display  = 'none';
-  snapEl.style.display  = 'block';
+  map2El.style.display = 'none';
+  snapEl.style.display = 'block';
 
   // 4) Expand mainContent for HTML→PDF
-  const mainEl      = document.getElementById('mainContent');
-  const origHeight  = mainEl.style.height;
-  const origOverflow= mainEl.style.overflow;
+  const mainEl       = document.getElementById('mainContent');
+  const origHeight   = mainEl.style.height;
+  const origOverflow = mainEl.style.overflow;
   mainEl.style.height   = 'auto';
   mainEl.style.overflow = 'visible';
 
@@ -3387,8 +3363,12 @@ async function exportPDFToAzure() {
     const pdfBlob = await html2pdf().set(opt).from(mainEl).outputPdf('blob');
 
     // 6) Upload to Azure
-    const [baseUrl, token] = containerSasUrl.split('?');
-    const uploadUrl        = `${baseUrl}/${reportName}?${token}`;
+    const [rawBaseUrl, token] = containerSasUrl.split('?');
+    const baseUrl  = rawBaseUrl.replace(/\/$/, '');
+    const blobName = reportName; // reuse the same name
+
+    const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
+
     const resp = await fetch(uploadUrl, {
       method: 'PUT',
       headers: {
@@ -3397,9 +3377,11 @@ async function exportPDFToAzure() {
       },
       body: pdfBlob
     });
+
     if (!resp.ok) {
       throw new Error(`PDF upload failed: ${resp.status} ${resp.statusText}`);
     }
+    console.log(`✔ Uploaded PDF report: ${blobName}`);
   } finally {
     // 7) Restore everything: mainContent style, swap map back
     mainEl.style.height   = origHeight;
@@ -3441,8 +3423,15 @@ let sectionTexts = {};
 
   // 1) Prep blob name & upload URL
   const blobName = `${reportBaseName}.pdf`;
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl       = `${baseUrl}/${blobName}?${token}`;
+    
+const [rawBaseUrl, token] = containerSasUrl.split('?');
+
+// remove trailing slash from account url, just in case
+const baseUrl = rawBaseUrl.replace(/\/$/, '');
+
+// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
+const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
+
 
   // 2) Create off-DOM wrapper sized to A4 width
   const tmp = document.createElement('div');
@@ -3594,277 +3583,6 @@ let sectionTexts = {};
   }
 }
 
-function generateIssuePlotDataUrl(issueRow, issueIndex) {
-  // helper: simple text-only image
-  function createFallbackPlot(message) {
-    const canvas = document.createElement('canvas');
-    canvas.width  = 800;
-    canvas.height = 600;
-    const ctx = canvas.getContext('2d');
-
-    // background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = '#000000';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = '20px Arial';
-
-    const title = `Issue #${issueIndex + 1}${
-      issueRow && issueRow.issue ? ' – ' + issueRow.issue : ''
-    }`;
-
-    const lines = [
-      title,
-      '',
-      message || 'Plot could not be generated'
-    ];
-
-    const lineHeight = 28;
-    const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
-
-    lines.forEach((line, i) => {
-      ctx.fillText(line, canvas.width / 2, startY + i * lineHeight);
-    });
-
-    return canvas.toDataURL('image/png', 0.9);
-  }
-
-  // ---- safety checks → fallback image instead of null ----
-  if (!issueRow) {
-    return createFallbackPlot('No issue data available');
-  }
-
-  if (!issueRow.eventId) {
-    return createFallbackPlot('No eventId linked to this issue.');
-  }
-
-  const eventSample = samplingTable.find(s => s.issueId === issueRow.eventId);
-  if (!eventSample) {
-    return createFallbackPlot('No sampling row linked to this issue.');
-  }
-
-  const tEvent = Date.parse(eventSample.timestamp);
-  if (!Number.isFinite(tEvent)) {
-    return createFallbackPlot('Invalid timestamp for this issue.');
-  }
-
-  // ---- collect samples in [-10s, +5s] window ----
-  const windowStart = tEvent - 10_000;
-  const windowEnd   = tEvent + 5_000;
-
-  const samples = samplingTable
-    .map(s => {
-      const t = Date.parse(s.timestamp);
-      return { s, t };
-    })
-    .filter(o => Number.isFinite(o.t) && o.t >= windowStart && o.t <= windowEnd)
-    .sort((a, b) => a.t - b.t);
-
-  if (samples.length === 0) {
-    return createFallbackPlot('No samples in ±10 seconds around this issue.');
-  }
-
-  // if only 1 sample: duplicate it so we can still draw a tiny line
-  if (samples.length === 1) {
-    samples.push({ ...samples[0], t: samples[0].t + 100 });
-  }
-
-  const times  = samples.map(o => (o.t - tEvent) / 1000);      // seconds rel. to issue
-  const speeds = samples.map(o => Number(o.s.speed || 0));     // km/h
-  const vMs    = speeds.map(v => v * (1000 / 3600));           // m/s
-
-  // Acceleration (m/s²)
-  const acc = [];
-  for (let i = 0; i < vMs.length; i++) {
-    if (i === 0) {
-      acc.push(0);
-    } else {
-      const dt = times[i] - times[i - 1];
-      if (dt <= 0) {
-        acc.push(acc[i - 1]);
-      } else {
-        acc.push((vMs[i] - vMs[i - 1]) / dt);
-      }
-    }
-  }
-
-  // ---- drawing on offscreen canvas (same as before) ----
-  const canvas = document.createElement('canvas');
-  canvas.width  = 800;
-  canvas.height = 600;
-  const ctx = canvas.getContext('2d');
-
-  // Background
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#000000';
-
-  const margin = {
-    left:   70,
-    right:  20,
-    top:    60,
-    bottom: 40,
-    midGap: 40
-  };
-  const plotWidth  = canvas.width  - margin.left - margin.right;
-  const plotHeight = (canvas.height - margin.top - margin.bottom - margin.midGap) / 2;
-
-  const title = `Issue #${issueIndex + 1} – ${issueRow.issue || ''}`;
-  ctx.font = '18px Arial';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText(title, margin.left, 20);
-
-  // Common X scaling
-  const xMin  = -10;
-  const xMax  = 5;
-  const xSpan = xMax - xMin;
-  const xFromT = t => margin.left + ((t - xMin) / xSpan) * plotWidth;
-
-  // ---------- Acceleration subplot ----------
-  const accTop    = margin.top;
-  const accHeight = plotHeight;
-  const accBottom = accTop + accHeight;
-
-  const maxAbsAcc = Math.max(0.1, ...acc.map(a => Math.abs(a)));
-  const accMax  = maxAbsAcc;
-  const accMin  = -maxAbsAcc;
-  const accSpan = accMax - accMin;
-
-  const yAccFromA = a =>
-    accTop + ((accMax - a) / accSpan) * accHeight;
-
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth   = 1;
-
-  const yZeroAcc = yAccFromA(0);
-  ctx.beginPath();
-  ctx.moveTo(margin.left, yZeroAcc);
-  ctx.lineTo(margin.left + plotWidth, yZeroAcc);
-  ctx.stroke();
-
-  ctx.strokeRect(margin.left, accTop, plotWidth, accHeight);
-
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  [-10, -5, 0, 5].forEach(t => {
-    const x = xFromT(t);
-    ctx.beginPath();
-    ctx.moveTo(x, accBottom);
-    ctx.lineTo(x, accBottom + 5);
-    ctx.stroke();
-    ctx.fillText(`${t}s`, x, accBottom + 7);
-  });
-
-  ctx.textAlign   = 'right';
-  ctx.textBaseline= 'middle';
-  const accTicks = 5;
-  for (let i = 0; i <= accTicks; i++) {
-    const frac = i / accTicks;
-    const val  = accMin + frac * accSpan;
-    const y    = yAccFromA(val);
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left,     y);
-    ctx.stroke();
-    ctx.fillText(val.toFixed(2), margin.left - 8, y);
-  }
-
-  ctx.save();
-  ctx.translate(20, accTop + accHeight / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Acceleration (m/s²)', 0, 0);
-  ctx.restore();
-
-  ctx.strokeStyle = '#d1242f';
-  ctx.lineWidth   = 2;
-  ctx.beginPath();
-  times.forEach((t, i) => {
-    const x = xFromT(t);
-    const y = yAccFromA(acc[i]);
-    if (i === 0) ctx.moveTo(x, y);
-    else         ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  // ---------- Speed subplot ----------
-  const spTop    = accBottom + margin.midGap;
-  const spHeight = plotHeight;
-  const spBottom = spTop + spHeight;
-
-  const spMin  = 0;
-  const spMax  = Math.max(10, ...speeds) * 1.1;
-  const spSpan = spMax - spMin;
-
-  const ySpFromV = v =>
-    spTop + ((spMax - v) / spSpan) * spHeight;
-
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth   = 1;
-
-  const yZeroSp = ySpFromV(0);
-  ctx.beginPath();
-  ctx.moveTo(margin.left, yZeroSp);
-  ctx.lineTo(margin.left + plotWidth, yZeroSp);
-  ctx.stroke();
-
-  ctx.strokeRect(margin.left, spTop, plotWidth, spHeight);
-
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  [-10, -5, 0, 5].forEach(t => {
-    const x = xFromT(t);
-    ctx.beginPath();
-    ctx.moveTo(x, spBottom);
-    ctx.lineTo(x, spBottom + 5);
-    ctx.stroke();
-    ctx.fillText(`${t}s`, x, spBottom + 7);
-  });
-
-  ctx.textAlign   = 'right';
-  ctx.textBaseline= 'middle';
-  const spTicks = 5;
-  for (let i = 0; i <= spTicks; i++) {
-    const frac = i / spTicks;
-    const val  = spMin + frac * spSpan;
-    const y    = ySpFromV(val);
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left - 5, y);
-    ctx.lineTo(margin.left,     y);
-    ctx.stroke();
-    ctx.fillText(val.toFixed(1), margin.left - 8, y);
-  }
-
-  ctx.save();
-  ctx.translate(20, spTop + spHeight / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Speed (km/h)', 0, 0);
-  ctx.restore();
-
-  ctx.strokeStyle = '#1f6feb';
-  ctx.lineWidth   = 2;
-  ctx.beginPath();
-  times.forEach((t, i) => {
-    const x = xFromT(t);
-    const y = ySpFromV(speeds[i]);
-    if (i === 0) ctx.moveTo(x, y);
-    else         ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  return canvas.toDataURL('image/png', 0.9);
-}
-    
 async function uploadSnapshotsZip() {
   console.log('💾 uploadSnapshotsZip() called; logTable.length =', logTable.length);
   const zip = new JSZip();
@@ -3885,8 +3603,13 @@ async function uploadSnapshotsZip() {
   // Use the same base name as your PDF/XLSX, but with .zip
   const blobName = `${reportBaseName}.zip`;
 
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
+const [rawBaseUrl, token] = containerSasUrl.split('?');
+
+// remove trailing slash from account url, just in case
+const baseUrl = rawBaseUrl.replace(/\/$/, '');
+
+// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
+const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
   try {
     if (!navigator.onLine) {
@@ -3912,58 +3635,6 @@ async function uploadSnapshotsZip() {
     saveBlobLocally(content, blobName);
   }
 }
-
-
-async function uploadIssuePlotsZip() {
-  console.log('💾 uploadIssuePlotsZip() called; logTable.length =', logTable.length);
-  if (!logTable.length || !samplingTable.length) return;
-
-  const zip = new JSZip();
-
-  logTable.forEach((row, i) => {
-    const dataUrl = generateIssuePlotDataUrl(row, i);
-    if (!dataUrl) return;
-
-    const [meta, base64] = dataUrl.split(',');
-    const safeIssue = (row.issue || 'issue')
-      .toString()
-      .slice(0, 40)              // limit filename length
-      .replace(/[^a-z0-9_-]+/gi, '_');
-
-    const filename = `${String(i + 1).padStart(3, '0')}_${safeIssue}.png`;
-    zip.file(filename, base64, { base64: true });
-  });
-
-  const content = await zip.generateAsync({ type: 'blob' });
-
-  const blobName = `${reportBaseName}_2.zip`; // 🔹 same base name, "_2"
-  const [baseUrl, token] = containerSasUrl.split('?');
-  const uploadUrl        = `${baseUrl}/${blobName}?${token}`;
-
-  try {
-    if (!navigator.onLine) {
-      throw new Error('Offline – skipping cloud upload');
-    }
-
-    const resp = await fetch(uploadUrl, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/zip'
-      },
-      body: content
-    });
-
-    if (!resp.ok) {
-      throw new Error(`Issue plots ZIP upload failed: ${resp.status} ${resp.statusText}`);
-    }
-
-    console.log(`✔ Uploaded issue plots ZIP as ${blobName}`);
-  } catch (err) {
-    console.error('Cloud issue-plot ZIP upload failed, saving locally instead:', err);
-    saveBlobLocally(content, blobName);
-  }
-} 
     
 // 1) Grab the existing Upload button
 const uploadNowBtn = document.getElementById('uploadNowButton');
@@ -3984,9 +3655,15 @@ function withSpinner(btn, fn) {
 // 3) Wire it all together
 uploadNowBtn.addEventListener('click', () => {
   withSpinner(uploadNowBtn, async () => {
+    // upload the XLSX
     await uploadWorkbookToAzure();
+
+    // upload the full PDF
+    //await exportPDFToAzure();
+
+    // upload *your* custom-sections PDF
     await uploadSnapshotsZip();
-    await uploadIssuePlotsZip();
+
     console.log('✔ All uploads complete');
   });
 });
@@ -3996,148 +3673,7 @@ const stopBtn = document.getElementById('stopTestingBtn');
 if (stopBtn) {
   stopBtn.addEventListener('click', () => withSpinner(stopBtn, stopTesting));
 }
-
-// =============== AI ANALYTICS AGENT ===============
-
-// Small helper to turn a table into an array of rows (arrays of cell texts)
-function readTableById(tableId, { skipDataExportNo = true } = {}) {
-  const table = document.getElementById(tableId);
-  if (!table) return [];
-
-  const rows = [];
-  table.querySelectorAll('tr').forEach(tr => {
-    const cells = Array.from(tr.querySelectorAll('th,td'))
-      .filter(td => !skipDataExportNo || td.dataset.export !== 'no')
-      .map(td => td.textContent.trim());
-    if (cells.length) rows.push(cells);
-  });
-  return rows;
-}
-
-// Build a compact JSON-like object with all relevant info
-function buildAnalysisPayload() {
-  const stats      = readTableById('statsTable');
-  const kpi        = readTableById('countTable');
-  const issues     = readTableById('logTable', { skipDataExportNo: true });
-  const countries  = readTableById('countryTable');
-  const weather    = readTableById('weatherTable');
-  const phases     = readTableById('phaseTable');
-  const roads      = readTableById('streetTable');
-  const meta       = readTableById('metaTable');
-
-  return {
-    meta,
-    stats,
-    kpi,
-    issues,
-    countries,
-    weather,
-    phases,
-    roads
-  };
-}
-
-// Turn the payload into a short, readable text so we don’t send crazy JSON
-function formatPayloadForPrompt(payload) {
-  const fmtTable = (name, rows) => {
-    if (!rows || rows.length === 0) return `\n[${name}: empty]\n`;
-    const [header, ...body] = rows;
-    const headerLine = header.join(' | ');
-    const bodyLines  = body.map(r => r.join(' | ')).join('\n');
-    return `\n[${name}]\n${headerLine}\n${bodyLines}\n`;
-  };
-
-  return [
-    fmtTable('Meta',      payload.meta),
-    fmtTable('Statistics',payload.stats),
-    fmtTable('KPI',       payload.kpi),
-    fmtTable('Issues',    payload.issues),
-    fmtTable('Countries', payload.countries),
-    fmtTable('Weather',   payload.weather),
-    fmtTable('Phase',     payload.phases),
-    fmtTable('Road types',payload.roads),
-  ].join('\n');
-}
-
-// Call OpenAI from the browser
-async function callOpenAIAgent(promptText) {
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'YOUR_API_KEY_HERE') {
-    throw new Error('OPENAI_API_KEY is not set in the HTML.');
-  }
-
-  const body = {
-    model: AI_MODEL_NAME,
-    messages: [
-      {
-        role: 'system',
-        content:
-          'You are an expert ADAS/KPI test engineer. ' +
-          'You receive structured tables from a test drive and must write a concise, ' +
-          'actionable summary for engineers and managers. ' +
-          'Highlight main problems, patterns, and any safety-critical findings. ' +
-          'Use bullet points and short paragraphs. Avoid repeating raw numbers unless needed.'
-      },
-      {
-        role: 'user',
-        content:
-          'Here is data from a single test drive. ' +
-          'The format is simple text tables. Please analyse it:\n\n' +
-          promptText
-      }
-    ],
-    max_tokens: 1000,
-    temperature: 0.3
-  };
-
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`OpenAI error ${resp.status}: ${text}`);
-  }
-
-  const data = await resp.json();
-  const choice = data.choices && data.choices[0];
-  const msg = choice && choice.message && choice.message.content;
-  return msg || '(No content returned)';
-}
-
-// Wire up the button
-(function initAiAgent() {
-  const btn    = document.getElementById('runAiAnalysisBtn');
-  const output = document.getElementById('aiAnalysisOutput');
-  if (!btn || !output) return;
-
-  btn.addEventListener('click', async () => {
-    try {
-      const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = 'Analysing…';
-      output.textContent = 'Contacting AI…';
-
-      const payload = buildAnalysisPayload();
-      const prompt  = formatPayloadForPrompt(payload);
-      const result  = await callOpenAIAgent(prompt);
-
-      output.textContent = result;
-      btn.textContent = original;
-      btn.disabled = false;
-    } catch (err) {
-      console.error(err);
-      output.textContent = 'Error: ' + err.message;
-      btn.disabled = false;
-      btn.textContent = 'Generate AI summary';
-    }
-  });
-})();
     
-</script>
+  </script>
 </body>
 </html>
