@@ -3142,19 +3142,18 @@ async function uploadWorkbookToAzure() {
     let ws;
 
     if (id === 'logTable') {
-      // 🔹 Build Issues sheet manually, skipping cells with data-export="no"
+      // Issues sheet: skip cells marked data-export="no"
       const rows = Array.from(tblEl.querySelectorAll('tr')).map(tr => {
         const cells = Array.from(tr.querySelectorAll('th,td'))
-          .filter(cell => cell.dataset.export !== 'no'); // ⬅ skip Remove column
+          .filter(cell => cell.dataset.export !== 'no');
         return cells.map(cell => cell.textContent);
       });
       ws = XLSX.utils.aoa_to_sheet(rows);
     } else {
-      // default path for all other tables
       ws = XLSX.utils.table_to_sheet(tblEl);
     }
 
-    // 🔸 Percent sheets: multiply column C by 100 (unchanged)
+    // Percent sheets: multiply column C by 100 (unchanged)
     if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
       const range = XLSX.utils.decode_range(ws['!ref']);
       for (let row = range.s.r + 1; row <= range.e.r; ++row) {
@@ -3169,16 +3168,49 @@ async function uploadWorkbookToAzure() {
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-  // 3. --- Sampling sheet (as before, but toggle-aware) ---
-const samplingHeader
+  // 3. --- Sampling sheet (toggle-aware, with Road type) ---
+  const samplingHeader = [
+    "No","Timestamp","Latitude","Longitude",
+    "Distance (km)","Speed (km/h)","Legal Speed (km/h)",
+    "Road type","Issue"
+  ];
+
+  // One column per configured toggle signal
+  toggleDefs.forEach(def => samplingHeader.push(def.signal));
+
+  const samplingAoA = [samplingHeader];
+
+  samplingTable.forEach(entry => {
+    const row = [
+      entry.no,
+      entry.timestamp,
+      entry.lat,
+      entry.lon,
+      entry.distance,
+      entry.speed,
+      entry.legalSpeed,
+      entry.roadType || "",
+      entry.issue || ""
+    ];
+
+    toggleDefs.forEach(def => {
+      const valFromEntry = entry.toggles?.[def.signal];
+      if (def.kind === 'tri') {
+        const fallback = def.states?.[0] || 'Not tested';
+        row.push(valFromEntry ?? fallback);
+      } else {
+        row.push(valFromEntry ?? def.offValue);
+      }
+    });
+
+    samplingAoA.push(row);
+  });
 
   const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
   XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-  // 4. --- Benchmark sheet: ONLY tri-state toggles, and ONLY if at least one was used ---
+  // 4. --- Benchmark sheet: ONLY tri-state toggles that were touched ---
   const triDefs = toggleDefs.filter(def => def.kind === 'tri');
-
-  // keep only tri-toggles that have been changed from default at least once
   const changedTriDefs = triDefs.filter(def => triToggleTouched[def.signal]);
 
   if (changedTriDefs.length > 0) {
@@ -3204,6 +3236,10 @@ const samplingHeader
   } else {
     console.log('No tri-state buttons pressed – skipping Benchmark sheet.');
   }
+
+  // 5. Generate workbook, 6. Blob, 7–9 upload: keep your existing code here
+  // (unchanged from your current version)
+}
 
   // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
