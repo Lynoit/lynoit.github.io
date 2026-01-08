@@ -542,6 +542,76 @@ function escapeHtml(str){
     .replace(/'/g,'&#39;');
 }
 
+function formatInlineWithBold(str){
+  // Turn **bold** into <strong>bold</strong>, keeping HTML escaping safe.
+  const parts = [];
+  let i = 0;
+  while (i < str.length) {
+    const start = str.indexOf('**', i);
+    if (start === -1) {
+      parts.push({ type: 'text', text: str.slice(i) });
+      break;
+    }
+    if (start > i) {
+      parts.push({ type: 'text', text: str.slice(i, start) });
+    }
+    const end = str.indexOf('**', start + 2);
+    if (end === -1) {
+      // unmatched **; treat rest as plain text
+      parts.push({ type: 'text', text: str.slice(start) });
+      break;
+    }
+    parts.push({ type: 'bold', text: str.slice(start + 2, end) });
+    i = end + 2;
+  }
+
+  return parts.map(p => {
+    const esc = escapeHtml(p.text);
+    return p.type === 'bold' ? `<strong>${esc}</strong>` : esc;
+  }).join('');
+}
+
+function formatAiSummary(rawText){
+  const lines = rawText.replace(/\r\n/g, '\n').split('\n');
+
+  // Optional timestamp line at top
+  let timestampHtml = '';
+  if (lines.length && /^AI summary generated at/i.test(lines[0].trim())) {
+    timestampHtml = `<div class="ai-summary-timestamp">${escapeHtml(lines[0].trim())}</div>`;
+    lines.shift();
+  }
+
+  const blocks = [];
+  let block = [];
+  for (const line of lines) {
+    if (/^\s*$/.test(line)) {
+      if (block.length) {
+        blocks.push(block);
+        block = [];
+      }
+    } else {
+      block.push(line);
+    }
+  }
+  if (block.length) blocks.push(block);
+
+  const htmlBlocks = blocks.map(linesBlock => {
+    const isList = linesBlock.every(l => /^\s*[-•]\s+/.test(l));
+    if (isList) {
+      const items = linesBlock.map(l => l.replace(/^\s*[-•]\s+/, ''));
+      return `<ul>${items.map(it => `<li>${formatInlineWithBold(it)}</li>`).join('')}</ul>`;
+    } else {
+      const text = linesBlock.join(' ');
+      return `<p>${formatInlineWithBold(text)}</p>`;
+    }
+  });
+
+  return {
+    timestampHtml,
+    bodyHtml: htmlBlocks.join('')
+  };
+}
+    
 function renderAiSummaryHtml(raw) {
   if (!raw) {
     return '<div class="ai-summary-body"><p>(No content)</p></div>';
@@ -1203,7 +1273,6 @@ function openAiSummaryPopup() {
     return;
   }
 
-  // Replace .xlsx/.xls with .txt
   const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
   const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
 
@@ -1215,12 +1284,14 @@ function openAiSummaryPopup() {
       return res.text();
     })
     .then(text => {
-      const { timestampHtml, bodyHtml } = renderAiSummaryHtml(text);
+      const { timestampHtml, bodyHtml } = formatAiSummary(text);
 
       const overlay = createModal(`
         <h3>AI summary</h3>
-        ${timestampHtml}
-        <div class="ai-summary-body">${bodyHtml}</div>
+        <div class="ai-summary-body">
+          ${timestampHtml}
+          ${bodyHtml}
+        </div>
         <div class="modal-buttons">
           <button type="button" class="secondary-button close-btn">Close</button>
         </div>
