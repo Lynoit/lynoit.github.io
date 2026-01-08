@@ -172,6 +172,11 @@
   color: #666;
   margin-bottom: 6px;
 }
+
+.ai-summary-body h4 {
+  margin: 8px 0 4px;
+  font-size: 14px;
+}
     
     /* Unified report tables (applies to all xlsx-rendered tables + TP table) */
 .report-table{ width:100%; border-collapse:collapse; margin-bottom:2em; }
@@ -1133,6 +1138,64 @@ function canonicalEU(raw){
     // Track which report is currently open (for AI summary .txt)
     let currentReportFileName = null;
 
+function renderAiSummaryHtml(rawText) {
+  const lines = String(rawText || '').replace(/\r\n/g, '\n').split('\n');
+
+  // Optional first line: "AI summary generated at 2026-01-07 11:36:27"
+  let timestampHtml = '';
+  if (lines.length && /^ai summary generated at/i.test(lines[0].trim())) {
+    const tsLine = lines.shift().trim();
+    timestampHtml = `<div class="ai-summary-timestamp">${escapeHtml(tsLine)}</div>`;
+    while (lines.length && !lines[0].trim()) lines.shift(); // drop blank line after timestamp
+  }
+
+  const parts = [];
+  let inList = false;
+  const closeList = () => {
+    if (inList) {
+      parts.push('</ul>');
+      inList = false;
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+
+    // 1) Section headings: "- **Session overview (Sheet ...)**"
+    let m = trimmed.match(/^[-*]\s+\*\*(.+?)\*\*\s*$/);
+    if (m) {
+      closeList();
+      parts.push(`<h4>${escapeHtml(m[1])}</h4>`);
+      continue;
+    }
+
+    // 2) Normal bullets: "- something"
+    if (/^[-*]\s+/.test(trimmed)) {
+      if (!inList) {
+        parts.push('<ul>');
+        inList = true;
+      }
+      const text = trimmed.replace(/^[-*]\s+/, '');
+      parts.push(`<li>${escapeHtml(text)}</li>`);
+      continue;
+    }
+
+    // 3) Plain paragraph line
+    closeList();
+    parts.push(`<p>${escapeHtml(trimmed)}</p>`);
+  }
+
+  closeList();
+  return {
+    timestampHtml,
+    bodyHtml: parts.join('')
+  };
+}
+    
 // Open the AI summary .txt in a modal popup
 function openAiSummaryPopup() {
   if (!currentReportFileName) {
@@ -1152,10 +1215,12 @@ function openAiSummaryPopup() {
       return res.text();
     })
     .then(text => {
-      const summaryHtml = renderAiSummaryHtml(text);
+      const { timestampHtml, bodyHtml } = renderAiSummaryHtml(text);
+
       const overlay = createModal(`
         <h3>AI summary</h3>
-        ${summaryHtml}
+        ${timestampHtml}
+        <div class="ai-summary-body">${bodyHtml}</div>
         <div class="modal-buttons">
           <button type="button" class="secondary-button close-btn">Close</button>
         </div>
@@ -1167,13 +1232,6 @@ function openAiSummaryPopup() {
           document.body.removeChild(overlay);
         });
       }
-
-      // Close when clicking outside the dialog
-      overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) {
-          document.body.removeChild(overlay);
-        }
-      });
     })
     .catch(err => {
       alert(
