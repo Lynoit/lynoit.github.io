@@ -1,0 +1,1783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KPI Scoring Visualizer</title>
+  <!-- SVG favicon (file sits next to this HTML) -->
+  <link rel="icon" href="./favicon_speed_K_carbon_bold.svg" type="image/svg+xml" sizes="any">
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <style>
+    :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
+
+    /* Top tabs */
+    .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
+    .tabs{ display:flex; gap:8px; padding:10px 16px; }
+    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; background:#e9ecf5; }
+    .tab.active{ background:#111; color:#fff; }
+
+    .container{padding:16px;}
+    .charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(680px,1fr)); gap:16px;}
+    .panel{background:#f6f7fb; border-radius:14px; padding:12px; box-shadow:0 4px 16px rgba(0,0,0,.06);}
+    .chart-card{background:white; border-radius:14px; padding:10px; box-shadow:0 3px 12px rgba(0,0,0,.08); position:relative}
+    .summary-card{ grid-column: 1 / -1; display:grid; justify-content:center; }
+    .small{font-size:12px; color:#666}
+    .link{ color:#1f3de3; text-decoration:underline; cursor:pointer; }
+
+    /* Summary table */
+    .summary-title{font-weight:700; font-size:16px; margin:4px 0 8px 0; text-align:center}
+    .summary-table{ display:inline-table; margin:6px 0 10px; table-layout:auto; border-collapse:separate; border-spacing:0; font-size:12px; }
+    .summary-table th, .summary-table td{ padding:8px 10px; text-align:left; border-bottom:1px solid #eef1fb; vertical-align:middle; }
+    .summary-table th{ background:#f6f7fb; font-weight:700; }
+    .software-cell{ display:inline-block; max-width:min(52vw, 680px); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+    .summary-chip{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #e9ecf5; font-weight:600; }
+
+    /* Column alignment */
+    .summary-table th.col-date,    .summary-table td.col-date    { text-align:center; white-space:nowrap; }
+    .summary-table th.col-weather, .summary-table td.col-weather { text-align:center; white-space:nowrap; }
+    .summary-table th.col-avg,     .summary-table td.col-avg     { text-align:right;  white-space:nowrap; }
+    .summary-table th.col-score,   .summary-table td.col-score   { text-align:center; white-space:nowrap; width:1%; }
+    .summary-table th.col-rating,  .summary-table td.col-rating  { white-space:nowrap; }
+    .summary-table th.col-note,    .summary-table td.col-note    { text-align:center; white-space:nowrap; }
+
+    /* Matrix tables */
+    .matrix-wrap{ margin:6px 0 6px; overflow:auto; max-width:100%; }
+    .matrix-title{ font-weight:700; font-size:16px; text-align:center; margin:2px 0 6px; }
+    .matrix-sub{ font-weight:600; font-size:12px; color:#555; margin:0 0 10px; text-align:center; }
+    .matrix-table{ border-collapse:separate; border-spacing:0; font-size:12px; min-width:520px; margin:0 auto; }
+    .matrix-table th, .matrix-table td{ padding:6px 8px; border-bottom:1px solid #eef1fb; }
+    .matrix-table th{ background:#f6f7fb; position:sticky; top:0; z-index:1; }
+    .matrix-table th.software{ text-align:center; white-space:nowrap; }
+    .matrix-table td.num{ text-align:right; white-space:nowrap; }
+    .matrix-table td.target, .matrix-table th.target{ text-align:right; white-space:nowrap; }
+
+    /* Freeze the first two columns in matrix tables */
+.matrix-wrap { --c1: 220px; --c2: 340px; }  /* defaults; will be overwritten by JS */
+
+/* freeze first two columns (header + body) and tint them grey */
+.matrix-table th.freeze-1,
+.matrix-table td.freeze-1{
+  position: sticky;
+  left: 0;
+  background: #f6f7fb;   /* <- grey like software headers */
+  z-index: 3;
+}
+
+.matrix-table th.freeze-2,
+.matrix-table td.freeze-2{
+  position: sticky;
+  left: var(--c1);
+  background: #f6f7fb;   /* <- grey like software headers */
+  z-index: 3;
+}
+
+/* header row sticks to the top and stays above body cells */
+.matrix-table thead th{
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: #f6f7fb;   /* header grey */
+}
+
+/* frozen header cells on top of everything */
+.matrix-table thead th.freeze-1,
+.matrix-table thead th.freeze-2{
+  z-index: 7;
+}
+
+/* subtle divider at the frozen edge */
+.matrix-table th.freeze-1,
+.matrix-table td.freeze-1,
+.matrix-table th.freeze-2,
+.matrix-table td.freeze-2{
+  box-shadow: 1px 0 0 #eef1fb inset;
+}
+
+    /* avoid reflow when scrollbars appear */
+.matrix-wrap{ scrollbar-gutter: stable both-edges; }
+
+/* make width maths consistent */
+.matrix-table, .matrix-table th, .matrix-table td{ box-sizing: border-box; }
+
+
+    /* Calendar trio */
+    .cal-title{ font-weight:700; font-size:14px; margin:2px 0 8px; text-align:center; }
+    .cal-grid{ display:grid; grid-template-columns:repeat(3, minmax(220px, 1fr)); gap:16px; padding:6px 10px 12px; }
+    .cal-col-title{ font-weight:600; font-size:13px; margin:0 0 4px; }
+
+    .kpi-table-wrap{ margin-top:8px; }
+
+.chart-card svg {
+  margin-left: 40px;
+}
+.chart-card .kpi-table-wrap,
+.chart-card svg + svg { /* scoreBand is appended after the radar SVG */
+  margin-left: 40px;
+}
+
+/* Nudge radar, table, and scoring boxes to the right equally */
+.chart-card svg,
+.chart-card .kpi-table-wrap,
+.chart-card .summary-table,
+.chart-card svg + svg {
+  margin-left: 40px;   /* adjust this value to fine-tune alignment */
+}
+    
+    /* === Modal overlay & dialog === */
+.modal-backdrop{
+  position: fixed;           /* overlay the whole page */
+  inset: 0;                  /* top/right/bottom/left: 0 */
+  display: none;             /* shown via JS */
+  align-items: center;       /* center dialog */
+  justify-content: center;
+  background: rgba(0,0,0,.45);
+  z-index: 9999;
+}
+.modal{
+  background: #fff;
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  overflow: auto;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.25);
+  padding: 14px 16px;
+}
+.modal header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #eef1fb;
+}
+.modal header h2{
+  font-size: 16px;
+  margin: 0;
+}
+.modal .close{
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  background: #eef2ff;
+  color: #111;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-weight: 600;
+}
+.modal .content ul{ margin: 0; padding-left: 1.1rem; }
+.modal .content li{ margin: 6px 0; }
+
+/* Optional: disable page scroll while modal is open */
+body.modal-open{ overflow: hidden; }
+    
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="tabs">
+      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
+      <button class="tab" data-mode="external" aria-pressed="false">External</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="panel">
+      <div id="charts" class="charts"></div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div id="modalBackdrop" class="modal-backdrop" aria-hidden="true" style="display:none">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header>
+        <h2 id="modalTitle">Release Note</h2>
+        <button class="close" id="modalClose" aria-label="Close">Close</button>
+      </header>
+      <div class="content" id="modalContent"></div>
+    </div>
+  </div>
+
+<script>
+/* ==================== CONFIG ==================== */
+const DATA_CSV = 'Winter_expedition_2025w49.csv';
+const RN_FETCH_MODE = 'auto';                 // 'auto' | 'manifest' | 'off'
+const RN_MANIFEST_FILE = 'release_notes_manifest.json';
+const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
+const SCORE_THRESHOLDS = [100,50,20,10,5,2,1.5,1,0.5,0];
+const LS_KEY = 'segRadarKPI.thresholds';
+
+const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
+let CURRENT_MODE = MODES.INTERNAL;
+
+const urlMode = new URLSearchParams(location.search).get('mode');
+if (urlMode && (urlMode.toLowerCase() in MODES)) CURRENT_MODE = urlMode.toLowerCase();
+
+const EXTERNAL_CARD_VISIBILITY = {
+  summary: false,
+  calendar: false,
+  ccMatrix: true,
+  nonCCPlusLatestCC: true,
+  softwareCards: false
+};
+
+const EXTERNAL_WHITELIST = [
+  'ACC — False brake',
+  'LCC — False brake',
+  'ALCA — Cancel for no reason',
+  'ALCA — Not available within ODD',
+  'ALCA — ALCA Available outside ODD',
+  'TSI — Wrong speed detected',
+  'LKA — LDW False positive',
+  'LKA — LDP False positive',
+  'LKA — ELKA False positive'
+];
+
+function normKey(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\u2013\u2014-]/g, '—')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
+
+/* Weather (Open-Meteo archive, aggregated 10–14) */
+const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
+const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
+const H_START = 10, H_END = 14;
+const WMO_TEXT = {0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Depositing rime fog',51:'Drizzle: light',53:'Drizzle: moderate',55:'Drizzle: dense',56:'Freezing drizzle: light',57:'Freezing drizzle: dense',61:'Rain: slight',63:'Rain: moderate',65:'Rain: heavy',66:'Freezing rain: light',67:'Freezing rain: heavy',71:'Snow fall: slight',73:'Snow fall: moderate',75:'Snow fall: heavy',77:'Snow grains',80:'Rain showers: slight',81:'Rain showers: moderate',82:'Rain showers: violent',85:'Snow showers: slight',86:'Snow showers: heavy',95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'};
+
+const KPI_BUTTONS_CSV = 'KPI_buttons.csv';
+let TOTAL_KPI_COUNT = null;
+
+const SCORE_FONTS = { number:13, label:11, range:10 };
+
+const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b';
+const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+const scoreColorsLowGood = scoreColors.slice().reverse(); // low→green, high→red
+
+let LAST_PARSED = null;
+
+/* ===== helpers ===== */
+const fmtCell = v => (v==null || Number.isNaN(v)) ? '—' : (Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2))).replace(/\.00$/,''));
+function parseNumber(x){ if (x==null) return null; const t = (''+x).trim(); if (!t) return null; const v = Number(t.replace(',', '.')); return isNaN(v)?null:v; }
+function detectDelimiter(text){ const lines=text.split(/\r?\n/).filter(Boolean); if(!lines.length) return '\t'; const cand=['\t',',',';']; let best='\t',bestCnt=0; for(const d of cand){const c=lines[0].split(d).length; if(c>bestCnt){bestCnt=c; best=d;}} return best; }
+function splitFuncKpi(s){ if(!s) return {func:'',kpi:''}; for(const sep of ['—','–',' - ']){ const parts=s.split(sep); if(parts.length>=2) return {func:parts[0].trim(),kpi:parts.slice(1).join(sep).trim()}; } const idx=s.indexOf('-'); if(idx>0) return {func:s.slice(0,idx).trim(),kpi:s.slice(idx+1).trim()}; const sp=s.split(' '); return {func:sp[0]||'',kpi:s}; }
+function normalizeHeader(h){ if(!h) return ''; return h.toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim(); }
+
+// add next to GREEN/YELLOW/RED
+const BLACK = '#000';
+
+// used by the radar dots
+function colorFor(v, tgt, max){
+  if (v == null || Number.isNaN(v)) return null;
+  if (v === 1000) return BLACK;      // sentinel -> black
+  if (tgt == null || max == null) return '#888';
+  if (v <= tgt) return GREEN;        // good
+  if (v < (max + 1)) return YELLOW;  // marginal
+  return RED;                        // bad
+}
+  
+function getThresholds(){
+  if (Array.isArray(SCORE_THRESHOLDS) && SCORE_THRESHOLDS.length===10) return SCORE_THRESHOLDS;
+  const parse=(str)=>{const arr=(str||'').split(',').map(s=>s.trim()).filter(Boolean).map(Number); if(arr.length!==10||arr.some(Number.isNaN)) return null; for(let i=1;i<arr.length;i++){ if(arr[i]>arr[i-1]) return null;} return arr;};
+  let t=null; try{ t=parse(localStorage.getItem(LS_KEY)); }catch{}
+  return t || parse(DEFAULT_THRESH_STR);
+}
+
+/* ===== parse main CSV (with optional inline Release Note rows) ===== */
+function parseTable(text){
+  const tryParse = (d)=> text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(r=>r.trim().length>0).map(r=>r.split(d));
+  const delim = detectDelimiter(text);
+  const rows = tryParse(delim);
+  if (!rows.length) return { headers: [], entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+
+  let headers = rows[0].map(h => h.trim());
+
+  // Insert missing first header if needed
+  if (rows.length > 1 && rows[1].length === headers.length + 1) {
+    const firstCell = (rows[1][0] || '').trim();
+    const looksText = parseNumber(firstCell) == null;
+    const normH = headers.map(normalizeHeader);
+    const hasTarget = normH.includes('target');
+    const hasMax = normH.includes('max allowed') || normH.includes('maxallowed');
+    if (looksText && hasTarget && hasMax) headers = ['Function — KPI', ...headers];
+  }
+
+  const norm = headers.map(normalizeHeader);
+  const idxTarget = norm.findIndex(h => h === 'target');
+  const idxMax    = norm.findIndex(h => (h === 'max allowed' || h === 'maxallowed'));
+  if (idxTarget < 0 || idxMax < 0) {
+    alert("Missing required columns: 'Target' and 'Max allowed'.\nHeaders seen: " + headers.join(', '));
+    return { headers, entries: [], software: [], releaseNotes: {}, weatherByDate:{} };
+  }
+
+  // Software columns
+  const swCols = [];
+  for (let i = idxMax + 1; i < headers.length; i++) {
+    const raw = headers[i].trim();
+    const theDate = raw.match(/\[(\d{4}-\d{2}-\d{2})\]\s*$/);
+    const date = theDate ? theDate[1] : null;
+    const baseNoDate = theDate ? raw.replace(/\s*\[\d{4}-\d{2}-\d{2}\]\s*$/, '') : raw;
+    const basePretty = baseNoDate.replace('(TO)', ' (TO)');
+    const countPrev = swCols.filter(s => s.base === basePretty).length;
+    const label = countPrev ? `${basePretty} — ${countPrev + 1}` : basePretty;
+    swCols.push({ idx: i, base: basePretty, label, date });
+  }
+
+  const releaseNotes = {};
+  const entries = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length === 0) continue;
+
+    const firstCellRaw = (row[0] || '').trim();
+    const firstNorm = normalizeHeader(firstCellRaw);
+
+    if (firstNorm === 'releasenote' || firstCellRaw.toLowerCase() === 'release note') {
+      for (const sw of swCols) {
+        const raw = (row[sw.idx] ?? '').trim();
+        if (raw) releaseNotes[sw.label] = (releaseNotes[sw.label] ? (releaseNotes[sw.label] + '\n' + raw) : raw);
+      }
+      continue;
+    }
+
+    const { func, kpi } = splitFuncKpi(firstCellRaw);
+    const target = parseNumber(row[idxTarget]);
+    const max    = parseNumber(row[idxMax]);
+
+    const values = {};
+    for (const sw of swCols) values[sw.label] = parseNumber(row[sw.idx]);
+
+    entries.push({ func, kpi, target, max, values });
+  }
+
+  return { headers, entries, software: swCols, releaseNotes, weatherByDate:{} };
+}
+
+  
+
+/* ===== modal & fetch utils ===== */
+async function readTextOrNull(path){
+  try{
+    const res = await fetch(encodeURI(path) + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    return await res.text();
+  }catch{ return null; }
+}
+async function loadReleaseNotesManifest(){
+  if (RN_FETCH_MODE !== 'manifest') return null;
+  try{
+    const res = await fetch(RN_MANIFEST_FILE + '?t=' + Date.now(), {cache:'no-store'});
+    if (!res.ok) return null;
+    const list = await res.json();
+    if (!Array.isArray(list)) return null;
+    return new Set(list.map(s => String(s).toLowerCase()));
+  }catch{ return null; }
+}
+async function loadReleaseNotesFromFiles(swCols, manifestSet){
+  if (RN_FETCH_MODE === 'off') return {};
+  const out = {};
+  for (const sw of (swCols||[])){
+    const file = `${sw.base}.csv`;
+    if (RN_FETCH_MODE === 'manifest' && (!manifestSet || !manifestSet.has(file.toLowerCase()))) continue;
+    const txt = await readTextOrNull(file);
+    if (!txt) continue;
+    const lines = txt.replace(/\r/g,'').split('\n').map(s=>s.trim()).filter(Boolean);
+    if (lines.length){
+      const joined = lines.join('\n');
+      out[sw.label] = (out[sw.label] ? (out[sw.label] + '\n' + joined) : joined);
+    }
+  }
+  return out;
+}
+
+/* ===== weather cache (unchanged) ===== */
+function loadWeatherCache(){ try{ return JSON.parse(localStorage.getItem(WEATHER_LS_KEY) || '{}'); }catch{ return {}; } }
+function saveWeatherCache(cache){ try{ localStorage.setItem(WEATHER_LS_KEY, JSON.stringify(cache)); }catch{} }
+function isoMinMax(dates){ let min=null,max=null; dates.forEach(d=>{ if(!d)return; if(!min||d<min)min=d; if(!max||d>max)max=d; }); return {min,max}; }
+function mode(arr){ const m=new Map(); let best=null,cnt=-1; for(const v of arr){const c=(m.get(v)||0)+1; m.set(v,c); if(c>cnt||(c===cnt&&v>best)){cnt=c; best=v;}} return best; }
+async function fetchWeatherForDates(dates){
+  const wanted = Array.from(new Set(dates.filter(Boolean)));
+  const cache = loadWeatherCache();
+  const missing = wanted.filter(d => !cache[d] || cache[d].tmax == null || cache[d].tmin == null);
+  if (!missing.length) return cache;
+
+  const {min, max} = isoMinMax(missing);
+  if (!min || !max) return cache;
+
+  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${GOTHENBURG.lat}&longitude=${GOTHENBURG.lon}&start_date=${min}&end_date=${max}&hourly=temperature_2m,weathercode&timezone=${encodeURIComponent(GOTHENBURG.tz)}`;
+
+  try{
+    const res = await fetch(url, {cache:'no-store'});
+    if (!res.ok) throw new Error('weather HTTP ' + res.status);
+    const data = await res.json();
+    const times = (data.hourly && data.hourly.time) || [];
+    const temps = (data.hourly && data.hourly.temperature_2m) || [];
+    const codes = (data.hourly && data.hourly.weathercode) || [];
+
+    const byDate = new Map();
+    for (let i=0;i<times.length;i++){
+      const t = times[i];
+      const day = t.slice(0,10);
+      const hr = parseInt(t.slice(11,13),10);
+      if (hr >= H_START && hr <= H_END){
+        if (!byDate.has(day)) byDate.set(day, []);
+        byDate.get(day).push(i);
+      }
+    }
+
+    for (const [day, idxs] of byDate.entries()){
+      if (!idxs.length) continue;
+      const tvals = idxs.map(i => temps[i]).filter(v => v!=null);
+      const cvals = idxs.map(i => codes[i]).filter(v => v!=null);
+      if (!tvals.length){ cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' }; continue; }
+      const tmax = Math.round(Math.max(...tvals));
+      const tmin = Math.round(Math.min(...tvals));
+      const c = cvals.length ? mode(cvals) : null;
+      cache[day] = { tmax, tmin, code: c, text: (c!=null && (c in WMO_TEXT)) ? WMO_TEXT[c] : '—', hours:'10–14' };
+    }
+
+    missing.forEach(day=>{ if (!cache[day] && !byDate.has(day)){ cache[day] = { tmax:null, tmin:null, code:null, text:'—', hours:'10–14' }; }});
+    saveWeatherCache(cache);
+  }catch(e){ console.warn('Weather fetch failed:', e); }
+  return cache;
+}
+
+/* ==================== External filtering ==================== */
+function filterEntriesForMode(parsed){
+  if (CURRENT_MODE === MODES.INTERNAL) return parsed;
+  const filteredEntries = (parsed.entries || []).filter(e =>
+    EXTERNAL_WL_KEYS.has(normKey(`${e.func} — ${e.kpi}`))
+  );
+  return { ...parsed, entries: filteredEntries };
+}
+
+/* ==================== Summary (unchanged visuals) ==================== */
+function scoreFromAvg(a, T){ if (a==null||Number.isNaN(a)) return null; if (a===0) return 10; for(let i=0;i<9;i++){ if(a>=T[i]) return i+1; } return 10; }
+function scoreRangeLabels(T){
+  const lab=[]; for(let i=0;i<9;i++) lab.push('≥ ' + (Number.isInteger(T[i])?T[i]:T[i].toFixed(2)));
+  lab.push('< ' + (Number.isInteger(T[8])?T[8]:T[8].toFixed(2)) + (T[9]===0?' (incl. 0)':''));
+  return lab;
+}
+
+// CC — Average per 1000 km by test date (bar color = score)
+function renderCCTimeline(container, parsed){
+  const T = getThresholds();
+
+  // CC softwares that have a date
+  const cc = (parsed.software||[]).filter(sw => /^CC\b/i.test(sw.base) && sw.date);
+  if (!cc.length) return;
+
+  // Build rows: average per 1000 km (÷ total KPIs, same logic as Summary)
+  const rows = cc.map(sw => {
+    const swLabel = sw.label;
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
+    const sum  = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT>0) ? TOTAL_KPI_COUNT : vals.length;
+    const avg  = denom ? (sum/denom) : null;
+    const score = avg==null ? null : scoreFromAvg(avg, T);
+    return { date: sw.date, label: swLabel, avg, score };
+  }).sort((a,b)=> a.date.localeCompare(b.date));
+
+  // Running average (ignores nulls)
+  const running = [];
+  let s = 0, n = 0;
+  rows.forEach(r => { if (r.avg!=null){ s+=r.avg; n++; } running.push(n ? s/n : null); });
+
+  const card = container.append('div').attr('class','chart-card');
+  card.append('div')
+      .attr('class','matrix-sub')
+      .style('text-align','left')
+      .text('CC — Average per 1000 km by test date (bar color = score)');
+
+  const w = 980, h = 260;
+  const m = {top:26, right:64, bottom:64, left:54};
+  const svg = card.append('svg').attr('width', w).attr('height', h);
+
+  const x = d3.scaleBand()
+    .domain(rows.map(r=>r.date))
+    .range([m.left, w - m.right])
+    .padding(0.22);
+
+  const maxY = d3.max(rows, d => d.avg==null ? 0 : d.avg) || 1;
+  const y = d3.scaleLinear()
+    .domain([0, Math.max(1, maxY*1.25)]).nice()
+    .range([h - m.bottom, m.top]);
+
+  // axes
+  svg.append('g')
+    .attr('transform', `translate(0,${h - m.bottom})`)
+    .call(d3.axisBottom(x).tickSizeOuter(0))
+    .selectAll('text')
+    .attr('transform','rotate(-35)')
+    .style('text-anchor','end');
+
+  svg.append('g')
+    .attr('transform', `translate(${m.left},0)`)
+    .call(d3.axisLeft(y).ticks(6));
+
+  // bars
+  svg.selectAll('.bar')
+    .data(rows)
+    .enter().append('rect')
+      .attr('class','bar')
+      .attr('x', d => x(d.date))
+      .attr('y', d => y(d.avg || 0))
+      .attr('width', x.bandwidth())
+      .attr('height', d => d.avg==null ? 0 : (y(0) - y(d.avg)))
+      .attr('fill', d => d.score==null ? '#eee' : scoreColors[d.score-1])
+      .attr('fill-opacity', 0.9)
+    .append('title')
+      .text(d => `${d.label}\n${d.date}\nAverage: ${d.avg==null?'n/a':d.avg.toFixed(1)}\nScore: ${d.score??'n/a'}`);
+
+  // value label (bold) and SW label inside bar
+  svg.selectAll('.val')
+    .data(rows).enter().append('text')
+      .attr('class','val')
+      .text(d => d.avg==null ? 'n/a' : d.avg.toFixed(1))
+      .attr('x', d => x(d.date) + x.bandwidth()/2)
+      .attr('y', d => y((d.avg||0)) - 6)
+      .attr('text-anchor','middle')
+      .attr('font-weight', 800);
+
+  svg.selectAll('.lab')
+    .data(rows).enter().append('text')
+      .attr('class','lab')
+      .text(d => d.label)
+      .attr('x', d => x(d.date) + x.bandwidth()/2)
+      .attr('y', d => y((d.avg||0)) + 16)
+      .attr('text-anchor','middle')
+      .attr('font-size', 11);
+
+  // dashed running average line with label at end
+  const line = d3.line()
+    .defined(v => v!=null)
+    .x((v,i) => x(rows[i].date) + x.bandwidth()/2)
+    .y(v => y(v));
+
+  svg.append('path')
+    .datum(running)
+    .attr('fill','none')
+    .attr('stroke','#444')
+    .attr('stroke-dasharray','6,5')
+    .attr('stroke-width',2)
+    .attr('d', line);
+
+  if (running.length && running[running.length-1]!=null){
+    svg.append('text')
+      .attr('x', x(rows[rows.length-1].date) + x.bandwidth()/2 - 6)
+      .attr('y', y(running[running.length-1]) - 6)
+      .attr('font-size', 12)
+      .attr('fill', '#333')
+      .text(`Running average: ${running[running.length-1].toFixed(1)}`);
+  }
+}
+
+// --- CC timeline (inside Summary card): bars by date + running average line
+function renderCCTimelineInSummary(card, parsed){
+  const T = getThresholds();
+
+  // collect CC softwares that have a date
+  const cc = (parsed.software||[])
+    .filter(sw => /^CC\b/i.test(sw.base) && sw.date)
+    .map(sw => {
+      const k = sw.label;
+      const vals = parsed.entries
+        .map(e => e.values[k])
+        .filter(v => v!=null && !Number.isNaN(v));
+      const sum = vals.length ? d3.sum(vals.map(v => Math.min(v,1000))) : 0;
+      const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT>0) ? TOTAL_KPI_COUNT : vals.length;
+      const avg = denom ? (sum/denom) : null;
+      const score = avg==null ? null : scoreFromAvg(avg, T);
+      return { date: sw.date, sw: sw.base, pretty: sw.label, avg, score };
+    })
+    .filter(d => d.avg!=null)
+    .sort((a,b)=> a.date.localeCompare(b.date));
+
+  if (!cc.length) return;
+
+  card.append('div')
+      .attr('class','small')
+      .style('margin','18px 0 6px')
+      .text('CC — Average per 1000 km by test date (bar color = score)');
+
+  const W = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width)-20)));
+  const H = 280;
+  const m = {top: 8, right: 18, bottom: 66, left: 42};
+  const iw = W - m.left - m.right;
+  const ih = H - m.top - m.bottom;
+
+  const svg = card.append('svg')
+    .attr('width', W).attr('height', H)
+    .style('display','block').style('margin','0 auto 10px');
+  const g = svg.append('g').attr('transform', `translate(${m.left},${m.top})`);
+
+  // scales
+  const x = d3.scaleBand().domain(cc.map(d=>d.date)).range([0, iw]).padding(0.22);
+  const y = d3.scaleLinear()
+              .domain([0, Math.max(20, Math.ceil(d3.max(cc, d=>d.avg)))])
+              .nice()
+              .range([ih, 0]);
+
+  // axes (Y integers, X dates)
+  g.append('g')
+    .attr('transform', `translate(0,${ih})`)
+    .call(d3.axisBottom(x).tickFormat(d=>d).tickSizeOuter(0))
+    .selectAll('text')
+      .attr('transform','rotate(45)')
+      .attr('text-anchor','start')
+      .attr('dx','0.5em').attr('dy','0.4em');
+
+  g.append('g')
+    .call(d3.axisLeft(y).ticks(6).tickFormat(d3.format('d')));
+
+  // running average (cumulative mean)
+  const cum = [];
+  let s = 0;
+  cc.forEach((d,i)=>{ s += d.avg; cum.push({date:d.date, val: s/(i+1)}); });
+
+  const line = d3.line()
+    .x(d => x(d.date) + x.bandwidth()/2)
+    .y(d => y(d.val));
+
+  g.append('path')
+    .datum(cum)
+    .attr('fill','none')
+    .attr('stroke','#333')
+    .attr('stroke-dasharray','5,4')
+    .attr('stroke-width',2)
+    .attr('d', line);
+
+  // small label for running average at the end (integer)
+  const last = cum[cum.length-1];
+  g.append('text')
+    .attr('x', x(last.date) + x.bandwidth()/2 - 42)
+    .attr('y', y(last.val) - 6)
+    .attr('font-size', 12)
+    .attr('fill', '#333')
+    .text(`Running average: ${Math.round(last.val)}`);
+
+  // bars (color by score; integer labels on bars)
+  g.selectAll('.bar').data(cc).enter().append('rect')
+    .attr('x', d => x(d.date))
+    .attr('y', d => y(d.avg))
+    .attr('width', x.bandwidth())
+    .attr('height', d => ih - y(d.avg))
+    .attr('fill', d => scoreColors[(d.score||10)-1])
+    .attr('opacity', 0.95)
+    .append('title')
+      .text(d => `${d.pretty}\n${d.date}\nAvg: ${Math.round(d.avg)} — Score ${d.score}`);
+
+  // on-bar labels (value integer + software label)
+  const lblY = 14;
+  g.selectAll('.val').data(cc).enter().append('text')
+    .attr('x', d => x(d.date) + x.bandwidth()/2)
+    .attr('y', d => y(d.avg) - 4)
+    .attr('text-anchor','middle')
+    .attr('font-size', 12)
+    .attr('font-weight', 700)
+    .attr('paint-order','stroke')
+    .attr('stroke','white').attr('stroke-width',3)
+    .text(d => Math.round(d.avg));
+
+  g.selectAll('.swlab').data(cc).enter().append('text')
+    .attr('x', d => x(d.date) + x.bandwidth()/2)
+    .attr('y', d => Math.min(ih-2, y(d.avg) + lblY))
+    .attr('text-anchor','middle')
+    .attr('font-size', 11)
+    .text(d => d.sw);
+}
+  
+function renderSummary(container, parsed){
+  const T = getThresholds();
+  if (!parsed || !parsed.software || !parsed.software.length) return;
+
+  const scoreText = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+
+  // Build per-software summary rows
+  const rowsRaw = parsed.software.map(sw => {
+    const swLabel = sw.label;
+    const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
+    const sumVals = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : vals.length;
+    const avg = denom ? (sumVals / denom) : null;
+    const score = avg == null ? null : scoreFromAvg(avg, T);
+    const note = (parsed.releaseNotes?.[swLabel] || '').trim();
+    const wx = (sw.date && parsed.weatherByDate) ? parsed.weatherByDate[sw.date] : null;
+    return {
+      sw: swLabel,
+      base: sw.base,
+      date: sw.date,
+      avg,
+      score,
+      text: score==null ? 'n/a' : scoreText[score-1],
+      note,
+      weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
+    };
+  });
+
+  const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
+
+  // Sort: higher score first, then lower avg
+  const rows = rowsRaw.slice().sort((a,b)=>{
+    const sa = a.score ?? -1, sb = b.score ?? -1;
+    if (sa !== sb) return sb - sa;
+    if (a.avg == null && b.avg == null) return 0;
+    if (a.avg == null) return 1;
+    if (b.avg == null) return -1;
+    return a.avg - b.avg;
+  });
+
+  if (!rows.length) return;
+
+  // ==== CARD
+  const card = container.append('div').attr('class', 'chart-card summary-card');
+  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL)
+    ? 'Summary Benchmark 2025w47 KPI — External (whitelisted)'
+    : 'Summary Benchmark 2025w47 KPI';
+  card.append('div').attr('class','summary-title').text(modeLabel);
+
+  // ==== TABLE
+  const table = card.append('table').attr('class', 'summary-table');
+  const theadRow = table.append('thead').append('tr');
+  theadRow.append('th').attr('class','col-sw').text('Software');
+  theadRow.append('th').attr('class','col-date').text('Test date');
+  theadRow.append('th').attr('class','col-weather').text('Weather (Göteborg, 10–14)');
+  theadRow.append('th').attr('class','col-avg').text('Average per 1000 km (÷ total KPIs)');
+  theadRow.append('th').attr('class','col-score').text('Score');
+  theadRow.append('th').attr('class','col-rating').text('Rating');
+  if (hasAnyNotes) theadRow.append('th').attr('class','col-note').text('Release Note');
+
+  const tbody = table.append('tbody');
+  rows.forEach(r=>{
+    const tr = tbody.append('tr');
+    tr.append('td').attr('class','col-sw').append('span')
+      .attr('class','software-cell').attr('title', r.sw).text(r.sw);
+    tr.append('td').attr('class','col-date').text(r.date || '—');
+    tr.append('td').attr('class','col-weather').text(r.date ? r.weatherText : '—');
+    tr.append('td').attr('class','col-avg').text(r.avg == null ? '—' : r.avg.toFixed(1));
+
+    const scoreCell = tr.append('td').attr('class','col-score');
+    if (r.score == null){
+      scoreCell.text('—');
+      tr.append('td').attr('class','col-rating').text('n/a');
+    } else {
+      // show integer score
+      scoreCell.append('span').attr('class','summary-chip')
+        .attr('style', `background:${scoreColors[r.score-1]}22; border-color:${scoreColors[r.score-1]}66; color:#111`)
+        .text(String(Math.trunc(r.score)));
+      tr.append('td').attr('class','col-rating').text(r.text);
+    }
+
+    if (hasAnyNotes){
+      const tdNote = tr.append('td').attr('class','col-note');
+      if (r.note){
+        const a = tdNote.append('span').attr('class','link').text('Release Note');
+        a.on('click', ()=> openReleaseNoteModal(`${r.sw}${r.date ? ' — ' + r.date : ''}`, r.note));
+      } else { tdNote.text(''); }
+    }
+  });
+
+  // ==== BAR CHART: Average per 1000 km (existing)
+  const chartData = rows.filter(r => r.avg != null);
+  if (chartData.length){
+    card.append('div').attr('class','small')
+      .style('margin','8px 0 4px')
+      .text('Average per 1000 km (bar color = score)');
+
+    const yLabels = chartData.map(d => d.date ? `${d.sw}  (${d.date})` : d.sw);
+    const tmp = d3.select('body').append('svg')
+      .attr('width',0).attr('height',0)
+      .style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+    let labelW = 0; yLabels.forEach(t=>{
+      const n=tmp.append('text').attr('font-size',12).text(t).node();
+      labelW=Math.max(labelW,n.getComputedTextLength());
+    });
+    tmp.remove();
+
+    const cardW = Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20);
+    const cw = Math.max(560, Math.min(1000, cardW));
+    const leftPad = Math.min(Math.floor(cw * 0.48), Math.max(160, Math.ceil(labelW)+14));
+    const rightPad = 16, topPad = 8, barH = 22, gap = 6;
+
+    const svg = card.append('svg')
+      .attr('width', cw)
+      .attr('height', topPad + chartData.length * (barH + gap) + 34)
+      .style('display','block').style('margin','0 auto 6px');
+    const g = svg.append('g').attr('transform', `translate(0, ${topPad})`);
+    const maxAvg = d3.max(chartData, d => Math.min(1000, d.avg));
+    const x = d3.scaleLinear().domain([0, Math.max(1, maxAvg)]).range([leftPad, cw - rightPad]);
+
+    chartData.forEach((d,i)=> d._y = i * (barH + gap));
+
+    g.selectAll('.ylabel').data(chartData).enter().append('text')
+      .attr('x', leftPad - 10).attr('y', d => d._y + barH/2)
+      .attr('text-anchor','end').attr('dominant-baseline','middle').attr('font-size', 12)
+      .text((d,i)=> yLabels[i]).append('title').text(d => d.sw);
+
+    g.selectAll('.bar').data(chartData).enter().append('rect')
+      .attr('x', x(0)).attr('y', d => d._y)
+      .attr('width', d => x(Math.min(1000, d.avg)) - x(0))
+      .attr('height', barH)
+      .attr('fill', d => scoreColors[(d.score || 10) - 1]).attr('fill-opacity', 0.9)
+      .append('title').text(d => `Score ${Math.trunc(d.score)}: ${d.text} — ${d.avg.toFixed(1)} /1000km`);
+
+    g.selectAll('.val').data(chartData).enter().append('text')
+      .attr('x', d => x(Math.min(1000, d.avg)) + 6).attr('y', d => d._y + barH/2)
+      .attr('dominant-baseline','middle').attr('font-size', 12).text(d => d.avg.toFixed(1));
+
+    const axisY = chartData.length * (barH + gap);
+    g.append('g').attr('transform', `translate(0, ${axisY})`).call(d3.axisBottom(x).ticks(6));
+  }
+
+  renderCCTimelineInSummary(card, parsed);
+
+  // ==== LEGEND (unchanged, now appears after both charts)
+  const ranges = scoreRangeLabels(getThresholds());
+  const legCw = Math.max(560, Math.min(1000, Math.max(0, Math.ceil(card.node().getBoundingClientRect().width) - 20)));
+  const legend = card.append('svg').style('display','block').style('margin','6px auto 2px').attr('width', legCw);
+  const bandMargin = 20, boxH = 42, boxCount = 11, barW = legCw - bandMargin*2, boxW = barW / boxCount;
+  legend.append('text').attr('x', 12).attr('y', 12).attr('font-size', 12).attr('fill', '#555').text('Scoring legend (1 = worst, 10 = best)');
+  for (let i = 0; i < boxCount; i++){
+    const x = bandMargin + i*boxW, g = legend.append('g');
+    if (i === 0){
+      g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', '#000').attr('stroke', '#111').attr('stroke-width', 0.6);
+      g.append('text').attr('x', x + boxW/2).attr('y', 34).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).attr('fill', '#fff').text('0');
+      g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).attr('font-weight', 700).attr('fill', '#fff').text('No function');
+    } else {
+      const idx = i - 1;
+      g.append('rect').attr('x', x).attr('y', 20).attr('width', boxW).attr('height', boxH).attr('fill', scoreColors[idx]).attr('stroke', '#111').attr('stroke-width', 0.4);
+      g.append('text').attr('x', x + boxW/2).attr('y', 34).attr('text-anchor','middle').attr('font-weight', 800).attr('font-size', SCORE_FONTS.number).text(i);
+      g.append('text').attr('x', x + boxW/2).attr('y', 50).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.label).text(scoreText[idx]);
+      g.append('text').attr('x', x + boxW/2).attr('y', 20 + boxH + 14).attr('text-anchor','middle').attr('font-size', SCORE_FONTS.range).text(ranges[idx]);
+    }
+  }
+  legend.attr('height', 20 + boxH + 28 + 6);
+}
+
+/* ==================== CC matrix + NEW heatmap from that matrix ==================== */
+function measureTextWidthCal(texts, fontSize=11, fontWeight=600){
+  const tmp = d3.select('body').append('svg').attr('width',0).attr('height',0).style('position','absolute').style('left','-9999px').style('top','-9999px').style('visibility','hidden');
+  let max = 0; (texts||[]).forEach(t=>{ const n = tmp.append('text').attr('font-size', fontSize).attr('font-weight', fontWeight).text(t==null ? '' : String(t)).node(); max = Math.max(max, n.getComputedTextLength()); });
+  tmp.remove(); return Math.ceil(max);
+}
+
+function renderCCMatrix(container, parsed){
+  const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
+  if (!ccSoftwares.length) return;
+
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{ const name = `${e.func} — ${e.kpi}`; if (!kpiNames.includes(name)) kpiNames.push(name); });
+  if (!kpiNames.length) return;
+
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('CC-only');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+const thead = mtable.append('thead').append('tr');
+thead.append('th').attr('class','freeze-1').text('KPI');
+thead.append('th').attr('class','target freeze-2').text('Target');
+ccSoftwares.forEach(sw => thead.append('th').attr('class','software').text(sw.label));
+
+  const tbody = mtable.append('tbody');
+  const matrixVals = []; // rows=kpis, cols=ccSoftwares (no target)
+  kpiNames.forEach(name=>{
+const tr = tbody.append('tr');
+tr.append('td').attr('class','freeze-1').text(name);
+const e = entryByName.get(name);
+tr.append('td').attr('class','target freeze-2').text(fmtCell(e ? e.target : null));
+    const rowVals = [];
+    ccSoftwares.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      rowVals.push(v);
+      tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`).text(fmtCell(v));
+    });
+    matrixVals.push(rowVals);
+  });
+
+  setFrozenColWidths(wrap.node());
+window.addEventListener('resize', () => setFrozenColWidths(wrap.node()));
+
+  // === Heatmap sourced from this table data ===
+  renderCCMatrixHeatmap(card, kpiNames, ccSoftwares.map(s=>s.label), matrixVals);
+}
+
+function setFrozenColWidths(wrapperEl){
+  const table = wrapperEl.querySelector('table');
+  if (!table || !table.tHead || !table.tHead.rows.length) return;
+
+  const th1 = table.tHead.rows[0].cells[0];   // KPI
+  const th2 = table.tHead.rows[0].cells[1];   // Target
+  if (!th1 || !th2) return;
+
+  // Use offsetWidth (integer, includes borders) to avoid sub-pixel drift
+  const c1 = th1.offsetWidth;
+  const c2 = th2.offsetWidth;
+
+  // Set sticky offsets for frozen headers/cells
+  wrapperEl.style.setProperty('--c1', c1 + 'px');
+  wrapperEl.style.setProperty('--c2', (c1 + c2) + 'px');
+
+  // Lock widths on every cell in those two columns (header + body)
+  for (const row of table.rows){
+    const c0 = row.cells[0];
+    const c1cell = row.cells[1];
+    if (c0){
+      c0.style.width = c0.style.minWidth = c0.style.maxWidth = c1 + 'px';
+    }
+    if (c1cell){
+      c1cell.style.width = c1cell.style.minWidth = c1cell.style.maxWidth = c2 + 'px';
+    }
+  }
+}
+
+/* ======= CC Heatmap (from matrix table) with "No Function" mask + compact legend ======= */
+function renderCCMatrixHeatmap(card, rowLabels, colLabels, matrixVals){
+  const T = getThresholds();               // thresholds array (length 10)
+  const cell = 12, gap = 2, topPad = 22;
+  const GREY_10 = '#DDE2EA';   // paler grey for score 10 cells
+
+  // --- split "Function — KPI"
+  const splitLabel = (lbl)=>{
+    if (!lbl) return { func:'', kpi:'' };
+    if (lbl.includes('—')) {
+      const parts = lbl.split('—');
+      return { func: parts[0].trim(), kpi: parts.slice(1).join('—').trim() };
+    }
+    const i1 = lbl.indexOf('–');
+    if (i1 > 0) return { func: lbl.slice(0,i1).trim(), kpi: lbl.slice(i1+1).trim() };
+    const i2 = lbl.indexOf('-');
+    if (i2 > 0) return { func: lbl.slice(0,i2).trim(), kpi: lbl.slice(i2+1).trim() };
+    return { func: lbl.trim(), kpi: '' };
+  };
+
+  const funcByRow = rowLabels.map(l => splitLabel(l).func);
+  const kpiByRow  = rowLabels.map(l => splitLabel(l).kpi);
+  const isNoFuncRow = kpiByRow.map(k => /no function/i.test(k));
+
+  // --- Build black mask: if any "No Function" row has value > 0 for a column,
+  // black out ALL KPIs for that (function, software).
+  const blackMask = new Set(); // key `${func}||${sw}`
+  for (let r = 0; r < rowLabels.length; r++){
+    if (!isNoFuncRow[r]) continue;
+    for (let c = 0; c < colLabels.length; c++){
+      const v = matrixVals?.[r]?.[c];
+      if (v != null && !Number.isNaN(v) && v > 0){
+        blackMask.add(`${funcByRow[r]}||${colLabels[c]}`);
+      }
+    }
+  }
+
+  // --- Filter out "No Function" rows (but keep their effect via the mask)
+  const keepIdx = [];
+  for (let r = 0; r < rowLabels.length; r++) if (!isNoFuncRow[r]) keepIdx.push(r);
+  if (!keepIdx.length) return;
+
+  const rowsLabelsFiltered = keepIdx.map(i => rowLabels[i]);
+  const funcsFiltered      = keepIdx.map(i => funcByRow[i]);
+  const matrixFiltered     = keepIdx.map(i => matrixVals[i]);
+
+  // --- Layout
+  const leftPad = Math.max(140, measureTextWidthCal(rowsLabelsFiltered, 11, 600) + 14);
+  const colLabH = measureTextWidthCal(colLabels, 11, 600) + 16;
+  const cols    = colLabels.length;
+  const rows    = rowsLabelsFiltered.length;
+  const gridW   = leftPad + cols*(cell+gap) + 6;
+  const gridH   = topPad + colLabH + rows*(cell+gap) + 6;
+
+  const wrap     = card.append('div').attr('class', 'chart-card').style('grid-column','1 / -1');
+  const scroller = wrap.append('div').style('overflow','auto');
+
+  const svg = scroller.append('svg')
+    .attr('width', gridW).attr('height', gridH)
+    .style('display','block').style('margin','0 auto 10px');
+
+  // --- Left KPI labels
+  const gLeft = svg.append('g');
+  rowsLabelsFiltered.forEach((lab, r) => {
+    const y = topPad + colLabH + r*(cell+gap) + cell*0.75;
+    gLeft.append('text')
+      .attr('x', leftPad - 8).attr('y', y)
+      .attr('font-size', 11).attr('font-weight', 600).attr('fill', '#666')
+      .attr('text-anchor','end')
+      .text(lab.length > 60 ? (lab.slice(0,60) + '…') : lab)
+      .append('title').text(lab);
+  });
+
+  // --- Cells: direct value -> score; masked -> black; null -> light grey
+  const gGrid = svg.append('g');
+  for (let r = 0; r < rows; r++){
+    const func = funcsFiltered[r];
+    for (let c = 0; c < cols; c++){
+      const sw  = colLabels[c];
+      const raw = matrixFiltered?.[r]?.[c];
+
+      const forceBlack = blackMask.has(`${func}||${sw}`);
+      let fill = '#f1f3f8', alpha = 1, tip = `Value: ${fmtCell(raw)}\nScore: n/a`;
+
+if (forceBlack){
+  fill = '#000';
+  alpha = 1;
+  tip  = `Value: ${fmtCell(raw)}\nNO FUNCTION (forced black)`;
+} else if (raw == null || Number.isNaN(raw)){
+  // treat "no KPI data" as score 10 → grey in HEATMAP ONLY
+  fill = GREY_10;
+  alpha = 0.95;
+  tip  = `No KPI data — colored as Score 10`;
+} else if (raw >= 1000){
+  fill = '#000';
+  alpha = 1;
+  tip  = `Value: ${fmtCell(raw)}\n(Forced black)`;
+} else {
+  const score = scoreFromAvg(Math.min(1000, raw), T);
+  // Only score 10 becomes grey in the HEATMAP
+  fill  = (score === 10) ? GREY_10 : scoreColors[(score || 10) - 1];
+  alpha = 0.95;
+  tip   = `Value: ${fmtCell(raw)}\nScore ${score}`;
+}
+
+      const x = leftPad + c*(cell+gap);
+      const y = topPad + colLabH + r*(cell+gap);
+
+      gGrid.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill).attr('fill-opacity', alpha)
+        .attr('stroke', '#fff').attr('stroke-width', 0.8)
+        .append('title').text(`${rowsLabelsFiltered[r]}\n${sw}\n${tip}`);
+    }
+  }
+
+  // --- Top (rotated) software labels; nudged slightly to the RIGHT
+  const gTop = svg.append('g');
+  const LABEL_X_NUDGE = 1;     // positive = right
+  const LABEL_Y_NUDGE = -8;
+  const labelBaseline = topPad + colLabH + LABEL_Y_NUDGE;
+  colLabels.forEach((lab, c) => {
+    const colLeft = leftPad + c*(cell+gap);
+    const anchorX = colLeft + LABEL_X_NUDGE;
+    const gl = gTop.append('g')
+      .attr('transform', `translate(${anchorX}, ${labelBaseline}) rotate(-90)`);
+    gl.append('text')
+      .attr('x', 0).attr('y', 0)
+      .attr('text-anchor', 'start').attr('dominant-baseline', 'hanging')
+      .attr('font-size', 11).attr('fill', '#111')
+      .text(lab)
+      .append('title').text(lab);
+  });
+
+  // --- Mini legend (compact, no gaps between boxes, readable text)
+  {
+    const ranges  = scoreRangeLabels(T);
+    const legendW = Math.max(720, gridW);          // give it some breath
+    const leg     = scroller.append('svg')
+      .attr('width', legendW)
+      .style('display','block')
+      .style('margin','8px auto 12px');
+
+    const marginX = 16;
+    const nBoxes  = 11;                            // 0..10
+    const boxW    = (legendW - marginX*2) / nBoxes;
+    const boxH    = 24;
+    const yBoxes  = 26;                            // top of the color boxes
+
+    // Caption
+    leg.append('text')
+      .attr('x', marginX)
+      .attr('y', 14)
+      .attr('font-size', 12)
+      .attr('fill', '#555')
+      .text('Score colors (0 = No function, 1 = worst … 10 = best)');
+
+    // Contrast helper
+    const textColorForFill = (hex) => {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      if (!m) return '#111';
+      const r = parseInt(m[1],16)/255, g = parseInt(m[2],16)/255, b = parseInt(m[3],16)/255;
+      const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+      return lum < 0.45 ? '#fff' : '#111';
+    };
+
+    // Helper to print one or two lines centered under a box
+    const drawUnderText = (xc, baseY, str) => {
+      const m = str.match(/^(.+?)\s*(\(.+\))?$/);
+      const line1 = m ? m[1] : str;
+      const line2 = (m && m[2]) ? m[2] : null;
+
+      leg.append('text')
+        .attr('x', xc).attr('y', baseY)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 11)
+        .text(line1);
+
+      if (line2) {
+        leg.append('text')
+          .attr('x', xc).attr('y', baseY + 12)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', 11)
+          .text(line2);
+        return 2;
+      }
+      return 1;
+    };
+
+    let maxLines = 1;
+
+    // Box 0: black "No function"
+    const x0 = marginX;
+    leg.append('rect')
+      .attr('x', x0).attr('y', yBoxes)
+      .attr('width', boxW).attr('height', boxH)
+      .attr('fill', '#000').attr('stroke', '#ddd');
+
+    leg.append('text')
+      .attr('x', x0 + boxW/2).attr('y', yBoxes + boxH/2 + 4)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 12).attr('font-weight', 800).attr('fill', '#fff')
+      .text('0');
+
+    maxLines = Math.max(maxLines, drawUnderText(x0 + boxW/2, yBoxes + boxH + 14, 'No function'));
+
+    // Boxes 1..10 (contiguous, no gaps)
+    const palette = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+    for (let i = 0; i < 10; i++) {
+      const left = marginX + (i+1) * boxW;         // no gap
+      const fill = palette[i];
+      const xc   = left + boxW/2;
+
+      leg.append('rect')
+        .attr('x', left).attr('y', yBoxes)
+        .attr('width', boxW).attr('height', boxH)
+        .attr('fill', fill).attr('stroke', '#ddd');
+
+      leg.append('text')
+        .attr('x', xc).attr('y', yBoxes + boxH/2 + 4)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 12).attr('font-weight', 800)
+        .attr('fill', textColorForFill(fill))
+        .text(i+1);
+
+      maxLines = Math.max(maxLines, drawUnderText(xc, yBoxes + boxH + 14, ranges[i]));
+    }
+
+    // Final height (room for 1–2 lines under boxes)
+    const extra = maxLines === 2 ? 12 : 0;
+    leg.attr('height', yBoxes + boxH + 14 + 12 + extra + 8);
+  }
+}
+
+// CC-style heatmap legend (0..10, contiguous boxes, same caption & labels)
+function drawCcStyleLegend(scroller, gridW, T){
+  const ranges  = scoreRangeLabels(T);
+  const legendW = Math.max(720, gridW);
+  const leg     = scroller.append('svg')
+    .attr('width', legendW)
+    .style('display','block')
+    .style('margin','8px auto 12px');
+
+  const marginX = 16;
+  const nBoxes  = 11;                 // 0..10
+  const boxW    = (legendW - marginX*2) / nBoxes;
+  const boxH    = 24;
+  const yBoxes  = 26;
+
+  // caption
+  leg.append('text')
+    .attr('x', marginX)
+    .attr('y', 14)
+    .attr('font-size', 12)
+    .attr('fill', '#555')
+    .text('Score colors (0 = No function, 1 = worst … 10 = best)');
+
+  // contrast helper
+  const textColorForFill = (hex) => {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if (!m) return '#111';
+    const r = parseInt(m[1],16)/255, g = parseInt(m[2],16)/255, b = parseInt(m[3],16)/255;
+    const lum = 0.2126*r + 0.7152*g + 0.0722*b;
+    return lum < 0.45 ? '#fff' : '#111';
+  };
+
+  // one/two-line helper under each box
+  const drawUnderText = (xc, baseY, str) => {
+    const m = str.match(/^(.+?)\s*(\(.+\))?$/);
+    const line1 = m ? m[1] : str;
+    const line2 = (m && m[2]) ? m[2] : null;
+
+    leg.append('text')
+      .attr('x', xc).attr('y', baseY)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 11)
+      .text(line1);
+
+    if (line2) {
+      leg.append('text')
+        .attr('x', xc).attr('y', baseY + 12)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', 11)
+        .text(line2);
+      return 2;
+    }
+    return 1;
+  };
+
+  let maxLines = 1;
+
+  // box 0 (No function) — black
+  const x0 = marginX;
+  leg.append('rect')
+    .attr('x', x0).attr('y', yBoxes)
+    .attr('width', boxW).attr('height', boxH)
+    .attr('fill', '#000').attr('stroke', '#ddd');
+  leg.append('text')
+    .attr('x', x0 + boxW/2).attr('y', yBoxes + boxH/2 + 4)
+    .attr('text-anchor', 'middle')
+    .attr('font-size', 12).attr('font-weight', 800).attr('fill', '#fff')
+    .text('0');
+  maxLines = Math.max(maxLines, drawUnderText(x0 + boxW/2, yBoxes + boxH + 14, 'No function'));
+
+  // boxes 1..10 (contiguous; use global scoreColors)
+  for (let i = 0; i < 10; i++) {
+    const left = marginX + (i+1) * boxW;
+    const fill = scoreColors[i];
+    const xc   = left + boxW/2;
+
+    leg.append('rect')
+      .attr('x', left).attr('y', yBoxes)
+      .attr('width', boxW).attr('height', boxH)
+      .attr('fill', fill).attr('stroke', '#ddd');
+
+    leg.append('text')
+      .attr('x', xc).attr('y', yBoxes + boxH/2 + 4)
+      .attr('text-anchor', 'middle')
+      .attr('font-size', 12).attr('font-weight', 800)
+      .attr('fill', textColorForFill(fill))
+      .text(i+1);
+
+    maxLines = Math.max(maxLines, drawUnderText(xc, yBoxes + boxH + 14, ranges[i]));
+  }
+
+  const extra = maxLines === 2 ? 12 : 0;
+  leg.attr('height', yBoxes + boxH + 14 + 12 + extra + 8);
+}
+
+// Heatmap for the Non-CC + latest CC table (black mask + hide "No Function" rows)
+function renderNonCCMatrixHeatmap(card, rowLabels, colKeys, colLabels, matrixVals){
+  const T = getThresholds();
+  const cell = 12, gap = 2, topPad = 22;
+  const GREY_10 = '#DDE2EA';   // paler grey for score 10 cells
+
+  // split "Function — KPI"
+  const splitLabel = lbl => {
+    if (!lbl) return {func:'', kpi:''};
+    if (lbl.includes('—')) { const p = lbl.split('—'); return {func:p[0].trim(), kpi:p.slice(1).join('—').trim()}; }
+    const i1 = lbl.indexOf('–'); if (i1>0) return {func:lbl.slice(0,i1).trim(), kpi:lbl.slice(i1+1).trim()};
+    const i2 = lbl.indexOf('-'); if (i2>0) return {func:lbl.slice(0,i2).trim(), kpi:lbl.slice(i2+1).trim()};
+    return {func:lbl.trim(), kpi:''};
+  };
+
+  const funcByRow = rowLabels.map(l => splitLabel(l).func);
+  const kpiByRow  = rowLabels.map(l => splitLabel(l).kpi);
+  const isNoFuncRow = kpiByRow.map(k => /no function/i.test(k));
+
+  // Build black mask: if any "No Function" row >0 for (func, sw), black out all KPIs for that pair
+  const blackMask = new Set(); // key `${func}||${swKey}`
+  for (let r=0; r<rowLabels.length; r++){
+    if (!isNoFuncRow[r]) continue;
+    for (let c=0; c<colKeys.length; c++){
+      const v = matrixVals?.[r]?.[c];
+      if (v != null && !Number.isNaN(v) && v > 0){
+        blackMask.add(`${funcByRow[r]}||${colKeys[c]}`);
+      }
+    }
+  }
+
+  // Filter out the "No Function" rows from drawing
+  const keepIdx = [];
+  for (let r=0; r<rowLabels.length; r++) if (!isNoFuncRow[r]) keepIdx.push(r);
+  if (!keepIdx.length) return;
+
+  const rowsLabelsFiltered = keepIdx.map(i => rowLabels[i]);
+  const funcsFiltered      = keepIdx.map(i => funcByRow[i]);
+  const matrixFiltered     = keepIdx.map(i => matrixVals[i]);
+
+  // Layout
+  const leftPad = Math.max(140, measureTextWidthCal(rowsLabelsFiltered, 11, 600) + 14);
+  const colLabH = measureTextWidthCal(colLabels, 11, 600) + 16;
+  const cols    = colKeys.length, rows = rowsLabelsFiltered.length;
+  const gridW   = leftPad + cols*(cell+gap) + 6;
+  const gridH   = topPad + colLabH + rows*(cell+gap) + 6;
+
+  const wrap = card.append('div').attr('class','chart-card').style('grid-column','1 / -1');
+  const scroller = wrap.append('div').style('overflow','auto');
+
+  const svg = scroller.append('svg')
+    .attr('width', gridW).attr('height', gridH)
+    .style('display','block').style('margin','0 auto 10px');
+
+  // Left KPI labels
+  const gLeft = svg.append('g');
+  rowsLabelsFiltered.forEach((lab, r) => {
+    const y = topPad + colLabH + r*(cell+gap) + cell*0.75;
+    gLeft.append('text')
+      .attr('x', leftPad - 8).attr('y', y)
+      .attr('font-size', 11).attr('font-weight', 600).attr('fill', '#666')
+      .attr('text-anchor','end')
+      .text(lab.length > 60 ? lab.slice(0,60) + '…' : lab)
+      .append('title').text(lab);
+  });
+
+  // Cells
+  const gGrid = svg.append('g');
+  for (let r=0; r<rows; r++){
+    const func = funcsFiltered[r];
+    for (let c=0; c<cols; c++){
+      const swKey = colKeys[c];
+      const raw = matrixFiltered?.[r]?.[c];
+
+      const forceBlack = blackMask.has(`${func}||${swKey}`);
+      let fill = '#f1f3f8', alpha = 1, tip = `Value: ${fmtCell(raw)}\nScore: n/a`;
+
+if (forceBlack){
+  fill = '#000';
+  alpha = 1;
+  tip  = `Value: ${fmtCell(raw)}\nNO FUNCTION (forced black)`;
+} else if (raw == null || Number.isNaN(raw)){
+  // treat "no KPI data" as score 10 → grey in HEATMAP ONLY
+  fill = GREY_10;
+  alpha = 0.95;
+  tip  = `No KPI data — colored as Score 10`;
+} else if (raw >= 1000){
+  fill = '#000';
+  alpha = 1;
+  tip  = `Value: ${fmtCell(raw)}\n(Forced black)`;
+} else {
+  const score = scoreFromAvg(Math.min(1000, raw), T);
+  // Only score 10 becomes grey in the HEATMAP
+  fill  = (score === 10) ? GREY_10 : scoreColors[(score || 10) - 1];
+  alpha = 0.95;
+  tip   = `Value: ${fmtCell(raw)}\nScore ${score}`;
+}
+
+      const x = leftPad + c*(cell+gap);
+      const y = topPad + colLabH + r*(cell+gap);
+
+      gGrid.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', cell).attr('height', cell)
+        .attr('fill', fill).attr('fill-opacity', alpha)
+        .attr('stroke', '#fff').attr('stroke-width', 0.8)
+        .append('title').text(`${rowsLabelsFiltered[r]}\n${colLabels[c]}\n${tip}`);
+    }
+  }
+
+  // Top software labels (nudge slightly right)
+  const gTop = svg.append('g');
+  const LABEL_X_NUDGE = 1, LABEL_Y_NUDGE = -8;
+  const labelBaseline = topPad + colLabH + LABEL_Y_NUDGE;
+  colLabels.forEach((lab, c) => {
+    const colLeft = leftPad + c*(cell+gap);
+    const anchorX = colLeft + LABEL_X_NUDGE;
+    const gl = gTop.append('g').attr('transform', `translate(${anchorX}, ${labelBaseline}) rotate(-90)`);
+    gl.append('text')
+      .attr('x', 0).attr('y', 0)
+      .attr('text-anchor', 'start').attr('dominant-baseline', 'hanging')
+      .attr('font-size', 11).attr('fill', '#111')
+      .text(lab)
+      .append('title').text(lab);
+  });
+
+// Legend: reuse the exact CC-only style
+drawCcStyleLegend(scroller, gridW, T);
+}
+  
+/* ==================== Non-CC + latest CC (unchanged) ==================== */
+function renderNonCCPlusLatestCCMatrix(container, parsed){
+  const allSoft = parsed.software || [];
+  const ccList = allSoft.filter(sw => /^CC\b/i.test(sw.base));
+  const nonCC  = allSoft.filter(sw => !/^CC\b/i.test(sw.base));
+  if (!nonCC.length && !ccList.length) return;
+
+  let latestCC = null;
+  if (ccList.length){
+     const withDate = ccList.filter(sw => !!sw.date);
+     latestCC = withDate.length ? withDate.reduce((best, cur)=> (best==null || cur.date > best.date) ? cur : best, null)
+                                : ccList[ccList.length - 1];
+  }
+
+  const cols = nonCC.slice();
+  if (latestCC) cols.push({...latestCC, _latest:true});
+  if (!cols.length) return;
+
+  const kpiNames = [];
+  parsed.entries.forEach(e=>{ const name = `${e.func} — ${e.kpi}`; if (!kpiNames.includes(name)) kpiNames.push(name); });
+  if (!kpiNames.length) return;
+
+  const entryByName = new Map();
+  parsed.entries.forEach(e => entryByName.set(`${e.func} — ${e.kpi}`, e));
+
+  const card = container.append('div').attr('class', 'chart-card');
+  card.append('div').attr('class','matrix-title').text('KPI × Software matrix');
+  card.append('div').attr('class','matrix-sub').text('Non-CC + latest CC');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const mtable = wrap.append('table').attr('class','matrix-table');
+
+const thead = mtable.append('thead').append('tr');
+thead.append('th').attr('class','freeze-1').text('KPI');
+thead.append('th').attr('class','target freeze-2').text('Target');
+  cols.forEach(sw => {
+    const th = thead.append('th').attr('class','software');
+    th.text(sw._latest ? `${sw.label} (latest CC)` : sw.label);
+  });
+
+  const tbody = mtable.append('tbody');
+  kpiNames.forEach(name=>{
+    const tr = tbody.append('tr');
+    const e = entryByName.get(name);
+tr.append('td').attr('class','freeze-1').text(name);
+tr.append('td').attr('class','target freeze-2').text(fmtCell(e ? e.target : null));
+    cols.forEach(sw=>{
+      const v = e ? e.values[sw.label] : null;
+      const td = tr.append('td').attr('class','num').attr('title', `Events: ${fmtCell(v)}  |  Target: ${fmtCell(e ? e.target : null)}`);
+      td.text(fmtCell(v));
+    });
+  });
+
+  // Build the data arrays for the heatmap (from the table’s data)
+const colKeys    = cols.map(sw => sw.label);                                   // keys for values/mask
+const colLabels  = cols.map(sw => sw._latest ? `${sw.label} (latest CC)` : sw.label); // pretty labels
+const matrixVals = kpiNames.map(name => {
+  const e = entryByName.get(name);
+  return colKeys.map(k => (e ? e.values[k] : null));
+});
+
+setFrozenColWidths(wrap.node());
+window.addEventListener('resize', () => setFrozenColWidths(wrap.node()));
+
+// Render heatmap under the Non-CC + latest CC table
+renderNonCCMatrixHeatmap(card, kpiNames, colKeys, colLabels, matrixVals);
+
+}
+
+/* ==================== Per-software cards ==================== */
+function renderSoftwareCards(container, parsed){
+  const T = getThresholds();
+  const scoreLabels = ['Worst','Too bad','Bad','Not good','Unacceptable','Marginal','Acceptable','Good','Impressive','Exceptional'];
+
+  (parsed.software||[]).forEach(sw=>{
+    const swLabel = sw.label;
+
+    // Any value for this SW after (possible) external filtering?
+    const hasAny = parsed.entries.some(e => e.values[swLabel]!=null && !Number.isNaN(e.values[swLabel]));
+    if (!hasAny) return;
+
+    const card = container.append('div').attr('class','chart-card');
+    const w = 680;
+
+    // Title SVG (radar sits inside same SVG)
+    const radarH = 540;
+    const TITLE_Y = 26, TITLE_TO_RADAR_GAP = 50, RADAR_PAD_LEFT = 30, MIN_SIDE_MARGIN = 8, FUNC_LABEL_OFFSET = 16;
+
+    const svg = card.append('svg').attr('width', w);
+
+    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
+    svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
+
+    // Build rows for this software
+    const rows = parsed.entries
+      .filter(e => e.values[swLabel] != null && !Number.isNaN(e.values[swLabel]))
+      .map(e => ({ kpi: e.kpi, func: e.func, target: e.target, max: e.max, events: e.values[swLabel] }));
+
+    if (rows.length === 0) {
+      card.append('div').attr('class','small').style('margin','8px 10px 12px')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
+    }
+
+    // ===== Radar geometry
+    const leftAreaWidth = w;
+    const radarTop = TITLE_Y + TITLE_TO_RADAR_GAP;
+    const availableW = Math.max(120, leftAreaWidth - RADAR_PAD_LEFT - MIN_SIDE_MARGIN);
+    const centerX = RADAR_PAD_LEFT + availableW / 2;
+    const rMaxCandidateW = Math.max(10, availableW/2 - FUNC_LABEL_OFFSET);
+    const rMaxCandidateH = (radarH - radarTop) - 16;
+    const rMax = Math.max(80, Math.min(rMaxCandidateW, rMaxCandidateH));
+    const centerY = radarTop + rMax;
+
+    const g = svg.append('g').attr('transform', `translate(${centerX},${centerY})`);
+
+    const functions = Array.from(new Set(rows.map(r => r.func)));
+    if (!functions.length){
+      card.append('div').attr('class','small')
+        .text(CURRENT_MODE === MODES.EXTERNAL
+          ? 'No KPIs remain for this software after External whitelist filtering.'
+          : 'No KPI values for this software.');
+      svg.remove();
+      return;
+    }
+
+    const linearPortion = 0.55;
+    const rLinear = rMax * linearPortion;
+    const logMin = 10, logMax = 1000;
+    const logDen = Math.log10(logMax) - Math.log10(logMin);
+    function toR(v){
+      if (v==null || Number.isNaN(v)) return null;
+      if (v <= 0) return 0;
+      const vv = Math.min(v, logMax);
+      if (vv < logMin) return (vv / logMin) * rLinear;
+      return rLinear + ((Math.log10(vv) - Math.log10(logMin)) / logDen) * (rMax - rLinear);
+    }
+
+    const ringGrid = [1,2,3,4,5,6,7,8,9,10,30,100,300,1000];
+    g.selectAll('.ring').data(ringGrid).enter().append('circle')
+      .attr('r', d=>toR(d)).attr('fill','none').attr('stroke','#999').attr('stroke-opacity',0.22);
+    g.selectAll('.rlabel').data(ringGrid).enter().append('text')
+      .attr('x', 6).attr('y', d=> -toR(d))
+      .attr('dominant-baseline','middle').attr('font-size', 11).attr('fill', '#666')
+      .text(d=>d);
+
+    const axisY = -rMax * 0.70;
+    g.append('text').attr('x', -8).attr('y', axisY).attr('transform', `rotate(-90, 0, ${axisY})`)
+      .attr('text-anchor','end').attr('font-size', 11).text('Number of events');
+
+    const F = functions.length;
+    const wedge = (Math.PI*2) / F;
+    const innerFrac = 0.98;
+    const spread = wedge * innerFrac;
+    const arc = d3.arc();
+
+    // Alternating background and labels
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const end = start + wedge;
+      g.append('path').attr('d', arc({innerRadius:0, outerRadius:rMax, startAngle:start, endAngle:end}))
+        .attr('fill', idx % 2 ? '#f6f7fb' : '#eef2ff').attr('fill-opacity', 0.06);
+      g.append('line').attr('x1',0).attr('y1',0).attr('x2', Math.cos(start)*rMax).attr('y2', Math.sin(start)*rMax)
+        .attr('stroke','#000').attr('stroke-opacity',0.25);
+      const cen = (start + end) / 2;
+      g.append('text').attr('x', Math.cos(cen)*(rMax+16)).attr('y', Math.sin(cen)*(rMax+16))
+        .attr('text-anchor','middle').attr('font-weight',700).attr('fill','#1f3de3').text(f);
+    });
+
+    // Plot KPI points
+    functions.forEach((f, idx)=>{
+      const start = -Math.PI/2 + idx*wedge;
+      const center = start + wedge/2;
+      const items = rows.filter(r=>r.func===f);
+      const K = items.length;
+      const avail = spread * 0.96;
+      const baseOffs = (K===1) ? [0] : d3.range(K).map(i => (i-(K-1)/2)/(K-1) * (avail/2));
+      const placed = [];
+      const minSep = wedge * 0.09;
+      const radBin = rMax * 0.12;
+      const labelAvoid = wedge * 0.18;
+
+      items.forEach((e, i)=>{
+        const v = e.events; if (v==null || Number.isNaN(v)) return;
+        let r = toR(v);
+        let ang = center + baseOffs[i];
+        const isBlack = (v === 1000);
+
+        if (isBlack && Math.abs(ang - center) < labelAvoid){
+          const dir = (ang >= center) ? 1 : -1;
+          ang = center + dir * (labelAvoid + wedge*0.02);
+        }
+        ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+        let tries = 0;
+        while (placed.some(p => Math.abs(p.ang - ang) < minSep && Math.abs(p.r - r) < radBin) && tries < 120){
+          const dir = (tries % 2 === 0) ? 1 : -1;
+          ang += dir * (minSep * 0.65);
+          ang = Math.max(center - avail/2, Math.min(center + avail/2, ang));
+          tries++;
+        }
+        if (tries >= 120){ r = Math.min(r + 8, rMax * 0.98); }
+        placed.push({ang, r});
+
+        const cx = Math.cos(ang)*r, cy = Math.sin(ang)*r;
+        const fill = colorFor(v, e.target, e.max);
+        if (!fill) return;
+
+        g.append('circle').attr('cx', cx).attr('cy', cy).attr('r', 7).attr('fill', fill)
+          .append('title').text(`${f} — ${e.kpi}: ${v}`);
+
+        const rLabel = Math.min(r + 18, rMax * 0.98);
+        const lx = Math.cos(ang)*rLabel, ly = Math.sin(ang)*rLabel;
+        g.append('text').attr('x', lx).attr('y', ly).attr('text-anchor','middle')
+          .attr('font-size', 11).attr('paint-order','stroke').attr('stroke','white').attr('stroke-width',3)
+          .text(e.kpi);
+      });
+    });
+
+    // ===== KPI summary table (HTML)
+    const htmlCaption = document.createElement('div');
+    htmlCaption.className = 'small';
+    htmlCaption.style.margin = '18px 0 6px';
+    htmlCaption.style.marginLeft = '60px';
+    htmlCaption.textContent = 'KPI summary per 1000 km';
+    card.node().appendChild(htmlCaption);
+
+    const wrapDiv = d3.select(card.node()).append('div').attr('class','kpi-table-wrap');
+    const t = wrapDiv.append('table').attr('class','summary-table');
+
+    const thead = t.append('thead').append('tr');
+    thead.append('th').text('KPI');
+    thead.append('th').text('Function');
+    thead.append('th').style('text-align','right').text('Target');
+    thead.append('th').style('text-align','right').text('Max allowed');
+    thead.append('th').style('text-align','right').text('Number of events');
+
+    const tbody = t.append('tbody');
+    rows.forEach(r=>{
+      const tr = tbody.append('tr');
+      tr.append('td').text(r.kpi);
+      tr.append('td').text(r.func);
+      tr.append('td').style('text-align','right').text(fmtCell(r.target));
+      tr.append('td').style('text-align','right').text(fmtCell(r.max));
+      tr.append('td').style('text-align','right').style('font-weight','600').text(fmtCell(r.events));
+    });
+
+    // ===== Scoring band (SVG below the table)
+    const scoreBand = d3.select(card.node()).append('svg').attr('width', w);
+    const valuesForAvg = rows.map(r => r.events).filter(v => v != null && !Number.isNaN(v));
+    const sumVals = valuesForAvg.length ? d3.sum(valuesForAvg.map(v => Math.min(v, 1000))) : 0;
+    const denom = (TOTAL_KPI_COUNT && TOTAL_KPI_COUNT > 0) ? TOTAL_KPI_COUNT : valuesForAvg.length;
+    const avgEvents = denom ? (sumVals / denom) : null;
+    const score = avgEvents==null ? null : scoreFromAvg(avgEvents, T);
+
+    const barMargin = 20, boxH2 = 42;
+    const barW = w - barMargin*2;
+    const boxW = barW / 10;
+    const caption = (avgEvents==null)
+      ? 'Average per 1000km:  n/a (only "No function" or missing values)'
+      : `Average per 1000km:  ${avgEvents.toFixed(1)} events → Score: ${score} (${scoreLabels[score-1]})`;
+
+    scoreBand.append('text').attr('x', barMargin).attr('y', 16).attr('font-size', 12).text(caption);
+    const ranges = scoreRangeLabels(T);
+
+    for (let i=0;i<10;i++){
+      const x = barMargin + i*boxW;
+      const isSel = (score === i+1);
+      const g2 = scoreBand.append('g');
+      g2.append('rect')
+        .attr('x', x).attr('y', 30)
+        .attr('width', boxW).attr('height', boxH2)
+        .attr('fill', ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'][i])
+        .attr('stroke', isSel ? '#000' : '#111')
+        .attr('stroke-width', isSel ? 3 : 0.4)
+        .append('title').text(`Score ${i+1}: ${scoreLabels[i]} — ${ranges[i]}`);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 950 : 750).attr('font-size', 13).text(i+1);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + 14 + 16).attr('text-anchor','middle')
+        .attr('font-weight', isSel ? 850 : 550).attr('font-size', 11).text(scoreLabels[i]);
+      g2.append('text').attr('x', x + boxW/2).attr('y', 30 + boxH2 + 14).attr('text-anchor','middle')
+        .attr('font-size', 10).text(ranges[i]);
+    }
+    scoreBand.attr('height', 30 + boxH2 + 28 + 8);
+
+    // Set radar-only SVG height (so PNG export captures radar neatly)
+    const RADAR_BOTTOM_PADDING = 20;
+    const totalRadarHeight = centerY + rMax + RADAR_BOTTOM_PADDING;
+    svg.attr('height', totalRadarHeight);
+  });
+}
+
+/* ==================== Main renderer ==================== */
+function renderCharts(parsedFull){
+  const parsed = filterEntriesForMode(parsedFull);
+  const container = d3.select('#charts').html('');
+  if (!parsed || !parsed.entries || !parsed.entries.length){
+    container.append('div').attr('class','small').text('No data to render.');
+    return;
+  }
+
+  const ext = (CURRENT_MODE === MODES.EXTERNAL);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
+
+  // ⬇️ REMOVE the old stand-alone CC timeline card
+  // renderCCTimeline(container, parsed);
+  // renderCCTimelineCard(container, parsed);
+  // renderCCTimelineBar(container, parsed);
+
+  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
+  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
+}
+
+
+/* ==================== Loader ==================== */
+async function loadCsvAndRender(){
+  try{
+    const res = await fetch(DATA_CSV + '?t=' + Date.now(), {cache:'no-store'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+
+    let parsed = parseTable(text);
+
+    const manifestSet = await loadReleaseNotesManifest();
+    const fileNotes = await loadReleaseNotesFromFiles(parsed.software, manifestSet);
+
+    const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
+    const weatherByDate = await fetchWeatherForDates(dates);
+
+    // Optional: read KPI_buttons total (kept for summary averages; heatmap doesn't use it)
+    try{
+      const txt = await readTextOrNull(KPI_BUTTONS_CSV);
+      if (txt){
+        const count = txt.replace(/\r/g,'').split('\n').filter(l => l.includes('redButton')).length;
+        TOTAL_KPI_COUNT = count || null;
+      }
+    }catch{ TOTAL_KPI_COUNT = null; }
+
+    parsed = { ...parsed, releaseNotes: { ...(parsed.releaseNotes||{}), ...fileNotes }, weatherByDate };
+    LAST_PARSED = parsed;
+    renderCharts(LAST_PARSED);
+  }catch(err){
+    d3.select('#charts').html('');
+    alert(`Could not load "${DATA_CSV}". Make sure it sits next to this HTML and that you're serving over http(s).\n\nError: ${err.message}`);
+  }
+}
+
+/* ==================== Modal & tabs ==================== */
+function openReleaseNoteModal(title, noteText){
+  const backdrop = document.getElementById('modalBackdrop');
+  const titleEl  = document.getElementById('modalTitle');
+  const content  = document.getElementById('modalContent');
+  titleEl.textContent = title || 'Release Note';
+  const parts = String(noteText || '').replace(/\r/g,'').split(/\n/g).map(s => s.trim()).filter(s => s.length);
+  content.innerHTML = '';
+  if (!parts.length){ const p=document.createElement('p'); p.className='empty'; p.textContent='No release note provided.'; content.appendChild(p); }
+  else{ const ul=document.createElement('ul'); parts.forEach(t=>{ const li=document.createElement('li'); li.textContent=t; ul.appendChild(li); }); content.appendChild(ul); }
+  backdrop.style.display='flex'; backdrop.setAttribute('aria-hidden','false');
+}
+function closeReleaseNoteModal(){ const backdrop=document.getElementById('modalBackdrop'); backdrop.style.display='none'; backdrop.setAttribute('aria-hidden','true'); }
+document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeReleaseNoteModal(); });
+document.getElementById('modalBackdrop').addEventListener('click', (e)=>{ if (e.target.id === 'modalBackdrop') closeReleaseNoteModal(); });
+document.getElementById('modalClose').addEventListener('click', closeReleaseNoteModal);
+
+function updateTabsUI(){ document.querySelectorAll('.tab').forEach(btn=>{ const on = (btn.dataset.mode === CURRENT_MODE); btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', on ? 'true' : 'false'); }); }
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click', (e)=>{ e.preventDefault(); const mode = btn.dataset.mode; if (!mode || mode === CURRENT_MODE) return; CURRENT_MODE = mode; updateTabsUI(); if (LAST_PARSED) renderCharts(LAST_PARSED); });
+  btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
+  btn.addEventListener('keydown', (e)=>{ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
+});
+
+/* ==================== Boot ==================== */
+document.addEventListener('DOMContentLoaded', ()=>{ updateTabsUI(); loadCsvAndRender(); });
+</script>
+</body>
+</html>
