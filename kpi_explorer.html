@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Expedition KPI Explorer (Auto-load)</title>
 
-  <!-- SheetJS (read .xlsx in-browser) -->
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.20.3/dist/xlsx.full.min.js"></script>
+  <!-- Stop favicon.ico 404 -->
+  <link rel="icon" href="data:,">
 
-  <!-- Chart.js (plots) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Libraries (defer ensures they load before our code runs) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.20.3/dist/xlsx.full.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
   <style>
     :root{
@@ -54,6 +55,7 @@
     canvas{max-height:340px;}
     .two{display:grid; gap:14px;}
     @media(min-width: 960px){ .two{grid-template-columns: 1fr 1fr;} }
+    code{background:rgba(255,255,255,.06); padding:2px 6px; border-radius:8px}
   </style>
 </head>
 
@@ -61,7 +63,7 @@
 <header>
   <h1>Expedition KPI Explorer</h1>
   <div class="sub">
-    Auto-loads <b id="autoName"></b> from the same folder as this HTML (via fetch). If it fails, use manual upload.
+    Auto-loads <b id="autoName"></b> from the same folder as this HTML (via <code>fetch</code>). If it fails, use manual upload.
   </div>
 </header>
 
@@ -76,6 +78,8 @@
     <div class="note" style="margin-top:8px;">
       <span class="warn">Tip:</span> For auto-load, serve this folder with a web server (not <code>file://</code>).
       Example: <code>python -m http.server</code>, then open <code>http://localhost:8000/</code>.
+      <br>
+      If you’re using GitHub Pages and get “XLSX is not defined”, your network may block CDNs — host the libs locally.
     </div>
   </section>
 
@@ -174,13 +178,30 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // If the CDN scripts are blocked, XLSX/Chart won't exist.
+  function requireLibsOrExplain(){
+    if (!window.XLSX){
+      $("#status").innerHTML =
+        `<span class="warn">Error:</span> SheetJS did not load (<code>XLSX</code> is undefined).<br>` +
+        `Check DevTools → Network for <code>xlsx.full.min.js</code>. If blocked, download the file and host it locally next to this HTML, then change the script tag to <code>./xlsx.full.min.js</code>.`;
+      return false;
+    }
+    if (!window.Chart){
+      $("#status").innerHTML =
+        `<span class="warn">Error:</span> Chart.js did not load (<code>Chart</code> is undefined).<br>` +
+        `Check DevTools → Network for <code>chart.umd.min.js</code>. If blocked, host it locally next to this HTML and change the script tag to <code>./chart.umd.min.js</code>.`;
+      return false;
+    }
+    return true;
+  }
+
   // -----------------------------
   // Charts
   // -----------------------------
   const charts = {};
   function setChart(id, labels, data, label){
     const ctx = document.getElementById(id);
-    if (!ctx) return;
+    if (!ctx || !window.Chart) return;
     if (charts[id]) charts[id].destroy();
     charts[id] = new Chart(ctx, {
       type: "bar",
@@ -363,16 +384,8 @@
 
   function renderTopKpiCharts(){
     const top = state.kpis.slice().sort((a,b)=>b.Events - a.Events).slice(0, 12);
-    setChart("chartTopKpis",
-      top.map(x=>x.Issue),
-      top.map(x=>x.Events_per_1000km),
-      "Events / 1000 km"
-    );
-    setChart("chartTopKpisAbs",
-      top.map(x=>x.Issue),
-      top.map(x=>x.Events),
-      "Total events"
-    );
+    setChart("chartTopKpis", top.map(x=>x.Issue), top.map(x=>x.Events_per_1000km), "Events / 1000 km");
+    setChart("chartTopKpisAbs", top.map(x=>x.Issue), top.map(x=>x.Events), "Total events");
   }
 
   function renderBreakdownCharts(){
@@ -381,11 +394,7 @@
 
     if (state.roadClass && state.roadClass.length){
       const rows = state.roadClass.slice().sort((a,b)=>b.Distance_km - a.Distance_km);
-      setChart("chartRoadClass",
-        rows.map(r=>r.RoadClass),
-        rows.map(r=>r.Issues_per_1000km),
-        "Issues / 1000 km"
-      );
+      setChart("chartRoadClass", rows.map(r=>r.RoadClass), rows.map(r=>r.Issues_per_1000km), "Issues / 1000 km");
       const sumDist = rows.reduce((a,b)=>a+b.Distance_km,0);
       if (Number.isFinite(state.distanceKm) && state.distanceKm>0 && sumDist < state.distanceKm*0.95){
         rn.innerHTML = `Road breakdown distance covers <b>${fmt(sumDist,1)} km</b> of <b>${fmt(state.distanceKm,1)} km</b> in the file (some distance not classified).`;
@@ -422,6 +431,8 @@
   // Loaders
   // -----------------------------
   async function loadWorkbookFromArrayBuffer(buf, sourceLabel){
+    if (!requireLibsOrExplain()) return;
+
     const wb = XLSX.read(buf, {type:"array"});
     const firstSheet = wb.SheetNames[0];
     const rows = sheetToRows(wb, firstSheet);
@@ -441,6 +452,8 @@
   }
 
   async function tryAutoLoad(){
+    if (!requireLibsOrExplain()) return;
+
     $("#status").textContent = `Auto-loading ${AUTO_XLSX_NAME}…`;
     try{
       const resp = await fetch(`./${encodeURIComponent(AUTO_XLSX_NAME)}`, { cache: "no-store" });
@@ -450,7 +463,7 @@
     }catch(err){
       $("#status").innerHTML =
         `<span class="warn">Auto-load failed:</span> ${String(err.message || err)}<br>` +
-        `Place <b>${AUTO_XLSX_NAME}</b> next to this HTML on the same web server, or choose a file manually above.`;
+        `Place <b>${AUTO_XLSX_NAME}</b> next to this HTML on the same web server (or GitHub Pages path), then reload.`;
     }
   }
 
@@ -490,8 +503,11 @@
 
   $("#btnReload").addEventListener("click", tryAutoLoad);
 
-  // Auto-load on page open
-  tryAutoLoad();
+  // IMPORTANT CHANGE: only auto-run after DOM is ready AND deferred libs are available
+  window.addEventListener("DOMContentLoaded", () => {
+    // libs should be loaded because of defer, but we still guard for blocked CDN
+    tryAutoLoad();
+  });
 </script>
 </body>
 </html>
