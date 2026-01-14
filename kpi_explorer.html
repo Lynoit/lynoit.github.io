@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Expedition KPI Explorer</title>
+
+  <!-- SheetJS (read .xlsx in-browser) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.20.3/dist/xlsx.full.min.js"></script>
+
+  <!-- Chart.js (plots) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+    :root{
+      --bg:#0b0e14; --card:#121826; --muted:#9aa4b2; --text:#e6e8ee;
+      --accent:#7dd3fc; --accent2:#a78bfa; --good:#34d399; --warn:#fbbf24;
+      --border:#1f2937;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      background:linear-gradient(180deg,#070a10, #0b0e14 30%, #0b0e14); color:var(--text);}
+    header{padding:24px 16px; border-bottom:1px solid var(--border); position:sticky; top:0; background:rgba(11,14,20,.92); backdrop-filter: blur(10px); z-index:10;}
+    h1{margin:0;font-size:18px;letter-spacing:.2px}
+    .sub{margin-top:6px;color:var(--muted);font-size:13px;line-height:1.4}
+    main{padding:18px 16px 40px; max-width:1200px; margin:0 auto;}
+    .row{display:grid; gap:14px;}
+    @media(min-width: 960px){
+      .row.cols-3{grid-template-columns: 1.2fr 1fr 1fr;}
+      .row.cols-2{grid-template-columns: 1fr 1fr;}
+    }
+    .card{background:rgba(18,24,38,.85); border:1px solid var(--border); border-radius:16px; padding:14px;}
+    .card h2{margin:0 0 10px; font-size:14px; color:#d9deea; font-weight:650}
+    .controls{display:flex; flex-wrap:wrap; gap:10px; align-items:center}
+    input[type="file"]{padding:10px;border:1px dashed var(--border);border-radius:12px;background:rgba(255,255,255,.02);color:var(--text);width:100%;}
+    .pill{display:inline-flex;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02);font-size:13px}
+    .pill b{color:#fff}
+    .muted{color:var(--muted)}
+    .grid-kpis{display:grid; gap:10px;}
+    @media(min-width: 960px){ .grid-kpis{grid-template-columns: 1fr 1fr;} }
+    .kpi-meta{display:flex; flex-wrap:wrap; gap:10px; margin-top:6px}
+    .kpi-meta .pill{padding:7px 10px}
+    .table-wrap{overflow:auto; border-radius:12px; border:1px solid var(--border)}
+    table{width:100%; border-collapse:collapse; min-width:720px; background:rgba(255,255,255,.01)}
+    th, td{padding:10px 10px; border-bottom:1px solid var(--border); font-size:13px; text-align:left; white-space:nowrap;}
+    th{position:sticky; top:0; background:rgba(18,24,38,.95); cursor:pointer; user-select:none;}
+    tr:hover td{background:rgba(255,255,255,.03)}
+    .right{text-align:right}
+    .search{display:flex; gap:10px; align-items:center}
+    .search input{flex:1; padding:10px 12px; border-radius:12px; border:1px solid var(--border);
+      background:rgba(255,255,255,.02); color:var(--text); outline:none;}
+    .btn{padding:10px 12px; border-radius:12px; border:1px solid var(--border);
+      background:rgba(255,255,255,.04); color:var(--text); cursor:pointer;}
+    .btn:hover{background:rgba(255,255,255,.06)}
+    .warn{color:var(--warn)}
+    .note{font-size:12px; color:var(--muted); line-height:1.4}
+    canvas{max-height:340px;}
+    .two{display:grid; gap:14px;}
+    @media(min-width: 960px){ .two{grid-template-columns: 1fr 1fr;} }
+  </style>
+</head>
+
+<body>
+<header>
+  <h1>Expedition KPI Explorer</h1>
+  <div class="sub">
+    Upload your <b>.xlsx</b> (either the original <i>2025w49_Winter_expedition_total_kpi.xlsx</i> or the generated analysis workbook).
+    This page will compute KPI totals, events/1000 km, and plot breakdowns that exist in the file.
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1) Load Excel</h2>
+    <div class="controls">
+      <input id="file" type="file" accept=".xlsx,.xls" />
+    </div>
+    <div id="status" class="note" style="margin-top:10px;">
+      No file loaded yet.
+    </div>
+  </section>
+
+  <section class="row cols-3" style="margin-top:14px;">
+    <div class="card">
+      <h2>Overview</h2>
+      <div class="kpi-meta" id="overviewPills"></div>
+      <div class="note" style="margin-top:10px;">
+        <span class="warn">Note:</span> Your original workbook does <b>not</b> contain “per KPI per road/country/weather/phase”
+        event tagging—those category tables are totals for <b>all KPIs combined</b>. If you have event-level data, you can extend this.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Top KPIs (Events / 1000 km)</h2>
+      <canvas id="chartTopKpis"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Top KPIs (Total Events)</h2>
+      <canvas id="chartTopKpisAbs"></canvas>
+    </div>
+  </section>
+
+  <section class="card" style="margin-top:14px;">
+    <h2>2) KPI List</h2>
+    <div class="search" style="margin:10px 0;">
+      <input id="search" placeholder="Search KPI / Issue name…" />
+      <button class="btn" id="btnExportCsv">Export KPI table as CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="kpiTable">
+        <thead>
+          <tr>
+            <th data-key="Issue">Issue (KPI)</th>
+            <th class="right" data-key="Events">Total events</th>
+            <th class="right" data-key="Events_per_1000km">Events / 1000 km</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="note" style="margin-top:10px;">
+      Click a column header to sort.
+    </div>
+  </section>
+
+  <section class="two" style="margin-top:14px;">
+    <div class="card">
+      <h2>Road class (City / Country / Highway)</h2>
+      <canvas id="chartRoadClass"></canvas>
+      <div class="note" id="roadNote" style="margin-top:10px;"></div>
+    </div>
+    <div class="card">
+      <h2>Country (all KPIs combined)</h2>
+      <canvas id="chartCountry"></canvas>
+    </div>
+  </section>
+
+  <section class="two" style="margin-top:14px;">
+    <div class="card">
+      <h2>Weather type (all KPIs combined)</h2>
+      <canvas id="chartWeather"></canvas>
+    </div>
+    <div class="card">
+      <h2>Phase (all KPIs combined)</h2>
+      <canvas id="chartPhase"></canvas>
+    </div>
+  </section>
+
+</main>
+
+<script>
+  // -----------------------------
+  // Utilities
+  // -----------------------------
+  const $ = (sel) => document.querySelector(sel);
+  const fmt = (n, d=1) => {
+    if (n === null || n === undefined || Number.isNaN(n)) return "—";
+    return Number(n).toLocaleString(undefined, {maximumFractionDigits:d, minimumFractionDigits:d});
+  };
+  const fmtInt = (n) => {
+    if (n === null || n === undefined || Number.isNaN(n)) return "—";
+    return Number(n).toLocaleString(undefined, {maximumFractionDigits:0});
+  };
+  function parseKm(v){
+    if (v === null || v === undefined) return NaN;
+    if (typeof v === "number") return v;
+    const s = String(v).replace(",", ".");
+    const m = s.match(/[-+]?\d*\.?\d+/);
+    return m ? Number(m[0]) : NaN;
+  }
+  function normalizeKey(s){ return String(s ?? "").trim().toLowerCase(); }
+  function downloadText(filename, text){
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], {type:"text/plain"}));
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // -----------------------------
+  // Charts
+  // -----------------------------
+  const charts = {};
+  function setChart(id, labels, data, label){
+    const ctx = document.getElementById(id);
+    if (!ctx) return;
+    if (charts[id]) charts[id].destroy();
+    charts[id] = new Chart(ctx, {
+      type: "bar",
+      data: { labels, datasets: [{ label, data }] },
+      options: {
+        responsive:true,
+        plugins: {
+          legend:{ display:false },
+          tooltip:{ callbacks:{
+            label: (c)=> `${c.dataset.label}: ${fmt(c.parsed.y, 2)}`
+          }}
+        },
+        scales: {
+          x: { ticks: { color:"#cfd6e6" }, grid:{ color:"rgba(255,255,255,.06)"} },
+          y: { ticks: { color:"#cfd6e6" }, grid:{ color:"rgba(255,255,255,.06)"} }
+        }
+      }
+    });
+  }
+
+  // -----------------------------
+  // Data extraction (supports:
+  //  A) analysis workbook: sheets like "KPI_totals", "RoadClass_allKPIs", etc
+  //  B) original workbook: single sheet with columns including Metric/Value and Issue/Total No of events
+  // -----------------------------
+  function sheetToRows(wb, sheetName){
+    const ws = wb.Sheets[sheetName];
+    if (!ws) return [];
+    return XLSX.utils.sheet_to_json(ws, {defval: null});
+  }
+
+  function findSheetByName(wb, wanted){
+    const names = wb.SheetNames;
+    const want = normalizeKey(wanted);
+    return names.find(n => normalizeKey(n) === want);
+  }
+
+  function roadClassFromOsmType(rt){
+    const t = normalizeKey(rt);
+    if (["motorway","motorway_link","trunk","trunk_link"].includes(t)) return "Highway";
+    if (["primary","secondary","tertiary","unclassified"].includes(t)) return "Country road";
+    if (["residential","service","living_street","road","construction"].includes(t)) return "City";
+    if (t.includes("unknown")) return "Unknown";
+    return "Other";
+  }
+
+  function computeFromOriginal(rows){
+    // Expect columns similar to your original file:
+    // Metric, Value, Issue, Total No of events, Road type + Distance (km) + No of issues etc (all-KPI combined)
+    const keyset = new Set(Object.keys(rows[0] || {}).map(normalizeKey));
+
+    const colMetric = [...keyset].find(k => k === "metric") ? "Metric" : null;
+    const colValue  = [...keyset].find(k => k === "value") ? "Value" : null;
+
+    // Total distance (sum per session): in your file it's repeated per session; we take max per session block.
+    // Original file has session blocks separated by first column labels; we approximate by summing unique "Total test distance" rows.
+    let distanceKm = 0;
+    if (colMetric && colValue){
+      const dist = rows.filter(r => normalizeKey(r[colMetric]) === "total test distance")
+                       .map(r => parseKm(r[colValue]))
+                       .filter(x => Number.isFinite(x) && x>0);
+      // In your file this already represented per session; summing them works.
+      distanceKm = dist.reduce((a,b)=>a+b,0);
+    }
+
+    // KPI totals from Issue + Total No of events
+    const issueCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === "issue") || "Issue";
+    const eventsCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === "total no of events") || "Total No of events";
+
+    const kpiMap = new Map();
+    for (const r of rows){
+      const issue = r[issueCol];
+      if (!issue || normalizeKey(issue) === "issue") continue;
+      const ev = Number(r[eventsCol]);
+      if (!Number.isFinite(ev)) continue;
+      kpiMap.set(issue, (kpiMap.get(issue) || 0) + ev);
+    }
+
+    const kpis = [...kpiMap.entries()]
+      .map(([Issue, Events]) => ({
+        Issue,
+        Events,
+        Events_per_1000km: distanceKm>0 ? (Events/distanceKm*1000) : NaN
+      }))
+      .sort((a,b)=> b.Events - a.Events);
+
+    const totalEvents = kpis.reduce((a,b)=>a+b.Events,0);
+
+    // Road/country/weather/phase tables in original file are all-KPI combined
+    // We'll detect the relevant columns if present and aggregate.
+
+    function aggregate3(groupColName, distColName, issuesColName){
+      const groupCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === normalizeKey(groupColName));
+      const distCol  = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === normalizeKey(distColName));
+      const issCol   = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === normalizeKey(issuesColName));
+      if (!groupCol || !distCol || !issCol) return null;
+
+      const m = new Map();
+      for (const r of rows){
+        const g = r[groupCol];
+        if (!g || normalizeKey(g) === normalizeKey(groupColName)) continue;
+        const dk = parseKm(r[distCol]);
+        const iss = Number(r[issCol]);
+        if (!Number.isFinite(dk) || dk<=0 || !Number.isFinite(iss)) continue;
+        const cur = m.get(g) || {Distance_km:0, Issues:0};
+        cur.Distance_km += dk;
+        cur.Issues += iss;
+        m.set(g, cur);
+      }
+      return [...m.entries()].map(([Group, v])=>({
+        Group,
+        Distance_km: v.Distance_km,
+        Issues: v.Issues,
+        Issues_per_1000km: v.Distance_km>0 ? (v.Issues/v.Distance_km*1000): NaN
+      })).sort((a,b)=> b.Distance_km - a.Distance_km);
+    }
+
+    const roadType = aggregate3("Road type","Distance (km)","No of issues");
+    let roadClass = null;
+    if (roadType){
+      const m = new Map();
+      for (const r of roadType){
+        const cls = roadClassFromOsmType(r.Group);
+        const cur = m.get(cls) || {Distance_km:0, Issues:0};
+        cur.Distance_km += r.Distance_km;
+        cur.Issues += r.Issues;
+        m.set(cls, cur);
+      }
+      roadClass = [...m.entries()].map(([RoadClass,v])=>({
+        RoadClass, Distance_km:v.Distance_km, Issues:v.Issues,
+        Issues_per_1000km: v.Distance_km>0 ? (v.Issues/v.Distance_km*1000) : NaN
+      })).sort((a,b)=> b.Distance_km - a.Distance_km);
+    }
+
+    const country = aggregate3("Country","Distance (km).1","No of issues.1");
+    const weather = aggregate3("Condition","Distance (km).2","No of issues.2");
+    const phase   = aggregate3("Phase","Distance (km).3","No of issues.3");
+
+    return { distanceKm, totalEvents, kpis, roadClass, country, weather, phase };
+  }
+
+  function loadFromAnalysisWorkbook(wb){
+    // Expect sheets created by the analysis file:
+    // KPI_totals columns: Issue, Events, Events_per_1000km
+    const sKpi = findSheetByName(wb, "KPI_totals");
+    const sOverview = findSheetByName(wb, "Overview");
+    const sRoadClass = findSheetByName(wb, "RoadClass_allKPIs");
+    const sCountry = findSheetByName(wb, "Country_allKPIs");
+    const sWeather = findSheetByName(wb, "Weather_allKPIs");
+    const sPhase = findSheetByName(wb, "Phase_allKPIs");
+
+    if (!sKpi) return null;
+
+    const kpis = sheetToRows(wb, sKpi).map(r => ({
+      Issue: r.Issue,
+      Events: Number(r.Events),
+      Events_per_1000km: Number(r.Events_per_1000km ?? r.Events_per_1000km ?? r.Events_per_1000km)
+    })).filter(r => r.Issue && Number.isFinite(r.Events));
+
+    let distanceKm = NaN, totalEvents = NaN;
+    if (sOverview){
+      const ov = sheetToRows(wb, sOverview)[0] || {};
+      distanceKm = Number(ov["Total distance (km)"]);
+      totalEvents = Number(ov["Total KPI events (sum of all issues)"]);
+    } else {
+      totalEvents = kpis.reduce((a,b)=>a+b.Events,0);
+    }
+
+    const roadClass = sRoadClass ? sheetToRows(wb, sRoadClass).map(r=>({
+      RoadClass: r.RoadClass ?? r.Roadclass ?? r.Road_Class ?? r.RoadClass,
+      Distance_km: Number(r.Distance_km),
+      Issues: Number(r.Issues),
+      Issues_per_1000km: Number(r.Issues_per_1000km)
+    })).filter(r=>r.RoadClass) : null;
+
+    const country = sCountry ? sheetToRows(wb, sCountry).map(r=>({
+      Country: r.Country,
+      Distance_km: Number(r.Distance_km),
+      Issues: Number(r.Issues),
+      Issues_per_1000km: Number(r.Issues_per_1000km)
+    })).filter(r=>r.Country) : null;
+
+    const weather = sWeather ? sheetToRows(wb, sWeather).map(r=>({
+      Condition: r.Condition,
+      Distance_km: Number(r.Distance_km),
+      Issues: Number(r.Issues),
+      Issues_per_1000km: Number(r.Issues_per_1000km)
+    })).filter(r=>r.Condition) : null;
+
+    const phase = sPhase ? sheetToRows(wb, sPhase).map(r=>({
+      Phase: r.Phase,
+      Distance_km: Number(r.Distance_km),
+      Issues: Number(r.Issues),
+      Issues_per_1000km: Number(r.Issues_per_1000km)
+    })).filter(r=>r.Phase) : null;
+
+    return { distanceKm, totalEvents, kpis, roadClass, country, weather, phase };
+  }
+
+  // -----------------------------
+  // UI render
+  // -----------------------------
+  let state = { distanceKm: NaN, totalEvents: NaN, kpis: [], roadClass:null, country:null, weather:null, phase:null };
+  let sortKey = "Events";
+  let sortDir = "desc";
+
+  function renderOverview(){
+    const el = $("#overviewPills");
+    el.innerHTML = "";
+    const pills = [
+      ["Total distance (km)", fmt(state.distanceKm, 1)],
+      ["Total KPI events", fmtInt(state.totalEvents)],
+      ["Events / 1000 km", fmt(state.distanceKm>0 ? (state.totalEvents/state.distanceKm*1000) : NaN, 2)],
+      ["# KPIs", fmtInt(state.kpis.length)]
+    ];
+    for (const [k,v] of pills){
+      const d = document.createElement("div");
+      d.className = "pill";
+      d.innerHTML = `<span class="muted">${k}</span> <b>${v}</b>`;
+      el.appendChild(d);
+    }
+  }
+
+  function applySortAndFilter(){
+    const q = normalizeKey($("#search").value);
+    let rows = state.kpis.slice();
+    if (q) rows = rows.filter(r => normalizeKey(r.Issue).includes(q));
+
+    rows.sort((a,b)=>{
+      const va = a[sortKey], vb = b[sortKey];
+      const na = (typeof va === "number") ? va : String(va||"");
+      const nb = (typeof vb === "number") ? vb : String(vb||"");
+      if (typeof na === "number" && typeof nb === "number"){
+        return sortDir==="asc" ? (na-nb) : (nb-na);
+      }
+      return sortDir==="asc" ? String(na).localeCompare(String(nb)) : String(nb).localeCompare(String(na));
+    });
+    return rows;
+  }
+
+  function renderTable(){
+    const tbody = $("#kpiTable tbody");
+    tbody.innerHTML = "";
+    const rows = applySortAndFilter();
+    for (const r of rows){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${r.Issue}</td>
+        <td class="right">${fmtInt(r.Events)}</td>
+        <td class="right">${fmt(r.Events_per_1000km, 2)}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderTopKpiCharts(){
+    const top = state.kpis.slice().sort((a,b)=>b.Events - a.Events).slice(0, 12);
+    setChart("chartTopKpis",
+      top.map(x=>x.Issue),
+      top.map(x=>x.Events_per_1000km),
+      "Events / 1000 km"
+    );
+    setChart("chartTopKpisAbs",
+      top.map(x=>x.Issue),
+      top.map(x=>x.Events),
+      "Total events"
+    );
+  }
+
+  function renderBreakdownCharts(){
+    // Road class
+    const rn = $("#roadNote");
+    rn.textContent = "";
+    if (state.roadClass && state.roadClass.length){
+      const rows = state.roadClass.slice().sort((a,b)=>b.Distance_km - a.Distance_km);
+      setChart("chartRoadClass",
+        rows.map(r=>r.RoadClass),
+        rows.map(r=>r.Issues_per_1000km),
+        "Issues / 1000 km"
+      );
+      // Optional note about residuals if original file road-type table doesn't cover all distance/issues
+      // (we can't always know from analysis workbook; so just show a gentle message if seems off)
+      const sumDist = rows.reduce((a,b)=>a+b.Distance_km,0);
+      if (Number.isFinite(state.distanceKm) && state.distanceKm>0 && sumDist < state.distanceKm*0.95){
+        rn.innerHTML = `Road breakdown distance covers <b>${fmt(sumDist,1)} km</b> of <b>${fmt(state.distanceKm,1)} km</b> in the file (some distance not classified).`;
+      }
+    } else {
+      setChart("chartRoadClass", ["No road-class data found"], [0], "Issues / 1000 km");
+      rn.textContent = "No road-class or road-type table found in this workbook.";
+    }
+
+    // Country
+    if (state.country && state.country.length){
+      const rows = state.country.slice().sort((a,b)=>b.Distance_km - a.Distance_km).slice(0, 12);
+      setChart("chartCountry",
+        rows.map(r=>r.Country),
+        rows.map(r=>r.Issues_per_1000km),
+        "Issues / 1000 km"
+      );
+    } else {
+      setChart("chartCountry", ["No country data found"], [0], "Issues / 1000 km");
+    }
+
+    // Weather
+    if (state.weather && state.weather.length){
+      const rows = state.weather.slice().sort((a,b)=>b.Distance_km - a.Distance_km).slice(0, 12);
+      setChart("chartWeather",
+        rows.map(r=>r.Condition),
+        rows.map(r=>r.Issues_per_1000km),
+        "Issues / 1000 km"
+      );
+    } else {
+      setChart("chartWeather", ["No weather data found"], [0], "Issues / 1000 km");
+    }
+
+    // Phase
+    if (state.phase && state.phase.length){
+      const rows = state.phase.slice().sort((a,b)=>b.Distance_km - a.Distance_km);
+      setChart("chartPhase",
+        rows.map(r=>r.Phase),
+        rows.map(r=>r.Issues_per_1000km),
+        "Issues / 1000 km"
+      );
+    } else {
+      setChart("chartPhase", ["No phase data found"], [0], "Issues / 1000 km");
+    }
+  }
+
+  function renderAll(){
+    renderOverview();
+    renderTopKpiCharts();
+    renderTable();
+    renderBreakdownCharts();
+  }
+
+  // -----------------------------
+  // Events
+  // -----------------------------
+  $("#file").addEventListener("change", async (e)=>{
+    const f = e.target.files?.[0];
+    if (!f) return;
+
+    $("#status").textContent = "Loading…";
+
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, {type:"array"});
+
+    // Try analysis workbook first; if not, compute from original
+    const fromAnalysis = loadFromAnalysisWorkbook(wb);
+    if (fromAnalysis){
+      state = {
+        distanceKm: fromAnalysis.distanceKm,
+        totalEvents: fromAnalysis.totalEvents,
+        kpis: fromAnalysis.kpis,
+        roadClass: fromAnalysis.roadClass,
+        country: fromAnalysis.country,
+        weather: fromAnalysis.weather,
+        phase: fromAnalysis.phase
+      };
+      $("#status").innerHTML = `Loaded <b>${f.name}</b>. Detected <b>analysis workbook</b> layout (sheet: KPI_totals).`;
+    } else {
+      const firstSheet = wb.SheetNames[0];
+      const rows = sheetToRows(wb, firstSheet);
+      if (!rows.length){
+        $("#status").textContent = "Could not read any rows from the first sheet.";
+        return;
+      }
+      const computed = computeFromOriginal(rows);
+      state = {
+        distanceKm: computed.distanceKm,
+        totalEvents: computed.totalEvents,
+        kpis: computed.kpis,
+        roadClass: computed.roadClass,
+        country: computed.country,
+        weather: computed.weather,
+        phase: computed.phase
+      };
+      $("#status").innerHTML = `Loaded <b>${f.name}</b>. Detected <b>original workbook</b> layout (computed from first sheet).`;
+    }
+
+    // Guard rails
+    if (!Number.isFinite(state.distanceKm) || state.distanceKm <= 0){
+      $("#status").innerHTML += `<br><span class="warn">Warning:</span> Could not reliably compute total distance. Events/1000 km may show as “—”.`;
+    }
+    if (!state.kpis.length){
+      $("#status").innerHTML += `<br><span class="warn">Warning:</span> No KPI (Issue) rows detected.`;
+    }
+
+    renderAll();
+  });
+
+  $("#search").addEventListener("input", renderTable);
+
+  // Sorting
+  document.querySelectorAll("#kpiTable thead th").forEach(th=>{
+    th.addEventListener("click", ()=>{
+      const key = th.dataset.key;
+      if (!key) return;
+      if (sortKey === key){
+        sortDir = (sortDir === "asc") ? "desc" : "asc";
+      } else {
+        sortKey = key;
+        sortDir = "desc";
+      }
+      renderTable();
+    });
+  });
+
+  // Export KPI table CSV
+  $("#btnExportCsv").addEventListener("click", ()=>{
+    const rows = applySortAndFilter();
+    const header = ["Issue","Events","Events_per_1000km"];
+    const lines = [header.join(",")].concat(
+      rows.map(r => [
+        `"${String(r.Issue).replaceAll('"','""')}"`,
+        r.Events,
+        (Number.isFinite(r.Events_per_1000km) ? r.Events_per_1000km : "")
+      ].join(","))
+    );
+    downloadText("kpi_totals.csv", lines.join("\n"));
+  });
+</script>
+</body>
+</html>
