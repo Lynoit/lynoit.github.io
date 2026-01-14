@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Expedition KPI Explorer</title>
+  <title>Expedition KPI Explorer (Auto-load)</title>
 
   <!-- SheetJS (read .xlsx in-browser) -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.20.3/dist/xlsx.full.min.js"></script>
@@ -14,13 +14,13 @@
   <style>
     :root{
       --bg:#0b0e14; --card:#121826; --muted:#9aa4b2; --text:#e6e8ee;
-      --accent:#7dd3fc; --accent2:#a78bfa; --good:#34d399; --warn:#fbbf24;
-      --border:#1f2937;
+      --border:#1f2937; --warn:#fbbf24;
     }
     *{box-sizing:border-box}
     body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
       background:linear-gradient(180deg,#070a10, #0b0e14 30%, #0b0e14); color:var(--text);}
-    header{padding:24px 16px; border-bottom:1px solid var(--border); position:sticky; top:0; background:rgba(11,14,20,.92); backdrop-filter: blur(10px); z-index:10;}
+    header{padding:24px 16px; border-bottom:1px solid var(--border); position:sticky; top:0;
+      background:rgba(11,14,20,.92); backdrop-filter: blur(10px); z-index:10;}
     h1{margin:0;font-size:18px;letter-spacing:.2px}
     .sub{margin-top:6px;color:var(--muted);font-size:13px;line-height:1.4}
     main{padding:18px 16px 40px; max-width:1200px; margin:0 auto;}
@@ -36,10 +36,7 @@
     .pill{display:inline-flex;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02);font-size:13px}
     .pill b{color:#fff}
     .muted{color:var(--muted)}
-    .grid-kpis{display:grid; gap:10px;}
-    @media(min-width: 960px){ .grid-kpis{grid-template-columns: 1fr 1fr;} }
     .kpi-meta{display:flex; flex-wrap:wrap; gap:10px; margin-top:6px}
-    .kpi-meta .pill{padding:7px 10px}
     .table-wrap{overflow:auto; border-radius:12px; border:1px solid var(--border)}
     table{width:100%; border-collapse:collapse; min-width:720px; background:rgba(255,255,255,.01)}
     th, td{padding:10px 10px; border-bottom:1px solid var(--border); font-size:13px; text-align:left; white-space:nowrap;}
@@ -64,19 +61,21 @@
 <header>
   <h1>Expedition KPI Explorer</h1>
   <div class="sub">
-    Upload your <b>.xlsx</b> (either the original <i>2025w49_Winter_expedition_total_kpi.xlsx</i> or the generated analysis workbook).
-    This page will compute KPI totals, events/1000 km, and plot breakdowns that exist in the file.
+    Auto-loads <b id="autoName"></b> from the same folder as this HTML (via fetch). If it fails, use manual upload.
   </div>
 </header>
 
 <main>
   <section class="card">
-    <h2>1) Load Excel</h2>
+    <h2>Load Excel</h2>
     <div class="controls">
       <input id="file" type="file" accept=".xlsx,.xls" />
+      <button class="btn" id="btnReload">Reload auto file</button>
     </div>
-    <div id="status" class="note" style="margin-top:10px;">
-      No file loaded yet.
+    <div id="status" class="note" style="margin-top:10px;">Starting…</div>
+    <div class="note" style="margin-top:8px;">
+      <span class="warn">Tip:</span> For auto-load, serve this folder with a web server (not <code>file://</code>).
+      Example: <code>python -m http.server</code>, then open <code>http://localhost:8000/</code>.
     </div>
   </section>
 
@@ -85,8 +84,8 @@
       <h2>Overview</h2>
       <div class="kpi-meta" id="overviewPills"></div>
       <div class="note" style="margin-top:10px;">
-        <span class="warn">Note:</span> Your original workbook does <b>not</b> contain “per KPI per road/country/weather/phase”
-        event tagging—those category tables are totals for <b>all KPIs combined</b>. If you have event-level data, you can extend this.
+        <span class="warn">Note:</span> The original workbook does not contain “per KPI per road/country/weather/phase”
+        event tagging—those category tables are totals for <b>all KPIs combined</b>.
       </div>
     </div>
 
@@ -102,7 +101,7 @@
   </section>
 
   <section class="card" style="margin-top:14px;">
-    <h2>2) KPI List</h2>
+    <h2>KPI List</h2>
     <div class="search" style="margin:10px 0;">
       <input id="search" placeholder="Search KPI / Issue name…" />
       <button class="btn" id="btnExportCsv">Export KPI table as CSV</button>
@@ -119,9 +118,7 @@
         <tbody></tbody>
       </table>
     </div>
-    <div class="note" style="margin-top:10px;">
-      Click a column header to sort.
-    </div>
+    <div class="note" style="margin-top:10px;">Click a column header to sort.</div>
   </section>
 
   <section class="two" style="margin-top:14px;">
@@ -146,22 +143,21 @@
       <canvas id="chartPhase"></canvas>
     </div>
   </section>
-
 </main>
 
 <script>
+  // ===== Config: auto-load file name from same folder =====
+  const AUTO_XLSX_NAME = "2025w49_Winter_expedition_total_kpi.xlsx";
+  document.getElementById("autoName").textContent = AUTO_XLSX_NAME;
+
   // -----------------------------
   // Utilities
   // -----------------------------
   const $ = (sel) => document.querySelector(sel);
-  const fmt = (n, d=1) => {
-    if (n === null || n === undefined || Number.isNaN(n)) return "—";
-    return Number(n).toLocaleString(undefined, {maximumFractionDigits:d, minimumFractionDigits:d});
-  };
-  const fmtInt = (n) => {
-    if (n === null || n === undefined || Number.isNaN(n)) return "—";
-    return Number(n).toLocaleString(undefined, {maximumFractionDigits:0});
-  };
+  const fmt = (n, d=1) => (n===null||n===undefined||Number.isNaN(n)) ? "—" :
+    Number(n).toLocaleString(undefined, {maximumFractionDigits:d, minimumFractionDigits:d});
+  const fmtInt = (n) => (n===null||n===undefined||Number.isNaN(n)) ? "—" :
+    Number(n).toLocaleString(undefined, {maximumFractionDigits:0});
   function parseKm(v){
     if (v === null || v === undefined) return NaN;
     if (typeof v === "number") return v;
@@ -193,9 +189,7 @@
         responsive:true,
         plugins: {
           legend:{ display:false },
-          tooltip:{ callbacks:{
-            label: (c)=> `${c.dataset.label}: ${fmt(c.parsed.y, 2)}`
-          }}
+          tooltip:{ callbacks:{ label: (c)=> `${c.dataset.label}: ${fmt(c.parsed.y, 2)}` } }
         },
         scales: {
           x: { ticks: { color:"#cfd6e6" }, grid:{ color:"rgba(255,255,255,.06)"} },
@@ -206,20 +200,12 @@
   }
 
   // -----------------------------
-  // Data extraction (supports:
-  //  A) analysis workbook: sheets like "KPI_totals", "RoadClass_allKPIs", etc
-  //  B) original workbook: single sheet with columns including Metric/Value and Issue/Total No of events
+  // Data extraction (original workbook)
   // -----------------------------
   function sheetToRows(wb, sheetName){
     const ws = wb.Sheets[sheetName];
     if (!ws) return [];
     return XLSX.utils.sheet_to_json(ws, {defval: null});
-  }
-
-  function findSheetByName(wb, wanted){
-    const names = wb.SheetNames;
-    const want = normalizeKey(wanted);
-    return names.find(n => normalizeKey(n) === want);
   }
 
   function roadClassFromOsmType(rt){
@@ -232,25 +218,21 @@
   }
 
   function computeFromOriginal(rows){
-    // Expect columns similar to your original file:
-    // Metric, Value, Issue, Total No of events, Road type + Distance (km) + No of issues etc (all-KPI combined)
+    if (!rows.length) return null;
+
     const keyset = new Set(Object.keys(rows[0] || {}).map(normalizeKey));
+    const colMetric = [...keyset].includes("metric") ? "Metric" : null;
+    const colValue  = [...keyset].includes("value") ? "Value" : null;
 
-    const colMetric = [...keyset].find(k => k === "metric") ? "Metric" : null;
-    const colValue  = [...keyset].find(k => k === "value") ? "Value" : null;
-
-    // Total distance (sum per session): in your file it's repeated per session; we take max per session block.
-    // Original file has session blocks separated by first column labels; we approximate by summing unique "Total test distance" rows.
     let distanceKm = 0;
     if (colMetric && colValue){
-      const dist = rows.filter(r => normalizeKey(r[colMetric]) === "total test distance")
-                       .map(r => parseKm(r[colValue]))
-                       .filter(x => Number.isFinite(x) && x>0);
-      // In your file this already represented per session; summing them works.
+      const dist = rows
+        .filter(r => normalizeKey(r[colMetric]) === "total test distance")
+        .map(r => parseKm(r[colValue]))
+        .filter(x => Number.isFinite(x) && x>0);
       distanceKm = dist.reduce((a,b)=>a+b,0);
     }
 
-    // KPI totals from Issue + Total No of events
     const issueCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === "issue") || "Issue";
     const eventsCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === "total no of events") || "Total No of events";
 
@@ -272,9 +254,6 @@
       .sort((a,b)=> b.Events - a.Events);
 
     const totalEvents = kpis.reduce((a,b)=>a+b.Events,0);
-
-    // Road/country/weather/phase tables in original file are all-KPI combined
-    // We'll detect the relevant columns if present and aggregate.
 
     function aggregate3(groupColName, distColName, issuesColName){
       const groupCol = Object.keys(rows[0]||{}).find(c => normalizeKey(c) === normalizeKey(groupColName));
@@ -322,64 +301,6 @@
     const country = aggregate3("Country","Distance (km).1","No of issues.1");
     const weather = aggregate3("Condition","Distance (km).2","No of issues.2");
     const phase   = aggregate3("Phase","Distance (km).3","No of issues.3");
-
-    return { distanceKm, totalEvents, kpis, roadClass, country, weather, phase };
-  }
-
-  function loadFromAnalysisWorkbook(wb){
-    // Expect sheets created by the analysis file:
-    // KPI_totals columns: Issue, Events, Events_per_1000km
-    const sKpi = findSheetByName(wb, "KPI_totals");
-    const sOverview = findSheetByName(wb, "Overview");
-    const sRoadClass = findSheetByName(wb, "RoadClass_allKPIs");
-    const sCountry = findSheetByName(wb, "Country_allKPIs");
-    const sWeather = findSheetByName(wb, "Weather_allKPIs");
-    const sPhase = findSheetByName(wb, "Phase_allKPIs");
-
-    if (!sKpi) return null;
-
-    const kpis = sheetToRows(wb, sKpi).map(r => ({
-      Issue: r.Issue,
-      Events: Number(r.Events),
-      Events_per_1000km: Number(r.Events_per_1000km ?? r.Events_per_1000km ?? r.Events_per_1000km)
-    })).filter(r => r.Issue && Number.isFinite(r.Events));
-
-    let distanceKm = NaN, totalEvents = NaN;
-    if (sOverview){
-      const ov = sheetToRows(wb, sOverview)[0] || {};
-      distanceKm = Number(ov["Total distance (km)"]);
-      totalEvents = Number(ov["Total KPI events (sum of all issues)"]);
-    } else {
-      totalEvents = kpis.reduce((a,b)=>a+b.Events,0);
-    }
-
-    const roadClass = sRoadClass ? sheetToRows(wb, sRoadClass).map(r=>({
-      RoadClass: r.RoadClass ?? r.Roadclass ?? r.Road_Class ?? r.RoadClass,
-      Distance_km: Number(r.Distance_km),
-      Issues: Number(r.Issues),
-      Issues_per_1000km: Number(r.Issues_per_1000km)
-    })).filter(r=>r.RoadClass) : null;
-
-    const country = sCountry ? sheetToRows(wb, sCountry).map(r=>({
-      Country: r.Country,
-      Distance_km: Number(r.Distance_km),
-      Issues: Number(r.Issues),
-      Issues_per_1000km: Number(r.Issues_per_1000km)
-    })).filter(r=>r.Country) : null;
-
-    const weather = sWeather ? sheetToRows(wb, sWeather).map(r=>({
-      Condition: r.Condition,
-      Distance_km: Number(r.Distance_km),
-      Issues: Number(r.Issues),
-      Issues_per_1000km: Number(r.Issues_per_1000km)
-    })).filter(r=>r.Condition) : null;
-
-    const phase = sPhase ? sheetToRows(wb, sPhase).map(r=>({
-      Phase: r.Phase,
-      Distance_km: Number(r.Distance_km),
-      Issues: Number(r.Issues),
-      Issues_per_1000km: Number(r.Issues_per_1000km)
-    })).filter(r=>r.Phase) : null;
 
     return { distanceKm, totalEvents, kpis, roadClass, country, weather, phase };
   }
@@ -455,9 +376,9 @@
   }
 
   function renderBreakdownCharts(){
-    // Road class
     const rn = $("#roadNote");
     rn.textContent = "";
+
     if (state.roadClass && state.roadClass.length){
       const rows = state.roadClass.slice().sort((a,b)=>b.Distance_km - a.Distance_km);
       setChart("chartRoadClass",
@@ -465,8 +386,6 @@
         rows.map(r=>r.Issues_per_1000km),
         "Issues / 1000 km"
       );
-      // Optional note about residuals if original file road-type table doesn't cover all distance/issues
-      // (we can't always know from analysis workbook; so just show a gentle message if seems off)
       const sumDist = rows.reduce((a,b)=>a+b.Distance_km,0);
       if (Number.isFinite(state.distanceKm) && state.distanceKm>0 && sumDist < state.distanceKm*0.95){
         rn.innerHTML = `Road breakdown distance covers <b>${fmt(sumDist,1)} km</b> of <b>${fmt(state.distanceKm,1)} km</b> in the file (some distance not classified).`;
@@ -476,41 +395,20 @@
       rn.textContent = "No road-class or road-type table found in this workbook.";
     }
 
-    // Country
     if (state.country && state.country.length){
       const rows = state.country.slice().sort((a,b)=>b.Distance_km - a.Distance_km).slice(0, 12);
-      setChart("chartCountry",
-        rows.map(r=>r.Country),
-        rows.map(r=>r.Issues_per_1000km),
-        "Issues / 1000 km"
-      );
-    } else {
-      setChart("chartCountry", ["No country data found"], [0], "Issues / 1000 km");
-    }
+      setChart("chartCountry", rows.map(r=>r.Group ?? r.Country), rows.map(r=>r.Issues_per_1000km), "Issues / 1000 km");
+    } else setChart("chartCountry", ["No country data found"], [0], "Issues / 1000 km");
 
-    // Weather
     if (state.weather && state.weather.length){
       const rows = state.weather.slice().sort((a,b)=>b.Distance_km - a.Distance_km).slice(0, 12);
-      setChart("chartWeather",
-        rows.map(r=>r.Condition),
-        rows.map(r=>r.Issues_per_1000km),
-        "Issues / 1000 km"
-      );
-    } else {
-      setChart("chartWeather", ["No weather data found"], [0], "Issues / 1000 km");
-    }
+      setChart("chartWeather", rows.map(r=>r.Group ?? r.Condition), rows.map(r=>r.Issues_per_1000km), "Issues / 1000 km");
+    } else setChart("chartWeather", ["No weather data found"], [0], "Issues / 1000 km");
 
-    // Phase
     if (state.phase && state.phase.length){
       const rows = state.phase.slice().sort((a,b)=>b.Distance_km - a.Distance_km);
-      setChart("chartPhase",
-        rows.map(r=>r.Phase),
-        rows.map(r=>r.Issues_per_1000km),
-        "Issues / 1000 km"
-      );
-    } else {
-      setChart("chartPhase", ["No phase data found"], [0], "Issues / 1000 km");
-    }
+      setChart("chartPhase", rows.map(r=>r.Group ?? r.Phase), rows.map(r=>r.Issues_per_1000km), "Issues / 1000 km");
+    } else setChart("chartPhase", ["No phase data found"], [0], "Issues / 1000 km");
   }
 
   function renderAll(){
@@ -521,79 +419,62 @@
   }
 
   // -----------------------------
-  // Events
+  // Loaders
   // -----------------------------
+  async function loadWorkbookFromArrayBuffer(buf, sourceLabel){
+    const wb = XLSX.read(buf, {type:"array"});
+    const firstSheet = wb.SheetNames[0];
+    const rows = sheetToRows(wb, firstSheet);
+
+    const computed = computeFromOriginal(rows);
+    if (!computed){
+      $("#status").innerHTML = `<span class="warn">Error:</span> Could not parse workbook (${sourceLabel}).`;
+      return;
+    }
+
+    state = computed;
+    $("#status").innerHTML = `Loaded workbook from <b>${sourceLabel}</b> (sheet: <b>${firstSheet}</b>).`;
+    if (!Number.isFinite(state.distanceKm) || state.distanceKm <= 0){
+      $("#status").innerHTML += `<br><span class="warn">Warning:</span> Could not compute total distance reliably.`;
+    }
+    renderAll();
+  }
+
+  async function tryAutoLoad(){
+    $("#status").textContent = `Auto-loading ${AUTO_XLSX_NAME}…`;
+    try{
+      const resp = await fetch(`./${encodeURIComponent(AUTO_XLSX_NAME)}`, { cache: "no-store" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      await loadWorkbookFromArrayBuffer(buf, AUTO_XLSX_NAME);
+    }catch(err){
+      $("#status").innerHTML =
+        `<span class="warn">Auto-load failed:</span> ${String(err.message || err)}<br>` +
+        `Place <b>${AUTO_XLSX_NAME}</b> next to this HTML on the same web server, or choose a file manually above.`;
+    }
+  }
+
+  // Manual upload fallback
   $("#file").addEventListener("change", async (e)=>{
     const f = e.target.files?.[0];
     if (!f) return;
-
-    $("#status").textContent = "Loading…";
-
+    $("#status").textContent = "Loading uploaded file…";
     const buf = await f.arrayBuffer();
-    const wb = XLSX.read(buf, {type:"array"});
-
-    // Try analysis workbook first; if not, compute from original
-    const fromAnalysis = loadFromAnalysisWorkbook(wb);
-    if (fromAnalysis){
-      state = {
-        distanceKm: fromAnalysis.distanceKm,
-        totalEvents: fromAnalysis.totalEvents,
-        kpis: fromAnalysis.kpis,
-        roadClass: fromAnalysis.roadClass,
-        country: fromAnalysis.country,
-        weather: fromAnalysis.weather,
-        phase: fromAnalysis.phase
-      };
-      $("#status").innerHTML = `Loaded <b>${f.name}</b>. Detected <b>analysis workbook</b> layout (sheet: KPI_totals).`;
-    } else {
-      const firstSheet = wb.SheetNames[0];
-      const rows = sheetToRows(wb, firstSheet);
-      if (!rows.length){
-        $("#status").textContent = "Could not read any rows from the first sheet.";
-        return;
-      }
-      const computed = computeFromOriginal(rows);
-      state = {
-        distanceKm: computed.distanceKm,
-        totalEvents: computed.totalEvents,
-        kpis: computed.kpis,
-        roadClass: computed.roadClass,
-        country: computed.country,
-        weather: computed.weather,
-        phase: computed.phase
-      };
-      $("#status").innerHTML = `Loaded <b>${f.name}</b>. Detected <b>original workbook</b> layout (computed from first sheet).`;
-    }
-
-    // Guard rails
-    if (!Number.isFinite(state.distanceKm) || state.distanceKm <= 0){
-      $("#status").innerHTML += `<br><span class="warn">Warning:</span> Could not reliably compute total distance. Events/1000 km may show as “—”.`;
-    }
-    if (!state.kpis.length){
-      $("#status").innerHTML += `<br><span class="warn">Warning:</span> No KPI (Issue) rows detected.`;
-    }
-
-    renderAll();
+    await loadWorkbookFromArrayBuffer(buf, f.name);
   });
 
   $("#search").addEventListener("input", renderTable);
 
-  // Sorting
   document.querySelectorAll("#kpiTable thead th").forEach(th=>{
     th.addEventListener("click", ()=>{
       const key = th.dataset.key;
       if (!key) return;
-      if (sortKey === key){
-        sortDir = (sortDir === "asc") ? "desc" : "asc";
-      } else {
-        sortKey = key;
-        sortDir = "desc";
-      }
+      if (sortKey === key) sortDir = (sortDir === "asc") ? "desc" : "asc";
+      else { sortKey = key; sortDir = "desc"; }
       renderTable();
     });
   });
 
-  // Export KPI table CSV
   $("#btnExportCsv").addEventListener("click", ()=>{
     const rows = applySortAndFilter();
     const header = ["Issue","Events","Events_per_1000km"];
@@ -606,6 +487,11 @@
     );
     downloadText("kpi_totals.csv", lines.join("\n"));
   });
+
+  $("#btnReload").addEventListener("click", tryAutoLoad);
+
+  // Auto-load on page open
+  tryAutoLoad();
 </script>
 </body>
 </html>
