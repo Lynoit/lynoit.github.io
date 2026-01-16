@@ -900,20 +900,11 @@ async function fetchSessionSummary(filename) {
   const issueCount = countIssuesFromWorkbook(wb);
 
   // 3) Test details
-  let testObject = null, testPurpose = null, additionalComment = null;
+  let testObject = null, testPurpose = null;
   try {
-    const details = extractTestDetails(wb);   // keys are lower-cased
-
+    const details = extractTestDetails(wb);
     testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
-    testPurpose = details['purpose']     || details['test purpose'] || null;
-
-    // 🔹 Pick first key that starts with "additional comment"
-    for (const [k, v] of Object.entries(details)) {
-      if (k.startsWith('additional comment')) {
-        additionalComment = v;
-        break;
-      }
-    }
+    testPurpose = details['purpose'] || details['test purpose'] || null;
   } catch {}
 
   // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
@@ -935,15 +926,9 @@ async function fetchSessionSummary(filename) {
   } catch {}
 
   const summary = {
-    mileageKm,
-    issueCount,
-    meanTempC,
-    weatherAgg,
-    testObject,
-    testPurpose,
-    additionalComment,   // 🔹 NEW
-    kpiScore,
-    kpiAvgPer1k,
+    mileageKm, issueCount, meanTempC, weatherAgg,
+    testObject, testPurpose,
+    kpiScore, kpiAvgPer1k,
     loaded: true
   };
 
@@ -1354,7 +1339,7 @@ function addAiSummaryRow(testDetailsTableEl) {
 }
     
     // Helper to render the default overview page
-  function renderOverview(){
+    function renderOverview(){
   const content = document.getElementById('content');
   content.innerHTML = `
     <!-- Latest routes FIRST -->
@@ -1368,12 +1353,8 @@ function addAiSummaryRow(testDetailsTableEl) {
       <div id="routes-grid" class="route-grid"></div>
     </div>
 
-    <!-- NEW: Test groups section (by Additional comment) -->
-    <div id="test-groups-wrap" style="margin-top:24px;"></div>
-
     <!-- Then Test activity overview -->
     <h1 id="title-overview" data-title="Test activity overview" data-loading="1" style="margin-top:24px;">
-
       <span>Loading</span>
       <span class="title-thinking">
         <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
@@ -1413,259 +1394,10 @@ function addAiSummaryRow(testDetailsTableEl) {
     buildWeatherMonthChart(allFiles);
     buildEUMileageMap(allFiles).finally(() => setTitleLoading(hEU, false));
     buildLatestRoutePreviews(allFiles).finally(() => setTitleLoading(h2, false));
-    buildTestGroupsSection(allFiles);
   }
 }
 
-// ---------- TEST GROUPS (by "Additional comment") ----------
-
-// ---------- TEST GROUPS (by "Additional comment") ----------
-
-// Builds the "Test groups" table on the overview page
-function buildTestGroupsSection(files) {
-  const host = document.getElementById('test-groups-wrap');
-  if (!host) return;
-  if (!files || !files.length) {
-    host.innerHTML = '';
-    return;
-  }
-
-  host.innerHTML = `
-    <h2>Test groups (by Additional comment)</h2>
-    <div id="test-groups-body">Loading groups…</div>
-  `;
-  const body = document.getElementById('test-groups-body');
-
-  // Fetch summaries for all files (will hit cache after first run)
-  Promise.all(
-    files.map(f =>
-      fetchSessionSummary(f)
-        .then(s => s ? { filename: f, ...s } : null)
-        .catch(() => null)
-    )
-  )
-  .then(rows => {
-    const groups = new Map(); // label -> { label, files, sessions, totalKm, totalIssues }
-
-    rows.forEach(r => {
-      if (!r || !r.additionalComment) return;
-      const label = String(r.additionalComment).trim();
-      if (!label) return;
-
-      let g = groups.get(label);
-      if (!g) {
-        g = { label, files: [], sessions: 0, totalKm: 0, totalIssues: 0 };
-        groups.set(label, g);
-      }
-      g.files.push(r.filename);
-      g.sessions += 1;
-
-      if (typeof r.mileageKm === 'number') g.totalKm += r.mileageKm;
-      if (typeof r.issueCount === 'number') g.totalIssues += r.issueCount;
-    });
-
-    // 🔹 Only keep groups with more than one session
-    const groupList = Array.from(groups.values()).filter(g => g.sessions > 1);
-
-    if (!groupList.length) {
-      body.textContent =
-        'No test groups yet. A test group is created when more than one session shares the same "Additional comment".';
-      return;
-    }
-
-    const table = document.createElement('table');
-    table.className = 'report-table';
-
-    const thead = document.createElement('thead');
-    thead.innerHTML = `
-      <tr>
-        <th>Group</th>
-        <th>Sessions</th>
-        <th>Total distance (km)</th>
-        <th>Total issues</th>
-        <th>Events / 1000 km</th>
-      </tr>`;
-    table.appendChild(thead);
-
-    const tbody = document.createElement('tbody');
-
-    groupList
-      .sort((a, b) => a.label.localeCompare(b.label))
-      .forEach(g => {
-        const km = Math.round(g.totalKm);
-        const evPer1k = km > 0 ? (g.totalIssues / km * 1000) : null;
-
-        const tr = document.createElement('tr');
-
-        // Group link
-        const nameTd = document.createElement('td');
-        const link = document.createElement('a');
-        link.href = '#';
-        link.textContent = g.label;
-        link.addEventListener('click', e => {
-          e.preventDefault();
-          openTestGroup(g.label, g.files);
-        });
-        nameTd.appendChild(link);
-        tr.appendChild(nameTd);
-
-        const sessionsTd = document.createElement('td');
-        sessionsTd.textContent = String(g.sessions);
-        tr.appendChild(sessionsTd);
-
-        const kmTd = document.createElement('td');
-        kmTd.textContent = km ? km.toString() : '–';
-        tr.appendChild(kmTd);
-
-        const issuesTd = document.createElement('td');
-        issuesTd.textContent = g.totalIssues.toString();
-        tr.appendChild(issuesTd);
-
-        const evTd = document.createElement('td');
-        evTd.textContent = evPer1k != null ? evPer1k.toFixed(1) : '–';
-        tr.appendChild(evTd);
-
-        tbody.appendChild(tr);
-      });
-
-    table.appendChild(tbody);
-    body.innerHTML = '';
-    body.appendChild(table);
-  })
-  .catch(err => {
-    console.error(err);
-    body.textContent = 'Failed to build test groups: ' + err.message;
-  });
-}
-
-// Opens a dedicated view for a specific test group
-function openTestGroup(groupLabel, fileList) {
-  const content = document.getElementById('content');
-  content.innerHTML = '';
-
-  // Back link
-  const backLink = document.createElement('a');
-  backLink.href = '#';
-  backLink.textContent = '← Back to overview';
-  backLink.style.display = 'inline-block';
-  backLink.style.marginBottom = '8px';
-  backLink.addEventListener('click', e => {
-    e.preventDefault();
-    renderOverview();
-  });
-  content.appendChild(backLink);
-
-  const h1 = document.createElement('h1');
-  h1.textContent = `Test group: ${groupLabel}`;
-  content.appendChild(h1);
-
-  const summaryDiv = document.createElement('div');
-  summaryDiv.textContent = 'Loading group summary…';
-  summaryDiv.style.marginBottom = '12px';
-  content.appendChild(summaryDiv);
-
-  const table = document.createElement('table');
-  table.className = 'report-table';
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Session</th>
-        <th>Distance (km)</th>
-        <th>Issues</th>
-        <th>Events / 1000 km</th>
-        <th>Open</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  `;
-  const tbody = table.querySelector('tbody');
-  content.appendChild(table);
-
-  // Load summaries for all sessions in this group
-  Promise.all(
-    fileList.map(f =>
-      fetchSessionSummary(f)
-        .then(s => s ? { filename: f, ...s } : null)
-        .catch(() => null)
-    )
-  )
-  .then(rows => {
-    const valid = rows.filter(Boolean);
-    if (!valid.length) {
-      summaryDiv.textContent = 'No usable sessions found in this group.';
-      return;
-    }
-
-    let totalKm = 0;
-    let totalIssues = 0;
-
-    valid.forEach(r => {
-      if (typeof r.mileageKm === 'number') totalKm += r.mileageKm;
-      if (typeof r.issueCount === 'number') totalIssues += r.issueCount;
-
-      const m = r.filename.match(/(\d{4}-\d{2}-\d{2})/);
-      const dayStr = m ? m[1] : '–';
-      const niceName = r.filename
-        .replace(/\.xlsx$/i, '')
-        .replace(`${dayStr}_`, '');
-
-      const km = (typeof r.mileageKm === 'number') ? Math.round(r.mileageKm) : null;
-      const evPer1k = (km && r.issueCount != null)
-        ? (r.issueCount / km * 1000)
-        : null;
-
-      const tr = document.createElement('tr');
-
-      const tdDate = document.createElement('td');
-      tdDate.textContent = dayStr;
-      tr.appendChild(tdDate);
-
-      const tdName = document.createElement('td');
-      tdName.textContent = niceName;
-      tr.appendChild(tdName);
-
-      const tdKm = document.createElement('td');
-      tdKm.textContent = km != null ? km.toString() : '–';
-      tr.appendChild(tdKm);
-
-      const tdIssues = document.createElement('td');
-      tdIssues.textContent = r.issueCount != null ? r.issueCount.toString() : '0';
-      tr.appendChild(tdIssues);
-
-      const tdRate = document.createElement('td');
-      tdRate.textContent = evPer1k != null ? evPer1k.toFixed(1) : '–';
-      tr.appendChild(tdRate);
-
-      const tdOpen = document.createElement('td');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = 'Open';
-      btn.addEventListener('click', () => loadFile(r.filename));
-      tdOpen.appendChild(btn);
-      tr.appendChild(tdOpen);
-
-      tbody.appendChild(tr);
-    });
-
-    const kmTotalRounded = Math.round(totalKm);
-    const overallRate = (kmTotalRounded > 0)
-      ? (totalIssues / kmTotalRounded * 1000)
-      : null;
-
-    summaryDiv.textContent =
-      `Total sessions: ${valid.length}   •   ` +
-      `Total distance: ${kmTotalRounded || 0} km   •   ` +
-      `Total issues: ${totalIssues}   •   ` +
-      `Events / 1000 km: ${overallRate != null ? overallRate.toFixed(1) : '–'}`;
-  })
-  .catch(err => {
-    console.error(err);
-    summaryDiv.textContent = 'Failed to load group data: ' + err.message;
-  });
-}
-
-function listBlobs() {
+   function listBlobs() {
   fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache: 'default' })
     .then(r => r.text())
     .then(xml => {
@@ -4034,4 +3766,3 @@ table.appendChild(row);
   </script>
 </body>
 </html>
-
