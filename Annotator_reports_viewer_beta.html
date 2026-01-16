@@ -906,7 +906,13 @@ async function fetchSessionSummary(filename) {
     testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
     testPurpose = details['purpose'] || details['test purpose'] || null;
   } catch {}
-
+  
+  // 4) Additional comment (used for test grouping)
+  let additionalComment = null;
+  try {
+    additionalComment = extractAdditionalComment(wb) || null;
+  } catch
+    
   // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
   let kpiScore = null, kpiAvgPer1k = null;
   try {
@@ -929,6 +935,7 @@ async function fetchSessionSummary(filename) {
     mileageKm, issueCount, meanTempC, weatherAgg,
     testObject, testPurpose,
     kpiScore, kpiAvgPer1k,
+    additionalComment,
     loaded: true
   };
 
@@ -957,6 +964,34 @@ function extractTestDetails(wb){
   return details;
 }
 
+// Read "Additional comment" from Test details sheet.
+// Returns the last non-empty value whose label starts with "Additional comment".
+function extractAdditionalComment(wb){
+  const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+  if (!sheetName) return null;
+
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+    header: 1,
+    blankrows: false
+  });
+  if (!rows || !rows.length) return null;
+
+  let latest = null;
+  for (let r = 0; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || row.length < 2) continue;
+    const label = String(row[0] ?? '').trim().toLowerCase();
+    const val   = String(row[1] ?? '').trim();
+    if (!label || !val) continue;
+
+    // Matches both "Additional comment" and "Additional comment (2026-01-07 ...)"
+    if (label === 'additional comment' || label.startsWith('additional comment')) {
+      latest = val;   // keep last seen
+    }
+  }
+  return latest;
+}
+    
 function rerenderTestDetailsTable(wb) {
   // Find the Test details sheet
   const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
@@ -1393,11 +1428,15 @@ function addAiSummaryRow(testDetailsTableEl) {
     buildTempMonthChart(allFiles);
     buildWeatherMonthChart(allFiles);
     buildEUMileageMap(allFiles).finally(() => setTitleLoading(hEU, false));
+    
+    // Latest routes
     buildLatestRoutePreviews(allFiles).finally(() => setTitleLoading(h2, false));
-  }
+
+    // 🔹 Test groups (between Latest routes & overview)
+    buildTestGroupsSection(allFiles);  }
 }
 
-   function listBlobs() {
+  function listBlobs() {
   fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache: 'default' })
     .then(r => r.text())
     .then(xml => {
@@ -1455,7 +1494,8 @@ function addAiSummaryRow(testDetailsTableEl) {
             buildTempMonthChart(xlsxNames),
             buildWeatherMonthChart(xlsxNames),
             buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false)),
-            buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false))
+            buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
+            buildTestGroupsSection(xlsxNames)
           ]);
         });
     })
@@ -2477,6 +2517,218 @@ function buildLatestRoutePreviews(files){
   });
 }
 
+// Build "Test groups" section (between Latest tests and Test activity overview).
+// A group qualifies only if the same Additional comment appears in ≥ 2 sessions.
+function buildTestGroupsSection(files){
+  if (!files || !files.length) return Promise.resolve();
+
+  // Make sure we have summaries (uses cache after first run)
+  const promises = files.map(f =>
+    fetchSessionSummary(f).then(summary => ({ filename: f, summary }))
+  );
+
+  return Promise.all(promises).then(all => {
+    // Group by additionalComment
+    const byComment = new Map();
+
+    all.forEach(({ filename, summary }) => {
+      const raw = summary && summary.additionalComment;
+      if (!raw) return;
+      const key = raw.trim();
+      if (!key) return;
+
+      if (!byComment.has(key)) byComment.set(key, []);
+      byComment.get(key).push({ filename, summary });
+    });
+
+    // Only keep groups with ≥ 2 sessions
+    const groups = Array.from(byComment.entries())
+      .map(([comment, sessions]) => ({ comment, sessions }))
+      .filter(g => g.sessions.length > 1);
+
+    // Create wrapper if needed (inserted right after .routes-wrap)
+    let wrap = document.getElementById('test-groups-wrap');
+    if (!wrap) {
+      const routesWrap = document.querySelector('.routes-wrap');
+      if (!routesWrap) return;
+
+      wrap = document.createElement('div');
+      wrap.id = 'test-groups-wrap';
+      wrap.style.margin = '24px 0';
+      wrap.innerHTML = `
+        <h2>Test groups</h2>
+        <div id="test-groups-body"></div>
+      `;
+      routesWrap.insertAdjacentElement('afterend', wrap);
+    }
+
+    const body = document.getElementById('test-groups-body');
+    if (!body) return;
+
+    if (!groups.length) {
+      body.innerHTML = `
+        <div style="color:#666;">
+          No test groups yet. Add the same “Additional comment” to more than one session to create a group.
+        </div>`;
+      return;
+    }
+
+    // Sort groups by newest session in the group (using blobMeta for strict time)
+    groups.sort((g1, g2) => {
+      const latest1 = Math.max(...g1.sessions.map(s => blobMeta.get(s.filename) || 0));
+      const latest2 = Math.max(...g2.sessions.map(s => blobMeta.get(s.filename) || 0));
+      return latest2 - latest1;
+    });
+
+    const rowsHtml = groups.map(g => {
+      const nSessions = g.sessions.length;
+      const totalKm   = g.sessions.reduce((acc, s) => acc + (s.summary.mileageKm || 0), 0);
+      const totalIssues = g.sessions.reduce((acc, s) => acc + (s.summary.issueCount || 0), 0);
+      const eventsPer1k = totalKm > 0 ? (totalIssues / totalKm) * 1000 : null;
+
+      return `
+        <tr>
+          <td>
+            <a href="#" class="route-link test-group-link">
+              <span class="u">${escapeHtml(g.comment)}</span>
+            </a>
+          </td>
+          <td>${nSessions}</td>
+          <td>${totalKm ? totalKm.toFixed(0) : '–'}</td>
+          <td>${totalIssues}</td>
+          <td>${eventsPer1k != null ? eventsPer1k.toFixed(1) : '–'}</td>
+        </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <table class="report-table">
+        <thead>
+          <tr>
+            <th>Group (Additional comment)</th>
+            <th>Sessions</th>
+            <th>Mileage (km)</th>
+            <th>Issues</th>
+            <th>Events / 1000 km</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+
+    // Attach click handlers to open group view
+    const links = body.querySelectorAll('.test-group-link');
+    links.forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const label = link.textContent.trim();
+        const group = groups.find(g => g.comment === label);
+        if (group) openTestGroupView(group);
+      });
+    });
+  });
+}
+
+// Show a dedicated view for one test group
+function openTestGroupView(group){
+  const content = document.getElementById('content');
+  if (!content) return;
+
+  const nSessions   = group.sessions.length;
+  const totalKm     = group.sessions.reduce((acc, s) => acc + (s.summary.mileageKm || 0), 0);
+  const totalIssues = group.sessions.reduce((acc, s) => acc + (s.summary.issueCount || 0), 0);
+  const eventsPer1k = totalKm > 0 ? (totalIssues / totalKm) * 1000 : null;
+
+  // Sort sessions in group by date + Last-Modified (newest first)
+  const sessionsSorted = [...group.sessions].sort((a, b) => {
+    const mA = a.filename.match(/(\d{4}-\d{2}-\d{2})/);
+    const mB = b.filename.match(/(\d{4}-\d{2}-\d{2})/);
+    const dA = mA ? mA[1] : '';
+    const dB = mB ? mB[1] : '';
+    const cmpDate = dB.localeCompare(dA);
+    if (cmpDate) return cmpDate;
+    const lmA = blobMeta.get(a.filename) || 0;
+    const lmB = blobMeta.get(b.filename) || 0;
+    return lmB - lmA;
+  });
+
+  const rowsHtml = sessionsSorted.map(s => {
+    const filename = s.filename;
+    const summary  = s.summary;
+    const m = filename.match(/(\d{4}-\d{2}-\d{2})/);
+    const dayStr = m ? m[1] : '';
+    const niceName = dayStr
+      ? filename.replace(`${dayStr}_`, '').replace('.xlsx','')
+      : filename.replace('.xlsx','');
+
+    const km     = summary.mileageKm != null ? summary.mileageKm : '–';
+    const issues = summary.issueCount != null ? summary.issueCount : 0;
+    const kpi    = summary.kpiScore != null ? summary.kpiScore : '–';
+
+    const safeId = cssSafeId(filename);
+
+    return `
+      <tr>
+        <td>${escapeHtml(dayStr)}</td>
+        <td>${escapeHtml(niceName)}</td>
+        <td>${km}</td>
+        <td>${issues}</td>
+        <td>${kpi}</td>
+        <td>
+          <button type="button"
+                  class="download-button"
+                  data-session="${escapeHtml(filename)}"
+                  id="open_${safeId}">
+            Open
+          </button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  content.innerHTML = `
+    <button type="button" class="download-button" id="back-to-overview-btn">
+      ← Back to overview
+    </button>
+
+    <h1 style="margin-top:16px;">Test group: ${escapeHtml(group.comment)}</h1>
+
+    <div style="margin:12px 0 24px;font-size:14px;">
+      <strong>Sessions:</strong> ${nSessions}&nbsp;&nbsp;
+      <strong>Mileage:</strong> ${totalKm ? totalKm.toFixed(0) : '–'} km&nbsp;&nbsp;
+      <strong>Issues:</strong> ${totalIssues}&nbsp;&nbsp;
+      <strong>Events / 1000 km:</strong> ${eventsPer1k != null ? eventsPer1k.toFixed(1) : '–'}
+    </div>
+
+    <h2>Sessions in this group</h2>
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Session</th>
+          <th>Mileage (km)</th>
+          <th>Issues</th>
+          <th>KPI score</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsHtml}
+      </tbody>
+    </table>
+  `;
+
+  // Back button → overview
+  document.getElementById('back-to-overview-btn')
+    ?.addEventListener('click', () => renderOverview());
+
+  // Attach Open buttons → loadFile(filename)
+  content.querySelectorAll('button[data-session]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const f = btn.getAttribute('data-session');
+      if (f) loadFile(f);
+    });
+  });
+}
+    
 function scoringLegendHtml(){
   return `
   <div class="score-legend" aria-label="Scoring legend (1 worst, 10 best)">
