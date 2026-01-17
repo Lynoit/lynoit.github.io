@@ -517,6 +517,87 @@ function formatTimestampForLabel(d = new Date()) {
   const mi   = pad(d.getMinutes());
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
+
+async function openGroupAsMergedWorkbook(groupLabel, fileNames) {
+  if (!fileNames || !fileNames.length) return;
+
+  // Use a synthetic filename so we can detect "group view" in loadFile()
+  const safeLabel = groupLabel.replace(/[^\w\-]+/g, '_').slice(0, 80) || 'group';
+  const groupFilename = `group__${safeLabel}.xlsx`;
+
+  if (!workbookCache.has(groupFilename)) {
+    const wbMerged = await buildMergedGroupWorkbook(groupLabel, fileNames);
+    // Store in the same cache used by loadWorkbook() so it won't fetch from Azure
+    workbookCache.set(groupFilename, Promise.resolve({ wb: wbMerged, buf: null }));
+  }
+
+  // Reuse the normal viewer with the virtual workbook
+  loadFile(groupFilename);
+}
+
+async function buildMergedGroupWorkbook(groupLabel, fileNames) {
+  const workbooks = await Promise.all(
+    fileNames.map(fn =>
+      loadWorkbook(fn).then(res => ({ filename: fn, wb: res.wb }))
+    )
+  );
+
+  const merged = { SheetNames: [], Sheets: {} };
+
+  // Union of all sheet names
+  const sheetSet = new Set();
+  for (const { wb } of workbooks) {
+    wb.SheetNames.forEach(n => sheetSet.add(n));
+  }
+
+  const sheetNames = Array.from(sheetSet);
+
+  sheetNames.forEach(sheetName => {
+    const combined = [];
+    let headerRow = null;
+    let hasAny = false;
+
+    for (const { filename, wb } of workbooks) {
+      const ws = wb.Sheets[sheetName];
+      if (!ws) continue;
+
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false });
+      if (!rows.length) continue;
+
+      const sessionLabel = filename.replace(/\.xlsx$/i, '');
+
+      if (!headerRow) {
+        headerRow = rows[0];
+        // Prepend "Session" column
+        combined.push(['Session', ...headerRow]);
+      }
+
+      for (let r = 1; r < rows.length; r++) {
+        combined.push([sessionLabel, ...rows[r]]);
+      }
+
+      hasAny = true;
+    }
+
+    if (hasAny) {
+      const wsMerged = XLSX.utils.aoa_to_sheet(combined);
+      merged.Sheets[sheetName] = wsMerged;
+      merged.SheetNames.push(sheetName);
+    }
+  });
+
+  // Small summary sheet at the front
+  const summaryAoA = [
+    ['Group label', groupLabel],
+    ['Number of sessions', fileNames.length],
+    ['Merged at', new Date().toISOString()]
+  ];
+  const sumSheetName = 'Group summary';
+  merged.Sheets[sumSheetName] = XLSX.utils.aoa_to_sheet(summaryAoA);
+  merged.SheetNames.unshift(sumSheetName);
+
+  return merged;
+}
     
 function loadWorkbook(filename) {
   if (workbookCache.has(filename)) return workbookCache.get(filename);
@@ -907,6 +988,12 @@ async function fetchSessionSummary(filename) {
     testPurpose = details['purpose'] || details['test purpose'] || null;
   } catch {}
 
+  // 4) Additional comment (for grouping Test groups)
+  let additionalComment = null;
+  try {
+    additionalComment = extractAdditionalComment(wb);
+  } catch {}
+
   // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
   let kpiScore = null, kpiAvgPer1k = null;
   try {
@@ -929,6 +1016,7 @@ async function fetchSessionSummary(filename) {
     mileageKm, issueCount, meanTempC, weatherAgg,
     testObject, testPurpose,
     kpiScore, kpiAvgPer1k,
+    additionalComment,
     loaded: true
   };
 
@@ -957,6 +1045,30 @@ function extractTestDetails(wb){
   return details;
 }
 
+function extractAdditionalComment(wb) {
+  const details = extractTestDetails(wb);
+  const keys = Object.keys(details);
+  if (!keys.length) return null;
+
+  // Prefer exact "additional comment"
+  let bestKey = keys.find(k => k === 'additional comment');
+
+  // Then any key starting with "additional comment"
+  if (!bestKey) {
+    bestKey = keys.find(k => k.startsWith('additional comment'));
+  }
+
+  // Fallback: anything that contains "additional comment" or just "comment"
+  if (!bestKey) {
+    bestKey = keys.find(k => /additional comment|comment/i.test(k));
+  }
+
+  if (!bestKey) return null;
+  const val = details[bestKey];
+  if (!val || !String(val).trim()) return null;
+  return String(val).trim();
+}
+    
 function rerenderTestDetailsTable(wb) {
   // Find the Test details sheet
   const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
@@ -1353,6 +1465,12 @@ function addAiSummaryRow(testDetailsTableEl) {
       <div id="routes-grid" class="route-grid"></div>
     </div>
 
+  <!-- NEW: Test groups section -->
+  <div id="test-groups-wrap" style="grid-column: 1 / -1; margin-top: 24px;">
+    <h2 id="title-test-groups" data-title="Test groups">Test groups</h2>
+    <div id="test-groups-list"></div>
+  </div>
+  
     <!-- Then Test activity overview -->
     <h1 id="title-overview" data-title="Test activity overview" data-loading="1" style="margin-top:24px;">
       <span>Loading</span>
@@ -1388,6 +1506,7 @@ function addAiSummaryRow(testDetailsTableEl) {
     setTitleLoading(h2, true, 'Loading');
     setTitleLoading(hEU, true, 'Loading');
 
+    buildTestGroupsSection(allFiles);
     buildOverviewHeatmap(allFiles).finally(() => setTitleLoading(h1, false));
     buildCountryMonthChart(allFiles);
     buildTempMonthChart(allFiles);
@@ -1449,6 +1568,8 @@ function addAiSummaryRow(testDetailsTableEl) {
         .then(() => {
           // After ALL sessions have been read (and sidebar updated),
           // build the heavy overview parts (they now hit the summary cache).
+          buildTestGroupsSection(xlsxNames);
+          
           return Promise.all([
             buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
             buildCountryMonthChart(xlsxNames),
@@ -1692,7 +1813,7 @@ function applySummaryToSidebar(filename, summary) {
       });
     }
 
-   function renderHeatmap(denseDays){
+  function renderHeatmap(denseDays){
   const host = document.getElementById('heatmap-host');
   if (!host) return;              // ← user navigated away; do nothing
 
@@ -2390,7 +2511,109 @@ map.setView([54, 15], 4);
   setTimeout(() => map.invalidateSize(), 100);
 }
 
-    // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
+async function buildTestGroupsSection(files) {
+  const container = document.getElementById('test-groups-list');
+  const titleEl   = document.getElementById('title-test-groups');
+  if (!container || !titleEl) return;
+
+  container.innerHTML = 'Loading…';
+
+  const groups = new Map(); // label -> { label, files:[], totalKm, totalIssues, kpiList:[] }
+
+  await Promise.all(
+    files.map(async (filename) => {
+      const summary = await fetchSessionSummary(filename).catch(() => null);
+      if (!summary) return;
+
+      const labelRaw = summary.additionalComment;
+      if (!labelRaw) return;
+      const label = String(labelRaw).trim();
+      if (!label) return;
+
+      let g = groups.get(label);
+      if (!g) {
+        g = { label, files: [], totalKm: 0, totalIssues: 0, kpiList: [] };
+        groups.set(label, g);
+      }
+      g.files.push(filename);
+      if (typeof summary.mileageKm === 'number') g.totalKm += summary.mileageKm;
+      if (typeof summary.issueCount === 'number') g.totalIssues += summary.issueCount;
+      if (typeof summary.kpiAvgPer1k === 'number') g.kpiList.push(summary.kpiAvgPer1k);
+    })
+  );
+
+  // Only show groups with at least 2 sessions (optional)
+  const groupsArr = Array.from(groups.values())
+    .filter(g => g.files.length >= 2)
+    .sort((a,b) => b.totalKm - a.totalKm || b.files.length - a.files.length);
+
+  titleEl.textContent = 'Test groups';
+
+  if (!groupsArr.length) {
+    container.innerHTML = '<div style="color:#666;">No groups yet. Add matching "Additional comment" texts in Test details to create groups.</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+
+  const tbl = document.createElement('table');
+  tbl.className = 'report-table';
+  tbl.innerHTML = `
+    <thead>
+      <tr>
+        <th>Group</th>
+        <th>Sessions</th>
+        <th>Total distance (km)</th>
+        <th>Total issues</th>
+        <th>Avg events /1000 km</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const tbody = tbl.querySelector('tbody');
+
+  for (const g of groupsArr) {
+    const avgKpi = g.kpiList.length
+      ? g.kpiList.reduce((a,b)=>a+b,0) / g.kpiList.length
+      : null;
+
+    const tr = document.createElement('tr');
+
+    // Group name as clickable link
+    const tdName = document.createElement('td');
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = g.label;
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      openGroupAsMergedWorkbook(g.label, g.files);
+    });
+    tdName.appendChild(a);
+    tr.appendChild(tdName);
+
+    const tdSessions = document.createElement('td');
+    tdSessions.textContent = g.files.length.toString();
+    tr.appendChild(tdSessions);
+
+    const tdKm = document.createElement('td');
+    tdKm.textContent = Math.round(g.totalKm).toString();
+    tr.appendChild(tdKm);
+
+    const tdIssues = document.createElement('td');
+    tdIssues.textContent = g.totalIssues.toString();
+    tr.appendChild(tdIssues);
+
+    const tdKpi = document.createElement('td');
+    tdKpi.textContent = (avgKpi != null) ? avgKpi.toFixed(1) : '–';
+    tr.appendChild(tdKpi);
+
+    tbody.appendChild(tr);
+  }
+
+  container.appendChild(tbl);
+}
+    
+// ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
 function buildLatestRoutePreviews(files){
   const withDates = files
     .map(f => ({ filename: f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
@@ -3313,7 +3536,11 @@ function showDeleteConfirmDialog(filename, filesToDelete) {
 }
     
 function loadFile(filename) {
-  currentReportFileName = filename;
+  const isGroupView = filename.startsWith('group__');  // NEW
+
+  // For group sessions we don't have a single .txt AI report yet
+  currentReportFileName = isGroupView ? null : filename;
+
   const content = document.getElementById('content');
   content.innerHTML = '';
   issueCoords = [];
@@ -3402,6 +3629,16 @@ const filesToDelete = [
 ];
 
   // 🔴 Delete session button (before download links)
+  if (!isGroupView) {
+  const baseNoExt = filename.replace(/\.xlsx$/i, '');
+
+  const filesToDelete = [
+    filename,
+    `${baseNoExt}.zip`,
+    `${baseNoExt}_2.zip`,
+    `${baseNoExt}.txt`
+  ];
+
   const deleteBtn = document.createElement('button');
   deleteBtn.type = 'button';
   deleteBtn.textContent = 'Delete session';
@@ -3410,8 +3647,7 @@ const filesToDelete = [
     showDeleteAuthDialog(filename, filesToDelete);
   });
   content.appendChild(deleteBtn);
-  
-  // Download XLSX
+
   const xlsxLink = document.createElement('a');
   xlsxLink.href = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
   xlsxLink.textContent = 'Download XLSX';
@@ -3419,7 +3655,6 @@ const filesToDelete = [
   xlsxLink.setAttribute('download', filename);
   content.appendChild(xlsxLink);
 
-  // 1) Download issue images (always shown)
   const imgZipFilename = `${baseNoExt}.zip`;
   const imgZipLink = document.createElement('a');
   imgZipLink.href = `${BASE_URL}/${imgZipFilename}?${SAS_TOKEN}`;
@@ -3428,7 +3663,6 @@ const filesToDelete = [
   imgZipLink.setAttribute('download', imgZipFilename);
   content.appendChild(imgZipLink);
 
-  // 2) Download issue speed/acceleration plots (always shown)
   const accelZipFilename = `${baseNoExt}_2.zip`;
   const accelZipLink = document.createElement('a');
   accelZipLink.href = `${BASE_URL}/${accelZipFilename}?${SAS_TOKEN}`;
@@ -3436,6 +3670,7 @@ const filesToDelete = [
   accelZipLink.className = 'download-button';
   accelZipLink.setAttribute('download', accelZipFilename);
   content.appendChild(accelZipLink);
+}
 
   // === Use cached workbook ===
   loadWorkbook(filename)
@@ -3478,13 +3713,15 @@ const filesToDelete = [
         }
         
         // For "Test details" sheet: add AI summary row + Additional comments editor
-        if (/^\s*test\s*details\s*$/i.test(sheet)) {
-          const tbl = document.getElementById(sheet);
-          if (tbl) {
-            addAiSummaryRow(tbl);  // <--- AI summary row
-          }
-          injectPostHocCommentUI(filename, wb, sheet, content);
-        }
+if (/^\s*test\s*details\s*$/i.test(sheet)) {
+  const tbl = document.getElementById(sheet);
+  if (tbl && !isGroupView) {
+    addAiSummaryRow(tbl);               // only for single-session
+  }
+  if (!isGroupView) {
+    injectPostHocCommentUI(filename, wb, sheet, content);
+  }
+}
 
         // For "Road types" sheet: build aggregated Road categories table below it
         if (/^\s*road\s*types?\s*$/i.test(sheet)) {
@@ -3590,16 +3827,19 @@ const filesToDelete = [
         ph.replaceWith(err);
       }
     })
-    .then(() => {
-      // Issue snapshots LAST (below everything)
-      const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
-      return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`, { cache:'default' })
-        .then(resp => {
-          if (!resp.ok) throw new Error('ZIP not found');
-          return resp.arrayBuffer();
-        })
-        .then(buf => JSZip.loadAsync(buf))
-        .then(zip => {
+.then(() => {
+  // For group views (merged temp workbook), there is no ZIP on Azure → skip
+  if (isGroupView) return;
+
+  // Issue snapshots LAST (below everything)
+  const zipFilename = filename.replace(/\.xlsx$/i, '.zip');
+  return fetch(`${BASE_URL}/${zipFilename}?${SAS_TOKEN}`, { cache:'default' })
+    .then(resp => {
+      if (!resp.ok) throw new Error('ZIP not found');
+      return resp.arrayBuffer();
+    })
+    .then(buf => JSZip.loadAsync(buf))
+    .then(zip => {
           const title = document.createElement('h2');
           title.textContent = 'Issue snapshots';
 
