@@ -901,10 +901,27 @@ async function fetchSessionSummary(filename) {
 
   // 3) Test details
   let testObject = null, testPurpose = null;
+  let adcuSoftware = null, participants = null;
   try {
     const details = extractTestDetails(wb);
+
+    // Keys are all lowercased by extractTestDetails
     testObject  = details['test object'] || details['object'] || details['vehicle'] || null;
     testPurpose = details['purpose'] || details['test purpose'] || null;
+
+    // ADCU software variants
+    adcuSoftware =
+      details['adcu software'] ||
+      details['adcu sw'] ||
+      details['adcu sw version'] ||
+      details['ecu software'] ||
+      null;
+
+    // Participants / Participant
+    participants =
+      details['participants'] ||
+      details['participant'] ||
+      null;
   } catch {}
   
   // 4) Additional comment (used for test grouping)
@@ -937,6 +954,7 @@ async function fetchSessionSummary(filename) {
   const summary = {
     mileageKm, issueCount, meanTempC, weatherAgg,
     testObject, testPurpose,
+    adcuSoftware, participants,
     kpiScore, kpiAvgPer1k,
     additionalComment,
     loaded: true
@@ -1244,14 +1262,15 @@ function renderAiSummaryHtml(rawText) {
 }
     
 // Open the AI summary .txt in a modal popup
-function openAiSummaryPopup() {
-  if (!currentReportFileName) {
+function openAiSummaryPopup(forFilename) {
+  const file = forFilename || currentReportFileName;
+  if (!file) {
     alert('No report selected for AI summary.');
     return;
   }
 
   // Replace .xlsx/.xls with .txt
-  const txtName = currentReportFileName.replace(/\.(xlsx|xls)$/i, '.txt');
+  const txtName = file.replace(/\.(xlsx|xls)$/i, '.txt');
   const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
 
   fetch(url, { cache: 'no-store' })
@@ -2663,9 +2682,12 @@ function openTestGroupView(group){
       ? filename.replace(`${dayStr}_`, '').replace('.xlsx','')
       : filename.replace('.xlsx','');
 
-    const km     = summary.mileageKm != null ? summary.mileageKm : '–';
-    const issues = summary.issueCount != null ? summary.issueCount : 0;
-    const kpi    = summary.kpiScore != null ? summary.kpiScore : '–';
+    const km         = summary.mileageKm != null ? summary.mileageKm : '–';
+    const issues     = summary.issueCount != null ? summary.issueCount : 0;
+    const kpi        = summary.kpiScore != null ? summary.kpiScore : '–';
+    const testObj    = summary.testObject || '–';
+    const adcuSw     = summary.adcuSoftware || '–';
+    const parts      = summary.participants || '–';
 
     const safeId = cssSafeId(filename);
 
@@ -2673,6 +2695,17 @@ function openTestGroupView(group){
       <tr>
         <td>${escapeHtml(dayStr)}</td>
         <td>${escapeHtml(niceName)}</td>
+        <td>${escapeHtml(testObj)}</td>
+        <td>${escapeHtml(adcuSw)}</td>
+        <td>${escapeHtml(parts)}</td>
+        <td>
+          <button type="button"
+                  class="download-button"
+                  data-session="${escapeHtml(filename)}"
+                  id="gen_${safeId}">
+            Open report
+          </button>
+        </td>
         <td>${km}</td>
         <td>${issues}</td>
         <td>${kpi}</td>
@@ -2707,6 +2740,10 @@ function openTestGroupView(group){
         <tr>
           <th>Date</th>
           <th>Session</th>
+          <th>Test object</th>
+          <th>ADCU Software</th>
+          <th>Participants</th>
+          <th>Generated report</th>
           <th>Mileage (km)</th>
           <th>Issues</th>
           <th>KPI score</th>
@@ -2723,13 +2760,23 @@ function openTestGroupView(group){
   document.getElementById('back-to-overview-btn')
     ?.addEventListener('click', () => renderOverview());
 
-  // Attach Open buttons → loadFile(filename)
-  content.querySelectorAll('button[data-session]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const f = btn.getAttribute('data-session');
-      if (f) loadFile(f);
+  // Attach "Open" buttons → loadFile(filename)
+  content.querySelectorAll('button.download-button[id^="open_"][data-session]')
+    .forEach(btn => {
+      btn.addEventListener('click', () => {
+        const f = btn.getAttribute('data-session');
+        if (f) loadFile(f);
+      });
     });
-  });
+
+  // Attach "Generated report" buttons → openAiSummaryPopup(filename)
+  content.querySelectorAll('button.download-button[id^="gen_"][data-session]')
+    .forEach(btn => {
+      btn.addEventListener('click', () => {
+        const f = btn.getAttribute('data-session');
+        if (f) openAiSummaryPopup(f);
+      });
+    });
 }
     
 function scoringLegendHtml(){
