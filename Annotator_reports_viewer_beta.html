@@ -2520,23 +2520,40 @@ function buildLatestRoutePreviews(files){
     });
 
     // 2) For each card, draw the mini route map using the cached workbook
-    slots.forEach(({ item, mapDiv }) => {
-      loadWorkbook(item.filename)
-        .then(({ wb }) => {
-          const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-          if (!samplingName) return;
+slots.forEach(({ item, mapDiv }) => {
+  loadWorkbook(item.filename)
+    .then(({ wb }) => {
+      const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
+      if (!samplingName) return;
 
-          const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-          if (!path || path.length < 2) return;
+      const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+      if (!path || path.length < 2) return;
 
-          const mini = L.map(mapDiv, { attributionControl:false, zoomControl:false });
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
-          const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
-          mini.fitBounds(line.getBounds(), { padding:[8,8] });
-          mini.whenReady(() => mini.invalidateSize());
-        })
-        .catch(() => { /* ignore individual failures for a single card */ });
-    });
+      // Mini map: zoom disabled
+      const mini = L.map(mapDiv, {
+        attributionControl: false,
+        zoomControl: false,
+        scrollWheelZoom: false,
+        doubleClickZoom: false,
+        touchZoom: false,
+        boxZoom: false,
+        keyboard: false
+      });
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+
+      const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
+      mini.fitBounds(line.getBounds(), { padding:[8,8] });
+
+      // Lock zoom level after fitBounds (so user can’t zoom in/out)
+      const fixedZoom = mini.getZoom();
+      mini.setMinZoom(fixedZoom);
+      mini.setMaxZoom(fixedZoom);
+
+      mini.whenReady(() => mini.invalidateSize());
+    })
+    .catch(() => { /* ignore individual failures for a single card */ });
+});
   });
 }
 
@@ -2651,6 +2668,40 @@ all.forEach(({ filename, summary }) => {
         if (group) openTestGroupView(group);
       });
     });
+  });
+}
+
+// Open a test group when we only know its label (Additional comment text)
+function openTestGroupViewByLabel(label) {
+  const commentKey = (label || '').trim();
+  if (!commentKey) return;
+
+  // Use allFiles if we have it; otherwise fall back to whatever is in the cache
+  const files = (allFiles && allFiles.length)
+    ? allFiles
+    : Array.from(summaryCache.keys());
+
+  const promises = files.map(f =>
+    fetchSessionSummary(f)
+      .then(summary => ({ filename: f, summary }))
+      .catch(() => null)
+  );
+
+  Promise.all(promises).then(rows => {
+    const sessions = rows.filter(r =>
+      r &&
+      r.summary &&
+      r.summary.additionalComment &&
+      r.summary.additionalComment.trim() === commentKey
+    );
+
+    if (!sessions.length) {
+      alert('No sessions found for this test group (it may have been renamed or removed).');
+      return;
+    }
+
+    const group = { comment: commentKey, sessions };
+    openTestGroupView(group);  // use the existing renderer
   });
 }
 
@@ -3631,7 +3682,7 @@ function loadFile(filename) {
     backToGroupBtn.className = 'download-button nav-button';
     backToGroupBtn.innerHTML = '← View test group';
     backToGroupBtn.style.marginRight = '12px';
-    backToGroupBtn.addEventListener('click', () => openTestGroupView(groupKey));
+    backToGroupBtn.addEventListener('click', () => openTestGroupViewByLabel(groupKey));
     content.appendChild(backToGroupBtn);
   }
   
