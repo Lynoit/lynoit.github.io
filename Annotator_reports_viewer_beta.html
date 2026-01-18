@@ -750,6 +750,30 @@ function hideGlobalLoading(){
   box.classList.add('hidden');
 }
 
+let globalProgressTotalFiles = 0;
+
+function initGlobalProgress(totalFiles) {
+  globalProgressTotalFiles = totalFiles || 0;
+  if (globalProgressTotalFiles > 0) {
+    setGlobalLoading(
+      `Reading 0 of ${globalProgressTotalFiles} sessions…`,
+      0
+    );
+  }
+}
+
+function updateGlobalProgress(doneCount) {
+  if (!globalProgressTotalFiles) return;
+
+  const safeDone = Math.min(doneCount, globalProgressTotalFiles);
+  const pct = (safeDone / globalProgressTotalFiles) * 100;
+
+  setGlobalLoading(
+    `Reading session ${safeDone} of ${globalProgressTotalFiles}…`,
+    pct
+  );
+}
+    
 // --- Simple stateful progress helpers for the "reading sessions" phase ---
 let globalProgressTotalFiles = 0;
 
@@ -1614,44 +1638,58 @@ function addAiSummaryRow(testDetailsTableEl) {
       initGlobalProgress(xlsxNames.length);
 
       // 🔹 SEQUENTIAL preload of summaries: newest → oldest
-      return preloadSummariesSequentially(xlsxNames)
-        .then(() => {
-          // After ALL sessions have been read (and sidebar updated),
-          // build the overview parts (they now hit the summary cache).
-          setGlobalLoading('Building overview charts…', 75);
+return preloadSummariesSequentially(xlsxNames)
+  .then(() => {
+    // Sessions are all read, bar already at 100% here.
+    // Just build the overview; we keep the bar visible as "Building overview…"
+    return Promise.all([
+      buildOverviewHeatmap(xlsxNames)
+        .finally(() => setTitleLoading(h1, false)),
 
-          return Promise.all([
-            buildOverviewHeatmap(xlsxNames)
-              .then(() => setGlobalLoading('Heatmap ready…', 82))
-              .finally(() => setTitleLoading(h1, false)),
+      buildCountryMonthChart(xlsxNames),
+      buildTempMonthChart(xlsxNames),
+      buildWeatherMonthChart(xlsxNames),
 
-            buildCountryMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Country activity ready…', 86)),
+      buildEUMileageMap(xlsxNames)
+        .finally(() => setTitleLoading(hEU, false)),
 
-            buildTempMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Temperature overview ready…', 90)),
+      buildLatestRoutePreviews(xlsxNames)
+        .finally(() => setTitleLoading(h2, false)),
 
-            buildWeatherMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Weather overview ready…', 94)),
-
-            buildEUMileageMap(xlsxNames)
-              .then(() => setGlobalLoading('Mileage map ready…', 96))
-              .finally(() => setTitleLoading(hEU, false)),
-
-            buildLatestRoutePreviews(xlsxNames)
-              .then(() => setGlobalLoading('Latest tests ready…', 98))
-              .finally(() => setTitleLoading(h2, false)),
-
-            buildTestGroupsSection(xlsxNames)
-          ]);
-        })
-.then(() => {
-  // All charts & maps are ready → jump to 100%
-  setGlobalLoading('Done.', 100);
-  setTimeout(() => {
+      buildTestGroupsSection(xlsxNames)
+    ]);
+  })
+  .then(() => {
+    // All done → hide bar
     hideGlobalLoading();
-  }, 500);
-});
+    setTimeout(hideGlobalLoading, 800);
+  });
+return preloadSummariesSequentially(xlsxNames)
+  .then(() => {
+    // Sessions are all read, bar already at 100% here.
+    // Just build the overview; we keep the bar visible as "Building overview…"
+    return Promise.all([
+      buildOverviewHeatmap(xlsxNames)
+        .finally(() => setTitleLoading(h1, false)),
+
+      buildCountryMonthChart(xlsxNames),
+      buildTempMonthChart(xlsxNames),
+      buildWeatherMonthChart(xlsxNames),
+
+      buildEUMileageMap(xlsxNames)
+        .finally(() => setTitleLoading(hEU, false)),
+
+      buildLatestRoutePreviews(xlsxNames)
+        .finally(() => setTitleLoading(h2, false)),
+
+      buildTestGroupsSection(xlsxNames)
+    ]);
+  })
+  .then(() => {
+    // All done → hide bar
+    hideGlobalLoading();
+    setTimeout(hideGlobalLoading, 800);
+  });
     })
     .catch(err => showError('Failed to list blobs: ' + err))
     .finally(() => {
@@ -1794,30 +1832,7 @@ function ensureActiveBadgeUpdater(){
   _activeBadgeTimer = setInterval(tick, 30000); // every 30s
 }
 
-// Sequentially read all sessions, newest → oldest, and update sidebar meta/KPI
-async function preloadSummariesSequentially(files) {
-  // Ensure we go newest → oldest using Last-Modified
-  const ordered = [...files].sort((a, b) => {
-    const la = blobMeta.get(a) || 0;
-    const lb = blobMeta.get(b) || 0;
-    if (lb !== la) return lb - la;
-    return b.localeCompare(a);
-  });
-
-  const total = ordered.length || 1;
-
-  let idx = 0;
-  for (const filename of ordered) {
-    idx++;
-
-    // Use the helper: maps idx/total → 0–70%
-    updateGlobalProgress(idx);
-
-    const summary = await fetchSessionSummary(filename);
-    applySummaryToSidebar(filename, summary);
-  }
-}
-
+async function preloadSummariesSequentially(files)
 // Fill sidebar meta line + KPI badge for a single session
 function applySummaryToSidebar(filename, summary) {
   if (!summary) return;
@@ -1845,7 +1860,6 @@ function applySummaryToSidebar(filename, summary) {
   }
 }
    
-
     // ---------- OVERVIEW HEATMAP (Test activity) ----------
     function buildOverviewHeatmap(files){
       const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
