@@ -1571,6 +1571,11 @@ function addAiSummaryRow(testDetailsTableEl) {
 }
 
 function listBlobs() {
+  // Start global loading bar early
+  if (typeof setGlobalLoading === 'function') {
+    setGlobalLoading('Preparing to read sessions…', 5);
+  }
+
   fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache: 'default' })
     .then(r => r.text())
     .then(xml => {
@@ -1588,12 +1593,12 @@ function listBlobs() {
       const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
       if (xlsx.length === 0) {
         showError('No .xlsx files found.');
-        // make sure we un-hide UI even on this path
         document.body.classList.remove('initial-loading');
+        if (typeof hideGlobalLoading === 'function') hideGlobalLoading();
         return;
       }
 
-      // 🔹 Sort newest → oldest
+      // Newest → oldest
       xlsx.sort((a, b) => {
         const la = a.lastModifiedMs || 0;
         const lb = b.lastModifiedMs || 0;
@@ -1606,66 +1611,33 @@ function listBlobs() {
       xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
 
       const xlsxNames = xlsx.map(b => b.name);
-      allFiles = xlsxNames; // for re-rendering overview later
+      allFiles = xlsxNames;          // for overview / groups / buttons etc.
 
-      // Build sidebar structure (all sessions, meta initially "Loading…")
+      // Sidebar structure (days + sessions) – metas initially "Loading…"
       buildSidebar(xlsxNames);
 
-      // Put titles into loading state
-      const h1  = document.getElementById('title-overview');
-      const h2  = document.getElementById('title-latest-routes');
-      const hEU = document.getElementById('title-eu-mileage');
-      setTitleLoading(h1, true, 'Loading');
-      setTitleLoading(h2, true, 'Loading');
-      setTitleLoading(hEU, true, 'Loading');
+      // Now read all sessions sequentially & update sidebar meta/KPI
+      if (typeof setGlobalLoading === 'function') {
+        setGlobalLoading('Reading sessions…', 10);
+      }
 
-      // Start global loading bar
-      setGlobalLoading('Preparing to read sessions…', 5);
+      return preloadSummariesSequentially(xlsxNames);
+    })
+    .then(() => {
+      // All summaries done → show main overview (latest tests, buttons, groups …)
+      document.body.classList.remove('initial-loading');
+      if (typeof hideGlobalLoading === 'function') hideGlobalLoading();
 
-      // 🔹 SEQUENTIAL preload of summaries: newest → oldest
-      return preloadSummariesSequentially(xlsxNames)
-        .then(() => {
-          // 👇 IMPORTANT: show overview *before* building charts/maps
-          document.body.classList.remove('initial-loading');
-
-          // After ALL sessions have been read (and sidebar updated),
-          // build the overview parts (they now hit the summary cache).
-          setGlobalLoading('Building overview charts…', 75);
-
-          return Promise.all([
-            buildOverviewHeatmap(xlsxNames)
-              .then(() => setGlobalLoading('Heatmap ready…', 82))
-              .finally(() => setTitleLoading(h1, false)),
-
-            buildCountryMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Country activity ready…', 86)),
-
-            buildTempMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Temperature overview ready…', 90)),
-
-            buildWeatherMonthChart(xlsxNames)
-              .then(() => setGlobalLoading('Weather overview ready…', 94)),
-
-            buildEUMileageMap(xlsxNames)
-              .then(() => setGlobalLoading('Mileage map ready…', 96))
-              .finally(() => setTitleLoading(hEU, false)),
-
-            buildLatestRoutePreviews(xlsxNames)
-              .then(() => setGlobalLoading('Latest tests ready…', 98))
-              .finally(() => setTitleLoading(h2, false)),
-
-            buildTestGroupsSection(xlsxNames)
-          ]);
-        })
-        .then(() => {
-          hideGlobalLoading();
-          setTimeout(hideGlobalLoading, 800);
-        });
+      // This rebuilds the main content area and wires the "Load heatmaps"/"Load map" buttons
+      if (typeof renderOverview === 'function') {
+        renderOverview();
+      }
     })
     .catch(err => {
+      console.error(err);
       showError('Failed to list blobs: ' + err);
-      // in case of error also un-hide UI
       document.body.classList.remove('initial-loading');
+      if (typeof hideGlobalLoading === 'function') hideGlobalLoading();
     });
 }
 
