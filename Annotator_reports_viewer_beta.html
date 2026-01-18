@@ -283,6 +283,42 @@
       display: block;
     }
 
+/* === Global loading status bar === */
+.loading-status{
+  background:#fffbe6;
+  border:1px solid #ffe58f;
+  padding:8px 12px;
+  border-radius:6px;
+  margin-bottom:12px;
+  font-size:13px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  max-width:520px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+.loading-status.hidden{
+  display:none;
+}
+.loading-text{
+  font-weight:500;
+  color:#8c6b00;
+}
+.loading-bar-wrap{
+  width:100%;
+  height:6px;
+  border-radius:999px;
+  background:#f5f5f5;
+  overflow:hidden;
+}
+.loading-bar{
+  height:100%;
+  width:0;
+  border-radius:999px;
+  background:linear-gradient(90deg,#faad14,#52c41a);
+  transition:width .25s ease;
+}
+    
  /* KPI badge (uses same s1..s10 colors as score boxes) */
 .kpi-badge{
   display:inline-flex; align-items:center; justify-content:center;
@@ -415,6 +451,18 @@
   </div>
 
 <div id="content">
+  <div id="loading-status" class="loading-status hidden">
+    <div id="loading-text" class="loading-text">Loading…</div>
+    <div class="loading-bar-wrap">
+      <div id="loading-bar"
+           class="loading-bar"
+           role="progressbar"
+           aria-valuemin="0"
+           aria-valuemax="100"
+           aria-valuenow="0"></div>
+    </div>
+  </div>
+  
   <!-- Latest routes FIRST -->
   <div class="routes-wrap" style="grid-column: 1 / -1;">
     <h2 id="title-latest-routes" data-title="Latest tests" data-loading="1" style="margin-top:0;">
@@ -668,6 +716,31 @@ function nc(url){
       }
     }
 
+    // === Global loading progress bar helpers ===
+function setGlobalLoading(message, percent){
+  const box = document.getElementById('loading-status');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  const msgEl = document.getElementById('loading-text');
+  if (msgEl && message) {
+    msgEl.textContent = message;
+  }
+
+  const barEl = document.getElementById('loading-bar');
+  if (barEl && typeof percent === 'number') {
+    const clamped = Math.max(0, Math.min(100, percent));
+    barEl.style.width = clamped + '%';
+    barEl.setAttribute('aria-valuenow', String(Math.round(clamped)));
+  }
+}
+
+function hideGlobalLoading(){
+  const box = document.getElementById('loading-status');
+  if (!box) return;
+  box.classList.add('hidden');
+}
+   
     function computeMileageAndPathFromSampling(sheet) {
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       if (rows.length < 3) return { km: null, path: [] };
@@ -1506,20 +1579,44 @@ function addAiSummaryRow(testDetailsTableEl) {
       setTitleLoading(h2, true, 'Loading');
       setTitleLoading(hEU, true, 'Loading');
 
+      // Start global loading bar
+      setGlobalLoading('Preparing to read sessions…', 5);
+
       // 🔹 SEQUENTIAL preload of summaries: newest → oldest
       return preloadSummariesSequentially(xlsxNames)
         .then(() => {
           // After ALL sessions have been read (and sidebar updated),
-          // build the heavy overview parts (they now hit the summary cache).
+          // build the overview parts (they now hit the summary cache).
+          setGlobalLoading('Building overview charts…', 75);
+
           return Promise.all([
-            buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
-            buildCountryMonthChart(xlsxNames),
-            buildTempMonthChart(xlsxNames),
-            buildWeatherMonthChart(xlsxNames),
-            buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false)),
-            buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
+            buildOverviewHeatmap(xlsxNames)
+              .then(() => setGlobalLoading('Heatmap ready…', 82))
+              .finally(() => setTitleLoading(h1, false)),
+
+            buildCountryMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Country activity ready…', 86)),
+
+            buildTempMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Temperature overview ready…', 90)),
+
+            buildWeatherMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Weather overview ready…', 94)),
+
+            buildEUMileageMap(xlsxNames)
+              .then(() => setGlobalLoading('Mileage map ready…', 96))
+              .finally(() => setTitleLoading(hEU, false)),
+
+            buildLatestRoutePreviews(xlsxNames)
+              .then(() => setGlobalLoading('Latest tests ready…', 98))
+              .finally(() => setTitleLoading(h2, false)),
+
             buildTestGroupsSection(xlsxNames)
           ]);
+        })
+        .then(() => {
+          hideGlobalLoading();
+          setTimeout(hideGlobalLoading, 800);
         });
     })
     .catch(err => showError('Failed to list blobs: ' + err));
@@ -1669,11 +1766,17 @@ async function preloadSummariesSequentially(files) {
     return b.localeCompare(a);
   });
 
-  for (const filename of ordered) {
-    // 1) Read this session (uses loadWorkbook under the hood)
-    const summary = await fetchSessionSummary(filename);
+  const total = ordered.length || 1;
 
-    // 2) Immediately apply to sidebar (now clickable + fully populated)
+  let idx = 0;
+  for (const filename of ordered) {
+    idx++;
+
+    // Progress covers roughly 0–60% for the "reading all sessions" phase
+    const pct = (idx / total) * 60;
+    setGlobalLoading(`Reading session ${idx} of ${total}…`, pct);
+
+    const summary = await fetchSessionSummary(filename);
     applySummaryToSidebar(filename, summary);
   }
 }
