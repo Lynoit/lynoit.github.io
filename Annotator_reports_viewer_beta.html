@@ -1570,7 +1570,7 @@ function addAiSummaryRow(testDetailsTableEl) {
     buildTestGroupsSection(allFiles);  }
 }
 
-  function listBlobs() {
+function listBlobs() {
   fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache: 'default' })
     .then(r => r.text())
     .then(xml => {
@@ -1588,6 +1588,8 @@ function addAiSummaryRow(testDetailsTableEl) {
       const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
       if (xlsx.length === 0) {
         showError('No .xlsx files found.');
+        // make sure we un-hide UI even on this path
+        document.body.classList.remove('initial-loading');
         return;
       }
 
@@ -1595,7 +1597,7 @@ function addAiSummaryRow(testDetailsTableEl) {
       xlsx.sort((a, b) => {
         const la = a.lastModifiedMs || 0;
         const lb = b.lastModifiedMs || 0;
-        if (lb !== la) return lb - la;      // newer first
+        if (lb !== la) return lb - la;
         return b.name.localeCompare(a.name);
       });
 
@@ -1618,68 +1620,54 @@ function addAiSummaryRow(testDetailsTableEl) {
       setTitleLoading(hEU, true, 'Loading');
 
       // Start global loading bar
-      initGlobalProgress(xlsxNames.length);
+      setGlobalLoading('Preparing to read sessions…', 5);
 
       // 🔹 SEQUENTIAL preload of summaries: newest → oldest
-return preloadSummariesSequentially(xlsxNames)
-  .then(() => {
-    // Sessions are all read, bar already at 100% here.
-    // Just build the overview; we keep the bar visible as "Building overview…"
-    return Promise.all([
-      buildOverviewHeatmap(xlsxNames)
-        .finally(() => setTitleLoading(h1, false)),
+      return preloadSummariesSequentially(xlsxNames)
+        .then(() => {
+          // 👇 IMPORTANT: show overview *before* building charts/maps
+          document.body.classList.remove('initial-loading');
 
-      buildCountryMonthChart(xlsxNames),
-      buildTempMonthChart(xlsxNames),
-      buildWeatherMonthChart(xlsxNames),
+          // After ALL sessions have been read (and sidebar updated),
+          // build the overview parts (they now hit the summary cache).
+          setGlobalLoading('Building overview charts…', 75);
 
-      buildEUMileageMap(xlsxNames)
-        .finally(() => setTitleLoading(hEU, false)),
+          return Promise.all([
+            buildOverviewHeatmap(xlsxNames)
+              .then(() => setGlobalLoading('Heatmap ready…', 82))
+              .finally(() => setTitleLoading(h1, false)),
 
-      buildLatestRoutePreviews(xlsxNames)
-        .finally(() => setTitleLoading(h2, false)),
+            buildCountryMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Country activity ready…', 86)),
 
-      buildTestGroupsSection(xlsxNames)
-    ]);
-  })
-  .then(() => {
-    // All done → hide bar
-    hideGlobalLoading();
-    setTimeout(hideGlobalLoading, 800);
-  });
-return preloadSummariesSequentially(xlsxNames)
-  .then(() => {
-    // Sessions are all read, bar already at 100% here.
-    // Just build the overview; we keep the bar visible as "Building overview…"
-    return Promise.all([
-      buildOverviewHeatmap(xlsxNames)
-        .finally(() => setTitleLoading(h1, false)),
+            buildTempMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Temperature overview ready…', 90)),
 
-      buildCountryMonthChart(xlsxNames),
-      buildTempMonthChart(xlsxNames),
-      buildWeatherMonthChart(xlsxNames),
+            buildWeatherMonthChart(xlsxNames)
+              .then(() => setGlobalLoading('Weather overview ready…', 94)),
 
-      buildEUMileageMap(xlsxNames)
-        .finally(() => setTitleLoading(hEU, false)),
+            buildEUMileageMap(xlsxNames)
+              .then(() => setGlobalLoading('Mileage map ready…', 96))
+              .finally(() => setTitleLoading(hEU, false)),
 
-      buildLatestRoutePreviews(xlsxNames)
-        .finally(() => setTitleLoading(h2, false)),
+            buildLatestRoutePreviews(xlsxNames)
+              .then(() => setGlobalLoading('Latest tests ready…', 98))
+              .finally(() => setTitleLoading(h2, false)),
 
-      buildTestGroupsSection(xlsxNames)
-    ]);
-  })
-  .then(() => {
-    // All done → hide bar
-    hideGlobalLoading();
-    setTimeout(hideGlobalLoading, 800);
-  });
+            buildTestGroupsSection(xlsxNames)
+          ]);
+        })
+        .then(() => {
+          hideGlobalLoading();
+          setTimeout(hideGlobalLoading, 800);
+        });
     })
-    .catch(err => showError('Failed to list blobs: ' + err))
-    .finally(() => {
-      // initial load is done → show overview + titles
+    .catch(err => {
+      showError('Failed to list blobs: ' + err);
+      // in case of error also un-hide UI
       document.body.classList.remove('initial-loading');
     });
-  }
+}
 
     // ---------- SIDEBAR ----------
  function buildSidebar(files) {
