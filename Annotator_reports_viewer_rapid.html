@@ -603,6 +603,10 @@ const APP_PASSWORD = 'adasfleet'; // change to your own
     
 const workbookCache = new Map(); // filename -> Promise<{ wb, buf }>
 
+function endInitialLoading(){
+  document.body.classList.remove('initial-loading');
+}
+    
 function formatTimestampForLabel(d = new Date()) {
   const pad = n => String(n).padStart(2, '0');
   const yyyy = d.getFullYear();
@@ -1554,6 +1558,7 @@ function addAiSummaryRow(testDetailsTableEl) {
     
     // Helper to render the default overview page
     function renderOverview(){
+      endInitialLoading(); // ✅ ensure overview is not hidden when returning
   const content = document.getElementById('content');
   content.innerHTML = `
     <!-- Latest routes FIRST -->
@@ -1668,6 +1673,8 @@ function listBlobs() {
       // SEQUENTIAL preload
       return preloadSummariesSequentially(xlsxNames)
         .then(() => {
+          endInitialLoading(); // ✅ make overview visible BEFORE rendering charts/maps
+          
           return Promise.all([
             buildOverviewHeatmap(xlsxNames)
               .finally(() => setTitleLoading(h1, false)),
@@ -1929,11 +1936,12 @@ function buildOverviewHeatmap(files){
       ensureSummary(x.filename).then(s => ({ ...x, ...s }))
     )
   ).then(rows => {
-    rows.forEach(r => {
-      if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
-      const prev = byDay.get(r.dayStr) || 0;
-      byDay.set(r.dayStr, prev + (r.issueCount || 0));
-    });
+rows.forEach(r => {
+  // ✅ activity = number of tests, not issue count
+  if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW) return;
+  const prev = byDay.get(r.dayStr) || 0;
+  byDay.set(r.dayStr, prev + 1);
+});
 
     const days = Array.from(byDay.keys()).sort();
     const host = document.getElementById('heatmap-host');
@@ -2068,7 +2076,7 @@ return Promise.all(
     ensureSummary(x.filename)
       .then(s => ({...x, ...s}))
       .then(r => {
-        if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+        if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW) return null;
         return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
       })
   )
@@ -2566,10 +2574,6 @@ function renderEUMileageMap(agg, issuePoints = []){
   if (!container) return;
 
   container.innerHTML = '';
-  const h = Math.round(container.getBoundingClientRect().height);
-  if (h > 0) {
-    container.style.height = h + 'px';
-  }
 
   const entries = Array.from(agg.entries()).filter(([,km]) => km > 0);
   if (!entries.length && (!issuePoints || !issuePoints.length)){
@@ -2661,7 +2665,8 @@ if (allBounds.length){
   map.setView([54,15], 4);
 }
 
-map.setView([54, 15], 4);
+requestAnimationFrame(() => map.invalidateSize());
+setTimeout(() => map.invalidateSize(), 200);
 
   map.whenReady(() => map.invalidateSize());
   setTimeout(() => map.invalidateSize(), 100);
