@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Camera Picker Test (USB Webcam)</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0f17; color:#e8eefc; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+    .card { background:#121a27; border:1px solid #1c2a40; border-radius: 14px; padding: 12px; }
+    .row { display:flex; gap:10px; flex-wrap: wrap; align-items: end; }
+    label { display:block; font-size: 12px; color:#93a4bd; margin-bottom:6px; }
+    select, button, input {
+      background:#0f1725; color:#e8eefc; border:1px solid #22344e; border-radius: 10px;
+      padding: 10px 10px; font-weight: 600;
+    }
+    button { cursor:pointer; background:#1a2a42; border-color:#243a5b; }
+    button:hover { border-color:#335684; }
+    button.ok { background:#123125; border-color:#1f5c44; }
+    button.danger { background:#3a1620; border-color:#5b2433; }
+    .pill { font-size: 12px; padding: 6px 10px; border-radius: 999px; border:1px solid #22344e; color:#93a4bd; background:#101a2a; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    video { width: 100%; max-height: 70vh; background:#000; border-radius: 14px; border:1px solid #22344e; }
+    .small { font-size: 12px; color:#93a4bd; line-height: 1.4; }
+    .error { color:#ffcc66; }
+    .oktxt { color:#3ddc97; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 10px; }
+    @media (min-width: 860px) {
+      .grid { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row">
+        <div style="flex:2; min-width: 260px;">
+          <label for="cameraSelect">Camera</label>
+          <select id="cameraSelect" disabled style="width:100%;">
+            <option value="">(grant permission first)</option>
+          </select>
+        </div>
+
+        <div style="flex:1; min-width: 170px;">
+          <label for="resolution">Preferred resolution</label>
+          <select id="resolution" style="width:100%;">
+            <option value="1280x720">1280×720</option>
+            <option value="1920x1080">1920×1080</option>
+            <option value="640x480">640×480</option>
+            <option value="any" selected>Any (most compatible)</option>
+          </select>
+        </div>
+
+        <div style="display:flex; gap:10px; flex-wrap: wrap;">
+          <button id="grantBtn" class="ok">Grant permission</button>
+          <button id="startBtn" disabled>Start selected</button>
+          <button id="stopBtn" class="danger" disabled>Stop</button>
+        </div>
+
+        <div class="pill mono" id="statusPill">idle</div>
+      </div>
+
+      <div class="small" style="margin-top:10px;">
+        Notes:
+        <ul style="margin:6px 0 0 18px; padding:0;">
+          <li>For best results, open this page on <span class="mono">https://</span> or <span class="mono">http://localhost</span> (not <span class="mono">file://</span>).</li>
+          <li>Device names may appear only <b>after</b> permission is granted (browser privacy rule).</li>
+          <li>If your USB webcam doesn’t show up, check OS camera privacy permissions and try another USB port/cable.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <video id="video" autoplay playsinline muted></video>
+      </div>
+
+      <div class="card">
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <div class="pill">Track</div>
+          <div class="pill mono" id="trackInfo">–</div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px;">
+          <div class="pill">Video</div>
+          <div class="pill mono" id="videoInfo">–</div>
+        </div>
+        <div style="margin-top:12px;">
+          <div class="pill">Diagnostics</div>
+          <pre id="diag" class="mono small" style="white-space:pre-wrap; margin:10px 0 0; padding:10px; border-radius:12px; border:1px solid #22344e; background:#0f1725;">–</pre>
+        </div>
+        <div id="err" class="small error" style="margin-top:10px;"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const el = {
+    cameraSelect: document.getElementById('cameraSelect'),
+    resolution: document.getElementById('resolution'),
+    grantBtn: document.getElementById('grantBtn'),
+    startBtn: document.getElementById('startBtn'),
+    stopBtn: document.getElementById('stopBtn'),
+    statusPill: document.getElementById('statusPill'),
+    video: document.getElementById('video'),
+    diag: document.getElementById('diag'),
+    err: document.getElementById('err'),
+    trackInfo: document.getElementById('trackInfo'),
+    videoInfo: document.getElementById('videoInfo'),
+  };
+
+  let stream = null;
+
+  function setStatus(s) { el.statusPill.textContent = s; }
+  function setError(msg) { el.err.textContent = msg || ''; }
+  function logDiag(obj) {
+    el.diag.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  }
+
+  function stopStream() {
+    if (stream) {
+      for (const t of stream.getTracks()) t.stop();
+      stream = null;
+    }
+    el.video.srcObject = null;
+    el.startBtn.disabled = el.cameraSelect.value === '';
+    el.stopBtn.disabled = true;
+    el.trackInfo.textContent = '–';
+    el.videoInfo.textContent = '–';
+    setStatus('stopped');
+  }
+
+  async function listCameras() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+
+    el.cameraSelect.innerHTML = '';
+    if (cams.length === 0) {
+      el.cameraSelect.innerHTML = '<option value="">(no cameras found)</option>';
+      el.cameraSelect.disabled = true;
+      el.startBtn.disabled = true;
+      return cams;
+    }
+
+    for (const [i, c] of cams.entries()) {
+      // label might be empty until permission granted
+      const label = c.label && c.label.trim()
+        ? c.label
+        : `Camera ${i + 1} (${c.deviceId.slice(0, 6)}…)`;
+      const opt = document.createElement('option');
+      opt.value = c.deviceId;
+      opt.textContent = label;
+      el.cameraSelect.appendChild(opt);
+    }
+
+    el.cameraSelect.disabled = false;
+    el.startBtn.disabled = false;
+    return cams;
+  }
+
+  function parseResolution(value) {
+    if (value === 'any') return null;
+    const [w, h] = value.split('x').map(Number);
+    if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+    return { w, h };
+  }
+
+  // Try a small ladder of constraints so USB cams with limited modes still work.
+  async function getStreamWithFallback(deviceId) {
+    const res = parseResolution(el.resolution.value);
+
+    const baseExact = {
+      audio: false,
+      video: {
+        deviceId: { exact: deviceId },
+        ...(res ? { width: { ideal: res.w }, height: { ideal: res.h } } : {}),
+      }
+    };
+
+    const attempts = [
+      // 1) user preference (ideal constraints)
+      baseExact,
+      // 2) drop resolution constraints
+      { audio:false, video: { deviceId: { exact: deviceId } } },
+      // 3) last resort: let browser decide (still try to target deviceId)
+      { audio:false, video: { deviceId: deviceId } },
+      // 4) ultimate fallback: any camera (helps identify permission/driver issues)
+      { audio:false, video: true },
+    ];
+
+    let lastErr = null;
+    for (const c of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(c);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr;
+  }
+
+  async function startSelected() {
+    setError('');
+    const deviceId = el.cameraSelect.value;
+    if (!deviceId) {
+      setError('No camera selected.');
+      return;
+    }
+
+    stopStream();
+    setStatus('starting…');
+    logDiag('Requesting stream…');
+
+    try {
+      stream = await getStreamWithFallback(deviceId);
+      el.video.srcObject = stream;
+
+      const track = stream.getVideoTracks()[0];
+      const settings = track.getSettings ? track.getSettings() : {};
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+
+      el.stopBtn.disabled = false;
+      el.startBtn.disabled = false;
+
+      // Wait a tick so videoWidth/Height populate
+      await new Promise(r => setTimeout(r, 200));
+      el.videoInfo.textContent = `${el.video.videoWidth || '–'}×${el.video.videoHeight || '–'} @ ${settings.frameRate ?? '–'}fps`;
+      el.trackInfo.textContent = `${track.label || 'video track'} | readyState=${track.readyState}`;
+
+      setStatus('live');
+      logDiag({
+        selectedDeviceId: deviceId,
+        trackLabel: track.label,
+        settings,
+        capabilities: caps
+      });
+    } catch (err) {
+      setStatus('error');
+      const name = err?.name || 'Error';
+      const msg  = err?.message || String(err);
+      setError(`${name}: ${msg}`);
+      logDiag({ name, message: msg, err });
+      stopStream();
+    }
+  }
+
+  async function grantPermission() {
+    setError('');
+    setStatus('requesting permission…');
+    logDiag('Calling getUserMedia({video:true}) to unlock device labels…');
+
+    try {
+      // One-time prompt. We immediately stop it afterwards.
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      for (const t of s.getTracks()) t.stop();
+
+      setStatus('permission granted');
+      await listCameras();
+
+      el.startBtn.disabled = el.cameraSelect.disabled;
+    } catch (err) {
+      setStatus('permission denied');
+      const name = err?.name || 'Error';
+      const msg  = err?.message || String(err);
+      setError(`${name}: ${msg}`);
+      logDiag({ name, message: msg, err });
+    }
+  }
+
+  // If cameras are plugged/unplugged while the page is open:
+  navigator.mediaDevices?.addEventListener?.('devicechange', async () => {
+    const prev = el.cameraSelect.value;
+    await listCameras();
+    // try to keep selection if still present
+    const stillThere = [...el.cameraSelect.options].some(o => o.value === prev);
+    if (stillThere) el.cameraSelect.value = prev;
+  });
+
+  el.grantBtn.addEventListener('click', grantPermission);
+  el.startBtn.addEventListener('click', startSelected);
+  el.stopBtn.addEventListener('click', stopStream);
+  el.cameraSelect.addEventListener('change', () => {
+    el.startBtn.disabled = el.cameraSelect.value === '';
+  });
+
+  // Initial state
+  setStatus('idle');
+  logDiag('Click “Grant permission” first. Then select your USB webcam and press “Start selected”.');
+})();
+</script>
+</body>
+</html>
