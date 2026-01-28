@@ -480,6 +480,30 @@
 .overview{
   row-gap: 28px;                    /* vertical spacing between tiles */
 }
+
+/* === Mini progress overlay for Latest route maps === */
+.route-map{ position: relative; }  /* needed for absolute overlay */
+
+.mini-loading{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background: rgba(255,255,255,.92);
+  border-radius:6px;
+  z-index: 500; /* above tiles while loading */
+}
+
+.mini-loading .loading-status{
+  margin:0;
+  max-width: 240px;     /* smaller than global */
+  width: calc(100% - 24px);
+  box-shadow:0 1px 2px rgba(0,0,0,.08);
+}
+
+.mini-loading .loading-bar-wrap{ height:6px; }
+.mini-loading .loading-text{ font-size:12px; }
     
 /* Hide main overview stuff while the initial progress bar is active */
 body.initial-loading #title-latest-routes,
@@ -603,6 +627,50 @@ const APP_PASSWORD = 'adasfleet'; // change to your own
     
 const workbookCache = new Map(); // filename -> Promise<{ wb, buf }>
 
+// === Per-map mini loading overlay helpers ===
+function showMiniMapLoading(mapDiv, message, percent){
+  if (!mapDiv) return;
+
+  let overlay = mapDiv.querySelector('.mini-loading');
+  if (!overlay){
+    overlay = document.createElement('div');
+    overlay.className = 'mini-loading';
+    overlay.innerHTML = `
+      <div class="loading-status">
+        <div class="loading-text">Loading…</div>
+        <div class="loading-bar-wrap">
+          <div class="loading-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+        </div>
+      </div>`;
+    mapDiv.appendChild(overlay);
+  }
+
+  const msgEl = overlay.querySelector('.loading-text');
+  if (msgEl && message) msgEl.textContent = message;
+
+  const barEl = overlay.querySelector('.loading-bar');
+  if (barEl && typeof percent === 'number'){
+    const clamped = Math.max(0, Math.min(100, percent));
+    barEl.style.width = clamped + '%';
+    barEl.setAttribute('aria-valuenow', String(Math.round(clamped)));
+  }
+}
+
+function hideMiniMapLoading(mapDiv){
+  const overlay = mapDiv?.querySelector('.mini-loading');
+  if (overlay) overlay.remove();
+}
+
+function showMiniMapError(mapDiv, message){
+  hideMiniMapLoading(mapDiv);
+  if (!mapDiv) return;
+  mapDiv.innerHTML = `<div style="padding:10px;font-size:12px;color:#666;">${escapeHtml(message || 'No data')}</div>`;
+}
+    
+function endInitialLoading(){
+  document.body.classList.remove('initial-loading');
+}
+    
 function formatTimestampForLabel(d = new Date()) {
   const pad = n => String(n).padStart(2, '0');
   const yyyy = d.getFullYear();
@@ -639,66 +707,6 @@ function escapeHtml(str){
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;')
     .replace(/'/g,'&#39;');
-}
-
-function renderAiSummaryHtml(raw) {
-  if (!raw) {
-    return '<div class="ai-summary-body"><p>(No content)</p></div>';
-  }
-
-  const lines = raw.split(/\r?\n/);
-  let timestampLine = '';
-
-  // First line like "AI summary generated at 2026-01-07 ..." → separate grey line
-  if (lines.length && /^AI summary generated at/i.test(lines[0])) {
-    timestampLine = lines.shift();
-  }
-
-  const parts = [];
-  let inList = false;
-
-  const closeList = () => {
-    if (inList) {
-      parts.push('</ul>');
-      inList = false;
-    }
-  };
-
-  for (let line of lines) {
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      // blank line => paragraph break
-      closeList();
-      parts.push('<br>');
-      continue;
-    }
-
-    if (trimmed.startsWith('- ')) {
-      // Bullet line
-      if (!inList) {
-        parts.push('<ul>');
-        inList = true;
-      }
-      let item = trimmed.slice(2);          // drop "- "
-      item = escapeHtml(item);              // escape HTML
-      item = item.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>'); // **bold**
-      parts.push('<li>' + item + '</li>');
-    } else {
-      // Normal text
-      closeList();
-      let text = escapeHtml(trimmed);
-      text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-      parts.push('<p>' + text + '</p>');
-    }
-  }
-  closeList();
-
-  const tsHtml = timestampLine
-    ? '<div class="ai-summary-timestamp">' + escapeHtml(timestampLine) + '</div>'
-    : '';
-
-  return tsHtml + '<div class="ai-summary-body">' + parts.join('') + '</div>';
 }
     
 // Map OSM highway types → 5 categories:
@@ -1554,6 +1562,7 @@ function addAiSummaryRow(testDetailsTableEl) {
     
     // Helper to render the default overview page
     function renderOverview(){
+      endInitialLoading(); // ✅ ensure overview is not hidden when returning
   const content = document.getElementById('content');
   content.innerHTML = `
     <!-- Latest routes FIRST -->
@@ -1615,7 +1624,7 @@ function addAiSummaryRow(testDetailsTableEl) {
     buildTestGroupsSection(allFiles);  }
 }
 
-  function listBlobs() {
+function listBlobs() {
   fetch(nc(`${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`), { cache: 'default' })
     .then(r => r.text())
     .then(xml => {
@@ -1630,31 +1639,32 @@ function addAiSummaryRow(testDetailsTableEl) {
         return { name, lastModifiedMs: Date.parse(lm) || 0 };
       });
 
+      // 1) Cache Last-Modified for *all* blobs
+      blobMeta.clear();
+      blobs.forEach(b => {
+        blobMeta.set(b.name, b.lastModifiedMs);
+      });
+
+      // 2) Filter xlsx
       const xlsx = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
       if (xlsx.length === 0) {
         showError('No .xlsx files found.');
         return;
       }
 
-      // 🔹 Sort newest → oldest
+      // Sort newest → oldest
       xlsx.sort((a, b) => {
         const la = a.lastModifiedMs || 0;
         const lb = b.lastModifiedMs || 0;
-        if (lb !== la) return lb - la;      // newer first
+        if (lb !== la) return lb - la;
         return b.name.localeCompare(a.name);
       });
 
-      // Cache Last-Modified for all files
-      blobMeta.clear();
-      xlsx.forEach(b => blobMeta.set(b.name, b.lastModifiedMs));
-
       const xlsxNames = xlsx.map(b => b.name);
-      allFiles = xlsxNames; // for re-rendering overview later
+      allFiles = xlsxNames;
 
-      // Build sidebar structure (all sessions, meta initially "Loading…")
       buildSidebar(xlsxNames);
 
-      // Put titles into loading state
       const h1  = document.getElementById('title-overview');
       const h2  = document.getElementById('title-latest-routes');
       const hEU = document.getElementById('title-eu-mileage');
@@ -1662,69 +1672,32 @@ function addAiSummaryRow(testDetailsTableEl) {
       setTitleLoading(h2, true, 'Loading');
       setTitleLoading(hEU, true, 'Loading');
 
-      // Start global loading bar
       initGlobalProgress(xlsxNames.length);
 
-      // 🔹 SEQUENTIAL preload of summaries: newest → oldest
-return preloadSummariesSequentially(xlsxNames)
-  .then(() => {
-    // Sessions are all read, bar already at 100% here.
-    // Just build the overview; we keep the bar visible as "Building overview…"
-    return Promise.all([
-      buildOverviewHeatmap(xlsxNames)
-        .finally(() => setTitleLoading(h1, false)),
-
-      buildCountryMonthChart(xlsxNames),
-      buildTempMonthChart(xlsxNames),
-      buildWeatherMonthChart(xlsxNames),
-
-      buildEUMileageMap(xlsxNames)
-        .finally(() => setTitleLoading(hEU, false)),
-
-      buildLatestRoutePreviews(xlsxNames)
-        .finally(() => setTitleLoading(h2, false)),
-
-      buildTestGroupsSection(xlsxNames)
-    ]);
-  })
-  .then(() => {
-    // All done → hide bar
-    hideGlobalLoading();
-    setTimeout(hideGlobalLoading, 800);
-  });
-return preloadSummariesSequentially(xlsxNames)
-  .then(() => {
-    // Sessions are all read, bar already at 100% here.
-    // Just build the overview; we keep the bar visible as "Building overview…"
-    return Promise.all([
-      buildOverviewHeatmap(xlsxNames)
-        .finally(() => setTitleLoading(h1, false)),
-
-      buildCountryMonthChart(xlsxNames),
-      buildTempMonthChart(xlsxNames),
-      buildWeatherMonthChart(xlsxNames),
-
-      buildEUMileageMap(xlsxNames)
-        .finally(() => setTitleLoading(hEU, false)),
-
-      buildLatestRoutePreviews(xlsxNames)
-        .finally(() => setTitleLoading(h2, false)),
-
-      buildTestGroupsSection(xlsxNames)
-    ]);
-  })
-  .then(() => {
-    // All done → hide bar
-    hideGlobalLoading();
-    setTimeout(hideGlobalLoading, 800);
-  });
-    })
-    .catch(err => showError('Failed to list blobs: ' + err))
-    .finally(() => {
-      // initial load is done → show overview + titles
-      document.body.classList.remove('initial-loading');
-    });
-  }
+      // SEQUENTIAL preload
+      return preloadSummariesSequentially(xlsxNames)
+        .then(() => {
+          endInitialLoading(); // ✅ make overview visible BEFORE rendering charts/maps
+          
+          return Promise.all([
+            buildOverviewHeatmap(xlsxNames)
+              .finally(() => setTitleLoading(h1, false)),
+            buildCountryMonthChart(xlsxNames),
+            buildTempMonthChart(xlsxNames),
+            buildWeatherMonthChart(xlsxNames),
+            buildEUMileageMap(xlsxNames)
+              .finally(() => setTitleLoading(hEU, false)),
+            buildLatestRoutePreviews(xlsxNames)
+              .finally(() => setTitleLoading(h2, false)),
+            buildTestGroupsSection(xlsxNames)
+          ]);
+        })
+        .then(() => {
+          hideGlobalLoading();
+          setTimeout(hideGlobalLoading, 800);
+        });
+    });  // <-- closes .then(xml => { ... })
+}         // <-- closes function listBlobs
 
     // ---------- SIDEBAR ----------
  function buildSidebar(files) {
@@ -1865,7 +1838,7 @@ async function preloadSummariesSequentially(files) {
 
   for (const f of files) {
     try {
-      const summary = await fetchSessionSummary(f);
+      const summary = await ensureSummary(f);   // 🔄 use ensureSummary
       applySummaryToSidebar(f, summary);
     } catch (e) {
       console.error('Failed to preload summary for', f, e);
@@ -1875,6 +1848,58 @@ async function preloadSummariesSequentially(files) {
   }
 }
 
+async function ensureSummary(filename) {
+  // already cached for this session?
+  if (summaryCache.has(filename)) {
+    return summaryCache.get(filename);
+  }
+
+  const base = filename.replace(/\.xlsx$/i, '');
+  const jsonName = base + '.json';
+
+  const xMs = blobMeta.get(filename) || 0;
+  const jMs = blobMeta.get(jsonName) || 0;
+
+  // 1) If JSON exists and is not older than XLSX → try using it
+  if (jMs && jMs >= xMs) {
+    try {
+      const url = `${BASE_URL}/${encodeURIComponent(jsonName)}?${SAS_TOKEN}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (res.ok) {
+        const summary = await res.json();
+        summaryCache.set(filename, summary);
+        return summary;
+      }
+    } catch (e) {
+      console.warn('Failed to load summary JSON for', filename, e);
+      // fall through to XLSX parsing
+    }
+  }
+
+  // 2) Otherwise: fall back to full XLSX parse (your existing logic)
+  const summary = await fetchSessionSummary(filename);  // you already have this
+  summaryCache.set(filename, summary);
+
+  // 3) Try to upload JSON so next app open can reuse it
+  try {
+    const jsonUrl = `${BASE_URL}/${encodeURIComponent(jsonName)}?${SAS_TOKEN}`;
+    await fetch(jsonUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(summary)
+    });
+    // locally update the meta so in this session we know JSON exists
+    blobMeta.set(jsonName, Date.now());
+  } catch (e) {
+    console.warn('Failed to upload summary JSON for', filename, e);
+  }
+
+  return summary;
+}
+    
 // Fill sidebar meta line + KPI badge for a single session
 function applySummaryToSidebar(filename, summary) {
   if (!summary) return;
@@ -1903,53 +1928,58 @@ function applySummaryToSidebar(filename, summary) {
 }
    
     // ---------- OVERVIEW HEATMAP (Test activity) ----------
-    function buildOverviewHeatmap(files){
-      const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
-      const withDates = files
-        .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
-        .filter(x => x.m)
-        .map(x => ({ filename: x.f, dayStr: x.m[1] }));
+function buildOverviewHeatmap(files){
+  const byDay = new Map(); // 'YYYY-MM-DD' -> totalIssues (only sessions ≥1 km and issues > 0)
+  const withDates = files
+    .map(f => ({ f, m: f.match(/(\d{4}-\d{2}-\d{2})/) }))
+    .filter(x => x.m)
+    .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(withDates.map(x => fetchSessionSummary(x.filename).then(s => ({...x, ...s})))).then(rows => {
-        rows.forEach(r => {
-          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return;
-          const prev = byDay.get(r.dayStr) || 0;
-          byDay.set(r.dayStr, prev + (r.issueCount || 0));
-        });
+  return Promise.all(
+    withDates.map(x =>
+      ensureSummary(x.filename).then(s => ({ ...x, ...s }))
+    )
+  ).then(rows => {
+rows.forEach(r => {
+  // ✅ activity = number of tests, not issue count
+  if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW) return;
+  const prev = byDay.get(r.dayStr) || 0;
+  byDay.set(r.dayStr, prev + 1);
+});
 
-        const days = Array.from(byDay.keys()).sort();
-        const host = document.getElementById('heatmap-host');
-        if (days.length === 0){
-          host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
-          return;
-        }
-
-        const minDate = toDateOnly(days[0]);
-        const maxDate = toDateOnly(days[days.length-1]);
-
-        const start = new Date(minDate);
-        const day = start.getDay(); // 0 Sun … 6 Sat
-        const offsetToMonday = (day === 0 ? 6 : day - 1);
-        start.setDate(start.getDate() - offsetToMonday);
-        start.setHours(0,0,0,0);
-
-        const end = new Date(maxDate);
-        const endDay = end.getDay();
-        const addToSunday = (7 - endDay) % 7;
-        end.setDate(end.getDate() + addToSunday);
-        end.setHours(0,0,0,0);
-
-        const dense = [];
-        let cur = new Date(start);
-        while (cur <= end) {
-          const ymd = cur.toISOString().slice(0,10);
-          dense.push({ date: new Date(cur), count: byDay.get(ymd) || 0 });
-          cur.setDate(cur.getDate() + 1);
-        }
-
-        renderHeatmap(dense);
-      });
+    const days = Array.from(byDay.keys()).sort();
+    const host = document.getElementById('heatmap-host');
+    if (days.length === 0){
+      host.innerHTML = '<div style="color:#666;">No eligible sessions (≥ 1 km and &gt; 0 issues) to show yet.</div>';
+      return;
     }
+
+    const minDate = toDateOnly(days[0]);
+    const maxDate = toDateOnly(days[days.length-1]);
+
+    const start = new Date(minDate);
+    const day = start.getDay(); // 0 Sun … 6 Sat
+    const offsetToMonday = (day === 0 ? 6 : day - 1);
+    start.setDate(start.getDate() - offsetToMonday);
+    start.setHours(0,0,0,0);
+
+    const end = new Date(maxDate);
+    const endDay = end.getDay();
+    const addToSunday = (7 - endDay) % 7;
+    end.setDate(end.getDate() + addToSunday);
+    end.setHours(0,0,0,0);
+
+    const dense = [];
+    let cur = new Date(start);
+    while (cur <= end) {
+      const ymd = cur.toISOString().slice(0,10);
+      dense.push({ date: new Date(cur), count: byDay.get(ymd) || 0 });
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    renderHeatmap(dense);
+  });
+}
 
    function renderHeatmap(denseDays){
   const host = document.getElementById('heatmap-host');
@@ -2045,16 +2075,16 @@ function applySummaryToSidebar(filename, summary) {
     return t.replace(/\b\w/g, c => c.toUpperCase());
   };
 
-  return Promise.all(
-    withDates.map(x =>
-      fetchSessionSummary(x.filename)
-        .then(s => ({...x, ...s}))
-        .then(r => {
-          if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-          return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
-        })
-    )
-  ).then(rows => {
+return Promise.all(
+  withDates.map(x =>
+    ensureSummary(x.filename)
+      .then(s => ({...x, ...s}))
+      .then(r => {
+        if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW) return null;
+        return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+      })
+  )
+).then(rows => {
     const valid = rows.filter(Boolean).filter(r => Array.isArray(r.countries) && r.countries.length > 0);
     const host = document.getElementById('country-host');
     if (!host) return;
@@ -2204,12 +2234,11 @@ function applySummaryToSidebar(filename, summary) {
         .filter(x => x.m)
         .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-      return Promise.all(
-        withDates.map(x =>
-          fetchSessionSummary(x.filename)
-            .then(s => ({...x, ...s}))
-        )
-      ).then(rows => {
+return Promise.all(
+  withDates.map(x =>
+    ensureSummary(x.filename).then(s => ({ ...x, ...s }))
+  )
+).then(rows => {
         const valid = rows.filter(r =>
           r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
           r.issueCount > 0 && r.meanTempC != null && !isNaN(r.meanTempC)
@@ -2356,12 +2385,11 @@ function applySummaryToSidebar(filename, summary) {
     return s === '' || /^weather$/i.test(s) || /^conditions?$/i.test(s) || /^n\/?a$/i.test(s) || /^unknown$/i.test(s);
   };
 
-  return Promise.all(
-    withDates.map(x =>
-      fetchSessionSummary(x.filename)
-        .then(s => ({...x, ...s}))
-    )
-  ).then(rows => {
+return Promise.all(
+  withDates.map(x =>
+    ensureSummary(x.filename).then(s => ({ ...x, ...s }))
+  )
+).then(rows => {
     const valid = rows.filter(r =>
       r && r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW &&
       r.issueCount > 0 && r.weatherAgg
@@ -2510,14 +2538,14 @@ function buildEUMileageMap(files){
     .filter(x => x.m)
     .map(x => ({ filename: x.f, dayStr: x.m[1] }));
 
-  return Promise.all(withDates.map(x =>
-    fetchSessionSummary(x.filename)
-      .then(s => ({...x, ...s}))
-      .then(r => {
-        if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
-        return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
-      })
-  )).then(async rows => {
+return Promise.all(withDates.map(x =>
+  ensureSummary(x.filename)
+    .then(s => ({...x, ...s}))
+    .then(r => {
+      if (r.mileageKm == null || r.mileageKm < MIN_KM_FOR_OVERVIEW || !(r.issueCount > 0)) return null;
+      return fetchCountriesForFile(r.filename).then(countries => ({...r, countries}));
+    })
+)).then(async rows => {
     const valid = rows.filter(Boolean);
     const agg = new Map();           // country -> total mileage (km)
     const issuePoints = [];          // all issue coordinates across valid sessions
@@ -2550,10 +2578,6 @@ function renderEUMileageMap(agg, issuePoints = []){
   if (!container) return;
 
   container.innerHTML = '';
-  const h = Math.round(container.getBoundingClientRect().height);
-  if (h > 0) {
-    container.style.height = h + 'px';
-  }
 
   const entries = Array.from(agg.entries()).filter(([,km]) => km > 0);
   if (!entries.length && (!issuePoints || !issuePoints.length)){
@@ -2645,7 +2669,8 @@ if (allBounds.length){
   map.setView([54,15], 4);
 }
 
-map.setView([54, 15], 4);
+requestAnimationFrame(() => map.invalidateSize());
+setTimeout(() => map.invalidateSize(), 200);
 
   map.whenReady(() => map.invalidateSize());
   setTimeout(() => map.invalidateSize(), 100);
@@ -2658,9 +2683,11 @@ function buildLatestRoutePreviews(files){
     .filter(x => x.m)
     .map(x => ({ filename: x.filename, dayStr: x.m[1] }));
 
-  return Promise.all(
-    withDates.map(x => fetchSessionSummary(x.filename).then(s => ({ ...x, ...s })))
-  ).then(rows => {
+return Promise.all(
+  withDates.map(x =>
+    ensureSummary(x.filename).then(s => ({ ...x, ...s }))
+  )
+).then(rows => {
     // Filter and sort strictly by date + last-modified
     const take = rows
       .filter(r => r.mileageKm != null && r.mileageKm >= MIN_KM_FOR_OVERVIEW && r.issueCount > 0)
@@ -2699,6 +2726,7 @@ function buildLatestRoutePreviews(files){
       mapDiv.className = 'route-map';
       mapDiv.id = `route_${cssSafeId(item.filename)}`;
       card.appendChild(mapDiv);
+      showMiniMapLoading(mapDiv, 'Preparing map…', 5);
 
       const meta = document.createElement('div');
       meta.className = 'route-meta';
@@ -2719,6 +2747,7 @@ function buildLatestRoutePreviews(files){
 
     // 2) For each card, draw the mini route map using the cached workbook
 slots.forEach(({ item, mapDiv }) => {
+  showMiniMapLoading(mapDiv, 'Loading route…', null);
   loadWorkbook(item.filename)
     .then(({ wb }) => {
       const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
@@ -2727,18 +2756,30 @@ slots.forEach(({ item, mapDiv }) => {
       const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
       if (!path || path.length < 2) return;
 
-      // Mini map: zoom disabled
-      const mini = L.map(mapDiv, {
-        attributionControl: false,
-        zoomControl: false,
-        scrollWheelZoom: false,
-        doubleClickZoom: false,
-        touchZoom: false,
-        boxZoom: false,
-        keyboard: false
-      });
+const mini = L.map(mapDiv, {
+  attributionControl: false,
+  zoomControl: false,
+  scrollWheelZoom: false,
+  doubleClickZoom: false,
+  touchZoom: false,
+  boxZoom: false,
+  keyboard: false
+});
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mini);
+
+// ✅ hide the progress overlay when tiles are ready (or fail)
+let done = false;
+const finish = () => {
+  if (done) return;
+  done = true;
+  hideMiniMapLoading(mapDiv);
+  requestAnimationFrame(() => mini.invalidateSize(true));
+};
+
+tiles.once('load', finish);
+tiles.once('tileerror', finish);
+setTimeout(finish, 2000); // fallback so it never gets stuck
 
       const line = L.polyline(path, { color:'blue', weight:3, opacity:0.8 }).addTo(mini);
       mini.fitBounds(line.getBounds(), { padding:[8,8] });
@@ -2761,9 +2802,9 @@ function buildTestGroupsSection(files){
   if (!files || !files.length) return Promise.resolve();
 
   // Make sure we have summaries (uses cache after first run)
-  const promises = files.map(f =>
-    fetchSessionSummary(f).then(summary => ({ filename: f, summary }))
-  );
+const promises = files.map(f =>
+  ensureSummary(f).then(summary => ({ filename: f, summary }))
+);
 
   return Promise.all(promises).then(all => {
     // Group by additionalComment
@@ -2878,12 +2919,12 @@ function openTestGroupViewByLabel(label) {
   const files = (allFiles && allFiles.length)
     ? allFiles
     : Array.from(summaryCache.keys());
-
-  const promises = files.map(f =>
-    fetchSessionSummary(f)
-      .then(summary => ({ filename: f, summary }))
-      .catch(() => null)
-  );
+  
+const promises = files.map(f =>
+  ensureSummary(f)
+    .then(summary => ({ filename: f, summary }))
+    .catch(() => null)
+);
 
   Promise.all(promises).then(rows => {
     const sessions = rows.filter(r =>
@@ -3964,9 +4005,10 @@ const baseNoExt = filename.replace(/\.xlsx$/i, '');
 // Files that belong to this session
 const filesToDelete = [
   filename,                 // the .xlsx
+  `${baseNoExt}.json`,      // parsed summary JSON
   `${baseNoExt}.zip`,       // issue images
   `${baseNoExt}_2.zip`,     // speed/accel plots
-  `${baseNoExt}.txt`        // 🔹 AI summary text file
+  `${baseNoExt}.txt`        // AI summary text file
 ];
 
   // 🔴 Delete session button (before download links)
