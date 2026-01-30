@@ -33,6 +33,7 @@
     .pill { display:inline-flex; gap:6px; align-items:center; border:1px solid #ddd; background:#fff; border-radius: 999px; padding: 6px 10px; font-size: 12px; }
     .mini { padding: 6px 10px; border-radius: 10px; border:1px solid #222; background:#fff; cursor:pointer; }
     .divider { height: 1px; background: #eee; margin: 10px 0; width: 100%; }
+    .note { background:#fff7d6; border:1px solid #f0d98a; padding:10px; border-radius:10px; font-size:12px; color:#5a4a00; }
   </style>
 
   <!-- jsPDF + autotable -->
@@ -128,10 +129,6 @@
 
       <h3 style="margin:0 0 8px;">Traktamente (utland)</h3>
       <div class="row">
-        <label>Importera traktamente-CSV (valfritt)
-          <input id="traktCsv" type="file" accept=".csv,text/csv">
-        </label>
-
         <label>Sök land
           <input id="traktSearch" placeholder="Sök land…">
         </label>
@@ -145,8 +142,10 @@
           <div style="font-size:18px; font-weight:700;" id="traktAmount">—</div>
         </div>
       </div>
+
+      <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
       <div class="muted small" style="margin-top:6px;">
-        Importera en CSV med kolumner som matchar “land + normalbelopp” (rubriker kan variera). CSV lagras lokalt.
+        Appen försöker läsa <code>traktamente.csv</code> som ligger bredvid denna HTML-fil.
       </div>
     </div>
 
@@ -220,8 +219,7 @@
   const STORAGE = {
     headerCsv: "reserakning_header_csv_v1",
     itemsCsv: "reserakning_items_csv_v1",
-    logoDataUrl: "reserakning_logo_dataurl_v1",
-    traktCsv: "traktamente_csv_v1"
+    logoDataUrl: "reserakning_logo_dataurl_v1"
   };
 
   const state = {
@@ -230,16 +228,14 @@
     logoDataUrl: null   // string|null (persistad)
   };
 
-  const TRAKT = {
-    data: [] // {country, amount, year?}
-  };
+  const TRAKT = { data: [] };
 
-  // Minimal fallback om du inte importerar CSV
+  // fallback om traktamente.csv inte kan läsas
   const TRAKT_FALLBACK = [
-    { country: "Tyskland", amount: 760 },
-    { country: "Danmark", amount: 0 }, // placeholder
-    { country: "Norge", amount: 0 },   // placeholder
-    { country: "Finland", amount: 0 }  // placeholder
+    { country: "Tyskland", amount: 760, year: "2026" },
+    { country: "Danmark", amount: 0, year: "" },
+    { country: "Norge", amount: 0, year: "" },
+    { country: "Finland", amount: 0, year: "" }
   ];
 
   const $ = (id) => document.getElementById(id);
@@ -333,7 +329,6 @@
         desc: cols[idx("desc")] ?? "",
         qty: Number(cols[idx("qty")] ?? 0),
         unit: Number(cols[idx("unit")] ?? 0),
-        // Filobjekt kan inte återställas automatiskt
         receiptFile: null
       });
     }
@@ -453,7 +448,7 @@
             ${it.receiptFile ? `<span class="pill">${escapeHtml(it.receiptFile.type || "")}</span>` : ""}
           </div>
           <div style="margin-top:8px;">
-            <label class="small">Byt/lägg till underlag (val proof)
+            <label class="small">Byt/lägg till underlag (valfritt)
               <input type="file" class="receiptInline" data-idx="${idx}" accept="image/*,application/pdf">
             </label>
           </div>
@@ -473,7 +468,7 @@
     recalcTotals();
   }
 
-  // ---- Traktamente ----
+  // ---- Traktamente (CSV bredvid skriptet) ----
   function parseTraktCsv(csvText) {
     const rows = parseCsvSemicolon(csvText);
     if (rows.length < 2) return [];
@@ -483,7 +478,7 @@
 
     const cLand = findCol("land", "land eller område", "country", "destination");
     const cBelopp = findCol("normalbelopp", "belopp", "amount", "normalbelopp (exklusive logi per dag)");
-    const cYear = findCol("inkomstår", "år", "year");
+    const cYear = findCol("år", "year", "inkomstår");
 
     if (cLand < 0 || cBelopp < 0) return [];
 
@@ -538,6 +533,34 @@
     const opt = sel.selectedOptions?.[0];
     const amt = opt?.dataset?.amount;
     $("traktAmount").textContent = amt ? `${amt} kr` : "—";
+  }
+
+  function showTraktNote(msg) {
+    const el = $("traktNote");
+    if (!msg) { el.style.display = "none"; el.textContent = ""; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+  }
+
+  async function loadTraktamenteFromSidecarCsv() {
+    // Försöker läsa ./traktamente.csv
+    // Kräver att sidan körs via http(s), inte file://
+    try {
+      const res = await fetch("./traktamente.csv", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
+      const parsed = parseTraktCsv(txt);
+      if (!parsed.length) throw new Error("CSV tolkades men gav 0 rader.");
+      setTraktData(parsed);
+      showTraktNote(""); // ingen varning
+    } catch (e) {
+      setTraktData(TRAKT_FALLBACK);
+      showTraktNote(
+        "Kunde inte läsa traktamente.csv. " +
+        "Om du öppnar HTML via file:// så blockeras fetch. " +
+        "Starta en lokal server (t.ex. 'python -m http.server') och ladda om."
+      );
+    }
   }
 
   // ---- PDF generation helpers ----
@@ -631,7 +654,6 @@
     const { sum, moms, total } = recalcTotals();
     const vatPct = Number(h.vatRate || 0);
 
-    // Logo (om sparad)
     if (state.logoDataUrl) {
       doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
     }
@@ -742,7 +764,7 @@
     const desc = $("newDesc").value.trim();
     const qty = Number($("newQty").value || 0);
     const unit = Number($("newUnit").value || 0);
-    const receipt = $("newReceipt").files?.[0] || null; // valfritt
+    const receipt = $("newReceipt").files?.[0] || null;
 
     if (!desc) return alert("Skriv en produktbeskrivning.");
 
@@ -802,28 +824,14 @@
   });
 
   $("clearLocalBtn").addEventListener("click", () => {
-    if (!confirm("Rensa lokalt sparade CSV:er (sektion 1 + poster + logga + traktamente)?")) return;
+    if (!confirm("Rensa lokalt sparade CSV:er (sektion 1 + poster + logga)?")) return;
     localStorage.removeItem(STORAGE.headerCsv);
     localStorage.removeItem(STORAGE.itemsCsv);
     localStorage.removeItem(STORAGE.logoDataUrl);
-    localStorage.removeItem(STORAGE.traktCsv);
     setStatus("Rensat. Ladda om sidan för att börja om.");
   });
 
-  // Traktamente: import + sök + dropdown
-  $("traktCsv").addEventListener("change", async () => {
-    const f = $("traktCsv").files?.[0];
-    if (!f) return;
-
-    const txt = await f.text();
-    const parsed = parseTraktCsv(txt);
-    if (!parsed.length) return alert("Kunde inte tolka CSV. Behöver kolumner för land + normalbelopp.");
-
-    localStorage.setItem(STORAGE.traktCsv, txt);
-    setTraktData(parsed);
-    setStatus("Traktamente-CSV importerat och sparat lokalt.");
-  });
-
+  // Traktamente sök/val
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
 
@@ -843,10 +851,8 @@
 
     setStatus("Skapar PDF…");
 
-    // Sida 1
     await drawFirstPage(doc, header, margin, pageW, pageH);
 
-    // Underlagssidor (endast om fil finns)
     for (const it of state.items) {
       const file = it.receiptFile;
       if (!file) continue;
@@ -869,27 +875,19 @@
 
   // ---- Init ----
   (function init() {
-    // default datum
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth()+1).padStart(2,"0");
     const dd = String(today.getDate()).padStart(2,"0");
     $("date").value = `${yyyy}-${mm}-${dd}`;
 
-    // Ladda sparat
     loadAllFromStorage();
-
-    // Ladda traktamente data
-    const savedTrakt = localStorage.getItem(STORAGE.traktCsv);
-    if (savedTrakt) {
-      const parsed = parseTraktCsv(savedTrakt);
-      setTraktData(parsed.length ? parsed : TRAKT_FALLBACK);
-    } else {
-      setTraktData(TRAKT_FALLBACK);
-    }
-
     renderItemsTable();
     recalcTotals();
+
+    // läs traktamente.csv från samma mapp
+    loadTraktamenteFromSidecarCsv();
+
     setStatus("Redo.");
   })();
 </script>
