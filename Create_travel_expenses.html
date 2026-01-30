@@ -34,6 +34,7 @@
     .mini { padding: 6px 10px; border-radius: 10px; border:1px solid #222; background:#fff; cursor:pointer; }
     .divider { height: 1px; background: #eee; margin: 10px 0; width: 100%; }
     .note { background:#fff7d6; border:1px solid #f0d98a; padding:10px; border-radius:10px; font-size:12px; color:#5a4a00; }
+    code { background:#f5f5f5; padding: 1px 4px; border-radius: 6px; }
   </style>
 
   <!-- jsPDF + autotable -->
@@ -42,11 +43,16 @@
 
   <!-- pdf.js (rendera uppladdade PDF-underlag till bilder) -->
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js"></script>
+
+  <!-- Traktamente data (lägg denna fil bredvid index.html på GitHub Pages) -->
+  <script src="./traktamente-data.js"></script>
 </head>
 
 <body>
   <h1>Reseräkning</h1>
-  <div class="muted">Autosparar Sektion 1 + poster lokalt som separata CSV:er. Underlag är valfritt.</div>
+  <div class="muted">
+    Autosparar Sektion 1 + poster lokalt som separata CSV:er (localStorage). Underlag är valfritt.
+  </div>
 
   <div class="grid" style="margin-top:12px;">
 
@@ -54,6 +60,12 @@
       <h2 style="margin:0 0 10px;">1) Uppgifter (förstasidan)</h2>
 
       <div class="row">
+        <label style="flex:1; min-width:320px;">Namn på reseräkningen
+          <input id="expenseName" placeholder='t.ex. "Tyskland Tuning event 2025w42"'>
+        </label>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
         <label>Datum
           <input id="date" type="date">
         </label>
@@ -145,7 +157,7 @@
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
       <div class="muted small" style="margin-top:6px;">
-        Appen försöker läsa <code>traktamente.csv</code> som ligger bredvid denna HTML-fil.
+        Traktamente läses från <code>traktamente-data.js</code> (variabeln <code>window.TRAKTAMENTE_CSV</code>).
       </div>
     </div>
 
@@ -154,7 +166,7 @@
 
       <div class="row">
         <label>Produktbeskrivning
-          <input id="newDesc" placeholder="t.ex. Hotel Karlatornet">
+          <input id="newDesc" placeholder="t.ex. Hotel Hirsch Leonberg">
         </label>
         <label>Antal
           <input id="newQty" type="number" value="1" min="0" step="1">
@@ -162,7 +174,7 @@
         <label>Pris (kr)
           <input id="newUnit" type="number" value="0" min="0" step="0.01">
         </label>
-        <label>Underlag
+        <label>Underlag (valfritt)
           <input id="newReceipt" type="file" accept="image/*,application/pdf">
         </label>
         <div style="align-self:flex-end;">
@@ -217,7 +229,7 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v1",
+    headerCsv: "reserakning_header_csv_v2", // bump (vi la till expenseName)
     itemsCsv: "reserakning_items_csv_v1",
     logoDataUrl: "reserakning_logo_dataurl_v1"
   };
@@ -230,12 +242,9 @@
 
   const TRAKT = { data: [] };
 
-  // fallback om traktamente.csv inte kan läsas
+  // fallback om traktamente-data.js saknas
   const TRAKT_FALLBACK = [
-    { country: "Tyskland", amount: 760, year: "2026" },
-    { country: "Danmark", amount: 0, year: "" },
-    { country: "Norge", amount: 0, year: "" },
-    { country: "Finland", amount: 0, year: "" }
+    { country: "Tyskland", amount: 760, year: "2026" }
   ];
 
   const $ = (id) => document.getElementById(id);
@@ -246,6 +255,16 @@
     const v = Number(n || 0);
     const rounded = Math.round(v * 100) / 100;
     return rounded.toLocaleString("sv-SE", { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + " kr";
+  }
+
+  function sanitizeFilenamePart(s) {
+    // Behåll bokstäver, siffror, mellanslag, - och _ ; ersätt övrigt med _
+    // Trimma och komprimera whitespace
+    const cleaned = String(s || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/[\/\\:*?"<>|]/g, "_"); // Windows-farliga
+    return cleaned;
   }
 
   function csvEscape(v) {
@@ -342,6 +361,7 @@
 
   function readHeader() {
     return {
+      expenseName: $("expenseName").value.trim(),
       date: $("date").value,
       kundNr: $("kundNr").value.trim(),
       fakturaNr: $("fakturaNr").value.trim(),
@@ -363,6 +383,7 @@
   }
 
   function writeHeader(h) {
+    $("expenseName").value = h.expenseName || "";
     $("date").value = h.date || "";
     $("kundNr").value = h.kundNr || "";
     $("fakturaNr").value = h.fakturaNr || "";
@@ -468,7 +489,7 @@
     recalcTotals();
   }
 
-  // ---- Traktamente (CSV bredvid skriptet) ----
+  // ---- Traktamente från traktamente-data.js ----
   function parseTraktCsv(csvText) {
     const rows = parseCsvSemicolon(csvText);
     if (rows.length < 2) return [];
@@ -542,23 +563,21 @@
     el.textContent = msg;
   }
 
-  async function loadTraktamenteFromSidecarCsv() {
-    // Försöker läsa ./traktamente.csv
-    // Kräver att sidan körs via http(s), inte file://
+  function loadTraktamenteFromEmbeddedCsv() {
     try {
-      const res = await fetch("./traktamente.csv", { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
+      const txt = (window.TRAKTAMENTE_CSV || "").trim();
+      if (!txt) throw new Error("window.TRAKTAMENTE_CSV saknas eller är tom.");
+
       const parsed = parseTraktCsv(txt);
       if (!parsed.length) throw new Error("CSV tolkades men gav 0 rader.");
+
       setTraktData(parsed);
-      showTraktNote(""); // ingen varning
+      showTraktNote("");
     } catch (e) {
       setTraktData(TRAKT_FALLBACK);
       showTraktNote(
-        "Kunde inte läsa traktamente.csv. " +
-        "Om du öppnar HTML via file:// så blockeras fetch. " +
-        "Starta en lokal server (t.ex. 'python -m http.server') och ladda om."
+        "Kunde inte läsa traktamente-data.js. " +
+        "Kontrollera att filen finns i samma mapp och att script-taggen ligger före appens script."
       );
     }
   }
@@ -654,12 +673,15 @@
     const { sum, moms, total } = recalcTotals();
     const vatPct = Number(h.vatRate || 0);
 
+    // Logo (om sparad)
     if (state.logoDataUrl) {
       doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
     }
 
-    doc.setFontSize(20);
-    doc.text("Reseräkning", pageW - margin, margin + 6, { align: "right" });
+    // Titel med namn: "Reseräkning - <namn>"
+    doc.setFontSize(18);
+    const titleName = h.expenseName ? `Reseräkning - ${h.expenseName}` : "Reseräkning";
+    doc.text(titleName, pageW - margin, margin + 6, { align: "right" });
 
     doc.setFontSize(10);
     const rightX = pageW - margin;
@@ -748,9 +770,9 @@
   // ---- Events ----
   const autosave = debounce(saveAllToStorage, 500);
 
-  $("vatRate").addEventListener("input", () => { recalcTotals(); autosave(); });
-
+  // Autosave på alla fields i sektion 1, inkl namn
   [
+    "expenseName",
     "date","kundNr","fakturaNr","betalningsvillkor","vatRate",
     "kundAdress","erRef","varRef","pnr","projektNr","projektNamn",
     "avsandareAdress","orgNr","momsRegnr","email","telefon","bankgiro"
@@ -759,6 +781,8 @@
     el.addEventListener("input", autosave);
     el.addEventListener("change", autosave);
   });
+
+  $("vatRate").addEventListener("input", () => { recalcTotals(); autosave(); });
 
   $("addItemBtn").addEventListener("click", () => {
     const desc = $("newDesc").value.trim();
@@ -824,7 +848,7 @@
   });
 
   $("clearLocalBtn").addEventListener("click", () => {
-    if (!confirm("Rensa lokalt sparade CSV:er (sektion 1 + poster + logga)?")) return;
+    if (!confirm("Rensa lokalt sparade värden (sektion 1 + poster + logga)?")) return;
     localStorage.removeItem(STORAGE.headerCsv);
     localStorage.removeItem(STORAGE.itemsCsv);
     localStorage.removeItem(STORAGE.logoDataUrl);
@@ -840,6 +864,7 @@
     setStatus("");
     const header = readHeader();
 
+    if (!header.expenseName) return alert("Fyll i 'Namn på reseräkningen'.");
     if (!header.date) return alert("Fyll i datum.");
     if (state.items.length === 0) return alert("Lägg till minst en post.");
 
@@ -869,8 +894,10 @@
     }
 
     const safeDate = (header.date || "datum").replaceAll(":", "-");
-    doc.save(`Reserakning_${safeDate}.pdf`);
-    setStatus("Klart! PDF nedladdad.");
+    const safeName = sanitizeFilenamePart(header.expenseName);
+    const fileName = `Reseräkning_${safeName}_${safeDate}.pdf`;
+    doc.save(fileName);
+    setStatus(`Klart! PDF nedladdad: ${fileName}`);
   });
 
   // ---- Init ----
@@ -885,8 +912,7 @@
     renderItemsTable();
     recalcTotals();
 
-    // läs traktamente.csv från samma mapp
-    loadTraktamenteFromSidecarCsv();
+    loadTraktamenteFromEmbeddedCsv();
 
     setStatus("Redo.");
   })();
