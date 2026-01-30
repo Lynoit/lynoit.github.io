@@ -54,9 +54,21 @@
   <div class="grid" style="margin-top:12px;">
 
     <div class="card">
-      <h2 style="margin:0 0 10px;">1) Uppgifter</h2>
+      <h2 style="margin:0 0 10px;">1) Uppgifter (förstasidan)</h2>
 
       <div class="row">
+        <label style="min-width:320px;">Company setup
+          <select id="companySetupSelect"></select>
+        </label>
+        <div style="align-self:flex-end;">
+          <button class="btn secondary" id="loadCompanySetupBtn" type="button">Ladda setup</button>
+        </div>
+        <div class="muted small" style="align-self:flex-end;" id="companySetupStatus"></div>
+      </div>
+
+      <div id="companySetupNote" class="note" style="margin-top:10px; display:none;"></div>
+
+      <div class="row" style="margin-top:12px;">
         <label style="flex:1; min-width:320px;">Namn på reseräkningen
           <input id="expenseName" placeholder='t.ex. "Tyskland Tuning event 2025w42"'>
         </label>
@@ -91,7 +103,7 @@
           <input id="varRef" placeholder="t.ex. Thomas Lyngfelt">
         </label>
         <label style="min-width:260px;">Personnummer / ID
-          <input id="pnr" placeholder="t.ex. 881019-xxxx">
+          <input id="pnr" placeholder="t.ex. 740815-4990">
         </label>
       </div>
 
@@ -136,7 +148,7 @@
 
       <div class="divider"></div>
 
-      <h3 style="margin:0 0 8px;">Traktamente</h3>
+      <h3 style="margin:0 0 8px;">Traktamente (utland)</h3>
       <div class="row">
         <label>Sök land
           <input id="traktSearch" placeholder="Sök land…">
@@ -154,7 +166,7 @@
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
       <div class="muted small" style="margin-top:6px;">
-        Appen läser <code>traktamente.csv</code> från samma mapp som denna sida (via <code>fetch("./traktamente.csv")</code>).
+        Appen läser <code>traktamente.csv</code> från samma mapp (via <code>fetch("./traktamente.csv")</code>).
       </div>
     </div>
 
@@ -171,7 +183,7 @@
         <label>Pris (kr)
           <input id="newUnit" type="number" value="0" min="0" step="0.01">
         </label>
-        <label>Underlag
+        <label>Underlag (valfritt)
           <input id="newReceipt" type="file" accept="image/*,application/pdf">
         </label>
         <div style="align-self:flex-end;">
@@ -226,10 +238,18 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v2", // includes expenseName
+    headerCsv: "reserakning_header_csv_v2",
     itemsCsv: "reserakning_items_csv_v1",
-    logoDataUrl: "reserakning_logo_dataurl_v1"
+    logoDataUrl: "reserakning_logo_dataurl_v1",
+    companySetupSelected: "reserakning_company_setup_selected_v1"
   };
+
+  // Hårdkodad lista (GitHub Pages kan inte lista katalogen)
+  // Lägg dina CSV-filer i samma mapp som index.html och lägg till dem här.
+  const COMPANY_SETUPS = [
+    { label: "Lynoit / Sigma / Zeekr (default)", file: "company_setup_lynoit.csv" },
+    { label: "Example setup", file: "company_setup_example.csv" }
+  ];
 
   const state = {
     items: [],          // {desc, qty, unit, receiptFile: File|null}
@@ -239,7 +259,6 @@
 
   const TRAKT = { data: [] };
 
-  // fallback om traktamente.csv inte kan läsas
   const TRAKT_FALLBACK = [
     { country: "Tyskland", amount: 760, year: "2026" }
   ];
@@ -255,11 +274,10 @@
   }
 
   function sanitizeFilenamePart(s) {
-    const cleaned = String(s || "")
+    return String(s || "")
       .trim()
       .replace(/\s+/g, " ")
       .replace(/[\/\\:*?"<>|]/g, "_");
-    return cleaned;
   }
 
   function csvEscape(v) {
@@ -484,6 +502,98 @@
     recalcTotals();
   }
 
+  // -------------------------
+  // Company setup (dropdown + CSV)
+  // -------------------------
+  function showCompanySetupNote(msg) {
+    const el = $("companySetupNote");
+    if (!msg) { el.style.display = "none"; el.textContent = ""; return; }
+    el.style.display = "block";
+    el.textContent = msg;
+  }
+
+  function setCompanySetupStatus(msg) {
+    $("companySetupStatus").textContent = msg || "";
+  }
+
+  function parseSingleRowCsvObject(csvText) {
+    const rows = parseCsvSemicolon(csvText);
+    if (rows.length < 2) return null;
+    const keys = rows[0].map(s => (s || "").trim());
+    const vals = rows[1];
+    const obj = {};
+    keys.forEach((k, i) => obj[k] = vals[i] ?? "");
+    return obj;
+  }
+
+  function applyCompanySetup(setupObj) {
+    // Sätt bara de fält du bad om (skriv över aktuella värden)
+    if (!setupObj) return;
+
+    // Stöd både "kundNr" och "Kund nr" om du skulle vilja
+    const get = (...keys) => {
+      for (const k of keys) {
+        if (setupObj[k] !== undefined && setupObj[k] !== null) return String(setupObj[k]);
+      }
+      return "";
+    };
+
+    $("kundNr").value = get("kundNr", "Kund nr");
+    $("kundAdress").value = get("kundAdress", "Kund (namn + adress)");
+    $("erRef").value = get("erRef", "Er referens");
+    $("varRef").value = get("varRef", "Vår referens");
+    $("projektNr").value = get("projektNr", "Projekt / uppdragsgivare (nr)");
+    $("projektNamn").value = get("projektNamn", "Projekt / uppdragsgivare (namn)");
+    $("avsandareAdress").value = get("avsandareAdress", "Avsändare (företag + adress)");
+    $("orgNr").value = get("orgNr", "Org.nr");
+    $("momsRegnr").value = get("momsRegnr", "Moms/regnr");
+    $("email").value = get("email", "E-post");
+    $("telefon").value = get("telefon", "Telefon");
+    $("bankgiro").value = get("bankgiro", "Bankgiro");
+  }
+
+  async function loadAndApplyCompanySetupCsv(fileName) {
+    try {
+      setCompanySetupStatus("Läser setup…");
+      const res = await fetch("./" + fileName, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
+      const obj = parseSingleRowCsvObject(txt);
+      if (!obj) throw new Error("CSV kunde inte tolkas (behöver headerrad + en datarad).");
+
+      applyCompanySetup(obj);
+      saveAllToStorage(); // så det finns kvar nästa gång
+
+      showCompanySetupNote("");
+      setCompanySetupStatus(`Laddad: ${fileName}`);
+    } catch (e) {
+      showCompanySetupNote(
+        `Kunde inte läsa "${fileName}". Kontrollera att filen ligger i samma mapp som index.html och publiceras av GitHub Pages. (${e.message})`
+      );
+      setCompanySetupStatus("Misslyckades.");
+    }
+  }
+
+  function initCompanySetupDropdown() {
+    const sel = $("companySetupSelect");
+    sel.innerHTML = "";
+
+    for (const s of COMPANY_SETUPS) {
+      const opt = document.createElement("option");
+      opt.value = s.file;
+      opt.textContent = s.label;
+      sel.appendChild(opt);
+    }
+
+    // Välj senast valda, annars första
+    const saved = localStorage.getItem(STORAGE.companySetupSelected);
+    if (saved && COMPANY_SETUPS.some(x => x.file === saved)) {
+      sel.value = saved;
+    } else {
+      sel.value = COMPANY_SETUPS[0]?.file || "";
+    }
+  }
+
   // ---- Traktamente från traktamente.csv ----
   function parseTraktCsv(csvText) {
     const rows = parseCsvSemicolon(csvText);
@@ -570,8 +680,7 @@
     } catch (e) {
       setTraktData(TRAKT_FALLBACK);
       showTraktNote(
-        "Kunde inte läsa traktamente.csv. Kontrollera att filen finns i samma mapp som index.html " +
-        "och att GitHub Pages faktiskt publicerar den (ingen 404)."
+        "Kunde inte läsa traktamente.csv. Kontrollera att filen finns i samma mapp som index.html och publiceras av GitHub Pages."
       );
     }
   }
@@ -839,15 +948,29 @@
   });
 
   $("clearLocalBtn").addEventListener("click", () => {
-    if (!confirm("Rensa lokalt sparade värden (sektion 1 + poster + logga)?")) return;
+    if (!confirm("Rensa lokalt sparade värden (sektion 1 + poster + logga + val av setup)?")) return;
     localStorage.removeItem(STORAGE.headerCsv);
     localStorage.removeItem(STORAGE.itemsCsv);
     localStorage.removeItem(STORAGE.logoDataUrl);
+    localStorage.removeItem(STORAGE.companySetupSelected);
     setStatus("Rensat. Ladda om sidan för att börja om.");
   });
 
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
+
+  $("loadCompanySetupBtn").addEventListener("click", async () => {
+    const file = $("companySetupSelect").value;
+    if (!file) return;
+    localStorage.setItem(STORAGE.companySetupSelected, file);
+    await loadAndApplyCompanySetupCsv(file);
+  });
+
+  $("companySetupSelect").addEventListener("change", () => {
+    const file = $("companySetupSelect").value;
+    localStorage.setItem(STORAGE.companySetupSelected, file || "");
+    setCompanySetupStatus(file ? `Vald: ${file}` : "");
+  });
 
   $("createPdfBtn").addEventListener("click", async () => {
     setStatus("");
@@ -891,18 +1014,31 @@
 
   // ---- Init ----
   (function init() {
+    // datum default
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth()+1).padStart(2,"0");
     const dd = String(today.getDate()).padStart(2,"0");
     $("date").value = `${yyyy}-${mm}-${dd}`;
 
+    initCompanySetupDropdown();
     loadAllFromStorage();
     renderItemsTable();
     recalcTotals();
 
+    // traktamente
     loadTraktamenteFromSidecarCsv();
 
+    // auto-apply setup på första körningen (om inget header-sparat finns)
+    const hasHeader = !!localStorage.getItem(STORAGE.headerCsv);
+    if (!hasHeader) {
+      const file = $("companySetupSelect").value;
+      if (file) {
+        loadAndApplyCompanySetupCsv(file);
+      }
+    }
+
+    setCompanySetupStatus($("companySetupSelect").value ? `Vald: ${$("companySetupSelect").value}` : "");
     setStatus("Redo.");
   })();
 </script>
