@@ -43,9 +43,6 @@
 
   <!-- pdf.js (rendera uppladdade PDF-underlag till bilder) -->
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js"></script>
-
-  <!-- Traktamente data (lägg denna fil bredvid index.html på GitHub Pages) -->
-  <script src="./traktamente-data.js"></script>
 </head>
 
 <body>
@@ -157,7 +154,7 @@
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
       <div class="muted small" style="margin-top:6px;">
-        Traktamente läses från <code>traktamente-data.js</code> (variabeln <code>window.TRAKTAMENTE_CSV</code>).
+        Appen läser <code>traktamente.csv</code> från samma mapp som denna sida (via <code>fetch("./traktamente.csv")</code>).
       </div>
     </div>
 
@@ -229,7 +226,7 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v2", // bump (vi la till expenseName)
+    headerCsv: "reserakning_header_csv_v2", // includes expenseName
     itemsCsv: "reserakning_items_csv_v1",
     logoDataUrl: "reserakning_logo_dataurl_v1"
   };
@@ -242,7 +239,7 @@
 
   const TRAKT = { data: [] };
 
-  // fallback om traktamente-data.js saknas
+  // fallback om traktamente.csv inte kan läsas
   const TRAKT_FALLBACK = [
     { country: "Tyskland", amount: 760, year: "2026" }
   ];
@@ -258,12 +255,10 @@
   }
 
   function sanitizeFilenamePart(s) {
-    // Behåll bokstäver, siffror, mellanslag, - och _ ; ersätt övrigt med _
-    // Trimma och komprimera whitespace
     const cleaned = String(s || "")
       .trim()
       .replace(/\s+/g, " ")
-      .replace(/[\/\\:*?"<>|]/g, "_"); // Windows-farliga
+      .replace(/[\/\\:*?"<>|]/g, "_");
     return cleaned;
   }
 
@@ -489,7 +484,7 @@
     recalcTotals();
   }
 
-  // ---- Traktamente från traktamente-data.js ----
+  // ---- Traktamente från traktamente.csv ----
   function parseTraktCsv(csvText) {
     const rows = parseCsvSemicolon(csvText);
     if (rows.length < 2) return [];
@@ -563,21 +558,20 @@
     el.textContent = msg;
   }
 
-  function loadTraktamenteFromEmbeddedCsv() {
+  async function loadTraktamenteFromSidecarCsv() {
     try {
-      const txt = (window.TRAKTAMENTE_CSV || "").trim();
-      if (!txt) throw new Error("window.TRAKTAMENTE_CSV saknas eller är tom.");
-
+      const res = await fetch("./traktamente.csv", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
       const parsed = parseTraktCsv(txt);
       if (!parsed.length) throw new Error("CSV tolkades men gav 0 rader.");
-
       setTraktData(parsed);
       showTraktNote("");
     } catch (e) {
       setTraktData(TRAKT_FALLBACK);
       showTraktNote(
-        "Kunde inte läsa traktamente-data.js. " +
-        "Kontrollera att filen finns i samma mapp och att script-taggen ligger före appens script."
+        "Kunde inte läsa traktamente.csv. Kontrollera att filen finns i samma mapp som index.html " +
+        "och att GitHub Pages faktiskt publicerar den (ingen 404)."
       );
     }
   }
@@ -673,12 +667,10 @@
     const { sum, moms, total } = recalcTotals();
     const vatPct = Number(h.vatRate || 0);
 
-    // Logo (om sparad)
     if (state.logoDataUrl) {
       doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
     }
 
-    // Titel med namn: "Reseräkning - <namn>"
     doc.setFontSize(18);
     const titleName = h.expenseName ? `Reseräkning - ${h.expenseName}` : "Reseräkning";
     doc.text(titleName, pageW - margin, margin + 6, { align: "right" });
@@ -770,7 +762,6 @@
   // ---- Events ----
   const autosave = debounce(saveAllToStorage, 500);
 
-  // Autosave på alla fields i sektion 1, inkl namn
   [
     "expenseName",
     "date","kundNr","fakturaNr","betalningsvillkor","vatRate",
@@ -855,11 +846,9 @@
     setStatus("Rensat. Ladda om sidan för att börja om.");
   });
 
-  // Traktamente sök/val
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
 
-  // Skapa PDF
   $("createPdfBtn").addEventListener("click", async () => {
     setStatus("");
     const header = readHeader();
@@ -912,7 +901,7 @@
     renderItemsTable();
     recalcTotals();
 
-    loadTraktamenteFromEmbeddedCsv();
+    loadTraktamenteFromSidecarCsv();
 
     setStatus("Redo.");
   })();
