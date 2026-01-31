@@ -50,14 +50,11 @@
 
 <body>
   <h1>Reseräkning</h1>
-  <div class="muted">
-    Autosparar Sektion 1 + poster lokalt (localStorage). Underlag är valfritt. Export skapar även intern-PDF.
-  </div>
 
   <div class="grid" style="margin-top:12px;">
 
     <div class="card">
-      <h2 style="margin:0 0 10px;">1) Uppgifter (förstasidan)</h2>
+      <h2 style="margin:0 0 10px;">1) Uppgifter</h2>
 
       <!-- VISAS ALLTID -->
       <div class="row">
@@ -74,7 +71,7 @@
 
       <div class="divider"></div>
 
-      <h3 style="margin:0 0 8px;">Traktamente (utland)</h3>
+      <h3 style="margin:0 0 8px;">Sök traktamente</h3>
       <div class="row">
         <label>Sök land
           <input id="traktSearch" placeholder="Sök land…">
@@ -91,9 +88,6 @@
       </div>
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
-      <div class="muted small" style="margin-top:6px;">
-        Appen läser <code>traktamente.csv</code> från samma mapp (via <code>fetch("./traktamente.csv")</code>).
-      </div>
 
       <!-- KNAPPAR -->
       <div class="profile-actions">
@@ -183,9 +177,6 @@
           <label>Logotyp (valfritt, PNG/JPG)
             <input id="logo" type="file" accept="image/*">
           </label>
-          <div class="muted small" style="align-self:flex-end;">
-            Loggan sparas lokalt och används vid PDF-export.
-          </div>
         </div>
       </div>
     </div>
@@ -195,7 +186,7 @@
 
       <div class="row">
         <label>Produktbeskrivning
-          <input id="newDesc" placeholder="t.ex. Hotel Hirsch Leonberg">
+          <input id="newDesc" placeholder="t.ex. Hotel Karlatornet">
         </label>
         <label>Antal
           <input id="newQty" type="number" value="1" min="0" step="1">
@@ -246,6 +237,10 @@
         <button class="btn secondary" id="clearLocalBtn" type="button">Rensa lokalt sparat</button>
         <span class="muted small" id="status"></span>
       </div>
+
+      <div class="muted small" style="margin-top:8px;">
+        Vid PDF-export skapas även en intern version (filnamn + <code>- intern.pdf</code>).
+      </div>
     </div>
 
   </div>
@@ -258,7 +253,7 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v4_personname",
+    headerCsv: "reserakning_header_csv_v5_textchanges",
     itemsCsv: "reserakning_items_csv_v1",
     logoDataUrl: "reserakning_logo_dataurl_v1",
     companySetupSelected: "reserakning_company_setup_selected_v1",
@@ -382,7 +377,6 @@
       personName: $("personName").value.trim(),
       fakturaNr: $("fakturaNr").value.trim(),
 
-      // dolda fält finns kvar (PDF behöver datum etc)
       date: $("date")?.value || "",
       kundNr: $("kundNr")?.value.trim() || "",
       betalningsvillkor: $("betalningsvillkor")?.value.trim() || "",
@@ -690,7 +684,7 @@
       showTraktNote("");
     } catch (e) {
       setTraktData(TRAKT_FALLBACK);
-      showTraktNote("Kunde inte läsa traktamente.csv. Kontrollera att filen publiceras av GitHub Pages.");
+      showTraktNote("Kunde inte läsa traktamente.csv.");
     }
   }
 
@@ -781,7 +775,6 @@
     }
   }
 
-  // ---- PDF first page ----
   async function drawFirstPage(doc, h, margin, pageW, pageH, options = { internal:false }) {
     const internal = !!options.internal;
     const totals = internal ? recalcTotalsNoVat() : recalcTotals();
@@ -795,11 +788,9 @@
     const titleName = h.expenseName ? `Reseräkning - ${h.expenseName}` : "Reseräkning";
     doc.text(titleName, pageW - margin, margin + 6, { align: "right" });
 
-    // NYTT: visa personnamn under "Namn på reseräkningen" (under rubriken i PDF)
     doc.setFontSize(11);
-    const personLine = h.personName ? `Namn: ${h.personName}` : "";
-    if (personLine) {
-      doc.text(personLine, pageW - margin, margin + 13, { align: "right" });
+    if (h.personName) {
+      doc.text(`Namn: ${h.personName}`, pageW - margin, margin + 13, { align: "right" });
     }
 
     doc.setFontSize(10);
@@ -989,6 +980,10 @@
     setStatus("Rensat. Ladda om sidan för att börja om.");
   });
 
+  // ---- Företagsprofil show/hide ----
+  $("showProfileBtn").addEventListener("click", () => setProfileVisible(true));
+  $("hideProfileBtn").addEventListener("click", () => setProfileVisible(false));
+
   // ---- Company setup events ----
   $("loadCompanySetupBtn")?.addEventListener("click", async () => {
     const file = $("companySetupSelect").value;
@@ -1003,22 +998,18 @@
     setCompanySetupStatus(file ? `Vald: ${file}` : "");
   });
 
-  // ---- Profile show/hide buttons ----
-  $("showProfileBtn").addEventListener("click", () => setProfileVisible(true));
-  $("hideProfileBtn").addEventListener("click", () => setProfileVisible(false));
-
   // ---- Trakt events ----
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
 
-  // ---- PDF export (extern + intern) ----
+  // ---- PDF export ----
   $("createPdfBtn").addEventListener("click", async () => {
     setStatus("");
     const header = readHeader();
 
     if (!header.expenseName) return alert("Fyll i 'Namn på reseräkningen'.");
     if (!header.personName) return alert('Fyll i ditt namn (t.ex. "Per Persson").');
-    if (!header.date) return alert("Fyll i datum (finns under företagsprofil).");
+    if (!header.date) return alert("Fyll i datum (under företagsprofil).");
     if (state.items.length === 0) return alert("Lägg till minst en post.");
 
     const safeDate = (header.date || "datum").replaceAll(":", "-");
@@ -1031,12 +1022,12 @@
 
     setStatus("Skapar PDF…");
 
+    const margin = 12;
+
     // extern
     const doc = new jsPDF({ unit: "mm", format: "a4" });
     const pageW = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
-    const margin = 12;
-
     await drawFirstPage(doc, header, margin, pageW, pageH, { internal:false });
 
     for (const it of state.items) {
@@ -1055,7 +1046,6 @@
     const docInternal = new jsPDF({ unit: "mm", format: "a4" });
     const pageW2 = docInternal.internal.pageSize.getWidth();
     const pageH2 = docInternal.internal.pageSize.getHeight();
-
     await drawFirstPage(docInternal, header, margin, pageW2, pageH2, { internal:true });
 
     for (const it of state.items) {
@@ -1077,19 +1067,42 @@
   });
 
   // ---- Init ----
-  function initCompanySetupDropdown() {
-    const sel = $("companySetupSelect");
-    if (!sel) return;
-    sel.innerHTML = "";
-    for (const s of COMPANY_SETUPS) {
-      const opt = document.createElement("option");
-      opt.value = s.file;
-      opt.textContent = s.label;
-      sel.appendChild(opt);
+  function setProfileVisible(visible) {
+    const block = $("companyProfileBlock");
+    const showBtn = $("showProfileBtn");
+    const hideBtn = $("hideProfileBtn");
+    const status = $("profileStatus");
+
+    if (visible) {
+      block.classList.remove("company-profile-hidden");
+      showBtn.style.display = "none";
+      hideBtn.style.display = "inline-block";
+      status.textContent = "Företagsprofil visas.";
+    } else {
+      block.classList.add("company-profile-hidden");
+      showBtn.style.display = "inline-block";
+      hideBtn.style.display = "none";
+      status.textContent = "Företagsprofil dold.";
     }
-    const saved = localStorage.getItem(STORAGE.companySetupSelected);
-    if (saved && COMPANY_SETUPS.some(x => x.file === saved)) sel.value = saved;
-    else sel.value = COMPANY_SETUPS[0]?.file || "";
+    localStorage.setItem(STORAGE.profileVisible, visible ? "1" : "0");
+  }
+
+  async function loadAndApplyCompanySetupCsv(fileName) {
+    try {
+      setCompanySetupStatus("Läser setup…");
+      const res = await fetch("./" + fileName, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
+      const obj = parseSingleRowCsvObject(txt);
+      if (!obj) throw new Error("CSV kunde inte tolkas.");
+      applyCompanySetup(obj);
+      saveAllToStorage();
+      showCompanySetupNote("");
+      setCompanySetupStatus(`Laddad: ${fileName}`);
+    } catch (e) {
+      showCompanySetupNote(`Kunde inte läsa "${fileName}". (${e.message})`);
+      setCompanySetupStatus("Misslyckades.");
+    }
   }
 
   (function init() {
