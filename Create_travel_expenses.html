@@ -36,7 +36,6 @@
     .note { background:#fff7d6; border:1px solid #f0d98a; padding:10px; border-radius:10px; font-size:12px; color:#5a4a00; }
     code { background:#f5f5f5; padding: 1px 4px; border-radius: 6px; }
 
-    /* Sektion 1: dold företagsprofil */
     .company-profile-hidden { display: none; }
     .profile-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
   </style>
@@ -60,10 +59,13 @@
     <div class="card">
       <h2 style="margin:0 0 10px;">1) Uppgifter (förstasidan)</h2>
 
-      <!-- VISAS ALLTID (enligt din spec) -->
+      <!-- VISAS ALLTID -->
       <div class="row">
         <label style="flex:1; min-width:320px;">Namn på reseräkningen
           <input id="expenseName" placeholder='t.ex. "Tyskland Tuning event 2025w42"'>
+        </label>
+        <label style="min-width:260px;">Ditt namn
+          <input id="personName" placeholder='t.ex. "Per Persson"'>
         </label>
         <label>Faktura nr
           <input id="fakturaNr" placeholder="t.ex. 0079">
@@ -100,7 +102,7 @@
         <span class="muted small" id="profileStatus"></span>
       </div>
 
-      <!-- FÖRETAGSPROFIL (DOLDS SOM DEFAULT) -->
+      <!-- FÖRETAGSPROFIL (DOLDS DEFAULT) -->
       <div id="companyProfileBlock" class="company-profile-hidden" style="margin-top:10px;">
 
         <div class="divider"></div>
@@ -256,14 +258,13 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v3_profilehide",
+    headerCsv: "reserakning_header_csv_v4_personname",
     itemsCsv: "reserakning_items_csv_v1",
     logoDataUrl: "reserakning_logo_dataurl_v1",
     companySetupSelected: "reserakning_company_setup_selected_v1",
     profileVisible: "reserakning_profile_visible_v1"
   };
 
-  // GitHub Pages kan inte lista katalogen => håll lista här
   const COMPANY_SETUPS = [
     { label: "Lynoit / Sigma / Zeekr (default)", file: "company_setup_lynoit.csv" },
     { label: "Example setup", file: "company_setup_example.csv" }
@@ -376,10 +377,12 @@
   }
 
   function readHeader() {
-    // OBS: även dolda fält läses & sparas
     return {
       expenseName: $("expenseName").value.trim(),
+      personName: $("personName").value.trim(),
       fakturaNr: $("fakturaNr").value.trim(),
+
+      // dolda fält finns kvar (PDF behöver datum etc)
       date: $("date")?.value || "",
       kundNr: $("kundNr")?.value.trim() || "",
       betalningsvillkor: $("betalningsvillkor")?.value.trim() || "",
@@ -401,7 +404,9 @@
 
   function writeHeader(h) {
     $("expenseName").value = h.expenseName || "";
+    $("personName").value = h.personName || "";
     $("fakturaNr").value = h.fakturaNr || "";
+
     if ($("date")) $("date").value = h.date || $("date").value || "";
     if ($("kundNr")) $("kundNr").value = h.kundNr || "";
     if ($("betalningsvillkor")) $("betalningsvillkor").value = h.betalningsvillkor || "45";
@@ -589,6 +594,7 @@
 
   function initCompanySetupDropdown() {
     const sel = $("companySetupSelect");
+    if (!sel) return;
     sel.innerHTML = "";
     for (const s of COMPANY_SETUPS) {
       const opt = document.createElement("option");
@@ -775,6 +781,7 @@
     }
   }
 
+  // ---- PDF first page ----
   async function drawFirstPage(doc, h, margin, pageW, pageH, options = { internal:false }) {
     const internal = !!options.internal;
     const totals = internal ? recalcTotalsNoVat() : recalcTotals();
@@ -788,9 +795,16 @@
     const titleName = h.expenseName ? `Reseräkning - ${h.expenseName}` : "Reseräkning";
     doc.text(titleName, pageW - margin, margin + 6, { align: "right" });
 
+    // NYTT: visa personnamn under "Namn på reseräkningen" (under rubriken i PDF)
+    doc.setFontSize(11);
+    const personLine = h.personName ? `Namn: ${h.personName}` : "";
+    if (personLine) {
+      doc.text(personLine, pageW - margin, margin + 13, { align: "right" });
+    }
+
     doc.setFontSize(10);
     const rightX = pageW - margin;
-    const topY = margin + 14;
+    const topY = margin + 18;
     doc.text(`Datum: ${h.date}`, rightX, topY, { align: "right" });
     doc.text(`Kund nr: ${h.kundNr || ""}`, rightX, topY + 5, { align: "right" });
     doc.text(`Faktura nr: ${h.fakturaNr || ""}`, rightX, topY + 10, { align: "right" });
@@ -817,7 +831,7 @@
       doc.text(`${h.betalningsvillkor || ""} dagar`, pageW - margin, refY + 5, { align: "right" });
     }
 
-    const tableStartY = internal ? (margin + 40) : (margin + 78);
+    const tableStartY = internal ? (margin + 45) : (margin + 78);
 
     const bodyRows = state.items.map(it => {
       const qty = Number(it.qty||0);
@@ -894,7 +908,7 @@
   const autosave = debounce(saveAllToStorage, 500);
 
   [
-    "expenseName","fakturaNr",
+    "expenseName","personName","fakturaNr",
     "date","kundNr","betalningsvillkor","vatRate",
     "kundAdress","erRef","varRef","pnr","projektNr","projektNamn",
     "avsandareAdress","orgNr","momsRegnr","email","telefon","bankgiro"
@@ -997,27 +1011,13 @@
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
 
-  async function loadTraktamenteFromSidecarCsv() {
-    try {
-      const res = await fetch("./traktamente.csv", { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
-      const parsed = parseTraktCsv(txt);
-      if (!parsed.length) throw new Error("CSV tolkades men gav 0 rader.");
-      setTraktData(parsed);
-      showTraktNote("");
-    } catch (e) {
-      setTraktData(TRAKT_FALLBACK);
-      showTraktNote("Kunde inte läsa traktamente.csv. Kontrollera att filen publiceras av GitHub Pages.");
-    }
-  }
-
   // ---- PDF export (extern + intern) ----
   $("createPdfBtn").addEventListener("click", async () => {
     setStatus("");
     const header = readHeader();
 
     if (!header.expenseName) return alert("Fyll i 'Namn på reseräkningen'.");
+    if (!header.personName) return alert('Fyll i ditt namn (t.ex. "Per Persson").');
     if (!header.date) return alert("Fyll i datum (finns under företagsprofil).");
     if (state.items.length === 0) return alert("Lägg till minst en post.");
 
@@ -1092,26 +1092,7 @@
     else sel.value = COMPANY_SETUPS[0]?.file || "";
   }
 
-  async function loadAndApplyCompanySetupCsv(fileName) {
-    try {
-      setCompanySetupStatus("Läser setup…");
-      const res = await fetch("./" + fileName, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
-      const obj = parseSingleRowCsvObject(txt);
-      if (!obj) throw new Error("CSV kunde inte tolkas (behöver headerrad + en datarad).");
-      applyCompanySetup(obj);
-      saveAllToStorage();
-      showCompanySetupNote("");
-      setCompanySetupStatus(`Laddad: ${fileName}`);
-    } catch (e) {
-      showCompanySetupNote(`Kunde inte läsa "${fileName}". (${e.message})`);
-      setCompanySetupStatus("Misslyckades.");
-    }
-  }
-
   (function init() {
-    // datum default (finns i profilen men vi sätter ändå)
     const today = new Date();
     const yyyy = today.getFullYear();
     const mm = String(today.getMonth()+1).padStart(2,"0");
@@ -1124,11 +1105,9 @@
     recalcTotals();
     loadTraktamenteFromSidecarCsv();
 
-    // default profil: dold
     const vis = localStorage.getItem(STORAGE.profileVisible);
     setProfileVisible(vis === "1");
 
-    // om ingen sparad header ännu, ladda default company setup (i bakgrunden)
     const hasHeader = !!localStorage.getItem(STORAGE.headerCsv);
     if (!hasHeader) {
       const file = $("companySetupSelect")?.value;
