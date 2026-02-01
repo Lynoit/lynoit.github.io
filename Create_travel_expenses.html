@@ -56,7 +56,6 @@
     <div class="card">
       <h2 style="margin:0 0 10px;">1) Uppgifter</h2>
 
-      <!-- VISAS ALLTID -->
       <div class="row">
         <label style="flex:1; min-width:320px;">Namn på reseräkningen
           <input id="expenseName" placeholder='t.ex. "Tyskland Tuning event 2025w42"'>
@@ -89,14 +88,12 @@
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
 
-      <!-- KNAPPAR -->
       <div class="profile-actions">
         <button class="btn secondary" id="showProfileBtn" type="button">Visa företags profil</button>
         <button class="btn secondary" id="hideProfileBtn" type="button" style="display:none;">Göm företagsprofil</button>
         <span class="muted small" id="profileStatus"></span>
       </div>
 
-      <!-- FÖRETAGSPROFIL (DOLDS DEFAULT) -->
       <div id="companyProfileBlock" class="company-profile-hidden" style="margin-top:10px;">
 
         <div class="divider"></div>
@@ -177,6 +174,9 @@
           <label>Logotyp (valfritt, PNG/JPG)
             <input id="logo" type="file" accept="image/*">
           </label>
+          <div class="muted small" style="align-self:flex-end;">
+            (Om du laddar upp en logga här så ersätter den setup-loggan.)
+          </div>
         </div>
       </div>
     </div>
@@ -253,19 +253,21 @@
   }
 
   const STORAGE = {
-    headerCsv: "reserakning_header_csv_v5_textchanges",
+    headerCsv: "reserakning_header_csv_v6_setup_logo",
     itemsCsv: "reserakning_items_csv_v1",
     logoDataUrl: "reserakning_logo_dataurl_v1",
     companySetupSelected: "reserakning_company_setup_selected_v1",
-    profileVisible: "reserakning_profile_visible_v1"
+    profileVisible: "reserakning_profile_visible_v1",
+    logoSource: "reserakning_logo_source_v1" // "setup:<csv>" eller "manual"
   };
 
+  // Viktigt: ange logo per setup (eller låt den auto-deriveras)
   const COMPANY_SETUPS = [
-    { label: "Lynoit / Sigma / Zeekr (default)", file: "company_setup_lynoit.csv" },
-    { label: "Example setup", file: "company_setup_example.csv" }
+    { label: "Lynoit / Sigma / Zeekr (default)", file: "company_setup_lynoit.csv", logo: "company_setup_lynoit_logo.png" },
+    { label: "Example setup", file: "company_setup_example.csv", logo: "company_setup_example_logo.png" }
   ];
 
-  const state = { items: [], logoFile: null, logoDataUrl: null };
+  const state = { items: [], logoDataUrl: null };
   const TRAKT = { data: [] };
   const TRAKT_FALLBACK = [{ country: "Tyskland", amount: 760, year: "2026" }];
 
@@ -566,6 +568,42 @@
     if ($("bankgiro")) $("bankgiro").value = get("bankgiro","Bankgiro");
   }
 
+  function inferLogoFromSetupCsv(fileName) {
+    // company_setup_lynoit.csv -> company_setup_lynoit_logo.png
+    const base = String(fileName || "").replace(/\.csv$/i, "");
+    return `${base}_logo.png`;
+  }
+
+  async function fetchImageAsDataUrl(path) {
+    const res = await fetch("./" + path, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("Inte en bild.");
+    return await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+  }
+
+  async function applySetupLogo(setupFileName) {
+    // välj logo från config, annars härled från csv-namn
+    const setup = COMPANY_SETUPS.find(s => s.file === setupFileName);
+    const logoFile = setup?.logo || inferLogoFromSetupCsv(setupFileName);
+
+    try {
+      const dataUrl = await fetchImageAsDataUrl(logoFile);
+      state.logoDataUrl = dataUrl;
+      localStorage.setItem(STORAGE.logoDataUrl, dataUrl);
+      localStorage.setItem(STORAGE.logoSource, `setup:${setupFileName}`);
+      setCompanySetupStatus(`Laddad: ${setupFileName} (+ logga)`);
+    } catch (e) {
+      // om logga saknas: behåll ev tidigare logga
+      showCompanySetupNote(`Setup laddades, men loggan kunde inte hittas: "${logoFile}".`);
+    }
+  }
+
   async function loadAndApplyCompanySetupCsv(fileName) {
     try {
       setCompanySetupStatus("Läser setup…");
@@ -576,10 +614,14 @@
       if (!obj) throw new Error("CSV kunde inte tolkas (behöver headerrad + en datarad).");
 
       applyCompanySetup(obj);
-      saveAllToStorage();
 
+      // NYTT: använd setup-logga automatiskt när setup laddas
+      await applySetupLogo(fileName);
+
+      saveAllToStorage();
       showCompanySetupNote("");
-      setCompanySetupStatus(`Laddad: ${fileName}`);
+      // status sätts i applySetupLogo vid lyckad logga
+      if (!state.logoDataUrl) setCompanySetupStatus(`Laddad: ${fileName}`);
     } catch (e) {
       showCompanySetupNote(`Kunde inte läsa "${fileName}". (${e.message})`);
       setCompanySetupStatus("Misslyckades.");
@@ -780,6 +822,7 @@
     const totals = internal ? recalcTotalsNoVat() : recalcTotals();
     const vatPct = internal ? 0 : Number(h.vatRate || 25);
 
+    // Logga (från setup eller manuellt)
     if (state.logoDataUrl) {
       doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
     }
@@ -789,9 +832,7 @@
     doc.text(titleName, pageW - margin, margin + 6, { align: "right" });
 
     doc.setFontSize(11);
-    if (h.personName) {
-      doc.text(`Namn: ${h.personName}`, pageW - margin, margin + 13, { align: "right" });
-    }
+    if (h.personName) doc.text(`Namn: ${h.personName}`, pageW - margin, margin + 13, { align: "right" });
 
     doc.setFontSize(10);
     const rightX = pageW - margin;
@@ -957,14 +998,15 @@
     autosave();
   });
 
-  // ---- Logo ----
+  // ---- Logo (manual override) ----
   $("logo")?.addEventListener("change", async () => {
     const f = $("logo").files?.[0] || null;
-    state.logoFile = f;
-    if (f && f.type.startsWith("image/")) {
+    if (!f) return;
+    if (f.type.startsWith("image/")) {
       const dataUrl = await fileToDataUrl(f);
       state.logoDataUrl = dataUrl;
       localStorage.setItem(STORAGE.logoDataUrl, dataUrl);
+      localStorage.setItem(STORAGE.logoSource, "manual");
       autosave();
     }
   });
@@ -977,6 +1019,7 @@
     localStorage.removeItem(STORAGE.logoDataUrl);
     localStorage.removeItem(STORAGE.companySetupSelected);
     localStorage.removeItem(STORAGE.profileVisible);
+    localStorage.removeItem(STORAGE.logoSource);
     setStatus("Rensat. Ladda om sidan för att börja om.");
   });
 
@@ -992,10 +1035,17 @@
     await loadAndApplyCompanySetupCsv(file);
   });
 
-  $("companySetupSelect")?.addEventListener("change", () => {
+  $("companySetupSelect")?.addEventListener("change", async () => {
     const file = $("companySetupSelect").value;
     localStorage.setItem(STORAGE.companySetupSelected, file || "");
     setCompanySetupStatus(file ? `Vald: ${file}` : "");
+
+    // Bonus: om man bara byter val (utan att trycka "Ladda setup") – byt logga direkt
+    // (men skriv inte över manual-logga om man vill behålla den)
+    const src = localStorage.getItem(STORAGE.logoSource) || "";
+    if (!src.startsWith("manual") && file) {
+      await applySetupLogo(file);
+    }
   });
 
   // ---- Trakt events ----
@@ -1019,7 +1069,6 @@
     const internalFileName = `Reseräkning_${safeName}_${safeDate} - intern.pdf`;
 
     const { jsPDF } = window.jspdf;
-
     setStatus("Skapar PDF…");
 
     const margin = 12;
@@ -1067,44 +1116,6 @@
   });
 
   // ---- Init ----
-  function setProfileVisible(visible) {
-    const block = $("companyProfileBlock");
-    const showBtn = $("showProfileBtn");
-    const hideBtn = $("hideProfileBtn");
-    const status = $("profileStatus");
-
-    if (visible) {
-      block.classList.remove("company-profile-hidden");
-      showBtn.style.display = "none";
-      hideBtn.style.display = "inline-block";
-      status.textContent = "Företagsprofil visas.";
-    } else {
-      block.classList.add("company-profile-hidden");
-      showBtn.style.display = "inline-block";
-      hideBtn.style.display = "none";
-      status.textContent = "Företagsprofil dold.";
-    }
-    localStorage.setItem(STORAGE.profileVisible, visible ? "1" : "0");
-  }
-
-  async function loadAndApplyCompanySetupCsv(fileName) {
-    try {
-      setCompanySetupStatus("Läser setup…");
-      const res = await fetch("./" + fileName, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
-      const obj = parseSingleRowCsvObject(txt);
-      if (!obj) throw new Error("CSV kunde inte tolkas.");
-      applyCompanySetup(obj);
-      saveAllToStorage();
-      showCompanySetupNote("");
-      setCompanySetupStatus(`Laddad: ${fileName}`);
-    } catch (e) {
-      showCompanySetupNote(`Kunde inte läsa "${fileName}". (${e.message})`);
-      setCompanySetupStatus("Misslyckades.");
-    }
-  }
-
   (function init() {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -1121,6 +1132,14 @@
     const vis = localStorage.getItem(STORAGE.profileVisible);
     setProfileVisible(vis === "1");
 
+    // Om man har ett valt setup sparat: se till att loggan matchar setup (om inte manual)
+    const selected = localStorage.getItem(STORAGE.companySetupSelected) || $("companySetupSelect")?.value || "";
+    const src = localStorage.getItem(STORAGE.logoSource) || "";
+    if (selected && !src.startsWith("manual")) {
+      applySetupLogo(selected);
+    }
+
+    // Om ingen sparad header ännu: ladda default setup (inkl logga)
     const hasHeader = !!localStorage.getItem(STORAGE.headerCsv);
     if (!hasHeader) {
       const file = $("companySetupSelect")?.value;
