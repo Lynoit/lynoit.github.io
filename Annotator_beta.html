@@ -1220,6 +1220,13 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let lastSpeedKmh = 0;
     let azureClockOffsetMs = null;  // device vs Azure time (ms, + = device ahead)
 
+    // ── Auto phase change logging with hysteresis ──
+let lastLoggedPhase    = null;   // the last phase we actually "accepted"/logged
+let phaseCandidate     = null;   // phase we might switch to
+let phaseCandidateSince= 0;      // when we first saw the candidate
+
+const PHASE_HYST_MS = 2 * 60 * 1000; // require 2 minutes stable before logging
+
     // near other globals
 let uploadsEnabled = false;
 
@@ -1548,6 +1555,45 @@ function applyCorrections(text) {
   return text.replace(/\b\w+\b/g, w => corrections[w.toLowerCase()] || w);
 }
 
+function handlePhaseForAutoIssue(newPhase) {
+  const now = Date.now();
+
+  // First ever phase: just initialize, no issue
+  if (lastLoggedPhase === null) {
+    lastLoggedPhase = newPhase;
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+    return;
+  }
+
+  // No change vs accepted phase → clear any pending candidate
+  if (newPhase === lastLoggedPhase) {
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+    return;
+  }
+
+  // Phase differs: start (or continue) candidate timer
+  if (phaseCandidate !== newPhase) {
+    phaseCandidate = newPhase;
+    phaseCandidateSince = now;
+    return; // not stable long enough yet
+  }
+
+  // Candidate is still the same; has it been stable long enough?
+  if ((now - phaseCandidateSince) >= PHASE_HYST_MS) {
+    // Commit the change
+    lastLoggedPhase = phaseCandidate;
+
+    // Log it as a normal (non-red) issue
+    logButton(`Phase changed to ${lastLoggedPhase}`, false);
+
+    // Reset candidate
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+  }
+}
+    
 function formatLocalTimestamp(d = new Date()) {
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   return (
@@ -2901,6 +2947,7 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
       }
 
       document.getElementById('dayPhase').textContent = `Phase: ${phase}`;
+      handlePhaseForAutoIssue(phase);
     })
     .catch(err => console.error('Sun API error', err));
 }
