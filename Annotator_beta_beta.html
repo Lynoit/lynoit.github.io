@@ -1220,6 +1220,12 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let lastSpeedKmh = 0;
     let azureClockOffsetMs = null;  // device vs Azure time (ms, + = device ahead)
 
+    // ── Country-change hysteresis (distance-based) ──
+const COUNTRY_HYST_M = 500;     // 500 meters stable inside new country
+
+let pendingCountry = null;      // candidate country
+let pendingCountryStartDist = 0; // totalDist (meters) when candidate first appeared
+
     // ── Auto phase change logging with hysteresis ──
 let lastLoggedPhase    = null;   // the last phase we actually "accepted"/logged
 let phaseCandidate     = null;   // phase we might switch to
@@ -2073,12 +2079,36 @@ if (limit !== null && limit !== lastLimit) {
       
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-      // ── NEW: auto‑log when the country changes ──
-      if (country !== lastCountry && lastCountry !== null) {
-      // Re‑use the regular logger so it shows up everywhere
-      logButton(`Entered ${country}`, false);   // false ⇒ not a KPI “red” event
-      }
+// ── Country change with 500m hysteresis ──
+if (lastCountry === null) {
+  // first ever country: accept immediately, no issue
+  lastCountry = country;
+  pendingCountry = null;
+  pendingCountryStartDist = 0;
+} else if (country === lastCountry) {
+  // we're back in the accepted country → cancel any pending switch
+  pendingCountry = null;
+  pendingCountryStartDist = 0;
+} else {
+  // country differs from accepted → candidate logic
+  if (pendingCountry !== country) {
+    // new candidate detected
+    pendingCountry = country;
+    pendingCountryStartDist = totalDist; // totalDist is meters in your code
+  } else {
+    // same candidate still being seen → check how far we've gone since it started
+    const deltaM = totalDist - pendingCountryStartDist;
+    if (deltaM >= COUNTRY_HYST_M) {
+      // commit switch + log once
+      logButton(`Entered ${country}`, false);
       lastCountry = country;
+
+      // reset candidate
+      pendingCountry = null;
+      pendingCountryStartDist = 0;
+    }
+  }
+}
 
       // fetch weather on city change
       if (city !== lastCity) {
