@@ -1136,6 +1136,11 @@ async function fetchSessionSummary(filename) {
     // ignore errors from extractAdditionalComment
   }
 
+  let testGroup = null;
+try {
+  testGroup = extractTestGroup(wb) || null;
+} catch (e) {}
+
   // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
   let kpiScore = null, kpiAvgPer1k = null;
 
@@ -1161,6 +1166,7 @@ async function fetchSessionSummary(filename) {
     adcuSoftware, participants,
     kpiScore, kpiAvgPer1k,
     additionalComment,
+    testGroup,
     loaded: true
   };
 
@@ -1168,7 +1174,36 @@ async function fetchSessionSummary(filename) {
   return summary;
 }
 
-    // Read "Test details" sheet (col1=label, col2=value) → map
+// Read "Test group" from Test details sheet.
+// Returns the last non-empty value whose label starts with "Test group".
+function extractTestGroup(wb){
+  const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+  if (!sheetName) return null;
+
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+    header: 1,
+    blankrows: false
+  });
+  if (!rows || !rows.length) return null;
+
+  let latest = null;
+  for (let r = 0; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || row.length < 2) continue;
+
+    const label = String(row[0] ?? '').trim().toLowerCase();
+    const val   = String(row[1] ?? '').trim();
+    if (!label || !val) continue;
+
+    // Matches "Test group" and "Test group (2026-01-07 11:36)"
+    if (label === 'test group' || label.startsWith('test group')) {
+      latest = val;
+    }
+  }
+  return latest;
+}
+    
+// Read "Test details" sheet (col1=label, col2=value) → map
 function extractTestDetails(wb){
   const details = {};
   const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
@@ -2015,7 +2050,7 @@ async function preloadSummariesSequentially(files) {
   for (const f of files) {
     try {
       const summary = await ensureSummary(f);   // 🔄 use ensureSummary
-      applySummaryToSidebar(f, summary);
+      (f, summary);
     } catch (e) {
       console.error('Failed to preload summary for', f, e);
     }
@@ -2987,7 +3022,7 @@ const promises = files.map(f =>
     const byComment = new Map();
 
 all.forEach(({ filename, summary }) => {
-  const raw = summary && summary.additionalComment;
+  const raw = (summary && summary.testGroup) || '';
   if (!raw) return;
   const key = raw.trim();
   if (!key) return;
@@ -3108,7 +3143,7 @@ const promises = files.map(f =>
       r &&
       r.summary &&
       r.summary.additionalComment &&
-      r.summary.additionalComment.trim() === commentKey
+      r.summary.testGroup && r.summary.testGroup.trim() === commentKey
     );
 
     if (!sessions.length) {
@@ -3904,6 +3939,47 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
   rerenderTestDetailsTable(wb);
 }
 
+async function savePostHocTestGroupToXlsx(filename, wb, sheetName, groupText){
+  let sheet = wb.Sheets[sheetName];
+  let rows = [];
+  if (sheet){
+    rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  }
+  if (!rows.length){
+    rows = [['Label', 'Value']];
+  }
+
+  const label = `Test group (${formatTimestampForLabel()})`;
+  rows.push([label, groupText]);
+
+  sheet = XLSX.utils.aoa_to_sheet(rows);
+  wb.Sheets[sheetName] = sheet;
+  if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
+
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+
+  const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!res.ok){
+    throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
+  }
+
+  // Re-render Test details table so user sees the new row immediately
+  rerenderTestDetailsTable(wb);
+}
+    
 // Inject UI under the Test details table
 function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   const safeId    = cssSafeId(filename + '_posthoc');
@@ -3952,6 +4028,78 @@ function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
   });
 }
 
+function injectPostHocTestGroupUI(filename, wb, sheetName, contentEl){
+  const safeId    = cssSafeId(filename + '_testgroup');
+  const inputId   = 'tg_text_'   + safeId;
+  const btnId     = 'tg_btn_'    + safeId;
+  const statusId  = 'tg_status_' + safeId;
+
+  const current = (() => {
+    try { return extractTestGroup(wb) || ''; } catch { return ''; }
+  })();
+
+  const container = document.createElement('div');
+  container.style.margin = '12px 0 24px';
+  container.innerHTML = `
+    <h3>Test group</h3>
+    <input id="${inputId}"
+           type="text"
+           style="width:100%;max-width:520px;"
+           placeholder="e.g. Winter baseline v2"
+           value="${escapeHtml(current)}">
+    <br>
+    <button id="${btnId}" style="margin-top:6px;">Set test group</button>
+    <button id="${btnId}_clear" style="margin-top:6px;margin-left:8px;">Clear</button>
+    <span id="${statusId}" style="margin-left:10px;font-size:12px;color:#555;"></span>
+  `;
+  contentEl.appendChild(container);
+
+  const input    = document.getElementById(inputId);
+  const button   = document.getElementById(btnId);
+  const clearBtn = document.getElementById(btnId + '_clear');
+  const status   = document.getElementById(statusId);
+
+  button.addEventListener('click', async () => {
+    const txt = (input.value || '').trim();
+    if (!txt){
+      status.textContent = 'Please enter a test group name.';
+      return;
+    }
+
+    status.textContent = 'Saving…';
+
+    try{
+      await savePostHocTestGroupToXlsx(filename, wb, sheetName, txt);
+
+      // ✅ Update local caches so grouping updates without reload
+      const cached = summaryCache.get(filename);
+      if (cached) cached.testGroup = txt;
+      else summaryCache.set(filename, { testGroup: txt });
+
+      fileToTestGroup.set(filename, txt);
+
+      status.textContent = 'Saved.';
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Save failed: ' + err.message;
+    }
+  });
+
+  clearBtn.addEventListener('click', async () => {
+    // "Clear" = write an empty group marker (or you can store "NONE")
+    status.textContent = 'Clearing…';
+    try{
+      await savePostHocTestGroupToXlsx(filename, wb, sheetName, ''); // will still write a row, value empty
+      // But extractor ignores empty values, so easiest is to write a visible token:
+      // Alternative: write "(cleared)" or "NONE"
+      status.textContent = 'Cleared (note: empty rows are ignored by extractor).';
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Clear failed: ' + err.message;
+    }
+  });
+}
+    
 function buildRoadCategoryTableFromRoadTypesTable(tbl) {
   if (!tbl || tbl.dataset.hasCategoryTable === '1') return;
   tbl.dataset.hasCategoryTable = '1';   // prevent duplicates if loadFile is called again
@@ -4337,15 +4485,18 @@ const filesToDelete = [
           if (tbl) unifyReportTableStyle(tbl);
         }
         
-        // For "Test details" sheet: add AI summary row + Additional comments editor
-        if (/^\s*test\s*details\s*$/i.test(sheet)) {
-          const tbl = document.getElementById(sheet);
-          if (tbl) {
-            addAiSummaryRow(tbl);  // <--- AI summary row
-          }
-          injectPostHocCommentUI(filename, wb, sheet, content);
-        }
+if (/^\s*test\s*details\s*$/i.test(sheet)) {
+  const tbl = document.getElementById(sheet);
+  if (tbl) {
+    addAiSummaryRow(tbl);
+  }
 
+  // ✅ NEW: Test group editor
+  injectPostHocTestGroupUI(filename, wb, sheet, content);
+
+  // Existing: Additional comments editor
+  injectPostHocCommentUI(filename, wb, sheet, content);
+}
         // For "Road types" sheet: build aggregated Road categories table below it
         if (/^\s*road\s*types?\s*$/i.test(sheet)) {
           const tbl = document.getElementById(sheet);
