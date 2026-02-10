@@ -1220,17 +1220,9 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let lastSpeedKmh = 0;
     let azureClockOffsetMs = null;  // device vs Azure time (ms, + = device ahead)
 
-// ── Initial auto-annotations after some driving ──
-const INITIAL_AUTO_ANN_M = 100;   // 100 meters
-
-let initialCountryLogged = false;
-let initialPhaseLogged   = false;
-
-// ── Phase auto logging (optional hysteresis/time) ──
-let currentPhaseRaw     = null;   // latest computed phase (from updateDayPhase)
-    
     // ── Country-change hysteresis (distance-based) ──
 const COUNTRY_HYST_M = 500;     // 500 meters stable inside new country
+
 let pendingCountry = null;      // candidate country
 let pendingCountryStartDist = 0; // totalDist (meters) when candidate first appeared
 
@@ -1569,25 +1561,6 @@ function applyCorrections(text) {
   return text.replace(/\b\w+\b/g, w => corrections[w.toLowerCase()] || w);
 }
 
-function maybeLogInitialAutoAnnotations() {
-  if (totalDist < INITIAL_AUTO_ANN_M) return;
-
-  // Country initial log (uses accepted lastCountry)
-  if (!initialCountryLogged && lastCountry) {
-    logButton(`Initial country: ${lastCountry}`, false);
-    initialCountryLogged = true;
-  }
-
-  // Phase initial log (uses latest known phase)
-  if (!initialPhaseLogged && currentPhaseRaw) {
-    logButton(`Initial phase: ${currentPhaseRaw}`, false);
-    initialPhaseLogged = true;
-
-    // Set baseline for later phase-change logging (if you use it)
-    if (lastLoggedPhase === null) lastLoggedPhase = currentPhaseRaw;
-  }
-}   
-
 function handlePhaseForAutoIssue(newPhase) {
   const now = Date.now();
 
@@ -1918,8 +1891,6 @@ async function resumeCameraIfNeeded() {
     // accumulate total and per‐weather
     totalDist += segDist;
     checkUploadEligibility();
-    maybeLogInitialAutoAnnotations();
-
     const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
     phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
     const condition = iconEl.alt || 'Unknown';
@@ -2100,49 +2071,45 @@ if (limit !== null && limit !== lastLimit) {
         || data.address.village
         || 'Unknown city';
 
-     const country = data.address.country || 'Unknown country';
+      const country = data.address.country || 'Unknown country';
 
-// accumulate distance (your existing code)
-if (segDist > 0) {
-  countryDistances[country] = (countryDistances[country] || 0) + segDist;
-}
+      if (segDist > 0) {
+         countryDistances[country] = (countryDistances[country] || 0) + segDist;
+      }
+      
+      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
 // ── Country change with 500m hysteresis ──
 if (lastCountry === null) {
-  // first ever country: accept immediately (no "Entered" log here)
+  // first ever country: accept immediately, no issue
   lastCountry = country;
   pendingCountry = null;
   pendingCountryStartDist = 0;
-
-  // if we already passed 100m, this can trigger initial country log
-  maybeLogInitialAutoAnnotations();
-
 } else if (country === lastCountry) {
-  // back in accepted country → cancel pending
+  // we're back in the accepted country → cancel any pending switch
   pendingCountry = null;
   pendingCountryStartDist = 0;
-
 } else {
-  // differs from accepted → candidate logic
+  // country differs from accepted → candidate logic
   if (pendingCountry !== country) {
+    // new candidate detected
     pendingCountry = country;
-    pendingCountryStartDist = totalDist; // meters
+    pendingCountryStartDist = totalDist; // totalDist is meters in your code
   } else {
+    // same candidate still being seen → check how far we've gone since it started
     const deltaM = totalDist - pendingCountryStartDist;
     if (deltaM >= COUNTRY_HYST_M) {
-      // commit + log once
+      // commit switch + log once
       logButton(`Entered ${country}`, false);
       lastCountry = country;
 
+      // reset candidate
       pendingCountry = null;
       pendingCountryStartDist = 0;
-
-      // also re-run initial logger (won't log again because flags)
-      maybeLogInitialAutoAnnotations();
     }
   }
 }
-      
+
       // fetch weather on city change
       if (city !== lastCity) {
         lastCity = city;
@@ -3009,12 +2976,7 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
         phase = 'Night';
       }
 
-      document.getElementById('dayPhase').textContent = `Phase: ${phase}`;document.getElementById('dayPhase').textContent = `Phase: ${phase}`;
-currentPhaseRaw = phase;
-
-// If we've already driven 100m, this can trigger the one-time initial phase log
-maybeLogInitialAutoAnnotations();
-
+      document.getElementById('dayPhase').textContent = `Phase: ${phase}`;
       handlePhaseForAutoIssue(phase);
     })
     .catch(err => console.error('Sun API error', err));
