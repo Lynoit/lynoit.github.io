@@ -1128,13 +1128,15 @@ async function fetchSessionSummary(filename) {
       null;
   } catch {}
   
-  // 4) Additional comment (used for test grouping)
-  let additionalComment = null;
-  try {
-    additionalComment = extractAdditionalComment(wb) || null;
-  } catch (e) {
-    // ignore errors from extractAdditionalComment
-  }
+// 4) Comments + stable test group key
+let additionalComment = null; // keep for UI (latest)
+let testGroupKey = null;      // use for grouping (stable)
+try {
+  additionalComment = extractLatestAdditionalComment(wb) || null;
+  testGroupKey      = extractTestGroupKey(wb) || null;
+} catch (e) {
+  // ignore
+}
 
   // 4) KPI score (sum column / total KPIs → 1 decimal → scoreFromRate)
   let kpiScore = null, kpiAvgPer1k = null;
@@ -1155,14 +1157,15 @@ async function fetchSessionSummary(filename) {
     }
   } catch {}
 
-  const summary = {
-    mileageKm, issueCount, meanTempC, weatherAgg,
-    testObject, testPurpose,
-    adcuSoftware, participants,
-    kpiScore, kpiAvgPer1k,
-    additionalComment,
-    loaded: true
-  };
+const summary = {
+  mileageKm, issueCount, meanTempC, weatherAgg,
+  testObject, testPurpose,
+  adcuSoftware, participants,
+  kpiScore, kpiAvgPer1k,
+  additionalComment,   // latest (display)
+  testGroupKey,        // stable (grouping)
+  loaded: true
+};
 
   summaryCache.set(filename, summary);
   return summary;
@@ -1189,32 +1192,65 @@ function extractTestDetails(wb){
   return details;
 }
 
-// Read "Additional comment" from Test details sheet.
-// Returns the last non-empty value whose label starts with "Additional comment".
-function extractAdditionalComment(wb){
+// Returns ALL additional comments in order (top→bottom in the sheet).
+function extractAdditionalComments(wb){
   const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
-  if (!sheetName) return null;
+  if (!sheetName) return [];
 
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
     header: 1,
     blankrows: false
   });
-  if (!rows || !rows.length) return null;
 
-  let latest = null;
+  const out = [];
   for (let r = 0; r < rows.length; r++){
     const row = rows[r];
     if (!row || row.length < 2) continue;
+
     const label = String(row[0] ?? '').trim().toLowerCase();
     const val   = String(row[1] ?? '').trim();
     if (!label || !val) continue;
 
-    // Matches both "Additional comment" and "Additional comment (2026-01-07 ...)"
     if (label === 'additional comment' || label.startsWith('additional comment')) {
-      latest = val;   // keep last seen
+      out.push(val);
     }
   }
-  return latest;
+  return out;
+}
+
+// Stable group key derived from comments.
+// Priority:
+// 1) If any comment contains "TG:" / "Test group:" / "[TG]" style → use that value
+// 2) Else use the FIRST additional comment (stable across appends)
+// 3) Else null
+function extractTestGroupKey(wb){
+  const comments = extractAdditionalComments(wb);
+  if (!comments.length) return null;
+
+  // Look for an explicit group tag in ANY comment
+  // Examples it matches:
+  // "TG: Winter tyres"
+  // "Test group: Radar tuning"
+  // "[TG] Night run"
+  const tagRe = /(?:^|\b)(?:tg|test\s*group)\s*[:=\]]\s*(.+)$/i;
+  const bracketRe = /^\s*\[tg\]\s*(.+)\s*$/i;
+
+  for (const c of comments){
+    let m = c.match(bracketRe);
+    if (m && m[1]) return m[1].trim();
+
+    m = c.match(tagRe);
+    if (m && m[1]) return m[1].trim();
+  }
+
+  // Fallback: first comment is stable
+  return comments[0].trim() || null;
+}
+
+// For display in sidebar etc: keep the latest comment (what you currently do)
+function extractLatestAdditionalComment(wb){
+  const all = extractAdditionalComments(wb);
+  return all.length ? all[all.length - 1] : null;
 }
     
 function rerenderTestDetailsTable(wb) {
@@ -2037,20 +2073,27 @@ async function ensureSummary(filename) {
   const jMs = blobMeta.get(jsonName) || 0;
 
   // 1) If JSON exists and is not older than XLSX → try using it
-  if (jMs && jMs >= xMs) {
-    try {
-      const url = `${BASE_URL}/${encodeURIComponent(jsonName)}?${SAS_TOKEN}`;
-      const res = await fetch(url, { cache: 'no-store' });
-      if (res.ok) {
-        const summary = await res.json();
-        summaryCache.set(filename, summary);
-        return summary;
+if (jMs && jMs >= xMs) {
+  try {
+    const url = `${BASE_URL}/${encodeURIComponent(jsonName)}?${SAS_TOKEN}`;
+    const res = await fetch(url, { cache: "no-store" });
+
+    if (res.ok) {
+      const summary = await res.json();
+
+      // Patch missing testGroupKey from additionalComment
+      if (!summary?.testGroupKey && summary?.additionalComment) {
+        summary.testGroupKey = String(summary.additionalComment).trim();
       }
-    } catch (e) {
-      console.warn('Failed to load summary JSON for', filename, e);
-      // fall through to XLSX parsing
+
+      summaryCache.set(filename, summary);
+      return summary;
     }
+  } catch (e) {
+    console.warn("Failed to load summary JSON for", filename, e);
+    // fall through to XLSX parsing
   }
+}
 
   // 2) Otherwise: fall back to full XLSX parse (your existing logic)
   const summary = await fetchSessionSummary(filename);  // you already have this
@@ -2987,7 +3030,8 @@ const promises = files.map(f =>
     const byComment = new Map();
 
 all.forEach(({ filename, summary }) => {
-  const raw = summary && summary.additionalComment;
+  const raw = summary && (summary.testGroupKey || summary.additionalComment);
+
   if (!raw) return;
   const key = raw.trim();
   if (!key) return;
