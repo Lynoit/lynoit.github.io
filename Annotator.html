@@ -1219,6 +1219,22 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
     let wakeLock = null;
     let lastSpeedKmh = 0;
     let azureClockOffsetMs = null;  // device vs Azure time (ms, + = device ahead)
+    // --- Auto "test started" trigger ---
+   let testStartLogged   = false;
+   let initialCountry    = null;  // country at first successful reverse-geocode
+
+    // ── Country-change hysteresis (distance-based) ──
+const COUNTRY_HYST_M = 500;     // 500 meters stable inside new country
+
+let pendingCountry = null;      // candidate country
+let pendingCountryStartDist = 0; // totalDist (meters) when candidate first appeared
+
+    // ── Auto phase change logging with hysteresis ──
+let lastLoggedPhase    = null;   // the last phase we actually "accepted"/logged
+let phaseCandidate     = null;   // phase we might switch to
+let phaseCandidateSince= 0;      // when we first saw the candidate
+
+const PHASE_HYST_MS = 2 * 60 * 1000; // require 2 minutes stable before logging
 
     // near other globals
 let uploadsEnabled = false;
@@ -1548,6 +1564,69 @@ function applyCorrections(text) {
   return text.replace(/\b\w+\b/g, w => corrections[w.toLowerCase()] || w);
 }
 
+function handlePhaseForAutoIssue(newPhase) {
+  const now = Date.now();
+
+  // First ever phase: just initialize, no issue
+  if (lastLoggedPhase === null) {
+    lastLoggedPhase = newPhase;
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+    return;
+  }
+
+  // No change vs accepted phase → clear any pending candidate
+  if (newPhase === lastLoggedPhase) {
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+    return;
+  }
+
+  // Phase differs: start (or continue) candidate timer
+  if (phaseCandidate !== newPhase) {
+    phaseCandidate = newPhase;
+    phaseCandidateSince = now;
+    return; // not stable long enough yet
+  }
+
+  // Candidate is still the same; has it been stable long enough?
+  if ((now - phaseCandidateSince) >= PHASE_HYST_MS) {
+    // Commit the change
+    lastLoggedPhase = phaseCandidate;
+
+    // Log it as a normal (non-red) issue
+    logButton(`Phase changed to ${lastLoggedPhase}`, false);
+
+    // Reset candidate
+    phaseCandidate = null;
+    phaseCandidateSince = 0;
+  }
+}
+    
+function formatLocalTimestamp(d = new Date()) {
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.` +
+    `${pad(d.getMilliseconds(), 3)}`
+  );
+}
+
+function formatLocalTimestamp(d = new Date()) {
+  // Always handle undefined / non-Date input safely
+  const dt = (d instanceof Date) ? d : new Date(d);
+
+  const pad = n => String(n).padStart(2, '0');
+  const YYYY = dt.getFullYear();
+  const MM   = pad(dt.getMonth() + 1);
+  const DD   = pad(dt.getDate());
+  const hh   = pad(dt.getHours());
+  const mm   = pad(dt.getMinutes());
+  const ss   = pad(dt.getSeconds());
+
+  return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
+}   
+    
 function updateCountryTable() {
   let html = `
     <tr>
@@ -1997,18 +2076,53 @@ if (limit !== null && limit !== lastLimit) {
 
       const country = data.address.country || 'Unknown country';
 
+      // --- Capture initial country (first time only) ---
+if (initialCountry === null && country) {
+  initialCountry = country;
+}
+
+// --- Fire "test started" after 100 m (one time) ---
+if (!testStartLogged && initialCountry && totalDist >= 100) {
+  logButton(`Test started. Country: ${initialCountry}`, false);
+  testStartLogged = true;
+}
+
       if (segDist > 0) {
          countryDistances[country] = (countryDistances[country] || 0) + segDist;
       }
       
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-      // ── NEW: auto‑log when the country changes ──
-      if (country !== lastCountry && lastCountry !== null) {
-      // Re‑use the regular logger so it shows up everywhere
-      logButton(`Entered ${country}`, false);   // false ⇒ not a KPI “red” event
-      }
+// ── Country change with 500m hysteresis ──
+if (lastCountry === null) {
+  // first ever country: accept immediately, no issue
+  lastCountry = country;
+  pendingCountry = null;
+  pendingCountryStartDist = 0;
+} else if (country === lastCountry) {
+  // we're back in the accepted country → cancel any pending switch
+  pendingCountry = null;
+  pendingCountryStartDist = 0;
+} else {
+  // country differs from accepted → candidate logic
+  if (pendingCountry !== country) {
+    // new candidate detected
+    pendingCountry = country;
+    pendingCountryStartDist = totalDist; // totalDist is meters in your code
+  } else {
+    // same candidate still being seen → check how far we've gone since it started
+    const deltaM = totalDist - pendingCountryStartDist;
+    if (deltaM >= COUNTRY_HYST_M) {
+      // commit switch + log once
+      logButton(`Entered ${country}`, false);
       lastCountry = country;
+
+      // reset candidate
+      pendingCountry = null;
+      pendingCountryStartDist = 0;
+    }
+  }
+}
 
       // fetch weather on city change
       if (city !== lastCity) {
@@ -2174,11 +2288,11 @@ function updateStatsTable () {
   }
 }
 
-function recordSample(issueText = '') {
+function recordSample(issueText = '', dt = new Date()) {
   if (!lastPos) return;
 
   const rowNo      = samplingTable.length + 1;
-  const timestamp  = new Date().toISOString();
+  const timestamp  = formatLocalTimestamp(dt); // ✅ local time, safe
   const latitude   = lastPos.lat;
   const longitude  = lastPos.lon;
   const distanceKm = (totalDist / 1000).toFixed(3);
@@ -2186,31 +2300,28 @@ function recordSample(issueText = '') {
   const maxSpd     = maxSpeed.toFixed(1);
   const legalSpd   = (currentLegalSpeed ?? '');
 
-  // snapshot current toggles (so export is time-accurate)
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
     if (def.kind === 'tri') {
-      // tri-state: Not tested / No / Yes
       const fallback = def.states?.[0] || 'Not tested';
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? fallback;
     } else {
-      // binary legacy toggle
       toggleSnapshot[def.signal] = toggleState[def.signal] ?? def.offValue;
     }
   });
 
   samplingTable.push({
-    no:        rowNo,
+    no:         rowNo,
     timestamp,
-    lat:       latitude,
-    lon:       longitude,
-    distance:  distanceKm,
-    speed:     speed,
-    maxspeed:  maxSpd,
+    lat:        latitude,
+    lon:        longitude,
+    distance:   distanceKm,
+    speed:      speed,
+    maxspeed:   maxSpd,
     legalSpeed: legalSpd,
-    roadType:   currentRoadType, 
-    issue:     issueText || '',
-    toggles:   toggleSnapshot
+    roadType:   currentRoadType,
+    issue:      issueText || '',
+    toggles:    toggleSnapshot
   });
 }
     
@@ -2268,7 +2379,8 @@ function logButton(name, isRed) {
   try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
   // still record a sampling row with the issue text
-  recordSample(name);
+  //recordSample(name);
+  recordSample('');
 
   // ⑧ Map marker for this issue (numbered)
   const issueNumber = logTable.length;
@@ -2879,6 +2991,7 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
       }
 
       document.getElementById('dayPhase').textContent = `Phase: ${phase}`;
+      handlePhaseForAutoIssue(phase);
     })
     .catch(err => console.error('Sun API error', err));
 }
