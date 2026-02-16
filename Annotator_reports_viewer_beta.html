@@ -1463,6 +1463,11 @@ function canonicalEU(raw){
     // Track which session is highlighted in the sidebar (global)
 let _activeSessionFilename = null;
 
+let euMapRef = null;               // keep the EU map instance
+let euIssueDotsLayer = null;       // layer group containing the dots
+let showEuIssueDots = true;        // default ON (checkbox checked)
+
+
 // Highlight current session in sidebar, expand its day, and scroll into view (global)
 function setActiveSessionInSidebar(filename){
   // remove previous highlight
@@ -1794,6 +1799,11 @@ function applyOverviewVisibilityToDom() {
         </span>
       </h2>
       <div id="eu-mileage-map" class="eu-mileage-map"></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:8px 0;">
+  <input type="checkbox" id="toggle-eu-issue-dots" checked>
+  Show issue dots
+</label>
+<div id="eu-mileage-map" class="eu-mileage-map"></div>
     </div>
   </div>
   `;
@@ -2846,6 +2856,8 @@ function renderEUMileageMap(agg, issuePoints = []){
   }
 
   const map = L.map(container, { attributionControl:true, zoomControl:true });
+  euMapRef = map; // ✅ save reference
+
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
@@ -2853,31 +2865,40 @@ function renderEUMileageMap(agg, issuePoints = []){
   const vectorRenderer = L.canvas({ padding: 0.5 });
   map.addLayer(vectorRenderer);
 
-  // --- Black trace layer (tiny dots) ---
-if (issuePoints && issuePoints.length){
-  const MAX_POINTS = 25000;
-  const stride = Math.max(1, Math.ceil(issuePoints.length / MAX_POINTS));
-  const isOK = (p) => Array.isArray(p) && p.length === 2 &&
-    Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
-    p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180;
-
-  const dots = [];
-  for (let i = 0; i < issuePoints.length; i += stride){
-    const p = issuePoints[i];
-    if (!isOK(p)) continue;
-    dots.push(L.circleMarker(p, {
-      renderer: vectorRenderer,
-      radius: 1.5,
-      color: '#000',
-      weight: 0,
-      fillColor: '#000',
-      fillOpacity: 0.45
-    }));
+  // ✅ build / replace dots layer group
+  if (euIssueDotsLayer) {
+    try { euIssueDotsLayer.remove(); } catch {}
+    euIssueDotsLayer = null;
   }
-  if (dots.length) L.layerGroup(dots).addTo(map);
-}
 
-  // --- Country bubbles (same as before) ---
+  if (issuePoints && issuePoints.length){
+    const MAX_POINTS = 25000;
+    const stride = Math.max(1, Math.ceil(issuePoints.length / MAX_POINTS));
+    const isOK = (p) => Array.isArray(p) && p.length === 2 &&
+      Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
+      p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180;
+
+    const dots = [];
+    for (let i = 0; i < issuePoints.length; i += stride){
+      const p = issuePoints[i];
+      if (!isOK(p)) continue;
+      dots.push(L.circleMarker(p, {
+        renderer: vectorRenderer,
+        radius: 1.5,
+        color: '#000',
+        weight: 0,
+        fillColor: '#000',
+        fillOpacity: 0.45
+      }));
+    }
+
+    euIssueDotsLayer = L.layerGroup(dots);
+
+    // ✅ only add if enabled
+    if (showEuIssueDots) euIssueDotsLayer.addTo(map);
+  }
+
+  // --- Country bubbles (unchanged) ---
   const latlngs = [];
   const maxKm = entries.length ? Math.max(...entries.map(([,km]) => km)) : 0;
   const minR = 6, maxR = 30;
@@ -2908,32 +2929,41 @@ if (issuePoints && issuePoints.length){
     });
   });
 
-const allBounds = latlngs.slice();
+  // bounds (unchanged)
+  const allBounds = latlngs.slice();
+  const isOKBound = (p) => Array.isArray(p) && p.length === 2 &&
+    Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
+    p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180;
 
-const isOKBound = (p) => Array.isArray(p) && p.length === 2 &&
-  Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
-  p[0] >= -90 && p[0] <= 90 && p[1] >= -180 && p[1] <= 180;
-
-if (issuePoints && issuePoints.length){
-  const MAX_BOUNDS_SAMPLES = 2000;
-  const jump = Math.max(1, Math.ceil(issuePoints.length / MAX_BOUNDS_SAMPLES));
-  for (let i = 0; i < issuePoints.length; i += jump){
-    const p = issuePoints[i];
-    if (isOKBound(p)) allBounds.push(p);
+  if (issuePoints && issuePoints.length){
+    const MAX_BOUNDS_SAMPLES = 2000;
+    const jump = Math.max(1, Math.ceil(issuePoints.length / MAX_BOUNDS_SAMPLES));
+    for (let i = 0; i < issuePoints.length; i += jump){
+      const p = issuePoints[i];
+      if (isOKBound(p)) allBounds.push(p);
+    }
   }
-}
 
-if (allBounds.length){
-  map.fitBounds(allBounds, { padding:[20,20] });
-} else {
-  map.setView([54,15], 4);
-}
+  if (allBounds.length){
+    map.fitBounds(allBounds, { padding:[20,20] });
+  } else {
+    map.setView([54,15], 4);
+  }
 
-requestAnimationFrame(() => map.invalidateSize());
-setTimeout(() => map.invalidateSize(), 200);
+  requestAnimationFrame(() => map.invalidateSize());
+  setTimeout(() => map.invalidateSize(), 200);
 
-  map.whenReady(() => map.invalidateSize());
-  setTimeout(() => map.invalidateSize(), 100);
+  // ✅ wire checkbox (once per render)
+  const cb = document.getElementById('toggle-eu-issue-dots');
+  if (cb){
+    cb.checked = showEuIssueDots; // keep UI in sync
+    cb.onchange = () => {
+      showEuIssueDots = cb.checked;
+      if (!euMapRef || !euIssueDotsLayer) return;
+      if (showEuIssueDots) euIssueDotsLayer.addTo(euMapRef);
+      else euMapRef.removeLayer(euIssueDotsLayer);
+    };
+  }
 }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
