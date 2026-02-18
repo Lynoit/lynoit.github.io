@@ -613,6 +613,9 @@ body.initial-loading #overview {
     const MIN_KM_FOR_OVERVIEW = 1;
     const ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
+    let euMapRef = null;
+    let euRedDotsLayer = null;   // the red “country bubble” markers
+
     // ---------- TEMP PERF FLAGS ----------
     const DISABLE_OVERVIEW_HEATMAPS = true; // activity + country + temp + weather
     const DISABLE_EU_MILEAGE_MAP    = true; // EU mileage + issue dots
@@ -1786,15 +1789,23 @@ function applyOverviewVisibilityToDom() {
       <div><div id="weather-host"></div></div>
     </div>
 
-    <div class="eu-mileage-wrap" style="grid-column: 1 / -1; display:none;">
-      <h2 id="title-eu-mileage" data-title="Mileage per country" data-loading="1" style="margin-top:16px;">
-        <span>Loading</span>
-        <span class="title-thinking">
-          <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
-        </span>
-      </h2>
-      <div id="eu-mileage-map" class="eu-mileage-map"></div>
-    </div>
+<div class="eu-mileage-wrap" style="grid-column: 1 / -1; display:none;">
+  <h2 id="title-eu-mileage" data-title="Mileage per country" data-loading="1" style="margin-top:16px;">
+    <span>Loading</span>
+    <span class="title-thinking">
+      <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+    </span>
+  </h2>
+
+  <!-- NEW: toggle for red dots -->
+  <label style="display:inline-flex;align-items:center;gap:8px;margin:6px 0 10px;font-size:13px;">
+    <input type="checkbox" id="toggle-eu-red-dots" checked>
+    Show red country dots
+  </label>
+
+  <div id="eu-mileage-map" class="eu-mileage-map"></div>
+</div>
+
   </div>
   `;
 
@@ -2854,6 +2865,11 @@ function renderEUMileageMap(agg, issuePoints = []){
   const vectorRenderer = L.canvas({ padding: 0.5 });
   map.addLayer(vectorRenderer);
 
+  euMapRef = map;
+
+  // NEW: create (or reset) a layer group for the red dots
+  euRedDotsLayer = L.layerGroup().addTo(map);
+
   // --- Black trace layer (tiny dots) ---
 if (issuePoints && issuePoints.length){
   const MAX_POINTS = 25000;
@@ -2894,13 +2910,13 @@ if (issuePoints && issuePoints.length){
       return Math.round(minR + f * (maxR - minR));
     })();
 
-    const marker = L.circleMarker([lat,lon], {
-      radius: r,
-      color: '#900',
-      weight: 1,
-      fillColor: '#d00',
-      fillOpacity: 0.7
-    }).addTo(map);
+const marker = L.circleMarker([lat,lon], {
+  radius: r,
+  color: '#900',
+  weight: 1,
+  fillColor: '#d00',
+  fillOpacity: 0.7
+}).addTo(euRedDotsLayer);
 
     marker.bindTooltip(`${Math.round(km)} km`, {
       permanent: true,
@@ -2935,6 +2951,24 @@ setTimeout(() => map.invalidateSize(), 200);
 
   map.whenReady(() => map.invalidateSize());
   setTimeout(() => map.invalidateSize(), 100);
+
+// NEW: wire checkbox
+const cb = document.getElementById('toggle-eu-red-dots');
+if (cb) {
+  // Apply current checkbox state on render
+  if (cb.checked) {
+    if (euRedDotsLayer && !euMapRef.hasLayer(euRedDotsLayer)) euRedDotsLayer.addTo(euMapRef);
+  } else {
+    if (euRedDotsLayer && euMapRef.hasLayer(euRedDotsLayer)) euMapRef.removeLayer(euRedDotsLayer);
+  }
+
+  // Avoid stacking multiple listeners if map re-renders
+  cb.onchange = () => {
+    if (!euMapRef || !euRedDotsLayer) return;
+    if (cb.checked) euRedDotsLayer.addTo(euMapRef);
+    else euMapRef.removeLayer(euRedDotsLayer);
+  };
+}  
 }
 
     // ---------- LATEST ROUTE PREVIEWS (latest 10, ≥1 km, issues > 0) ----------
