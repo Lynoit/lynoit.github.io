@@ -569,6 +569,7 @@
   }
 
   function inferLogoFromSetupCsv(fileName) {
+    // company_setup_lynoit.csv -> company_setup_lynoit_logo.png
     const base = String(fileName || "").replace(/\.csv$/i, "");
     return `${base}_logo.png`;
   }
@@ -587,6 +588,7 @@
   }
 
   async function applySetupLogo(setupFileName) {
+    // välj logo från config, annars härled från csv-namn
     const setup = COMPANY_SETUPS.find(s => s.file === setupFileName);
     const logoFile = setup?.logo || inferLogoFromSetupCsv(setupFileName);
 
@@ -597,6 +599,7 @@
       localStorage.setItem(STORAGE.logoSource, `setup:${setupFileName}`);
       setCompanySetupStatus(`Laddad: ${setupFileName} (+ logga)`);
     } catch (e) {
+      // om logga saknas: behåll ev tidigare logga
       showCompanySetupNote(`Setup laddades, men loggan kunde inte hittas: "${logoFile}".`);
     }
   }
@@ -611,10 +614,13 @@
       if (!obj) throw new Error("CSV kunde inte tolkas (behöver headerrad + en datarad).");
 
       applyCompanySetup(obj);
+
+      // NYTT: använd setup-logga automatiskt när setup laddas
       await applySetupLogo(fileName);
 
       saveAllToStorage();
       showCompanySetupNote("");
+      // status sätts i applySetupLogo vid lyckad logga
       if (!state.logoDataUrl) setCompanySetupStatus(`Laddad: ${fileName}`);
     } catch (e) {
       showCompanySetupNote(`Kunde inte läsa "${fileName}". (${e.message})`);
@@ -747,17 +753,6 @@
     return "JPEG";
   }
 
-  function isPdfFile(file) {
-    const t = (file?.type || "").toLowerCase();
-    const n = (file?.name || "").toLowerCase();
-    return t.includes("pdf") || n.endsWith(".pdf");
-  }
-
-  function isImageFile(file) {
-    const t = (file?.type || "").toLowerCase();
-    return t.startsWith("image/");
-  }
-
   async function appendImageUnderlag(doc, file, margin, pageW, pageH, title) {
     const dataUrl = await fileToDataUrl(file);
     doc.addPage();
@@ -827,6 +822,7 @@
     const totals = internal ? recalcTotalsNoVat() : recalcTotals();
     const vatPct = internal ? 0 : Number(h.vatRate || 25);
 
+    // Logga (från setup eller manuellt)
     if (state.logoDataUrl) {
       doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
     }
@@ -883,7 +879,7 @@
       styles: { fontSize: 10, cellPadding: 2.2 },
       headStyles: { fillColor: [240, 240, 240], textColor: 20 },
       columnStyles: {
-        0: { cellWidth: 100 }, // <-- FIX: lite smalare för att undvika "could not fit page"
+        0: { cellWidth: 105 },
         1: { halign: "right", cellWidth: 18 },
         2: { halign: "right", cellWidth: 28 },
         3: { halign: "right", cellWidth: 28 }
@@ -1044,6 +1040,8 @@
     localStorage.setItem(STORAGE.companySetupSelected, file || "");
     setCompanySetupStatus(file ? `Vald: ${file}` : "");
 
+    // Bonus: om man bara byter val (utan att trycka "Ladda setup") – byt logga direkt
+    // (men skriv inte över manual-logga om man vill behålla den)
     const src = localStorage.getItem(STORAGE.logoSource) || "";
     if (!src.startsWith("manual") && file) {
       await applySetupLogo(file);
@@ -1072,6 +1070,7 @@
 
     const { jsPDF } = window.jspdf;
     setStatus("Skapar PDF…");
+
     const margin = 12;
 
     // extern
@@ -1083,42 +1082,38 @@
     for (const it of state.items) {
       const file = it.receiptFile;
       if (!file) continue;
-
-      if (isPdfFile(file)) {
-        await appendPdfUnderlag(doc, file, margin, pageW, pageH, `Underlag: ${it.desc}`);
-      } else if (isImageFile(file)) {
-        await appendImageUnderlag(doc, file, margin, pageW, pageH, `Underlag: ${it.desc}`);
-      } else {
+      if (file.type === "application/pdf") await appendPdfUnderlag(doc, file, margin, pageW, pageH, `Underlag: ${it.desc}`);
+      else if (file.type.startsWith("image/")) await appendImageUnderlag(doc, file, margin, pageW, pageH, `Underlag: ${it.desc}`);
+      else {
         doc.addPage();
         doc.setFontSize(12);
         doc.text(`Underlag kunde inte tolkas: ${file.name}`, margin, margin + 10);
       }
     }
 
-    // intern
-    const docInternal = new jsPDF({ unit: "mm", format: "a4" });
-    const pageW2 = docInternal.internal.pageSize.getWidth();
-    const pageH2 = docInternal.internal.pageSize.getHeight();
-    await drawFirstPage(docInternal, header, margin, pageW2, pageH2, { internal:true });
+// intern
+const docInternal = new jsPDF({ unit: "mm", format: "a4" });
+const pageW2 = docInternal.internal.pageSize.getWidth();
+const pageH2 = docInternal.internal.pageSize.getHeight();
+await drawFirstPage(docInternal, header, margin, pageW2, pageH2, { internal:true });
 
-    for (const it of state.items) {
-      const file = it.receiptFile;
-      if (!file) continue;
+// ✅ Lägg till underlagen även i intern-PDF:en (innan save)
+for (const it of state.items) {
+  const file = it.receiptFile;
+  if (!file) continue;
 
-      if (isPdfFile(file)) {
-        await appendPdfUnderlag(docInternal, file, margin, pageW2, pageH2, `Underlag: ${it.desc}`);
-      } else if (isImageFile(file)) {
-        await appendImageUnderlag(docInternal, file, margin, pageW2, pageH2, `Underlag: ${it.desc}`);
-      } else {
-        docInternal.addPage();
-        docInternal.setFontSize(12);
-        docInternal.text(`Underlag kunde inte tolkas: ${file.name}`, margin, margin + 10);
-      }
-    }
+  if (file.type === "application/pdf") {
+    await appendPdfUnderlag(docInternal, file, margin, pageW2, pageH2, `Underlag: ${it.desc}`);
+  } else if (file.type.startsWith("image/")) {
+    await appendImageUnderlag(docInternal, file, margin, pageW2, pageH2, `Underlag: ${it.desc}`);
+  } else {
+    docInternal.addPage();
+    docInternal.setFontSize(12);
+    docInternal.text(`Underlag kunde inte tolkas: ${file.name}`, margin, margin + 10);
+  }
+}
 
-    // ✅ Spara båda
-    doc.save(baseFileName);
-    docInternal.save(internalFileName);
+docInternal.save(internalFileName);
 
     setStatus(`Klart! Skapade: ${baseFileName} + ${internalFileName}`);
   });
@@ -1140,12 +1135,14 @@
     const vis = localStorage.getItem(STORAGE.profileVisible);
     setProfileVisible(vis === "1");
 
+    // Om man har ett valt setup sparat: se till att loggan matchar setup (om inte manual)
     const selected = localStorage.getItem(STORAGE.companySetupSelected) || $("companySetupSelect")?.value || "";
     const src = localStorage.getItem(STORAGE.logoSource) || "";
     if (selected && !src.startsWith("manual")) {
       applySetupLogo(selected);
     }
 
+    // Om ingen sparad header ännu: ladda default setup (inkl logga)
     const hasHeader = !!localStorage.getItem(STORAGE.headerCsv);
     if (!hasHeader) {
       const file = $("companySetupSelect")?.value;
