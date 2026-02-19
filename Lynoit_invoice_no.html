@@ -82,8 +82,8 @@
   /** @type {FileSystemFileHandle|null} */
   let fileHandle = null;
 
-  let delimiter = ",";              // auto-detected from file content
-  let rows = [];                    // array of {Date, Description, No}
+  let delimiter = ",";
+  let rows = []; // {Date, Description, No}
   let pendingAdded = false;
 
   function setStatus(msg, kind="") {
@@ -163,5 +163,153 @@
     return maxNo + 1;
   }
 
-  async function ensurePermissions(handle) {
-   
+  async function ensurePermissions(handle, mode = "readwrite") {
+    if (!handle) return false;
+
+    if (await handle.queryPermission({ mode }) === "granted") return true;
+
+    const res = await handle.requestPermission({ mode });
+    return res === "granted";
+  }
+
+  function setUiEnabled(ready) {
+    reloadBtn.disabled = !ready;
+    addBtn.disabled = !ready;
+    saveCloseBtn.disabled = !(ready && pendingAdded);
+  }
+
+  function initDefaults() {
+    const today = new Date();
+    dateEl.value = today.toISOString().slice(0, 10);
+    noEl.value = computeNextNo();
+    pendingAdded = false;
+    saveCloseBtn.disabled = true;
+  }
+
+  async function loadFromHandle() {
+    if (!fileHandle) return;
+
+    const ok = await ensurePermissions(fileHandle, "read");
+    if (!ok) {
+      setStatus("Permission to read the CSV was not granted.", "err");
+      return;
+    }
+
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+
+    delimiter = detectDelimiter(text);
+    const parsed = parseDelimited(text, delimiter);
+
+    rows = parsed.rows.map(r => ({
+      Date: r.Date ?? r["date"] ?? r["DATE"] ?? "",
+      Description: r.Description ?? r["Desc"] ?? r["description"] ?? "",
+      No: r.No ?? r["no"] ?? r["NO"] ?? ""
+    }));
+
+    renderTable();
+    initDefaults();
+    setUiEnabled(true);
+
+    setStatus(
+      `Loaded ${rows.length} row(s) from ${file.name}. Delimiter: ${delimiter === "\t" ? "TAB" : "COMMA"}.`,
+      "ok"
+    );
+  }
+
+  openBtn.addEventListener("click", async () => {
+    try {
+      if (!("showOpenFilePicker" in window)) {
+        setStatus("Your browser does not support file picking. Use Chrome or Edge.", "err");
+        return;
+      }
+
+      const [handle] = await window.showOpenFilePicker({
+        multiple: false,
+        types: [{
+          description: "CSV files",
+          accept: { "text/csv": [".csv"], "text/plain": [".csv", ".txt"] }
+        }]
+      });
+
+      fileHandle = handle;
+
+      const ok = await ensurePermissions(fileHandle, "read");
+      if (!ok) {
+        setStatus("Permission not granted to read the file.", "err");
+        fileHandle = null;
+        setUiEnabled(false);
+        return;
+      }
+
+      await loadFromHandle();
+    } catch (e) {
+      if (e && (e.name === "AbortError" || String(e).includes("AbortError"))) {
+        setStatus("Open cancelled.", "");
+        return;
+      }
+      setStatus("Open failed: " + (e?.message || e), "err");
+      console.error(e);
+    }
+  });
+
+  reloadBtn.addEventListener("click", async () => {
+    try {
+      await loadFromHandle();
+    } catch (e) {
+      setStatus("Reload failed: " + (e?.message || e), "err");
+      console.error(e);
+    }
+  });
+
+  addBtn.addEventListener("click", () => {
+    const d = dateEl.value?.trim();
+    const desc = descEl.value?.trim();
+
+    if (!d) return setStatus("Please select a date.", "err");
+    if (!desc) return setStatus("Please enter a description.", "err");
+
+    const newNo = computeNextNo();
+    const newRow = { Date: d, Description: desc, No: String(newNo) };
+
+    rows.push(newRow);
+    renderTable();
+
+    noEl.value = computeNextNo();
+    descEl.value = "";
+
+    pendingAdded = true;
+    saveCloseBtn.disabled = false;
+
+    setStatus(`Added row with invoice no ${newRow.No}. Click “Save and close” to write the CSV.`, "ok");
+  });
+
+  saveCloseBtn.addEventListener("click", async () => {
+    try {
+      if (!fileHandle) return setStatus("No CSV file opened.", "err");
+      if (!pendingAdded) return setStatus("Nothing new to save (add a row first).", "err");
+
+      const ok = await ensurePermissions(fileHandle, "readwrite");
+      if (!ok) return setStatus("Permission to write was not granted.", "err");
+
+      const csvText = toDelimited(rows, delimiter);
+
+      const writable = await fileHandle.createWritable();
+      await writable.write(csvText);
+      await writable.close();
+
+      setStatus("Saved. Closing window...", "ok");
+      window.close();
+    } catch (e) {
+      setStatus("Save failed: " + (e?.message || e), "err");
+      console.error(e);
+    }
+  });
+
+  // Initial UI state
+  setUiEnabled(false);
+  setStatus("Click “Open CSV” to select Lynoit_invoice_no.csv.", "");
+})();
+</script>
+</body>
+</html>
