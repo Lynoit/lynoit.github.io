@@ -179,33 +179,48 @@
   }
 
   async function loadCsvFromAzure() {
-    if (!BLOB_SAS_URL || BLOB_SAS_URL.includes("PASTE_YOUR")) {
-      setStatus("Please paste your Azure Blob SAS URL into BLOB_SAS_URL in the HTML.", "err");
-      addBtn.disabled = true;
-      return;
+  setStatus("Loading CSV from Azure...", "");
+  try {
+    // Helpful: show which origin the browser is using
+    // If you opened the HTML as file:// it will be "null"
+    console.log("Page origin:", window.location.origin);
+
+    const resp = await fetch(BLOB_SAS_URL, {
+      cache: "no-store",
+      // credentials: "omit" // default; keep simple
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      throw new Error(`HTTP ${resp.status} ${resp.statusText} — ${t.slice(0,200)}`);
     }
 
-    setStatus("Loading CSV from Azure...", "");
-    try {
-      const resp = await fetch(BLOB_SAS_URL, { cache: "no-store" });
-      if (!resp.ok) throw new Error(`Failed to load from Azure (HTTP ${resp.status})`);
-      const text = await resp.text();
+    const text = await resp.text();
 
-      delimiter = detectDelimiter(text);
-      const parsed = parseDelimited(text, delimiter);
-      rows = normalizeRows(parsed.rows);
+    delimiter = detectDelimiter(text);
+    const parsed = parseDelimited(text, delimiter);
+    rows = normalizeRows(parsed.rows);
 
-      renderTable();
-      initDefaults();
+    renderTable();
+    initDefaults();
 
-      setStatus(`Loaded ${rows.length} row(s) from Azure.`, "ok");
-    } catch (e) {
-      addBtn.disabled = true;
-      saveCloseBtn.disabled = true;
-      setStatus("Load failed: " + (e?.message || e), "err");
-      console.error(e);
+    setStatus(`Loaded ${rows.length} row(s) from Azure.`, "ok");
+  } catch (e) {
+    // This typically triggers on CORS/network; browsers hide details.
+    setStatus("Load failed: " + (e?.message || e), "err");
+    console.error("Fetch error:", e);
+
+    // A hint to you in the UI about the common cause:
+    if (window.location.origin === "null") {
+      setStatus("Load failed: likely CORS. You opened this as file:// (Origin is null). Serve the HTML via http(s) OR allow Origin: null in Azure CORS.", "err");
+    } else {
+      setStatus("Load failed: likely CORS. Check Azure Storage CORS for Blob service (allow your site origin, GET/PUT, and headers).", "err");
     }
+
+    addBtn.disabled = true;
+    saveCloseBtn.disabled = true;
   }
+}
 
   async function saveCsvToAzure(csvText) {
     // Azure Blob overwrite via PUT requires these headers.
