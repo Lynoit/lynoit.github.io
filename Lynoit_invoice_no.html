@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Lynoit Invoice No Tool</title>
+  <title>Lynoit Invoice No Tool (Azure)</title>
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
@@ -23,10 +23,10 @@
   </style>
 </head>
 <body>
-  <h2>Lynoit Invoice No Tool</h2>
+  <h2>Lynoit Invoice No Tool (Azure)</h2>
 
   <div class="row">
-    <button id="reload">Reload CSV</button>
+    <button id="reload">Reload from Azure</button>
     <button id="saveClose" disabled>Save and close</button>
   </div>
 
@@ -50,8 +50,7 @@
   </div>
 
   <div class="hint">
-    This page auto-loads <code>./Lynoit_invoice_no.csv</code> from the same server.<br/>
-    Saving requires the server to allow overwriting the CSV (e.g. via HTTP <code>PUT</code>). If not allowed, the tool will download a new CSV.
+    Reads/writes <code>Lynoit_invoice_no.csv</code> from Azure Blob Storage via SAS URL.
   </div>
 
   <div class="status" id="status"></div>
@@ -66,23 +65,22 @@
 <script>
 (() => {
   // === CONFIG ===
-  const CSV_URL = "./Lynoit_invoice_no.csv"; // same folder as HTML
+  // Paste your FULL Azure Blob SAS URL here (blob URL + ?sv=... token)
+  const BLOB_SAS_URL = "PASTE_YOUR_BLOB_SAS_URL_HERE";
 
   // === UI ===
   const statusEl = document.getElementById("status");
   const tbody = document.querySelector("#table tbody");
-
   const reloadBtn = document.getElementById("reload");
   const saveCloseBtn = document.getElementById("saveClose");
   const addBtn = document.getElementById("add");
-
   const dateEl = document.getElementById("date");
   const descEl = document.getElementById("desc");
   const noEl   = document.getElementById("no");
 
   // === STATE ===
-  let delimiter = ",";     // auto-detected: comma or tab
-  let rows = [];           // {Date, Description, No}
+  let delimiter = ",";
+  let rows = [];
   let pendingAdded = false;
 
   function setStatus(msg, kind="") {
@@ -95,7 +93,6 @@
     return firstLine.includes("\t") ? "\t" : ",";
   }
 
-  // Small CSV/TSV parser with quoted-field support (sufficient for 3 columns)
   function parseDelimited(text, delim) {
     const lines = text.split(/\r?\n/).filter(l => l.length > 0);
     if (lines.length === 0) return { headers: ["Date","Description","No"], rows: [] };
@@ -171,31 +168,58 @@
     addBtn.disabled = false;
   }
 
-  async function loadCsv() {
-    setStatus("Loading CSV...", "");
+  function normalizeRows(parsedRows) {
+    return parsedRows.map(r => ({
+      Date: r.Date ?? r["date"] ?? r["DATE"] ?? "",
+      Description: r.Description ?? r["Desc"] ?? r["description"] ?? "",
+      No: r.No ?? r["no"] ?? r["NO"] ?? ""
+    }));
+  }
+
+  async function loadCsvFromAzure() {
+    if (!BLOB_SAS_URL || BLOB_SAS_URL.includes("PASTE_YOUR")) {
+      setStatus("Please paste your Azure Blob SAS URL into BLOB_SAS_URL in the HTML.", "err");
+      addBtn.disabled = true;
+      return;
+    }
+
+    setStatus("Loading CSV from Azure...", "");
     try {
-      const resp = await fetch(CSV_URL, { cache: "no-store" });
-      if (!resp.ok) throw new Error(`Failed to load CSV (${resp.status})`);
+      const resp = await fetch(BLOB_SAS_URL, { cache: "no-store" });
+      if (!resp.ok) throw new Error(`Failed to load from Azure (HTTP ${resp.status})`);
       const text = await resp.text();
 
       delimiter = detectDelimiter(text);
       const parsed = parseDelimited(text, delimiter);
-
-      rows = parsed.rows.map(r => ({
-        Date: r.Date ?? r["date"] ?? r["DATE"] ?? "",
-        Description: r.Description ?? r["Desc"] ?? r["description"] ?? "",
-        No: r.No ?? r["no"] ?? r["NO"] ?? ""
-      }));
+      rows = normalizeRows(parsed.rows);
 
       renderTable();
       initDefaults();
 
-      setStatus(`Loaded ${rows.length} row(s). Delimiter: ${delimiter === "\t" ? "TAB" : "COMMA"}.`, "ok");
+      setStatus(`Loaded ${rows.length} row(s) from Azure.`, "ok");
     } catch (e) {
       addBtn.disabled = true;
       saveCloseBtn.disabled = true;
       setStatus("Load failed: " + (e?.message || e), "err");
       console.error(e);
+    }
+  }
+
+  async function saveCsvToAzure(csvText) {
+    // Azure Blob overwrite via PUT requires these headers.
+    // We use x-ms-blob-type: BlockBlob for a normal blob.
+    const resp = await fetch(BLOB_SAS_URL, {
+      method: "PUT",
+      headers: {
+        "x-ms-blob-type": "BlockBlob",
+        "Content-Type": "text/csv; charset=utf-8"
+      },
+      body: csvText
+    });
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      throw new Error(`Azure save failed (HTTP ${resp.status}). ${msg}`.trim());
     }
   }
 
@@ -217,60 +241,29 @@
 
     pendingAdded = true;
     saveCloseBtn.disabled = false;
-
-    setStatus(`Added row with invoice no ${newRow.No}. Click “Save and close” to save.`, "ok");
+    setStatus(`Added row with invoice no ${newRow.No}. Click “Save and close” to write to Azure.`, "ok");
   });
-
-  // Try to overwrite the CSV on the server via PUT.
-  // This works only if your server is configured to allow it.
-  async function saveToServer(csvText) {
-    const resp = await fetch(CSV_URL, {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-      body: csvText
-    });
-    if (!resp.ok) {
-      const msg = await resp.text().catch(() => "");
-      throw new Error(`Server rejected save (HTTP ${resp.status}). ${msg}`.trim());
-    }
-  }
-
-  function downloadFallback(csvText) {
-    const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "Lynoit_invoice_no.csv";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(a.href);
-  }
 
   saveCloseBtn.addEventListener("click", async () => {
     if (!pendingAdded) return setStatus("Nothing new to save (add a row first).", "err");
 
     const csvText = toDelimited(rows, delimiter);
-    setStatus("Saving...", "");
+    setStatus("Saving to Azure...", "");
 
     try {
-      await saveToServer(csvText);
-      setStatus("Saved on server. Closing window...", "ok");
+      await saveCsvToAzure(csvText);
+      setStatus("Saved to Azure. Closing window...", "ok");
       window.close();
     } catch (e) {
-      // Server probably doesn't allow PUT. Provide fallback.
-      console.warn(e);
-      setStatus(
-        "Server did not allow saving the file. A new CSV will be downloaded instead (replace the server file manually).",
-        "err"
-      );
-      downloadFallback(csvText);
+      setStatus("Save failed: " + (e?.message || e), "err");
+      console.error(e);
     }
   });
 
-  reloadBtn.addEventListener("click", loadCsv);
+  reloadBtn.addEventListener("click", loadCsvFromAzure);
 
   // Auto-load on startup
-  loadCsv();
+  loadCsvFromAzure();
 })();
 </script>
 </body>
