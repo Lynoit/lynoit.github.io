@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Lynoit Invoice No Tool</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
+    label { display: grid; gap: 6px; font-size: 14px; }
+    input { padding: 8px; font-size: 14px; min-width: 220px; }
+    input[readonly] { background: #f3f3f3; }
+    button { padding: 10px 14px; font-size: 14px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    table { border-collapse: collapse; margin-top: 12px; width: 100%; max-width: 900px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f7f7f7; }
+    .status { margin-top: 10px; font-size: 14px; }
+    .ok { color: #0a7a0a; }
+    .err { color: #b00020; }
+    .hint { color: #666; font-size: 13px; margin-top: 8px; line-height: 1.35; }
+    code { background: #f4f4f4; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h2>Lynoit Invoice No Tool</h2>
+
+  <div class="row">
+    <button id="openCsv">Open CSV</button>
+    <button id="reload" disabled>Reload</button>
+    <button id="saveClose" disabled>Save and close</button>
+  </div>
+
+  <div class="row">
+    <label>
+      Date
+      <input id="date" type="date" />
+    </label>
+
+    <label>
+      Description
+      <input id="desc" type="text" placeholder="e.g., Thomas Stuttgart" />
+    </label>
+
+    <label>
+      New Invoice No
+      <input id="no" type="number" readonly />
+    </label>
+
+    <button id="add" disabled>Add row</button>
+  </div>
+
+  <div class="hint">
+    Single-file version. Works best in <b>Chrome/Edge</b>.<br/>
+    Click <b>Open CSV</b> and select <code>Lynoit_invoice_no.csv</code> (in the same folder as this HTML).<br/>
+    After adding a row, click <b>Save and close</b> to overwrite the CSV with the new row appended.
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <table id="table">
+    <thead>
+      <tr><th>Date</th><th>Description</th><th>No</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+(() => {
+  const statusEl = document.getElementById("status");
+  const tbody = document.querySelector("#table tbody");
+
+  const openBtn = document.getElementById("openCsv");
+  const reloadBtn = document.getElementById("reload");
+  const saveCloseBtn = document.getElementById("saveClose");
+  const addBtn = document.getElementById("add");
+
+  const dateEl = document.getElementById("date");
+  const descEl = document.getElementById("desc");
+  const noEl   = document.getElementById("no");
+
+  /** @type {FileSystemFileHandle|null} */
+  let fileHandle = null;
+
+  let delimiter = ",";              // auto-detected from file content
+  let rows = [];                    // array of {Date, Description, No}
+  let pendingAdded = false;
+
+  function setStatus(msg, kind="") {
+    statusEl.className = "status " + (kind || "");
+    statusEl.textContent = msg;
+  }
+
+  function detectDelimiter(text) {
+    const firstLine = (text.split(/\r?\n/).find(l => l.trim().length) || "");
+    return firstLine.includes("\t") ? "\t" : ",";
+  }
+
+  // Small CSV/TSV parser with quoted-field support (sufficient for 3 columns)
+  function parseDelimited(text, delim) {
+    const lines = text.split(/\r?\n/).filter(l => l.length > 0);
+    if (lines.length === 0) return { headers: ["Date","Description","No"], rows: [] };
+
+    const parseLine = (line) => {
+      const out = [];
+      let cur = "", inQ = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+          else inQ = !inQ;
+        } else if (!inQ && ch === delim) {
+          out.push(cur); cur = "";
+        } else {
+          cur += ch;
+        }
+      }
+      out.push(cur);
+      return out;
+    };
+
+    const hdr = parseLine(lines[0]).map(s => s.trim());
+    const data = [];
+    for (let i = 1; i < lines.length; i++) {
+      const vals = parseLine(lines[i]);
+      if (vals.every(v => String(v).trim() === "")) continue;
+      const obj = {};
+      hdr.forEach((h, idx) => obj[h] = (vals[idx] ?? "").trim());
+      data.push(obj);
+    }
+    return { headers: hdr, rows: data };
+  }
+
+  function escapeField(v, delim) {
+    const s = String(v ?? "");
+    const mustQuote = s.includes('"') || s.includes("\n") || s.includes("\r") || s.includes(delim) || s.includes("\t");
+    if (!mustQuote) return s;
+    return '"' + s.replaceAll('"', '""') + '"';
+  }
+
+  function toDelimited(data, delim) {
+    const hdr = ["Date","Description","No"];
+    const head = hdr.join(delim);
+    const body = data.map(r => hdr.map(h => escapeField(r[h], delim)).join(delim)).join("\n");
+    return head + "\n" + (body ? body + "\n" : "");
+  }
+
+  function renderTable() {
+    tbody.innerHTML = "";
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${r.Date ?? ""}</td><td>${r.Description ?? ""}</td><td>${r.No ?? ""}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function computeNextNo() {
+    let maxNo = 0;
+    for (const r of rows) {
+      const n = parseInt(r.No, 10);
+      if (!Number.isNaN(n)) maxNo = Math.max(maxNo, n);
+    }
+    return maxNo + 1;
+  }
+
+  async function ensurePermissions(handle) {
+   
