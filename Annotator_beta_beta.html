@@ -539,6 +539,20 @@ form.addEventListener('submit', async e => {
   color: #000000;
 }
 
+#toggleDistanceTable{
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid #444;
+  margin-bottom: 80px;
+}
+#toggleDistanceTable th,
+#toggleDistanceTable td{
+  border: 1px solid #444;
+  padding: 6px 8px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+    
 #countryTable {
   width: 100%;
   border-collapse: collapse;
@@ -948,7 +962,23 @@ form.addEventListener('submit', async e => {
       </table>
     </div>
     <div class="page-break"></div>
-        
+
+    <div id="toggleDistanceContainer" class="section">
+  <h3>Toggle Distance Accumulation</h3>
+  <table id="toggleDistanceTable">
+    <tr>
+      <th>Toggle</th>
+      <th>Signal</th>
+      <th>Current state</th>
+      <th>Distance (km)</th>
+      <th>Distance (%)</th>
+    </tr>
+    <tr><td colspan="5">&nbsp;</td></tr>
+  </table>
+</div>
+
+<div class="page-break"></div>
+    
     <div id="mapContainer" class="section">
       <h3>Route view</h3>
       <div id="map" style="height:300px;width:100%;"></div>
@@ -1148,6 +1178,79 @@ const triToggleTouched = {};   // signals for tri-toggles that have been changed
 let   toggleDefs  = [];
 let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
 
+    // Accumulated distance per toggle (meters)
+const toggleDistances = {};  // { [signal]: meters }
+
+// Decide if a toggle is "active" for distance accumulation
+function isToggleActive(def) {
+  const v = toggleState[def.signal];
+
+  // Tri-state: count only "Yes"
+  if (def.kind === 'tri') return v === 'Yes';
+
+  // Binary: count when it equals onValue
+  return v === def.onValue;
+}
+
+// Called each GPS segment: add segDist meters to any active toggles
+function accumulateToggleDistances(segDist) {
+  if (!segDist || segDist <= 0) return;
+  if (!Array.isArray(toggleDefs) || toggleDefs.length === 0) return;
+
+  toggleDefs.forEach(def => {
+    // only toggles (binary/tri) should be in toggleDefs, but guard anyway
+    if (!def?.signal) return;
+
+    if (isToggleActive(def)) {
+      toggleDistances[def.signal] = (toggleDistances[def.signal] || 0) + segDist;
+    }
+  });
+}
+
+// Render the table
+function updateToggleDistanceTable() {
+  const tbl = document.getElementById('toggleDistanceTable');
+  if (!tbl) return;
+
+  let html = `
+    <tr>
+      <th>Toggle</th>
+      <th>Signal</th>
+      <th>Current state</th>
+      <th>Distance (km)</th>
+      <th>Distance (%)</th>
+    </tr>`;
+
+  // show rows in the same order as toggleDefs
+  const total = totalDist || 0;
+
+  toggleDefs.forEach(def => {
+    const sig = def.signal;
+    const label = def.label || sig;
+    const state = toggleState[sig] ?? (def.kind === 'tri' ? (def.states?.[0] || 'Not tested') : def.offValue);
+
+    const meters = toggleDistances[sig] || 0;
+    const km = (meters / 1000).toFixed(2);
+    const pct = total > 0 ? ((meters / total) * 100).toFixed(1) : '0.0';
+
+    html += `
+      <tr>
+        <td>${label}</td>
+        <td>${sig}</td>
+        <td>${state}</td>
+        <td>${km}</td>
+        <td>${pct}%</td>
+      </tr>`;
+  });
+
+  // if there are no toggles yet, show a placeholder
+  if (!toggleDefs.length) {
+    html += `<tr><td colspan="5">No toggle definitions loaded yet</td></tr>`;
+  }
+
+  tbl.innerHTML = html;
+}
+
     let lastLimit = null;
     let limitChanges = 0;
     let roundaboutCount     = 0;
@@ -1188,6 +1291,7 @@ let   toggleNotes = {};   // per-signal free-text notes for tri-state toggles
       { id: 'metaTable',    name: 'Test details'  },
       { id: 'logTable',     name: 'Issues'     },
       { id: 'countTable',   name: 'KPI'        },
+      { id: 'toggleDistanceTable', name: 'Toggle distance' },
       { id: 'statsTable',   name: 'Statistics' },
       { id: 'streetTable',  name: 'Road types' },
       { id: 'countryTable', name: 'Country'    },
@@ -1390,6 +1494,7 @@ async function stopTesting() {
     try { if (typeof renderLatestSnapshots === 'function') renderLatestSnapshots(5); } catch {}
     try { if (typeof updateStatsTable    === 'function') updateStatsTable(); } catch {}
     try { if (typeof updateCountTable    === 'function') updateCountTable(); } catch {}
+    try { if (typeof updateToggleDistanceTable === 'function') updateToggleDistanceTable(); } catch {}
     try { if (typeof updateStreetTable   === 'function') updateStreetTable(); } catch {}
     try { if (typeof updateCountryTable  === 'function') updateCountryTable(); } catch {}
     try { if (typeof updateWeatherTable  === 'function') updateWeatherTable(); } catch {}
@@ -1893,6 +1998,8 @@ async function resumeCameraIfNeeded() {
 
     // accumulate total and per‐weather
     totalDist += segDist;
+    accumulateToggleDistances(segDist);
+    
     checkUploadEligibility();
     const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
     phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
@@ -3044,6 +3151,7 @@ async function maybeUpdateTables() {
     renderLatestSnapshots(5);
     updateStatsTable();
     updateCountTable();
+    updateToggleDistanceTable();
     updateStreetTable();
     updateCountryTable();
     updateWeatherTable();
