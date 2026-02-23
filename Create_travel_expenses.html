@@ -190,11 +190,33 @@ label > span,
           <select id="traktCountry"></select>
         </label>
 
-        <div style="align-self:flex-end;">
-          <div class="muted small" data-i18n="txt_normalPerDay">Normalbelopp / dag (exkl logi)</div>
-          <div style="font-size:18px; font-weight:700;" id="traktAmount">—</div>
-        </div>
-      </div>
+<div style="align-self:flex-end; min-width:260px;">
+  <div class="muted small" data-i18n="txt_adjustedPerDay">Justerat / dag (efter måltider)</div>
+  <div style="font-size:18px; font-weight:700;" id="traktAmount">—</div>
+  <div class="muted small" style="margin-top:2px;">
+    <span data-i18n="txt_basePerDay">Normalbelopp</span>:
+    <span id="traktBaseAmount">—</span>
+  </div>
+</div>
+
+ <div class="row" style="margin-top:8px;">
+  <div class="muted small" style="min-width:220px;" data-i18n="lbl_meals">Måltider som ingår (dras av):</div>
+
+  <label style="flex-direction:row; align-items:center; gap:8px; min-width:auto;">
+    <input type="checkbox" id="mealBreakfast">
+    <span data-i18n="meal_breakfast">Frukost</span>
+  </label>
+
+  <label style="flex-direction:row; align-items:center; gap:8px; min-width:auto;">
+    <input type="checkbox" id="mealLunch">
+    <span data-i18n="meal_lunch">Lunch</span>
+  </label>
+
+  <label style="flex-direction:row; align-items:center; gap:8px; min-width:auto;">
+    <input type="checkbox" id="mealDinner">
+    <span data-i18n="meal_dinner">Middag</span>
+  </label>
+</div>       
 
       <div id="traktNote" class="note" style="margin-top:10px; display:none;"></div>
 
@@ -404,6 +426,13 @@ label > span,
       lbl_traktPick: "Välj land",
       txt_normalPerDay: "Normalbelopp / dag (exkl logi)",
 
+      lbl_meals: "Måltider som ingår (dras av):",
+meal_breakfast: "Frukost",
+meal_lunch: "Lunch",
+meal_dinner: "Middag",
+txt_adjustedPerDay: "Justerat / dag (efter måltider)",
+txt_basePerDay: "Normalbelopp",
+
       btn_showProfile: "Visa företags profil",
       btn_hideProfile: "Göm företagsprofil",
 
@@ -505,6 +534,13 @@ label > span,
       ph_traktSearch: "Search country…",
       lbl_traktPick: "Select country",
       txt_normalPerDay: "Daily amount (excl. lodging)",
+
+      lbl_meals: "Meals included (deducted):",
+meal_breakfast: "Breakfast",
+meal_lunch: "Lunch",
+meal_dinner: "Dinner",
+txt_adjustedPerDay: "Adjusted / day (after meals)",
+txt_basePerDay: "Daily amount",
 
       btn_showProfile: "Show company profile",
       btn_hideProfile: "Hide company profile",
@@ -617,6 +653,7 @@ label > span,
     renderTraktDropdown($("traktSearch")?.value || "");
     showTraktNote(t("trakt_rules_html"));
     renderItemsTable();
+    updateTraktAmount();
   }
 
   function setLang(newLang) {
@@ -751,6 +788,10 @@ label > span,
       email: $("email")?.value.trim() || "",
       telefon: $("telefon")?.value.trim() || "",
       bankgiro: $("bankgiro")?.value.trim() || "",
+
+      mealBreakfast: $("mealBreakfast")?.checked ? "1" : "0",
+mealLunch: $("mealLunch")?.checked ? "1" : "0",
+mealDinner: $("mealDinner")?.checked ? "1" : "0",      
     };
   }
 
@@ -775,6 +816,9 @@ label > span,
     if ($("email")) $("email").value = h.email || "";
     if ($("telefon")) $("telefon").value = h.telefon || "";
     if ($("bankgiro")) $("bankgiro").value = h.bankgiro || "";
+    if ($("mealBreakfast")) $("mealBreakfast").checked = String(h.mealBreakfast || "0") === "1";
+if ($("mealLunch")) $("mealLunch").checked = String(h.mealLunch || "0") === "1";
+if ($("mealDinner")) $("mealDinner").checked = String(h.mealDinner || "0") === "1";
   }
 
   function saveAllToStorage() {
@@ -1051,12 +1095,58 @@ label > span,
     updateTraktAmount();
   }
 
-  function updateTraktAmount() {
-    const sel = $("traktCountry");
-    const opt = sel.selectedOptions?.[0];
-    const amt = opt?.dataset?.amount;
-    $("traktAmount").textContent = amt ? formatKr(amt) : "—";
+  function isSwedenSelected() {
+  const sel = $("traktCountry");
+  const v = (sel?.value || "").trim().toLowerCase();
+  return v === "sverige" || v === "sweden";
+}
+
+function getMealSelection() {
+  return {
+    breakfast: !!$("mealBreakfast")?.checked,
+    lunch: !!$("mealLunch")?.checked,
+    dinner: !!$("mealDinner")?.checked
+  };
+}
+
+function calcAdjustedPerDiem(baseAmount) {
+  const base = Number(baseAmount);
+  if (!Number.isFinite(base)) return null;
+
+  const m = getMealSelection();
+
+  if (isSwedenSelected()) {
+    // Sverige 2026: fasta avdrag (SEK)
+    const ded =
+      (m.breakfast ? 60 : 0) +
+      (m.lunch ? 105 : 0) +
+      (m.dinner ? 105 : 0);
+
+    return Math.max(0, base - ded);
+  } else {
+    // Utland: % av normalbeloppet (max 85%)
+    const pct =
+      (m.breakfast ? 0.15 : 0) +
+      (m.lunch ? 0.35 : 0) +
+      (m.dinner ? 0.35 : 0);
+
+    const capped = Math.min(0.85, pct);
+    return Math.max(0, base * (1 - capped));
   }
+}
+
+function updateTraktAmount() {
+  const sel = $("traktCountry");
+  const opt = sel.selectedOptions?.[0];
+  const base = opt?.dataset?.amount ? Number(opt.dataset.amount) : null;
+
+  // Visa normalbelopp
+  $("traktBaseAmount").textContent = (base != null && Number.isFinite(base)) ? formatKr(base) : "—";
+
+  // Visa justerat belopp
+  const adjusted = calcAdjustedPerDiem(base);
+  $("traktAmount").textContent = (adjusted != null) ? formatKr(adjusted) : "—";
+}
 
   function showTraktNote(html) {
     const el = $("traktNote");
@@ -1301,7 +1391,8 @@ label > span,
     "expenseName","personName","fakturaNr",
     "date","kundNr","betalningsvillkor","vatRate",
     "kundAdress","erRef","varRef","pnr","projektNr","projektNamn",
-    "avsandareAdress","orgNr","momsRegnr","email","telefon","bankgiro"
+    "avsandareAdress","orgNr","momsRegnr","email","telefon","bankgiro",
+    "mealBreakfast","mealLunch","mealDinner"
   ].forEach(id => {
     const el = $(id);
     if (!el) return;
@@ -1408,6 +1499,15 @@ label > span,
   $("traktSearch").addEventListener("input", (e) => renderTraktDropdown(e.target.value));
   $("traktCountry").addEventListener("change", updateTraktAmount);
 
+["mealBreakfast","mealLunch","mealDinner"].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("change", () => {
+    updateTraktAmount();
+    autosave();
+  });
+});
+  
   // ---- PDF export ----
   $("createPdfBtn").addEventListener("click", async () => {
     setStatus("");
