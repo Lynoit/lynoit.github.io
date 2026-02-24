@@ -1034,130 +1034,136 @@
     return t0 ? t0.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
   }
 
-  async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
-    const totals = recalcTotals();
-    const vatPct = Number($("vatRate")?.value || 25);
+async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
+  const totals = recalcTotals();
+  const vatPct = Number($("vatRate")?.value || 25);
 
-    if (state.logoDataUrl) {
-      doc.addImage(state.logoDataUrl, "PNG", margin, margin, 55, 22, undefined, "FAST");
-    }
+  // --- Layout knobs (tweak these if you want even more/less spacing)
+  const logoY = margin;            // logo top
+  const rightBlockY = margin + 28; // Datum/Kund nr/Faktura nr block (pushed down from logo)
+  const customerInfoY = margin + 52; // Kund (address) start (pushed further down)
+  const refsStartY = margin + 78;  // references/project/terms block
 
-    const dateStr = todayISO(); // always today in PDF
-
-    doc.setFontSize(10);
-    const rightX = pageW - margin;
-    const topY = margin + 18;
-    doc.text(`${t("pdf_date")}: ${dateStr}`, rightX, topY, { align: "right" });
-    doc.text(`${t("pdf_customerNo")}: ${h.kundNr || ""}`, rightX, topY + 5, { align: "right" });
-    doc.text(`${t("pdf_invoiceNo")}: ${h.fakturaNr || ""}`, rightX, topY + 10, { align: "right" });
-
-    doc.setFontSize(11);
-    doc.text(splitLines(h.kundAdress || ""), margin, margin + 34);
-
-    doc.setFontSize(10);
-    const refY = margin + 58;
-
-    doc.text(t("pdf_yourRef"), margin, refY);
-    doc.text(h.erRef || "", margin, refY + 5);
-
-    doc.text(t("pdf_ourRef"), margin + 55, refY);
-    doc.text(h.varRef || "", margin + 55, refY + 5);
-    doc.text(h.pnr || "", margin + 55, refY + 10);
-
-    doc.text(t("pdf_project"), margin + 110, refY);
-    doc.text(h.projektNr || "", margin + 110, refY + 5);
-    doc.text(h.projektNamn || "", margin + 110, refY + 10);
-
-    doc.text(t("pdf_terms"), pageW - margin, refY, { align: "right" });
-    doc.text(`${h.betalningsvillkor || ""} ${t("pdf_days")}`, pageW - margin, refY + 5, { align: "right" });
-
-    const tableStartY = margin + 78;
-
-    const bodyRows = state.items.map(it => {
-      const hours = Number(it.hours||0);
-      const rate = Number(it.rate||0);
-      const amount = hours * rate;
-      return [ it.desc || "", String(hours), formatKr(rate), formatKr(amount) ];
-    });
-
-    doc.autoTable({
-      startY: tableStartY,
-      head: [t("pdf_table_head")],
-      body: bodyRows,
-      styles: { fontSize: 10, cellPadding: 2.2 },
-      headStyles: { fillColor: [240, 240, 240], textColor: 20 },
-      columnStyles: {
-        0: { cellWidth: 105 },
-        1: { halign: "right", cellWidth: 18 },
-        2: { halign: "right", cellWidth: 30 },
-        3: { halign: "right", cellWidth: 30 }
-      },
-      margin: { left: margin, right: margin }
-    });
-
-    const tableEndY = doc.lastAutoTable.finalY || (tableStartY + 40);
-
-    const boxW = 72, boxH = 28;
-    const boxX = pageW - margin - boxW;
-    const boxY = Math.min(pageH - margin - boxH - 10, tableEndY + 10);
-
-    doc.setDrawColor(60);
-    doc.rect(boxX, boxY, boxW, boxH);
-
-    doc.setFontSize(10);
-    doc.text(t("pdf_sum"), boxX + 4, boxY + 8);
-    doc.text(formatKr(totals.sum), boxX + boxW - 4, boxY + 8, { align: "right" });
-
-    doc.text(`${t("pdf_vat")} ${vatPct}%:`, boxX + 4, boxY + 16);
-    doc.text(formatKr(totals.moms), boxX + boxW - 4, boxY + 16, { align: "right" });
-
-    doc.setFontSize(11);
-    doc.text(t("pdf_pay"), boxX + 4, boxY + 25);
-    doc.text(formatKr(totals.total), boxX + boxW - 4, boxY + 25, { align: "right" });
-
-    doc.setFontSize(9);
-    const leftFooterLines = splitLines(h.avsandareAdress || "");
-    const rightFooterLines = [
-      `Org: ${h.orgNr || ""}`,
-      `${LANG === "en" ? "VAT reg. no." : "Moms/regnr"}: ${h.momsRegnr || ""}`,
-      `${LANG === "en" ? "Email" : "E-post"}: ${h.email || ""}`,
-      `${LANG === "en" ? "Phone" : "Telefon"}: ${h.telefon || ""}`,
-      `Bankgiro: ${h.bankgiro || ""}`,
-      t("pdf_has_f_tax")
-    ].filter(s => String(s).trim().length);
-
-    const lineH = 4.2;
-    const maxLines = Math.max(leftFooterLines.length || 1, rightFooterLines.length || 1);
-    const footerStartY = pageH - margin - (maxLines - 1) * lineH;
-
-    doc.text(leftFooterLines.length ? leftFooterLines : [""], margin, footerStartY);
-    doc.text(rightFooterLines, pageW - margin, footerStartY, { align: "right" });
+  // Logo (optional)
+  if (state.logoDataUrl) {
+    doc.addImage(state.logoDataUrl, "PNG", margin, logoY, 55, 22, undefined, "FAST");
   }
 
-  $("createPdfBtn").addEventListener("click", async () => {
-    setStatus("");
-    const header = readHeader();
+  // No big title here (removed as requested)
 
-    if (state.items.length === 0) return alert(t("alert_need_item"));
+  // Right-side info
+  const dateStr = todayISO();
+  doc.setFontSize(10);
+  const rightX = pageW - margin;
 
-    const safeDate = todayISO();
-    const safeInv = sanitizeFilenamePart(header.fakturaNr || (LANG === "en" ? "invoice" : "faktura"));
-    const COMPANY_NAME_FOR_FILENAME = "Lynoit";
-    const baseFileName = `${COMPANY_NAME_FOR_FILENAME}_${safeInv}_${safeDate}.pdf`;
+  doc.setFont(undefined, "normal");
+  doc.text(`${t("pdf_date")}: ${dateStr}`, rightX, rightBlockY, { align: "right" });
+  doc.text(`${t("pdf_customerNo")}: ${h.kundNr || ""}`, rightX, rightBlockY + 5, { align: "right" });
+  doc.text(`${t("pdf_invoiceNo")}: ${h.fakturaNr || ""}`, rightX, rightBlockY + 10, { align: "right" });
 
-    const { jsPDF } = window.jspdf;
-    setStatus(t("status_creating_pdf"));
+  // Customer address/info (moved down to increase spacing)
+  doc.setFontSize(11);
+  doc.setFont(undefined, "normal");
+  doc.text(splitLines(h.kundAdress || ""), margin, customerInfoY);
 
-    const margin = 12;
-    const doc = new jsPDF({ unit: "mm", format: "a4" });
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
+  // References / Project / Terms block (headings in bold)
+  doc.setFontSize(10);
+  const refY = refsStartY;
 
-    await drawInvoiceFirstPage(doc, header, margin, pageW, pageH);
+  // Er referens (bold title)
+  doc.setFont(undefined, "bold");
+  doc.text(t("pdf_yourRef"), margin, refY);
+  doc.setFont(undefined, "normal");
+  doc.text(h.erRef || "", margin, refY + 5);
 
-    doc.save(baseFileName);
-    setStatus(`${t("status_done_prefix")}${baseFileName}`);
+  // Vår referens (bold title)
+  doc.setFont(undefined, "bold");
+  doc.text(t("pdf_ourRef"), margin + 55, refY);
+  doc.setFont(undefined, "normal");
+  doc.text(h.varRef || "", margin + 55, refY + 5);
+  doc.text(h.pnr || "", margin + 55, refY + 10);
+
+  // Projekt / uppdragsgivare (bold title)
+  doc.setFont(undefined, "bold");
+  doc.text(t("pdf_project"), margin + 110, refY);
+  doc.setFont(undefined, "normal");
+  doc.text(h.projektNr || "", margin + 110, refY + 5);
+  doc.text(h.projektNamn || "", margin + 110, refY + 10);
+
+  // Betalningsvillkor (bold title)
+  doc.setFont(undefined, "bold");
+  doc.text(t("pdf_terms"), rightX, refY, { align: "right" });
+  doc.setFont(undefined, "normal");
+  doc.text(`${h.betalningsvillkor || ""} ${t("pdf_days")}`, rightX, refY + 5, { align: "right" });
+
+  // Table
+  const tableStartY = refsStartY + 20;
+
+  const bodyRows = state.items.map(it => {
+    const hours = Number(it.hours || 0);
+    const rate = Number(it.rate || 0);
+    const amount = hours * rate;
+    return [ it.desc || "", String(hours), formatKr(rate), formatKr(amount) ];
   });
+
+  doc.autoTable({
+    startY: tableStartY,
+    head: [t("pdf_table_head")],
+    body: bodyRows,
+    styles: { fontSize: 10, cellPadding: 2.2 },
+    headStyles: { fillColor: [240, 240, 240], textColor: 20 },
+    columnStyles: {
+      0: { cellWidth: 105 },
+      1: { halign: "right", cellWidth: 18 },
+      2: { halign: "right", cellWidth: 30 },
+      3: { halign: "right", cellWidth: 30 }
+    },
+    margin: { left: margin, right: margin }
+  });
+
+  const tableEndY = doc.lastAutoTable.finalY || (tableStartY + 40);
+
+  // Totals box
+  const boxW = 72, boxH = 28;
+  const boxX = pageW - margin - boxW;
+  const boxY = Math.min(pageH - margin - boxH - 10, tableEndY + 10);
+
+  doc.setDrawColor(60);
+  doc.rect(boxX, boxY, boxW, boxH);
+
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(10);
+  doc.text(t("pdf_sum"), boxX + 4, boxY + 8);
+  doc.text(formatKr(totals.sum), boxX + boxW - 4, boxY + 8, { align: "right" });
+
+  doc.text(`${t("pdf_vat")} ${vatPct}%:`, boxX + 4, boxY + 16);
+  doc.text(formatKr(totals.moms), boxX + boxW - 4, boxY + 16, { align: "right" });
+
+  doc.setFontSize(11);
+  doc.text(t("pdf_pay"), boxX + 4, boxY + 25);
+  doc.text(formatKr(totals.total), boxX + boxW - 4, boxY + 25, { align: "right" });
+
+  // Footer
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(9);
+
+  const leftFooterLines = splitLines(h.avsandareAdress || "");
+  const rightFooterLines = [
+    `Org: ${h.orgNr || ""}`,
+    `${LANG === "en" ? "VAT reg. no." : "Moms/regnr"}: ${h.momsRegnr || ""}`,
+    `${LANG === "en" ? "Email" : "E-post"}: ${h.email || ""}`,
+    `${LANG === "en" ? "Phone" : "Telefon"}: ${h.telefon || ""}`,
+    `Bankgiro: ${h.bankgiro || ""}`,
+    t("pdf_has_f_tax")
+  ].filter(s => String(s).trim().length);
+
+  const lineH = 4.2;
+  const maxLines = Math.max(leftFooterLines.length || 1, rightFooterLines.length || 1);
+  const footerStartY = pageH - margin - (maxLines - 1) * lineH;
+
+  doc.text(leftFooterLines.length ? leftFooterLines : [""], margin, footerStartY);
+  doc.text(rightFooterLines, pageW - margin, footerStartY, { align: "right" });
+}
 
   // ---- Init ----
   function initCompanySetupDropdown() {
