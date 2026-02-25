@@ -1036,20 +1036,15 @@
 // -------------------------
 // PDF
 // -------------------------
-function splitLines(text) {
-  const t0 = String(text || "").trim();
-  return t0 ? t0.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [];
-}
-
 async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
   const totals = recalcTotals();
   const vatPct = Number($("vatRate")?.value || 25);
 
-  // --- Layout knobs
+  // Layout knobs
   const logoY = margin;
-  const rightBlockY = margin + 8;     // Datum/Kund nr/Faktura nr (higher)
-  const customerInfoY = margin + 52;  // Kund address (lower)
-  const refsStartY = margin + 78;     // refs/project/terms
+  const rightBlockY = margin + 8;
+  const customerInfoY = margin + 52;
+  const refsStartY = margin + 78;
 
   // Logo
   if (state.logoDataUrl) {
@@ -1059,6 +1054,7 @@ async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
   // Right-side info
   const dateStr = todayISO();
   doc.setFontSize(10);
+  const rightX = pageW - margin; // ✅ define once here
 
   doc.setFont(undefined, "normal");
   doc.text(`${t("pdf_date")}: ${dateStr}`, rightX, rightBlockY, { align: "right" });
@@ -1067,7 +1063,6 @@ async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
 
   // Customer info
   doc.setFontSize(11);
-  doc.setFont(undefined, "normal");
   doc.text(splitLines(h.kundAdress || ""), margin, customerInfoY);
 
   // Refs / Project / Terms headings bold
@@ -1098,7 +1093,6 @@ async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
 
   // Table
   const tableStartY = refsStartY + 20;
-
   const bodyRows = state.items.map(it => {
     const hours = Number(it.hours || 0);
     const rate = Number(it.rate || 0);
@@ -1144,77 +1138,70 @@ async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
   doc.text(formatKr(totals.total), boxX + boxW - 4, boxY + 25, { align: "right" });
 
   // -------------------------
-  // Footer (labels bold, values normal)
+  // Footer (left bigger)
   // -------------------------
-// -------------------------
-// Footer
-// - Left footer bigger text
-// - Right footer: labels bold, values normal
-// -------------------------
+  const leftFooterLines = splitLines(h.avsandareAdress || "");
 
-const leftFooterLines = splitLines(h.avsandareAdress || "");
+  const rightFooterPairs = [
+    { label: "Org:", value: (h.orgNr || "") },
+    { label: (LANG === "en" ? "VAT reg. no.:" : "Moms/regnr:"), value: (h.momsRegnr || "") },
+    { label: (LANG === "en" ? "Email:" : "E-post:"), value: (h.email || "") },
+    { label: (LANG === "en" ? "Phone:" : "Telefon:"), value: (h.telefon || "") },
+    { label: "Bankgiro:", value: (h.bankgiro || "") },
+  ].filter(p => String(p.value).trim().length);
 
-const rightFooterPairs = [
-  { label: "Org:", value: (h.orgNr || "") },
-  { label: (LANG === "en" ? "VAT reg. no.:" : "Moms/regnr:"), value: (h.momsRegnr || "") },
-  { label: (LANG === "en" ? "Email:" : "E-post:"), value: (h.email || "") },
-  { label: (LANG === "en" ? "Phone:" : "Telefon:"), value: (h.telefon || "") },
-  { label: "Bankgiro:", value: (h.bankgiro || "") },
-].filter(p => String(p.value).trim().length);
+  const leftFontSize = 11;
+  const rightFontSize = 9;
+  const lineH = 4.6;
 
-const leftFontSize = 11;   // ✅ increase left footer size here
-const rightFontSize = 9;
-const lineH = 4.6;         // slightly larger line height looks better with bigger left font
+  const rightLineCount = rightFooterPairs.length + 1;
+  const maxLines = Math.max(leftFooterLines.length || 1, rightLineCount || 1);
+  const footerStartY = pageH - margin - (maxLines - 1) * lineH;
 
-const rightLineCount = rightFooterPairs.length + 1; // + F-tax line
-const maxLines = Math.max(leftFooterLines.length || 1, rightLineCount || 1);
+  // Left footer bigger
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(leftFontSize);
+  doc.text(leftFooterLines.length ? leftFooterLines : [""], margin, footerStartY);
 
-const footerStartY = pageH - margin - (maxLines - 1) * lineH;
+  // Helper: label bold, value normal
+  function drawRightLabelValue(rightEdgeX, y, label, value) {
+    const labelText = `${label} `;
+    const valueText = String(value ?? "");
 
-// Left footer (bigger)
-doc.setFont(undefined, "normal");
-doc.setFontSize(leftFontSize);
-doc.text(leftFooterLines.length ? leftFooterLines : [""], margin, footerStartY);
+    doc.setFontSize(rightFontSize);
 
-// Helper: label bold, value normal (right-aligned)
-function drawRightLabelValue(rightEdgeX, y, label, value) {
-  const labelText = `${label} `;
-  const valueText = String(value ?? "");
+    doc.setFont(undefined, "bold");
+    const wLabel = doc.getTextWidth(labelText);
 
+    doc.setFont(undefined, "normal");
+    const wValue = doc.getTextWidth(valueText);
+
+    const startX = rightEdgeX - (wLabel + wValue);
+
+    doc.setFont(undefined, "bold");
+    doc.text(labelText, startX, y);
+
+    doc.setFont(undefined, "normal");
+    doc.text(valueText, startX + wLabel, y);
+  }
+
+  // Right footer
+  let yR = footerStartY;
+  for (const p of rightFooterPairs) {
+    drawRightLabelValue(rightX, yR, p.label, p.value);
+    yR += lineH;
+  }
+
+  // F-tax bold
   doc.setFontSize(rightFontSize);
-
   doc.setFont(undefined, "bold");
-  const wLabel = doc.getTextWidth(labelText);
-
+  doc.text(t("pdf_has_f_tax"), rightX, yR, { align: "right" });
   doc.setFont(undefined, "normal");
-  const wValue = doc.getTextWidth(valueText);
+} // ✅ function closed properly
 
-  const startX = rightEdgeX - (wLabel + wValue);
-
-  doc.setFont(undefined, "bold");
-  doc.text(labelText, startX, y);
-
-  doc.setFont(undefined, "normal");
-  doc.text(valueText, startX + wLabel, y);
-}
-
-// Right footer
-let yR = footerStartY;
-const rightX = pageW - margin;
-
-for (const p of rightFooterPairs) {
-  drawRightLabelValue(rightX, yR, p.label, p.value);
-  yR += lineH;
-}
-
-// F-tax line (bold)
-doc.setFontSize(rightFontSize);
-doc.setFont(undefined, "bold");
-doc.text(t("pdf_has_f_tax"), rightX, yR, { align: "right" });
-doc.setFont(undefined, "normal");
 
 // -------------------------
-// PDF button handler (must be OUTSIDE the drawInvoiceFirstPage function)
+// PDF button handler (OUTSIDE function)
 // -------------------------
 $("createPdfBtn").addEventListener("click", async () => {
   try {
@@ -1244,10 +1231,9 @@ $("createPdfBtn").addEventListener("click", async () => {
     const safeDate = todayISO();
     const safeInv = sanitizeFilenamePart(header.fakturaNr || (LANG === "en" ? "invoice" : "faktura"));
 
-    const COMPANY_NAME_FOR_FILENAME = "Lynoit";
-    const baseFileName = `${COMPANY_NAME_FOR_FILENAME}_${safeInv}_${safeDate}.pdf`;
-
+    const baseFileName = `Lynoit_${safeInv}_${safeDate}.pdf`;
     doc.save(baseFileName);
+
     setStatus(`${t("status_done_prefix")}${baseFileName}`);
   } catch (err) {
     console.error(err);
