@@ -1047,37 +1047,61 @@ async function drawInvoiceFirstPage(doc, h, margin, pageW, pageH) {
   const totals = recalcTotals();
   const vatPct = Number($("vatRate")?.value || 25);
 
-  // Layout knobs
+  // ---- Layout knobs ----
   const logoY = margin;
-  const rightBlockY = margin + 8;
-  const customerInfoY = margin + 52;
-  const refsStartY = margin + 78;
+  const rightHeaderTitleY = margin + 6;  // "Faktura" / "Invoice"
+  const rightBlockY = margin + 14;       // Datum/Kund/Faktura rows start
+  const customerInfoY = margin + 52;     // Customer address start
+  const refsStartY = margin + 78;        // Refs/Project/Terms row
+  const tableStartY = refsStartY + 20;
 
-  // Logo
+  const rightX = pageW - margin;
+  const dateStr = todayISO();
+
+  // ---- Logo ----
   if (state.logoDataUrl) {
     doc.addImage(state.logoDataUrl, "PNG", margin, logoY, 55, 22, undefined, "FAST");
   }
 
-  // Right-side info
-  const dateStr = todayISO();
-  doc.setFontSize(10);
-  const rightX = pageW - margin; // ✅ define once here
+  // ---- Right header title ("Faktura"/"Invoice") ----
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(13);
+  doc.text(t("pdf_title"), rightX, rightHeaderTitleY, { align: "right" });
 
-  // Right-side header title
-doc.setFont(undefined, "bold");
-doc.setFontSize(12);
-doc.text(t("pdf_title"), rightX, rightBlockY - 4, { align: "right" });
+  // Helper: bold label + normal value, right-aligned as ONE line
+  function drawRightLabelValueRow(y, label, value) {
+    const labelText = `${label} `;
+    const valueText = String(value ?? "");
 
+    // measure at the same font size you draw with
+    doc.setFontSize(10);
+
+    doc.setFont(undefined, "bold");
+    const wLabel = doc.getTextWidth(labelText);
+
+    doc.setFont(undefined, "normal");
+    const wValue = doc.getTextWidth(valueText);
+
+    const startX = rightX - (wLabel + wValue);
+
+    doc.setFont(undefined, "bold");
+    doc.text(labelText, startX, y);
+
+    doc.setFont(undefined, "normal");
+    doc.text(valueText, startX + wLabel, y);
+  }
+
+  // ---- Right header rows (no overlap) ----
+  drawRightLabelValueRow(rightBlockY,      `${t("pdf_date")}:`,       dateStr);
+  drawRightLabelValueRow(rightBlockY + 6,  `${t("pdf_customerNo")}:`, h.kundNr || "");
+  drawRightLabelValueRow(rightBlockY + 12, `${t("pdf_invoiceNo")}:`,  h.fakturaNr || "");
+
+  // ---- Customer info ----
   doc.setFont(undefined, "normal");
-  doc.text(`${t("pdf_date")}: ${dateStr}`, rightX, rightBlockY, { align: "right" });
-  doc.text(`${t("pdf_customerNo")}: ${h.kundNr || ""}`, rightX, rightBlockY + 5, { align: "right" });
-  doc.text(`${t("pdf_invoiceNo")}: ${h.fakturaNr || ""}`, rightX, rightBlockY + 10, { align: "right" });
-
-  // Customer info
   doc.setFontSize(11);
   doc.text(splitLines(h.kundAdress || ""), margin, customerInfoY);
 
-  // Refs / Project / Terms headings bold
+  // ---- Refs / Project / Terms (headings bold) ----
   doc.setFontSize(10);
   const refY = refsStartY;
 
@@ -1103,8 +1127,7 @@ doc.text(t("pdf_title"), rightX, rightBlockY - 4, { align: "right" });
   doc.setFont(undefined, "normal");
   doc.text(`${h.betalningsvillkor || ""} ${t("pdf_days")}`, rightX, refY + 5, { align: "right" });
 
-  // Table
-  const tableStartY = refsStartY + 20;
+  // ---- Table ----
   const bodyRows = state.items.map(it => {
     const hours = Number(it.hours || 0);
     const rate = Number(it.rate || 0);
@@ -1112,51 +1135,45 @@ doc.text(t("pdf_title"), rightX, rightBlockY - 4, { align: "right" });
     return [it.desc || "", String(hours), formatKr(rate), formatKr(amount)];
   });
 
-doc.autoTable({
-  startY: tableStartY,
-  head: [t("pdf_table_head")],
-  body: bodyRows,
-
-  // ✅ slightly smaller
-  styles: { fontSize: 9, cellPadding: 2.0 },
-
-  headStyles: { fillColor: [240, 240, 240], textColor: 20 },
-
-  // ✅ slightly narrower columns
-  columnStyles: {
-    0: { cellWidth: 100 },                // was 105
-    1: { halign: "right", cellWidth: 18 },
-    2: { halign: "right", cellWidth: 28 }, // was 30
-    3: { halign: "right", cellWidth: 28 }  // was 30
-  },
-
-  margin: { left: margin, right: margin }
-});
+  doc.autoTable({
+    startY: tableStartY,
+    head: [t("pdf_table_head")],
+    body: bodyRows,
+    styles: { fontSize: 9, cellPadding: 2.0 },
+    headStyles: { fillColor: [240, 240, 240], textColor: 20 },
+    columnStyles: {
+      0: { cellWidth: 100 },
+      1: { halign: "right", cellWidth: 18 },
+      2: { halign: "right", cellWidth: 28 },
+      3: { halign: "right", cellWidth: 28 }
+    },
+    margin: { left: margin, right: margin }
+  });
 
   const tableEndY = doc.lastAutoTable.finalY || (tableStartY + 40);
 
-  // Totals box
-  const boxW = 72, boxH = 28;
+  // ---- Totals box ----
+  const boxW = 80, boxH = 30;
   const boxX = pageW - margin - boxW;
-  const boxY = Math.min(pageH - margin - boxH - 10, tableEndY + 10);
+  const boxY = Math.min(pageH - margin - boxH - 35, tableEndY + 10);
 
   doc.setDrawColor(60);
   doc.rect(boxX, boxY, boxW, boxH);
 
   doc.setFont(undefined, "normal");
   doc.setFontSize(10);
-  doc.text(t("pdf_sum"), boxX + 4, boxY + 8);
-  doc.text(formatKr(totals.sum), boxX + boxW - 4, boxY + 8, { align: "right" });
+  doc.text(t("pdf_sum"), boxX + 4, boxY + 9);
+  doc.text(formatKr(totals.sum), boxX + boxW - 4, boxY + 9, { align: "right" });
 
-  doc.text(`${t("pdf_vat")} ${vatPct}%:`, boxX + 4, boxY + 16);
-  doc.text(formatKr(totals.moms), boxX + boxW - 4, boxY + 16, { align: "right" });
+  doc.text(`${t("pdf_vat")} ${vatPct}%:`, boxX + 4, boxY + 18);
+  doc.text(formatKr(totals.moms), boxX + boxW - 4, boxY + 18, { align: "right" });
 
   doc.setFontSize(11);
-  doc.text(t("pdf_pay"), boxX + 4, boxY + 25);
-  doc.text(formatKr(totals.total), boxX + boxW - 4, boxY + 25, { align: "right" });
+  doc.text(t("pdf_pay"), boxX + 4, boxY + 28);
+  doc.text(formatKr(totals.total), boxX + boxW - 4, boxY + 28, { align: "right" });
 
   // -------------------------
-  // Footer (left bigger)
+  // Footer (draw ONCE)
   // -------------------------
   const leftFooterLines = splitLines(h.avsandareAdress || "");
 
@@ -1170,9 +1187,9 @@ doc.autoTable({
 
   const leftFontSize = 11;
   const rightFontSize = 9;
-  const lineH = 4.6;
+  const lineH = 4.8; // a bit more breathing room
 
-  const rightLineCount = rightFooterPairs.length + 1;
+  const rightLineCount = rightFooterPairs.length + 1; // + F-tax line
   const maxLines = Math.max(leftFooterLines.length || 1, rightLineCount || 1);
   const footerStartY = pageH - margin - (maxLines - 1) * lineH;
 
@@ -1181,47 +1198,42 @@ doc.autoTable({
   doc.setFontSize(leftFontSize);
   doc.text(leftFooterLines.length ? leftFooterLines : [""], margin, footerStartY);
 
-// Helper: bold label + normal value, right-aligned as one line
-function drawRightLabelValue(y, label, value) {
-  const labelText = `${label} `;
-  const valueText = String(value ?? "");
+  // Right footer helper (name differs from header helper)
+  function drawFooterLabelValue(y, label, value) {
+    const labelText = `${label} `;
+    const valueText = String(value ?? "");
 
-  doc.setFontSize(10);
+    doc.setFontSize(rightFontSize);
 
-  doc.setFont(undefined, "bold");
-  const wLabel = doc.getTextWidth(labelText);
+    doc.setFont(undefined, "bold");
+    const wLabel = doc.getTextWidth(labelText);
 
-  doc.setFont(undefined, "normal");
-  const wValue = doc.getTextWidth(valueText);
+    doc.setFont(undefined, "normal");
+    const wValue = doc.getTextWidth(valueText);
 
-  const startX = rightX - (wLabel + wValue);
+    const startX = rightX - (wLabel + wValue);
 
-  doc.setFont(undefined, "bold");
-  doc.text(labelText, startX, y);
+    doc.setFont(undefined, "bold");
+    doc.text(labelText, startX, y);
 
-  doc.setFont(undefined, "normal");
-  doc.text(valueText, startX + wLabel, y);
-}
+    doc.setFont(undefined, "normal");
+    doc.text(valueText, startX + wLabel, y);
+  }
 
-// Datum/Kund nr/Faktura nr with bold labels only
-drawRightLabelValue(rightBlockY,      `${t("pdf_date")}:`,      dateStr);
-drawRightLabelValue(rightBlockY + 5,  `${t("pdf_customerNo")}:`, h.kundNr || "");
-drawRightLabelValue(rightBlockY + 10, `${t("pdf_invoiceNo")}:`,  h.fakturaNr || "");
-
-  // Right footer
   let yR = footerStartY;
   for (const p of rightFooterPairs) {
-    drawRightLabelValue(rightX, yR, p.label, p.value);
+    drawFooterLabelValue(yR, p.label, p.value);
     yR += lineH;
   }
 
-  // F-tax bold
+  // F-tax (bold)
   doc.setFontSize(rightFontSize);
   doc.setFont(undefined, "bold");
   doc.text(t("pdf_has_f_tax"), rightX, yR, { align: "right" });
-  doc.setFont(undefined, "normal");
-} // ✅ function closed properly
 
+  // Reset
+  doc.setFont(undefined, "normal");
+}
 
 // -------------------------
 // PDF button handler (OUTSIDE function)
