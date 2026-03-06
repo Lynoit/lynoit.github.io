@@ -907,6 +907,38 @@ form.addEventListener('submit', async e => {
 }
     </style>
 
+<div id="accelMonitorSection" class="section" style="margin-bottom:20px;">
+  <h3>Automatic acceleration monitors</h3>
+
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="autoLatToggle">
+      Auto lateral accel
+    </label>
+    <label>
+      Threshold:
+      <input type="number" id="autoLatThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
+    </label>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="autoLonToggle">
+      Auto longitudinal accel
+    </label>
+    <label>
+      Threshold:
+      <input type="number" id="autoLonThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
+    </label>
+  </div>
+
+  <p id="accelLiveReadout" style="margin-top:10px;">
+    Lateral: 0.00 m/s² | Longitudinal: 0.00 m/s²
+  </p>
+</div>
+    
 <div
   style="
     margin-bottom: 10px;
@@ -1133,6 +1165,31 @@ const metaAnswers     = {};
     const micLamp   = document.getElementById('micLamp');
     const textBox   = document.getElementById('textBox');
 
+let motionPermissionGranted = false;
+let motionListening = false;
+
+let currentAccel = {
+  x: 0,
+  y: 0,
+  z: 0,
+  lateral: 0,
+  longitudinal: 0,
+  ts: 0
+};
+
+let accelBaseline = { x: 0, y: 0, z: 0 };
+let accelSmoothed = { x: 0, y: 0, z: 0 };
+
+const accelAutoState = {
+  lateralEnabled: false,
+  longitudinalEnabled: false,
+  lateralThreshold: 2.5,       // m/s², adjust as needed
+  longitudinalThreshold: 2.5,  // m/s², adjust as needed
+  cooldownMs: 3000,
+  lastLateralLogTs: 0,
+  lastLongitudinalLogTs: 0
+};
+    
 // --- button sorting for tri-state toggles ---
 let triToggleSerial = 0;   // stable original order among tri toggles
 let sortTimeoutId   = null;
@@ -1480,6 +1537,8 @@ async function stopTesting() {
     }
   } catch {}
 
+  try { stopMotionAccess(); } catch {}
+  
   // prevent double runs
   if (typeof sessionEnded !== 'undefined' && sessionEnded) return;
   window.sessionEnded = true;
@@ -1585,6 +1644,8 @@ async function stopTesting() {
   function startApp() {
     // 1) Acquire a wake lock right away
     requestWakeLock();
+    await ensureMotionAccess();
+    initAccelMonitorUi();
     
   loadCorrections()
     .then(() => console.log('Corrections loaded:', corrections))
@@ -1680,6 +1741,116 @@ document.getElementById('micToggle').onclick = async event => {
   }
 };
 
+function handleDeviceMotion(event) {
+  // Prefer gravity-free acceleration
+  let ax = event.acceleration?.x;
+  let ay = event.acceleration?.y;
+  let az = event.acceleration?.z;
+
+  // Fallback if acceleration is null
+  if (ax == null || ay == null || az == null) {
+    ax = event.accelerationIncludingGravity?.x ?? 0;
+    ay = event.accelerationIncludingGravity?.y ?? 0;
+    az = event.accelerationIncludingGravity?.z ?? 0;
+
+    // Very slow baseline tracker to remove static gravity/bias
+    const alphaBase = 0.02;
+    accelBaseline.x = (1 - alphaBase) * accelBaseline.x + alphaBase * ax;
+    accelBaseline.y = (1 - alphaBase) * accelBaseline.y + alphaBase * ay;
+    accelBaseline.z = (1 - alphaBase) * accelBaseline.z + alphaBase * az;
+
+    ax -= accelBaseline.x;
+    ay -= accelBaseline.y;
+    az -= accelBaseline.z;
+  }
+
+  // Smooth slightly to suppress sensor noise
+  const alpha = 0.25;
+  accelSmoothed.x = (1 - alpha) * accelSmoothed.x + alpha * ax;
+  accelSmoothed.y = (1 - alpha) * accelSmoothed.y + alpha * ay;
+  accelSmoothed.z = (1 - alpha) * accelSmoothed.z + alpha * az;
+
+  // Portrait, upright, back camera forward:
+  // lateral ~ x
+  // longitudinal ~ z or -z depending on sign convention
+  const lateral = accelSmoothed.x;
+  const longitudinal = -accelSmoothed.z; // flip if road test shows opposite sign
+
+  currentAccel = {
+    x: accelSmoothed.x,
+    y: accelSmoothed.y,
+    z: accelSmoothed.z,
+    lateral,
+    longitudinal,
+    ts: Date.now()
+  };
+
+  checkAutoAccelerationIssues();
+}
+
+function checkAutoAccelerationIssues() {
+  const now = Date.now();
+
+  if (
+    accelAutoState.lateralEnabled &&
+    Math.abs(currentAccel.lateral) >= accelAutoState.lateralThreshold &&
+    now - accelAutoState.lastLateralLogTs >= accelAutoState.cooldownMs
+  ) {
+    document.getElementById('textBox').value =
+      `Auto lateral acceleration event: ${currentAccel.lateral.toFixed(2)} m/s² (threshold ${accelAutoState.lateralThreshold.toFixed(2)})`;
+
+    logButton('Auto lateral acceleration threshold exceeded', true);
+    accelAutoState.lastLateralLogTs = now;
+  }
+
+  if (
+    accelAutoState.longitudinalEnabled &&
+    Math.abs(currentAccel.longitudinal) >= accelAutoState.longitudinalThreshold &&
+    now - accelAutoState.lastLongitudinalLogTs >= accelAutoState.cooldownMs
+  ) {
+    document.getElementById('textBox').value =
+      `Auto longitudinal acceleration event: ${currentAccel.longitudinal.toFixed(2)} m/s² (threshold ${accelAutoState.longitudinalThreshold.toFixed(2)})`;
+
+    logButton('Auto longitudinal acceleration threshold exceeded', true);
+    accelAutoState.lastLongitudinalLogTs = now;
+  }
+}    
+
+function initAccelMonitorUi() {
+  const latToggle = document.getElementById('autoLatToggle');
+  const lonToggle = document.getElementById('autoLonToggle');
+  const latThr    = document.getElementById('autoLatThreshold');
+  const lonThr    = document.getElementById('autoLonThreshold');
+  const live      = document.getElementById('accelLiveReadout');
+
+  latToggle?.addEventListener('change', async () => {
+    accelAutoState.lateralEnabled = latToggle.checked;
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
+    if (latToggle.checked) await ensureMotionAccess();
+  });
+
+  lonToggle?.addEventListener('change', async () => {
+    accelAutoState.longitudinalEnabled = lonToggle.checked;
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+    if (lonToggle.checked) await ensureMotionAccess();
+  });
+
+  latThr?.addEventListener('input', () => {
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
+  });
+
+  lonThr?.addEventListener('input', () => {
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+  });
+
+  setInterval(() => {
+    if (!live) return;
+    live.textContent =
+      `Lateral: ${currentAccel.lateral.toFixed(2)} m/s² | ` +
+      `Longitudinal: ${currentAccel.longitudinal.toFixed(2)} m/s²`;
+  }, 250);
+}
+    
 function loadCorrections() {
   return fetch('corrections.csv')
     .then(r => r.ok ? r.text() : Promise.reject('CSV load failed'))
@@ -1974,7 +2145,7 @@ function startCamera() {
   window.addEventListener('pageshow', () => restart());
 }
     
-    function getCameraConstraints() {
+function getCameraConstraints() {
   return { video: { facingMode: 'environment' } };
 }
 
@@ -3267,6 +3438,41 @@ function tableToCSV(tableEl) {
     .join('\n');
 }
 
+async function ensureMotionAccess() {
+  try {
+    if (
+      typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function'
+    ) {
+      const result = await DeviceMotionEvent.requestPermission();
+      motionPermissionGranted = (result === 'granted');
+      if (!motionPermissionGranted) {
+        console.warn('Device motion permission denied');
+        return false;
+      }
+    } else {
+      motionPermissionGranted = true;
+    }
+
+    if (!motionListening) {
+      window.addEventListener('devicemotion', handleDeviceMotion, { passive: true });
+      motionListening = true;
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Failed to enable device motion:', err);
+    return false;
+  }
+}
+
+function stopMotionAccess() {
+  if (motionListening) {
+    window.removeEventListener('devicemotion', handleDeviceMotion);
+    motionListening = false;
+  }
+}
+    
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/?sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-12-30T23:33:30Z&st=2026-01-02T15:18:30Z&spr=https&sig=BoWBgheeFkDsFQk8Ckq1xwO3mbqtUZSdMey0pWWkzGk%3D";
@@ -3685,7 +3891,7 @@ const SECTIONS_TO_EXPORT = [
 ];
 
 let sectionTexts = {};
-  async function loadSectionTexts() {
+async function loadSectionTexts() {
     try {
       const resp = await fetch('sectionTexts.json');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
