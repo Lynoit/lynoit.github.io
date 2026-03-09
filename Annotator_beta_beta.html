@@ -908,34 +908,34 @@ form.addEventListener('submit', async e => {
     </style>
 
 <div id="accelMonitorSection" class="section" style="margin-bottom:20px;">
-  <h3>Automatic jerk monitors</h3>
+  <h3>Automatic acceleration monitors</h3>
 
   <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
     <label style="display:flex;align-items:center;gap:8px;">
       <input type="checkbox" id="autoLatToggle">
-      Auto lateral jerk
+      Auto lateral accel
     </label>
     <label>
       Threshold:
-      <input type="number" id="autoLatThreshold" value="3.0" step="0.1" min="0" style="width:80px;">
-      m/s³
+      <input type="number" id="autoLatThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
     </label>
   </div>
 
   <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;">
     <label style="display:flex;align-items:center;gap:8px;">
       <input type="checkbox" id="autoLonToggle">
-      Auto longitudinal jerk
+      Auto longitudinal accel
     </label>
     <label>
       Threshold:
-      <input type="number" id="autoLonThreshold" value="3.5" step="0.1" min="0" style="width:80px;">
-      m/s³
+      <input type="number" id="autoLonThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
     </label>
   </div>
 
   <p id="accelLiveReadout" style="margin-top:10px;">
-    Lat a: 0.00 m/s² | Lat jerk: 0.00 m/s³ | Lon a: 0.00 m/s² | Lon jerk: 0.00 m/s³
+    Lateral: 0.00 m/s² | Longitudinal: 0.00 m/s²
   </p>
 </div>
     
@@ -1167,29 +1167,6 @@ const metaAnswers     = {};
 
 let motionPermissionGranted = false;
 let motionListening = false;
-
-let prevAccelTs = 0;
-let prevLateralAccel = 0;
-let prevLongitudinalAccel = 0;
-
-let currentJerk = {
-  lateral: 0,
-  longitudinal: 0
-};
-
-let accelUiIntervalId = null;
-
-const jerkAutoState = {
-  lateralEnabled: false,
-  longitudinalEnabled: false,
-  lateralThreshold: 3.0,        // m/s^3
-  longitudinalThreshold: 3.5,   // m/s^3
-  minSpeedKmh: 30,
-  maxCurveAccelForLatTrigger: 2.0, // m/s^2
-  cooldownMs: 3000,
-  lastLateralLogTs: 0,
-  lastLongitudinalLogTs: 0
-};    
 
 let currentAccel = {
   x: 0,
@@ -1664,7 +1641,7 @@ async function stopTesting() {
   }
 }
     
-async function startApp() {
+  function startApp() {
     // 1) Acquire a wake lock right away
     requestWakeLock();
     await ensureMotionAccess();
@@ -1765,15 +1742,18 @@ document.getElementById('micToggle').onclick = async event => {
 };
 
 function handleDeviceMotion(event) {
+  // Prefer gravity-free acceleration
   let ax = event.acceleration?.x;
   let ay = event.acceleration?.y;
   let az = event.acceleration?.z;
 
+  // Fallback if acceleration is null
   if (ax == null || ay == null || az == null) {
     ax = event.accelerationIncludingGravity?.x ?? 0;
     ay = event.accelerationIncludingGravity?.y ?? 0;
     az = event.accelerationIncludingGravity?.z ?? 0;
 
+    // Very slow baseline tracker to remove static gravity/bias
     const alphaBase = 0.02;
     accelBaseline.x = (1 - alphaBase) * accelBaseline.x + alphaBase * ax;
     accelBaseline.y = (1 - alphaBase) * accelBaseline.y + alphaBase * ay;
@@ -1784,32 +1764,17 @@ function handleDeviceMotion(event) {
     az -= accelBaseline.z;
   }
 
-  // Smooth acceleration to suppress sensor noise
+  // Smooth slightly to suppress sensor noise
   const alpha = 0.25;
   accelSmoothed.x = (1 - alpha) * accelSmoothed.x + alpha * ax;
   accelSmoothed.y = (1 - alpha) * accelSmoothed.y + alpha * ay;
   accelSmoothed.z = (1 - alpha) * accelSmoothed.z + alpha * az;
 
   // Portrait, upright, back camera forward:
-  // lateral ~= x
-  // longitudinal ~= -z
+  // lateral ~ x
+  // longitudinal ~ z or -z depending on sign convention
   const lateral = accelSmoothed.x;
-  const longitudinal = -accelSmoothed.z;
-
-  const nowTs = Date.now();
-  const dt = prevAccelTs ? (nowTs - prevAccelTs) / 1000 : 0;
-
-  if (dt > 0.01 && dt < 0.5) {
-    currentJerk.lateral = (lateral - prevLateralAccel) / dt;
-    currentJerk.longitudinal = (longitudinal - prevLongitudinalAccel) / dt;
-  } else {
-    currentJerk.lateral = 0;
-    currentJerk.longitudinal = 0;
-  }
-
-  prevLateralAccel = lateral;
-  prevLongitudinalAccel = longitudinal;
-  prevAccelTs = nowTs;
+  const longitudinal = -accelSmoothed.z; // flip if road test shows opposite sign
 
   currentAccel = {
     x: accelSmoothed.x,
@@ -1817,46 +1782,39 @@ function handleDeviceMotion(event) {
     z: accelSmoothed.z,
     lateral,
     longitudinal,
-    ts: nowTs
+    ts: Date.now()
   };
 
-  checkAutoJerkIssues();
+  checkAutoAccelerationIssues();
 }
 
-function checkAutoJerkIssues() {
+function checkAutoAccelerationIssues() {
   const now = Date.now();
 
-  // LATERAL jerk trigger:
-  // catches sudden steering impulses, not steady-state cornering
   if (
-    jerkAutoState.lateralEnabled &&
-    Math.abs(currentJerk.lateral) >= jerkAutoState.lateralThreshold &&
-    lastSpeedKmh >= jerkAutoState.minSpeedKmh &&
-    Math.abs(currentAccel.lateral) <= jerkAutoState.maxCurveAccelForLatTrigger &&
-    now - jerkAutoState.lastLateralLogTs >= jerkAutoState.cooldownMs
+    accelAutoState.lateralEnabled &&
+    Math.abs(currentAccel.lateral) >= accelAutoState.lateralThreshold &&
+    now - accelAutoState.lastLateralLogTs >= accelAutoState.cooldownMs
   ) {
     document.getElementById('textBox').value =
-      `Auto lateral jerk event: jerk=${currentJerk.lateral.toFixed(2)} m/s³, a_lat=${currentAccel.lateral.toFixed(2)} m/s², speed=${lastSpeedKmh.toFixed(1)} km/h`;
+      `Auto lateral acceleration event: ${currentAccel.lateral.toFixed(2)} m/s² (threshold ${accelAutoState.lateralThreshold.toFixed(2)})`;
 
-    logButton('Auto lateral jerk threshold exceeded', true);
-    jerkAutoState.lastLateralLogTs = now;
+    logButton('Auto lateral acceleration threshold exceeded', true);
+    accelAutoState.lastLateralLogTs = now;
   }
 
-  // LONGITUDINAL jerk trigger:
-  // catches sudden accel/brake impulses
   if (
-    jerkAutoState.longitudinalEnabled &&
-    Math.abs(currentJerk.longitudinal) >= jerkAutoState.longitudinalThreshold &&
-    lastSpeedKmh >= jerkAutoState.minSpeedKmh &&
-    now - jerkAutoState.lastLongitudinalLogTs >= jerkAutoState.cooldownMs
+    accelAutoState.longitudinalEnabled &&
+    Math.abs(currentAccel.longitudinal) >= accelAutoState.longitudinalThreshold &&
+    now - accelAutoState.lastLongitudinalLogTs >= accelAutoState.cooldownMs
   ) {
     document.getElementById('textBox').value =
-      `Auto longitudinal jerk event: jerk=${currentJerk.longitudinal.toFixed(2)} m/s³, a_lon=${currentAccel.longitudinal.toFixed(2)} m/s², speed=${lastSpeedKmh.toFixed(1)} km/h`;
+      `Auto longitudinal acceleration event: ${currentAccel.longitudinal.toFixed(2)} m/s² (threshold ${accelAutoState.longitudinalThreshold.toFixed(2)})`;
 
-    logButton('Auto longitudinal jerk threshold exceeded', true);
-    jerkAutoState.lastLongitudinalLogTs = now;
+    logButton('Auto longitudinal acceleration threshold exceeded', true);
+    accelAutoState.lastLongitudinalLogTs = now;
   }
-}
+}    
 
 function initAccelMonitorUi() {
   const latToggle = document.getElementById('autoLatToggle');
@@ -1866,33 +1824,30 @@ function initAccelMonitorUi() {
   const live      = document.getElementById('accelLiveReadout');
 
   latToggle?.addEventListener('change', async () => {
-    jerkAutoState.lateralEnabled = latToggle.checked;
-    jerkAutoState.lateralThreshold = Number(latThr.value) || 0;
+    accelAutoState.lateralEnabled = latToggle.checked;
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
     if (latToggle.checked) await ensureMotionAccess();
   });
 
   lonToggle?.addEventListener('change', async () => {
-    jerkAutoState.longitudinalEnabled = lonToggle.checked;
-    jerkAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+    accelAutoState.longitudinalEnabled = lonToggle.checked;
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
     if (lonToggle.checked) await ensureMotionAccess();
   });
 
   latThr?.addEventListener('input', () => {
-    jerkAutoState.lateralThreshold = Number(latThr.value) || 0;
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
   });
 
   lonThr?.addEventListener('input', () => {
-    jerkAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
   });
 
-  if (accelUiIntervalId) clearInterval(accelUiIntervalId);
-  accelUiIntervalId = setInterval(() => {
+  setInterval(() => {
     if (!live) return;
     live.textContent =
-      `Lat a: ${currentAccel.lateral.toFixed(2)} m/s² | ` +
-      `Lat jerk: ${currentJerk.lateral.toFixed(2)} m/s³ | ` +
-      `Lon a: ${currentAccel.longitudinal.toFixed(2)} m/s² | ` +
-      `Lon jerk: ${currentJerk.longitudinal.toFixed(2)} m/s³`;
+      `Lateral: ${currentAccel.lateral.toFixed(2)} m/s² | ` +
+      `Longitudinal: ${currentAccel.longitudinal.toFixed(2)} m/s²`;
   }, 250);
 }
     
@@ -4207,4 +4162,3 @@ if (stopBtn) {
   </script>
 </body>
 </html>
-
