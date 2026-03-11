@@ -557,6 +557,46 @@ body.initial-loading #overview {
   margin-bottom:6px;
   background:#f5f5f5;
 }
+
+.test-group-loading{
+  background:#ffffff;
+  color:#000000;
+  border:1px solid #000000;
+  padding:8px 12px;
+  border-radius:6px;
+  margin:12px 0 20px;
+  font-size:13px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  max-width:620px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04);
+}
+
+.test-group-loading.hidden{
+  display:none;
+}
+
+.test-group-loading .loading-text{
+  color:#000000 !important;
+}
+
+.test-group-loading .loading-bar-wrap{
+  width:100%;
+  height:6px;
+  border-radius:999px;
+  background:#f5f5f5;
+  overflow:hidden;
+}
+
+.test-group-loading .loading-bar{
+  height:100%;
+  width:0;
+  border-radius:999px;
+  background:#007bff !important;
+  background-image:none !important;
+  transition:width .25s ease;
+}    
     
 /* Optional: remove default print margins in some browsers */
 @page { margin: 12mm; }
@@ -735,6 +775,27 @@ function showMiniMapError(mapDiv, message){
   if (!mapDiv) return;
   mapDiv.innerHTML = `<div style="padding:10px;font-size:12px;color:#666;">${escapeHtml(message || 'No data')}</div>`;
 }
+
+function setTestGroupLoading(message, percent){
+  const box = document.getElementById('test-group-loading');
+  if (!box) return;
+  box.classList.remove('hidden');
+
+  const msgEl = document.getElementById('test-group-loading-text');
+  if (msgEl && message) msgEl.textContent = message;
+
+  const barEl = document.getElementById('test-group-loading-bar');
+  if (barEl && typeof percent === 'number'){
+    const clamped = Math.max(0, Math.min(100, percent));
+    barEl.style.width = clamped + '%';
+    barEl.setAttribute('aria-valuenow', String(Math.round(clamped)));
+  }
+}
+
+function hideTestGroupLoading(){
+  const box = document.getElementById('test-group-loading');
+  if (box) box.classList.add('hidden');
+}   
     
 function endInitialLoading(){
   document.body.classList.remove('initial-loading');
@@ -3279,7 +3340,7 @@ function extractKpiRowsFromWorkbook(wb){
   return out;
 }
 
-async function buildCombinedGroupKpiTableHtml(group){
+async function buildCombinedGroupKpiTableHtml(group, progressCb){
   const totalMileageKm = group.sessions.reduce((acc, s) => acc + (s.summary.mileageKm || 0), 0);
   if (!(totalMileageKm > 0)) {
     return `
@@ -3289,23 +3350,31 @@ async function buildCombinedGroupKpiTableHtml(group){
   }
 
   const combined = new Map(); // issue -> weighted events / 1000 km over total group mileage
+  let done = 0;
+  const total = group.sessions.length;
 
-  await Promise.all(group.sessions.map(async (s) => {
+  for (const s of group.sessions){
     const mileageKm = s.summary.mileageKm || 0;
-    if (!(mileageKm > 0)) return;
 
-    try{
-      const { wb } = await loadWorkbook(s.filename);
-      const rows = extractKpiRowsFromWorkbook(wb);
+    if (mileageKm > 0){
+      try{
+        const { wb } = await loadWorkbook(s.filename);
+        const rows = extractKpiRowsFromWorkbook(wb);
 
-      rows.forEach(({ issue, rate }) => {
-        const weightedContribution = rate * (mileageKm / totalMileageKm);
-        combined.set(issue, (combined.get(issue) || 0) + weightedContribution);
-      });
-    }catch(e){
-      console.warn('Failed KPI aggregation for', s.filename, e);
+        rows.forEach(({ issue, rate }) => {
+          const weightedContribution = rate * (mileageKm / totalMileageKm);
+          combined.set(issue, (combined.get(issue) || 0) + weightedContribution);
+        });
+      }catch(e){
+        console.warn('Failed KPI aggregation for', s.filename, e);
+      }
     }
-  }));
+
+    done++;
+    if (typeof progressCb === 'function') {
+      progressCb(done, total, s.filename);
+    }
+  }
 
   if (!combined.size) {
     return `
@@ -3341,7 +3410,6 @@ async function buildCombinedGroupKpiTableHtml(group){
 
   return `
     <h2>Combined KPI table</h2>
-    Combined KPI value = Σ(Session KPI × Session mileage / Total group mileage)
     ${
       overallAvg != null
         ? `<div class="kpi-avg">
@@ -3368,34 +3436,44 @@ async function buildCombinedGroupKpiTableHtml(group){
   `;
 }
 
-async function renderTestGroupMap(group, mapId){
+async function renderTestGroupMap(group, mapId, progressCb){
   const mapEl = document.getElementById(mapId);
   if (!mapEl) return;
 
   mapEl.innerHTML = '';
 
-  const sessionPaths = await Promise.all(group.sessions.map(async (s, idx) => {
+  const valid = [];
+  let done = 0;
+  const total = group.sessions.length;
+
+  for (let idx = 0; idx < group.sessions.length; idx++){
+    const s = group.sessions[idx];
+
     try{
       const { wb } = await loadWorkbook(s.filename);
       const samplingName = wb.SheetNames.find(n => n.toLowerCase() === 'sampling');
-      if (!samplingName) return null;
 
-      const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
-      if (!path || !path.length) return null;
-
-      return {
-        filename: s.filename,
-        label: getSessionDisplayName(s.filename),
-        color: getColorForIndex(idx),
-        path
-      };
+      if (samplingName) {
+        const { path } = computeMileageAndPathFromSampling(wb.Sheets[samplingName]);
+        if (path && path.length) {
+          valid.push({
+            filename: s.filename,
+            label: getSessionDisplayName(s.filename),
+            color: getColorForIndex(idx),
+            path
+          });
+        }
+      }
     }catch(e){
       console.warn('Failed to load sampling path for', s.filename, e);
-      return null;
     }
-  }));
 
-  const valid = sessionPaths.filter(Boolean);
+    done++;
+    if (typeof progressCb === 'function') {
+      progressCb(done, total, s.filename);
+    }
+  }
+
   if (!valid.length){
     mapEl.outerHTML = `<div class="test-group-map" style="display:flex;align-items:center;justify-content:center;color:#666;">No sampling positions available for this test group.</div>`;
     return;
@@ -3458,7 +3536,7 @@ async function renderTestGroupMap(group, mapId){
 
   requestAnimationFrame(() => map.invalidateSize());
   setTimeout(() => map.invalidateSize(), 150);
-}    
+}
 
 // Show a dedicated view for one test group
 async function openTestGroupView(group){
@@ -3532,7 +3610,6 @@ async function openTestGroupView(group){
       </tr>`;
   }).join('');
 
-  const combinedKpiHtml = await buildCombinedGroupKpiTableHtml(group);
   const mapId = `test-group-map-${cssSafeId(group.comment)}`;
 
   content.innerHTML = `
@@ -3542,17 +3619,32 @@ async function openTestGroupView(group){
 
     <h1 style="margin-top:16px;">Test group: ${escapeHtml(group.comment)}</h1>
 
-    <div style="margin:12px 0 24px;font-size:14px;">
+    <div style="margin:12px 0 16px;font-size:14px;">
       <strong>Sessions:</strong> ${nSessions}&nbsp;&nbsp;
       <strong>Mileage:</strong> ${totalKm ? totalKm.toFixed(0) : '–'} km&nbsp;&nbsp;
       <strong>Issues:</strong> ${totalIssues}&nbsp;&nbsp;
       <strong>Events / 1000 km:</strong> ${eventsPer1k != null ? eventsPer1k.toFixed(1) : '–'}
     </div>
 
+    <div id="test-group-loading" class="test-group-loading">
+      <div id="test-group-loading-text" class="loading-text">Preparing test group view…</div>
+      <div class="loading-bar-wrap">
+        <div id="test-group-loading-bar"
+             class="loading-bar"
+             role="progressbar"
+             aria-valuemin="0"
+             aria-valuemax="100"
+             aria-valuenow="0"></div>
+      </div>
+    </div>
+
     <h2>Session map</h2>
     <div id="${mapId}" class="test-group-map"></div>
 
-    ${combinedKpiHtml}
+    <div id="combined-kpi-host">
+      <h2>Combined KPI table</h2>
+      <div style="color:#666;">Loading…</div>
+    </div>
 
     <h2>Sessions in this group</h2>
     <table class="report-table">
@@ -3595,9 +3687,35 @@ async function openTestGroupView(group){
       });
     });
 
-  renderTestGroupMap({ ...group, sessions: sessionsSorted }, mapId).catch(err => {
-    console.error('Failed to render test group map', err);
-  });
+  const totalSteps = sessionsSorted.length * 2; // KPI pass + map pass
+  let completedSteps = 0;
+
+  const bumpProgress = (phaseText, filename) => {
+    completedSteps++;
+    const pct = totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 100;
+    const label = filename ? getSessionDisplayName(filename) : '';
+    setTestGroupLoading(
+      `${phaseText} ${completedSteps} of ${totalSteps}${label ? ` — ${label}` : ''}…`,
+      pct
+    );
+  };
+
+  setTestGroupLoading(`Preparing test group view 0 of ${totalSteps}…`, 0);
+
+  const combinedKpiHtml = await buildCombinedGroupKpiTableHtml(
+    { ...group, sessions: sessionsSorted },
+    (_done, _total, filename) => bumpProgress('Reading KPIs', filename)
+  );
+  document.getElementById('combined-kpi-host').innerHTML = combinedKpiHtml;
+
+  await renderTestGroupMap(
+    { ...group, sessions: sessionsSorted },
+    mapId,
+    (_done, _total, filename) => bumpProgress('Reading map positions', filename)
+  );
+
+  setTestGroupLoading('Finished loading test group.', 100);
+  setTimeout(hideTestGroupLoading, 500);
 }
     
 function scoringLegendHtml(){
