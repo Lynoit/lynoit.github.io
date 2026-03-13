@@ -597,6 +597,66 @@ body.initial-loading #overview {
   background-image:none !important;
   transition:width .25s ease;
 }    
+
+.kpi-trend-cell{
+  min-width: 150px;
+}
+
+.kpi-sparkline{
+  display:block;
+  width:140px;
+  height:32px;
+}
+
+.kpi-sparkline path.line{
+  fill:none;
+  stroke:#007bff;
+  stroke-width:2;
+}
+
+.kpi-sparkline path.area{
+  fill:rgba(0,123,255,0.12);
+  stroke:none;
+}
+
+.kpi-sparkline circle.point{
+  fill:#007bff;
+}
+
+.kpi-sparkline .axis{
+  stroke:#d0d0d0;
+  stroke-width:1;
+}
+
+.kpi-trend-label{
+  font-size:11px;
+  color:#666;
+  margin-top:2px;
+}
+
+/* Mini-map card overlay badge */
+.route-map{
+  position: relative;   /* already present, keep it */
+}
+
+.route-map-active-badge{
+  position:absolute;
+  top:8px;
+  right:8px;
+  z-index:600;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:2px 8px;
+  background:#e01616;
+  color:#fff;
+  font-weight:700;
+  font-size:11px;
+  border-radius:999px;
+  border:1px solid rgba(0,0,0,.15);
+  animation: activeBlink 2s steps(2, end) infinite;
+  pointer-events:none;
+}    
     
 /* Optional: remove default print margins in some browsers */
 @page { margin: 12mm; }
@@ -908,17 +968,15 @@ function nc(url){
 function getSessionFromUrlHash(){
   const h = (window.location.hash || '').replace(/^#/, '');
   const sp = new URLSearchParams(h);
-  const v = sp.get('session');
-  return v ? decodeURIComponent(v) : null;
+  return sp.get('session');
 }
 
 function setSessionInUrlHash(filename){
   if (filename) {
     const sp = new URLSearchParams();
-    sp.set('session', encodeURIComponent(filename));
+    sp.set('session', filename);
     window.location.hash = sp.toString();
   } else {
-    // Clear hash without reloading
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 }
@@ -1700,6 +1758,52 @@ function openAiSummaryPopup(forFilename) {
     });
 }
 
+function sanitizeGroupReportName(name){
+  return String(name || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9\- ]+/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function openGroupSummaryPopup(groupLabel) {
+  const safeGroup = sanitizeGroupReportName(groupLabel);
+  const txtName = `GROUP__${safeGroup}.txt`;
+  const url = `${BASE_URL}/${encodeURIComponent(txtName)}?${SAS_TOKEN}`;
+
+  fetch(url, { cache: 'no-store' })
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.text();
+    })
+    .then(text => {
+      const { timestampHtml, bodyHtml } = renderAiSummaryHtml(text);
+
+      const overlay = createModal(`
+        <h3>Generated group report</h3>
+        <div style="font-size:12px;color:#666;margin-bottom:6px;">${escapeHtml(txtName)}</div>
+        ${timestampHtml}
+        <div class="ai-summary-body">${bodyHtml}</div>
+        <div class="modal-buttons">
+          <button type="button" class="secondary-button close-btn">Close</button>
+        </div>
+      `);
+
+      overlay.querySelector('.close-btn')?.addEventListener('click', () => {
+        document.body.removeChild(overlay);
+      });
+    })
+    .catch(err => {
+      alert(
+        'Could not load AI summary file for this test group (.txt).\n' +
+        'It may not exist yet for this group.\n\n' +
+        err.message
+      );
+    });
+  console.log('Group report filename:', `GROUP__${sanitizeGroupReportName(groupLabel)}.txt`);
+}    
+
 // Add a row "Generated report | [Open report]" to the Test details table,
 // inserted directly below the "Participant" row if present.
 // If an old row labeled "AI summary" exists (from XLSX), rename it.
@@ -1958,77 +2062,78 @@ function listBlobs() {
         return b.name.localeCompare(a.name);
       });
 
-      const xlsxNames = xlsx.map(b => b.name);
-      allFiles = xlsxNames;
+const xlsxNames = xlsx.map(b => b.name);
+allFiles = xlsxNames;
 
-      buildSidebar(xlsxNames);
+buildSidebar(xlsxNames);
 
-      //  auto-open previous session on page load
-      //const wanted = getSessionFromUrlHash();
-      //  if (wanted && xlsxNames.includes(wanted)) {
-      //  loadFile(wanted);
-      //}
+const wanted = getSessionFromUrlHash();
+const hasWanted = wanted && xlsxNames.includes(wanted);
 
-      const h1  = document.getElementById('title-overview');
-      const h2  = document.getElementById('title-latest-routes');
-      const hEU = document.getElementById('title-eu-mileage');
-      setTitleLoading(h1, true, 'Loading');
-      setTitleLoading(h2, true, 'Loading');
-      setTitleLoading(hEU, true, 'Loading');
+initGlobalProgress(xlsxNames.length);
 
-      initGlobalProgress(xlsxNames.length);
+// always preload summaries first
+    return preloadSummariesSequentially(xlsxNames)
+      .then(() => {
+        if (hasWanted) {
+          hideGlobalLoading();
+          endInitialLoading();
+          loadFile(wanted);
+          return;
+        }
 
-      // SEQUENTIAL preload
-      return preloadSummariesSequentially(xlsxNames)
-        .then(() => {
-          endInitialLoading(); // ✅ make overview visible BEFORE rendering charts/maps
-          applyOverviewFlagsToDom();
-          applyOverviewVisibilityToDom();
-          
-const tasks = [];
+        const h1  = document.getElementById('title-overview');
+        const h2  = document.getElementById('title-latest-routes');
+        const hEU = document.getElementById('title-eu-mileage');
 
-// Overview heatmaps
-if (!DISABLE_OVERVIEW_HEATMAPS) {
-  tasks.push(
-    buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
-    buildCountryMonthChart(xlsxNames),
-    buildTempMonthChart(xlsxNames),
-    buildWeatherMonthChart(xlsxNames)
-  );
-} else {
-  setTitleLoading(h1, false);
-  document.getElementById('heatmap-host')?.insertAdjacentHTML(
-    'beforeend',
-    `<div style="color:#666;font-size:12px;">(Overview heatmaps disabled)</div>`
-  );
-}
+        setTitleLoading(h1, true, 'Loading');
+        setTitleLoading(h2, true, 'Loading');
+        setTitleLoading(hEU, true, 'Loading');
 
-// EU mileage map
-if (!DISABLE_EU_MILEAGE_MAP) {
-  tasks.push(
-    buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false))
-  );
-} else {
-  setTitleLoading(hEU, false);
-  document.getElementById('eu-mileage-map')?.insertAdjacentHTML(
-    'beforeend',
-    `<div style="padding:10px;color:#666;font-size:12px;">(EU mileage map disabled)</div>`
-  );
-}
+        endInitialLoading();
+        applyOverviewFlagsToDom();
+        applyOverviewVisibilityToDom();
 
-// Keep these on
-tasks.push(
-  buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
-  buildTestGroupsSection(xlsxNames)
-);
+        const tasks = [];
 
-return Promise.all(tasks);
-        })
-        .then(() => {
+        if (!DISABLE_OVERVIEW_HEATMAPS) {
+          tasks.push(
+            buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
+            buildCountryMonthChart(xlsxNames),
+            buildTempMonthChart(xlsxNames),
+            buildWeatherMonthChart(xlsxNames)
+          );
+        } else {
+          setTitleLoading(h1, false);
+          document.getElementById('heatmap-host')?.insertAdjacentHTML(
+            'beforeend',
+            `<div style="color:#666;font-size:12px;">(Overview heatmaps disabled)</div>`
+          );
+        }
+
+        if (!DISABLE_EU_MILEAGE_MAP) {
+          tasks.push(
+            buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false))
+          );
+        } else {
+          setTitleLoading(hEU, false);
+          document.getElementById('eu-mileage-map')?.insertAdjacentHTML(
+            'beforeend',
+            `<div style="padding:10px;color:#666;font-size:12px;">(EU mileage map disabled)</div>`
+          );
+        }
+
+        tasks.push(
+          buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
+          buildTestGroupsSection(xlsxNames)
+        );
+
+        return Promise.all(tasks).then(() => {
           hideGlobalLoading();
           setTimeout(hideGlobalLoading, 800);
         });
-    });  // <-- closes .then(xml => { ... })
+      });
+  });
 }         // <-- closes function listBlobs
 
     // ---------- SIDEBAR ----------
@@ -3065,11 +3170,21 @@ return Promise.all(
       title.appendChild(link);
       card.appendChild(title);
 
-      const mapDiv = document.createElement('div');
-      mapDiv.className = 'route-map';
-      mapDiv.id = `route_${cssSafeId(item.filename)}`;
-      card.appendChild(mapDiv);
-      showMiniMapLoading(mapDiv, 'Preparing map…', 5);
+const mapDiv = document.createElement('div');
+mapDiv.className = 'route-map';
+mapDiv.id = `route_${cssSafeId(item.filename)}`;
+card.appendChild(mapDiv);
+showMiniMapLoading(mapDiv, 'Preparing map…', 5);
+
+const lm = blobMeta.get(item.filename) || 0;
+const isActive = (Date.now() - lm) <= ACTIVE_WINDOW_MS;
+
+if (isActive) {
+  const activeBadge = document.createElement('div');
+  activeBadge.className = 'route-map-active-badge';
+  activeBadge.textContent = 'Active';
+  mapDiv.appendChild(activeBadge);
+}
 
       const meta = document.createElement('div');
       meta.className = 'route-meta';
@@ -3141,6 +3256,53 @@ setTimeout(finish, 2000); // fallback so it never gets stuck
 
 // Build "Test groups" section (between Latest tests and Test activity overview).
 // A group qualifies only if the same Additional comment appears in ≥ 2 sessions.
+
+function buildSparklineSvg(values, opts = {}){
+  const width  = opts.width  || 140;
+  const height = opts.height || 32;
+  const padX = 4;
+  const padY = 4;
+
+  const clean = Array.isArray(values) ? values.filter(v => Number.isFinite(v)) : [];
+  if (!clean.length) return '<span style="color:#999;">–</span>';
+
+  const min = Math.min(...clean);
+  const max = Math.max(...clean);
+  const range = (max - min) || 1;
+
+  const xAt = (i, n) => {
+    if (n <= 1) return width / 2;
+    return padX + (i * (width - 2 * padX)) / (n - 1);
+  };
+
+  const yAt = (v) => {
+    return height - padY - ((v - min) / range) * (height - 2 * padY);
+  };
+
+  const pts = clean.map((v, i) => [xAt(i, clean.length), yAt(v)]);
+  const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0]} ${p[1]}`).join(' ');
+  const areaD = `${lineD} L ${pts[pts.length - 1][0]} ${height - padY} L ${pts[0][0]} ${height - padY} Z`;
+
+  const circles = pts.map(p =>
+    `<circle class="point" cx="${p[0]}" cy="${p[1]}" r="1.8"></circle>`
+  ).join('');
+
+  const firstVal = clean[0];
+  const lastVal  = clean[clean.length - 1];
+  const delta    = lastVal - firstVal;
+  const deltaTxt = `${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
+
+  return `
+    <svg class="kpi-sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="KPI trend">
+      <line class="axis" x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}"></line>
+      <path class="area" d="${areaD}"></path>
+      <path class="line" d="${lineD}"></path>
+      ${circles}
+    </svg>
+    <div class="kpi-trend-label">${firstVal.toFixed(2)} → ${lastVal.toFixed(2)} (${deltaTxt})</div>
+  `;
+}
+    
 function buildTestGroupsSection(files){
   if (!files || !files.length) return Promise.resolve();
 
@@ -3341,7 +3503,19 @@ function extractKpiRowsFromWorkbook(wb){
 }
 
 async function buildCombinedGroupKpiTableHtml(group, progressCb){
-  const totalMileageKm = group.sessions.reduce((acc, s) => acc + (s.summary.mileageKm || 0), 0);
+  const sessionsChronological = [...group.sessions].sort((a, b) => {
+    const mA = a.filename.match(/(\d{4}-\d{2}-\d{2})/);
+    const mB = b.filename.match(/(\d{4}-\d{2}-\d{2})/);
+    const dA = mA ? mA[1] : '';
+    const dB = mB ? mB[1] : '';
+    const cmpDate = dA.localeCompare(dB); // oldest first
+    if (cmpDate) return cmpDate;
+    const lmA = blobMeta.get(a.filename) || 0;
+    const lmB = blobMeta.get(b.filename) || 0;
+    return lmA - lmB;
+  });
+
+  const totalMileageKm = sessionsChronological.reduce((acc, s) => acc + (s.summary.mileageKm || 0), 0);
   if (!(totalMileageKm > 0)) {
     return `
       <h2>Combined KPI table</h2>
@@ -3349,11 +3523,19 @@ async function buildCombinedGroupKpiTableHtml(group, progressCb){
     `;
   }
 
-  const combined = new Map(); // issue -> weighted events / 1000 km over total group mileage
-  let done = 0;
-  const total = group.sessions.length;
+  // final combined weighted KPI values
+  const combined = new Map(); // issue -> final weighted value
 
-  for (const s of group.sessions){
+  // cumulative weighted KPI values over time
+  const cumulativeTrend = new Map(); // issue -> [v1, v2, v3, ...]
+
+  let done = 0;
+  const total = sessionsChronological.length;
+
+  // running totals as sessions are added over time
+  const running = new Map();
+
+  for (const s of sessionsChronological){
     const mileageKm = s.summary.mileageKm || 0;
 
     if (mileageKm > 0){
@@ -3361,20 +3543,41 @@ async function buildCombinedGroupKpiTableHtml(group, progressCb){
         const { wb } = await loadWorkbook(s.filename);
         const rows = extractKpiRowsFromWorkbook(wb);
 
+        const sessionContribution = new Map();
+
         rows.forEach(({ issue, rate }) => {
           const weightedContribution = rate * (mileageKm / totalMileageKm);
-          combined.set(issue, (combined.get(issue) || 0) + weightedContribution);
+          sessionContribution.set(issue, (sessionContribution.get(issue) || 0) + weightedContribution);
+        });
+
+        // add this session's contribution into running totals
+        sessionContribution.forEach((value, issue) => {
+          running.set(issue, (running.get(issue) || 0) + value);
         });
       }catch(e){
         console.warn('Failed KPI aggregation for', s.filename, e);
       }
     }
 
+    // after each session, snapshot all currently known KPI totals
+    const allKnownIssues = new Set([
+      ...running.keys(),
+      ...cumulativeTrend.keys()
+    ]);
+
+    allKnownIssues.forEach(issue => {
+      if (!cumulativeTrend.has(issue)) cumulativeTrend.set(issue, []);
+      cumulativeTrend.get(issue).push(running.get(issue) || 0);
+    });
+
     done++;
     if (typeof progressCb === 'function') {
       progressCb(done, total, s.filename);
     }
   }
+
+  // final values = last running values
+  running.forEach((value, issue) => combined.set(issue, value));
 
   if (!combined.size) {
     return `
@@ -3399,18 +3602,28 @@ async function buildCombinedGroupKpiTableHtml(group, progressCb){
       ? `<span class="kpi-badge s${score}">${score}</span>`
       : '–';
 
+    const trendValues = cumulativeTrend.get(issue) || [weightedRate];
+    const trendHtml = buildSparklineSvg(trendValues);
+
     return `
       <tr>
         <td>${escapeHtml(issue)}</td>
         <td>${weightedRate.toFixed(2)}</td>
+        <td class="kpi-trend-cell">${trendHtml}</td>
         <td>${scoreHtml}</td>
       </tr>
     `;
   }).join('');
 
   return `
-    <h2>Combined KPI table</h2>
-    Combined KPI value = Σ(Session KPI × Session mileage / Total group mileage)
+<h2>Combined KPI table</h2>
+<p>Weighted events = Σ(Session KPI × Session mileage / Total group mileage)</p>
+<p>Trend:</p>
+<ul>
+  <li>Flat early, jump late → KPI worsened in later sessions</li>
+  <li>Steep early, then flat → KPI problems were mostly in earlier sessions</li>
+  <li>Steady rise → consistent contribution across the group</li>
+</ul>
     ${
       overallAvg != null
         ? `<div class="kpi-avg">
@@ -3427,6 +3640,7 @@ async function buildCombinedGroupKpiTableHtml(group, progressCb){
         <tr>
           <th>KPI</th>
           <th>Weighted events / 1000 km</th>
+          <th>Trend</th>
           <th>Score</th>
         </tr>
       </thead>
@@ -3639,8 +3853,14 @@ async function openTestGroupView(group){
       </div>
     </div>
 
-    <h2>Session map</h2>
-    <div id="${mapId}" class="test-group-map"></div>
+<div style="margin:0 0 16px;">
+  <button type="button" class="download-button" id="open-group-report-btn">
+    Open group report
+  </button>
+</div>
+
+<h2>Session map</h2>
+<div id="${mapId}" class="test-group-map"></div>
 
     <div id="combined-kpi-host">
       <h2>Combined KPI table</h2>
@@ -3671,6 +3891,9 @@ async function openTestGroupView(group){
 
   document.getElementById('back-to-overview-btn')
     ?.addEventListener('click', () => renderOverview());
+
+  document.getElementById('open-group-report-btn')
+  ?.addEventListener('click', () => openGroupSummaryPopup(group.comment));
 
   content.querySelectorAll('button.download-button[id^="open_"][data-session]')
     .forEach(btn => {
