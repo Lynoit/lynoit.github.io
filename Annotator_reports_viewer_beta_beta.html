@@ -1390,12 +1390,20 @@ function extractAdditionalComments(wb){
   return out;
 }
 
-// Stable group key derived from comments.
-// Priority:
-// 1) If any comment contains "TG:" / "Test group:" / "[TG]" style → use that value
-// 2) Else use the FIRST additional comment (stable across appends)
-// 3) Else null
 function extractTestGroupKey(wb){
+  const details = extractTestDetails(wb);
+
+  // 1) Preferred explicit field in Test details
+  const explicit =
+    details['test group'] ||
+    details['testgroup'] ||
+    null;
+
+  if (explicit && String(explicit).trim()) {
+    return String(explicit).trim();
+  }
+
+  // 2) Backward-compatible fallback for old files
   const comments = extractAdditionalComments(wb);
   if (!comments.length) return null;
 
@@ -1403,10 +1411,10 @@ function extractTestGroupKey(wb){
   const bracketRe = /^\s*\[tg\]\s*(.+)\s*$/i;
 
   for (const c of comments){
-    let m = c.match(bracketRe);
+    let m = String(c).match(bracketRe);
     if (m && m[1]) return m[1].trim();
 
-    m = c.match(tagRe);
+    m = String(c).match(tagRe);
     if (m && m[1]) return m[1].trim();
   }
 
@@ -3429,12 +3437,11 @@ const promises = files.map(f =>
 );
 
   Promise.all(promises).then(rows => {
-const sessions = rows.filter(r =>
-  r &&
-  r.summary &&
-  r.summary.testGroupKey &&
-  r.summary.testGroupKey.trim() === commentKey
-);
+const sessions = rows.filter(r => {
+  if (!r || !r.summary) return false;
+  const key = r.summary.testGroupKey || r.summary.additionalComment || '';
+  return String(key).trim() === commentKey;
+});
 
     if (!sessions.length) {
       alert('No sessions found for this test group (it may have been renamed or removed).');
@@ -4545,6 +4552,78 @@ function unifyReportTableStyle(tbl){
   }
 }
 
+async function saveTestGroupToXlsx(filename, wb, sheetName, testGroupText){
+  let sheet = wb.Sheets[sheetName];
+  let rows = [];
+
+  if (sheet){
+    rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  }
+  if (!rows.length){
+    rows = [['Label', 'Value']];
+  }
+
+  const norm = v => String(v ?? '').trim().toLowerCase();
+
+  let foundRow = -1;
+  for (let i = 0; i < rows.length; i++){
+    const label = norm(rows[i][0]);
+    if (label === 'test group' || label === 'testgroup'){
+      foundRow = i;
+      break;
+    }
+  }
+
+  if (foundRow >= 0){
+    rows[foundRow][1] = testGroupText;
+  } else {
+    rows.push(['Test group', testGroupText]);
+  }
+
+  sheet = XLSX.utils.aoa_to_sheet(rows);
+  wb.Sheets[sheetName] = sheet;
+  if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
+
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+
+  const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!res.ok){
+    throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
+  }
+
+  // Refresh summary immediately in memory
+  const existing = summaryCache.get(filename) || {};
+  const cleanGroup = String(testGroupText || '').trim() || null;
+
+  const updatedSummary = {
+    ...existing,
+    testGroupKey: cleanGroup
+  };
+
+  summaryCache.set(filename, updatedSummary);
+
+  if (cleanGroup) {
+    fileToTestGroup.set(filename, cleanGroup);
+  } else {
+    fileToTestGroup.delete(filename);
+  }
+
+  rerenderTestDetailsTable(wb);
+}
+    
 // --- Save "Additional comments" back into the XLSX on Azure --------------------
 async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
   // Get existing sheet or create a minimal one
@@ -4594,6 +4673,57 @@ async function savePostHocCommentToXlsx(filename, wb, sheetName, commentText){
 
   rerenderTestDetailsTable(wb);
 }
+
+function injectTestGroupUI(filename, wb, sheetName, contentEl){
+  const safeId    = cssSafeId(filename + '_testgroup');
+  const inputId   = 'tg_text_' + safeId;
+  const btnId     = 'tg_btn_' + safeId;
+  const statusId  = 'tg_status_' + safeId;
+
+  const currentGroup = extractTestGroupKey(wb) || '';
+
+  const container = document.createElement('div');
+  container.style.margin = '12px 0 24px';
+  container.innerHTML = `
+    <h3>Test group</h3>
+    <input id="${inputId}"
+           type="text"
+           style="width:100%;max-width:800px;"
+           placeholder="Enter test group..."
+           value="${escapeHtml(currentGroup)}">
+    <br>
+    <button id="${btnId}" style="margin-top:6px;">Save test group</button>
+    <span id="${statusId}" style="margin-left:10px;font-size:12px;color:#555;"></span>
+  `;
+  contentEl.appendChild(container);
+
+  const input  = document.getElementById(inputId);
+  const button = document.getElementById(btnId);
+  const status = document.getElementById(statusId);
+
+  button.addEventListener('click', async () => {
+    const txt = (input.value || '').trim();
+    if (!txt){
+      status.textContent = 'Please enter a test group before saving.';
+      return;
+    }
+
+    status.textContent = 'Saving…';
+
+    try{
+      await saveTestGroupToXlsx(filename, wb, sheetName, txt);
+      status.textContent = 'Saved to XLSX.';
+
+      // Rebuild group overview so the session appears immediately
+      if (allFiles && allFiles.length) {
+        buildTestGroupsSection(allFiles);
+      }
+    } catch(err){
+      console.error(err);
+      status.textContent = 'Save failed: ' + err.message;
+    }
+  });
+}    
 
 // Inject UI under the Test details table
 function injectPostHocCommentUI(filename, wb, sheetName, contentEl){
@@ -5037,13 +5167,15 @@ const filesToDelete = [
         }
         
         // For "Test details" sheet: add AI summary row + Additional comments editor
-        if (/^\s*test\s*details\s*$/i.test(sheet)) {
-          const tbl = document.getElementById(sheet);
-          if (tbl) {
-            addAiSummaryRow(tbl);  // <--- AI summary row
-          }
-          injectPostHocCommentUI(filename, wb, sheet, content);
-        }
+if (/^\s*test\s*details\s*$/i.test(sheet)) {
+  const tbl = document.getElementById(sheet);
+  if (tbl) {
+    addAiSummaryRow(tbl);
+  }
+
+  injectTestGroupUI(filename, wb, sheet, content);
+  injectPostHocCommentUI(filename, wb, sheet, content);
+}
 
         // For "Road types" sheet: build aggregated Road categories table below it
         if (/^\s*road\s*types?\s*$/i.test(sheet)) {
