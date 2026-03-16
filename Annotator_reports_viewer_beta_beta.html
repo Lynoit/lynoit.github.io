@@ -1304,8 +1304,8 @@ async function fetchSessionSummary(filename) {
 let additionalComment = null; // keep for UI (latest)
 let testGroupKey = null;      // use for grouping (stable)
 try {
-  additionalComment = extractLatestAdditionalComment(wb) || null;
-  testGroupKey      = extractTestGroupKey(wb) || null;
+additionalComment = extractLatestAdditionalComment(wb) || null;
+testGroupKey      = extractTestGroupFromDetails(wb) || null;
 } catch (e) {
   // ignore
 }
@@ -1390,35 +1390,9 @@ function extractAdditionalComments(wb){
   return out;
 }
 
-function extractTestGroupKey(wb){
+function extractTestGroupFromDetails(wb){
   const details = extractTestDetails(wb);
-
-  // 1) Preferred explicit field in Test details
-  const explicit =
-    details['test group'] ||
-    details['testgroup'] ||
-    null;
-
-  if (explicit && String(explicit).trim()) {
-    return String(explicit).trim();
-  }
-
-  // 2) Backward-compatible fallback for old files
-  const comments = extractAdditionalComments(wb);
-  if (!comments.length) return null;
-
-  const tagRe = /(?:^|\b)(?:tg|test\s*group)\s*[:=]\s*(.+)$/i;
-  const bracketRe = /^\s*\[tg\]\s*(.+)\s*$/i;
-
-  for (const c of comments){
-    let m = String(c).match(bracketRe);
-    if (m && m[1]) return m[1].trim();
-
-    m = String(c).match(tagRe);
-    if (m && m[1]) return m[1].trim();
-  }
-
-  return null;
+  return (details['test group'] || '').trim() || null;
 }
 
 // For display in sidebar etc: keep the latest comment (what you currently do)
@@ -3304,6 +3278,83 @@ function buildSparklineSvg(values, opts = {}){
     <div class="kpi-trend-label">${firstVal.toFixed(2)} → ${lastVal.toFixed(2)} (${deltaTxt})</div>
   `;
 }
+
+function ensureTestGroupRow(testDetailsTableEl, filename, wb, sheetName){
+  if (!testDetailsTableEl) return;
+
+  const tbl = testDetailsTableEl;
+  const tbody = tbl.tBodies[0] || tbl;
+  const rows = Array.from(tbody.rows);
+  if (!rows.length) return;
+
+  const colCount = rows[0].cells.length || 2;
+  let targetRow = null;
+
+  for (const row of rows){
+    const c0 = row.cells[0];
+    if (!c0) continue;
+    const lbl = c0.textContent.trim().toLowerCase();
+    if (lbl === 'test group'){
+      targetRow = row;
+      break;
+    }
+  }
+
+  if (!targetRow){
+    targetRow = document.createElement('tr');
+
+    const labelTd = document.createElement('td');
+    labelTd.textContent = 'Test group';
+
+    const valueTd = document.createElement('td');
+    if (colCount > 2) valueTd.colSpan = colCount - 1;
+
+    targetRow.appendChild(labelTd);
+    targetRow.appendChild(valueTd);
+
+    tbody.appendChild(targetRow);
+  }
+
+  let valueTd = targetRow.cells[1];
+  if (!valueTd){
+    valueTd = targetRow.insertCell(1);
+    if (colCount > 2) valueTd.colSpan = colCount - 1;
+  }
+
+  const currentValue = extractTestGroupFromDetails(wb) || '';
+
+  valueTd.innerHTML = `
+    <input type="text"
+           id="test-group-input-${cssSafeId(filename)}"
+           value="${escapeHtml(currentValue)}"
+           placeholder="Enter test group"
+           style="width:100%;max-width:420px;padding:4px 6px;box-sizing:border-box;">
+    <button type="button"
+            id="test-group-save-${cssSafeId(filename)}"
+            style="margin-left:8px;">
+      Save
+    </button>
+    <span id="test-group-status-${cssSafeId(filename)}"
+          style="margin-left:10px;font-size:12px;color:#555;"></span>
+  `;
+
+  const input  = valueTd.querySelector(`#test-group-input-${cssSafeId(filename)}`);
+  const btn    = valueTd.querySelector(`#test-group-save-${cssSafeId(filename)}`);
+  const status = valueTd.querySelector(`#test-group-status-${cssSafeId(filename)}`);
+
+  btn.addEventListener('click', async () => {
+    const newValue = (input.value || '').trim();
+    status.textContent = 'Saving…';
+
+    try {
+      await saveTestGroupToXlsx(filename, wb, sheetName, newValue);
+      status.textContent = 'Saved.';
+    } catch (err) {
+      console.error(err);
+      status.textContent = 'Save failed: ' + err.message;
+    }
+  });
+}    
     
 function buildTestGroupsSection(files){
   if (!files || !files.length) return Promise.resolve();
@@ -3318,7 +3369,7 @@ const promises = files.map(f =>
     const byComment = new Map();
 
 all.forEach(({ filename, summary }) => {
-  const raw = summary && (summary.testGroupKey || summary.additionalComment);
+  const raw = summary && summary.testGroupKey;
 
   if (!raw) return;
   const key = raw.trim();
@@ -3651,6 +3702,64 @@ async function buildCombinedGroupKpiTableHtml(group, progressCb){
     </table>
   `;
 }
+
+async function saveTestGroupToXlsx(filename, wb, sheetName, testGroupValue){
+  let sheet = wb.Sheets[sheetName];
+  let rows = [];
+
+  if (sheet){
+    rows = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false });
+  }
+  if (!rows.length){
+    rows = [['Label', 'Value']];
+  }
+
+  let found = false;
+
+  for (let i = 0; i < rows.length; i++){
+    const label = String(rows[i][0] ?? '').trim().toLowerCase();
+    if (label === 'test group'){
+      rows[i][1] = testGroupValue;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found){
+    rows.push(['Test group', testGroupValue]);
+  }
+
+  sheet = XLSX.utils.aoa_to_sheet(rows);
+  wb.Sheets[sheetName] = sheet;
+  if (!wb.SheetNames.includes(sheetName)) wb.SheetNames.push(sheetName);
+
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([out], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  });
+
+  const url = `${BASE_URL}/${filename}?${SAS_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    },
+    body: blob
+  });
+
+  if (!res.ok){
+    throw new Error('Upload failed: ' + res.status + ' ' + res.statusText);
+  }
+
+  rerenderTestDetailsTable(wb);
+
+  summaryCache.delete(filename);
+  const jsonName = filename.replace(/\.xlsx$/i, '.json');
+  try {
+    await fetch(`${BASE_URL}/${jsonName}?${SAS_TOKEN}`, { method: 'DELETE' });
+  } catch {}
+}    
 
 async function renderTestGroupMap(group, mapId, progressCb){
   const mapEl = document.getElementById(mapId);
@@ -5171,9 +5280,9 @@ if (/^\s*test\s*details\s*$/i.test(sheet)) {
   const tbl = document.getElementById(sheet);
   if (tbl) {
     addAiSummaryRow(tbl);
+    addTestGroupRow(tbl, filename, wb, sheet);
   }
 
-  injectTestGroupUI(filename, wb, sheet, content);
   injectPostHocCommentUI(filename, wb, sheet, content);
 }
 
