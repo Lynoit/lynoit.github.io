@@ -895,21 +895,72 @@ form.addEventListener('submit', async e => {
 </button>
 </div>
 
-    <style>
-      /* start hidden */
-#buttonGroups {
-  display: none;
-}
-#showButtons:checked ~ #buttonGroups {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-}
-    </style>
+<style>
+  /* KPI buttons start hidden */
+  #buttonGroups {
+    display: none;
+  }
+  #showButtons:checked ~ #buttonGroups {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+</style>
 
 <div
   style="
     margin-bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  ">
+  <input type="checkbox" id="showAccelMonitors">
+  <label for="showAccelMonitors">Show acceleration monitors</label>
+</div>
+    
+<div id="accelMonitorSection" class="section" style="margin-bottom:20px; display:none;">
+  <h3>Automatic acceleration monitors</h3>
+
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="autoLatToggle">
+      Auto lateral accel
+    </label>
+    <label>
+      Threshold:
+      <input type="number" id="autoLatThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
+    </label>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:10px;">
+    <label style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="autoLonToggle">
+      Auto longitudinal accel
+    </label>
+    <label>
+      Threshold:
+      <input type="number" id="autoLonThreshold" value="2.5" step="0.1" min="0" style="width:80px;">
+      m/s²
+    </label>
+  </div>
+
+  <p id="accelLiveReadout" style="margin-top:10px;">
+    Lateral: 0.00 m/s² | Longitudinal: 0.00 m/s²
+  </p>
+
+<div>
+Note: Device must be oriented in a standing position with screen facing backwards
+</div>
+  
+</div>
+    
+<div
+  style="
+    margin-top: 30px;
+    margin-bottom: 30px;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -1129,10 +1180,44 @@ const metaAnswers     = {};
     const streetTbl = document.getElementById('streetTable');
     const countryTable = document.getElementById('countryTable');
     const logContainer = document.getElementById('logTableContainer');
-    const buttonGroups = document.getElementById('buttonGroups');
-    const micLamp   = document.getElementById('micLamp');
-    const textBox   = document.getElementById('textBox');
+const buttonGroups = document.getElementById('buttonGroups');
+const micLamp   = document.getElementById('micLamp');
+const textBox   = document.getElementById('textBox');
 
+const showAccelMonitorsCb = document.getElementById('showAccelMonitors');
+const accelMonitorSection = document.getElementById('accelMonitorSection');
+
+if (showAccelMonitorsCb && accelMonitorSection) {
+  showAccelMonitorsCb.addEventListener('change', () => {
+    accelMonitorSection.style.display = showAccelMonitorsCb.checked ? 'block' : 'none';
+  });
+}
+
+let motionPermissionGranted = false;
+let motionListening = false;
+
+let currentAccel = {
+  x: 0,
+  y: 0,
+  z: 0,
+  lateral: 0,
+  longitudinal: 0,
+  ts: 0
+};
+
+let accelBaseline = { x: 0, y: 0, z: 0 };
+let accelSmoothed = { x: 0, y: 0, z: 0 };
+
+const accelAutoState = {
+  lateralEnabled: false,
+  longitudinalEnabled: false,
+  lateralThreshold: 2.5,       // m/s², adjust as needed
+  longitudinalThreshold: 2.5,  // m/s², adjust as needed
+  cooldownMs: 3000,
+  lastLateralLogTs: 0,
+  lastLongitudinalLogTs: 0
+};
+    
 // --- button sorting for tri-state toggles ---
 let triToggleSerial = 0;   // stable original order among tri toggles
 let sortTimeoutId   = null;
@@ -1480,6 +1565,8 @@ async function stopTesting() {
     }
   } catch {}
 
+  try { stopMotionAccess(); } catch {}
+  
   // prevent double runs
   if (typeof sessionEnded !== 'undefined' && sessionEnded) return;
   window.sessionEnded = true;
@@ -1582,9 +1669,10 @@ async function stopTesting() {
   }
 }
     
-  function startApp() {
-    // 1) Acquire a wake lock right away
-    requestWakeLock();
+async function startApp() {
+  requestWakeLock();
+  await ensureMotionAccess();
+  initAccelMonitorUi();
     
   loadCorrections()
     .then(() => console.log('Corrections loaded:', corrections))
@@ -1680,6 +1768,116 @@ document.getElementById('micToggle').onclick = async event => {
   }
 };
 
+function handleDeviceMotion(event) {
+  // Prefer gravity-free acceleration
+  let ax = event.acceleration?.x;
+  let ay = event.acceleration?.y;
+  let az = event.acceleration?.z;
+
+  // Fallback if acceleration is null
+  if (ax == null || ay == null || az == null) {
+    ax = event.accelerationIncludingGravity?.x ?? 0;
+    ay = event.accelerationIncludingGravity?.y ?? 0;
+    az = event.accelerationIncludingGravity?.z ?? 0;
+
+    // Very slow baseline tracker to remove static gravity/bias
+    const alphaBase = 0.02;
+    accelBaseline.x = (1 - alphaBase) * accelBaseline.x + alphaBase * ax;
+    accelBaseline.y = (1 - alphaBase) * accelBaseline.y + alphaBase * ay;
+    accelBaseline.z = (1 - alphaBase) * accelBaseline.z + alphaBase * az;
+
+    ax -= accelBaseline.x;
+    ay -= accelBaseline.y;
+    az -= accelBaseline.z;
+  }
+
+  // Smooth slightly to suppress sensor noise
+  const alpha = 0.25;
+  accelSmoothed.x = (1 - alpha) * accelSmoothed.x + alpha * ax;
+  accelSmoothed.y = (1 - alpha) * accelSmoothed.y + alpha * ay;
+  accelSmoothed.z = (1 - alpha) * accelSmoothed.z + alpha * az;
+
+  // Portrait, upright, back camera forward:
+  // lateral ~ x
+  // longitudinal ~ z or -z depending on sign convention
+  const lateral = accelSmoothed.x;
+  const longitudinal = -accelSmoothed.z; // flip if road test shows opposite sign
+
+  currentAccel = {
+    x: accelSmoothed.x,
+    y: accelSmoothed.y,
+    z: accelSmoothed.z,
+    lateral,
+    longitudinal,
+    ts: Date.now()
+  };
+
+  checkAutoAccelerationIssues();
+}
+
+function checkAutoAccelerationIssues() {
+  const now = Date.now();
+
+  if (
+    accelAutoState.lateralEnabled &&
+    Math.abs(currentAccel.lateral) >= accelAutoState.lateralThreshold &&
+    now - accelAutoState.lastLateralLogTs >= accelAutoState.cooldownMs
+  ) {
+    document.getElementById('textBox').value =
+      `Auto lateral acceleration event: ${currentAccel.lateral.toFixed(2)} m/s² (threshold ${accelAutoState.lateralThreshold.toFixed(2)})`;
+
+    logButton('Auto lateral acceleration threshold exceeded', true);
+    accelAutoState.lastLateralLogTs = now;
+  }
+
+  if (
+    accelAutoState.longitudinalEnabled &&
+    Math.abs(currentAccel.longitudinal) >= accelAutoState.longitudinalThreshold &&
+    now - accelAutoState.lastLongitudinalLogTs >= accelAutoState.cooldownMs
+  ) {
+    document.getElementById('textBox').value =
+      `Auto longitudinal acceleration event: ${currentAccel.longitudinal.toFixed(2)} m/s² (threshold ${accelAutoState.longitudinalThreshold.toFixed(2)})`;
+
+    logButton('Auto longitudinal acceleration threshold exceeded', true);
+    accelAutoState.lastLongitudinalLogTs = now;
+  }
+}    
+
+function initAccelMonitorUi() {
+  const latToggle = document.getElementById('autoLatToggle');
+  const lonToggle = document.getElementById('autoLonToggle');
+  const latThr    = document.getElementById('autoLatThreshold');
+  const lonThr    = document.getElementById('autoLonThreshold');
+  const live      = document.getElementById('accelLiveReadout');
+
+  latToggle?.addEventListener('change', async () => {
+    accelAutoState.lateralEnabled = latToggle.checked;
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
+    if (latToggle.checked) await ensureMotionAccess();
+  });
+
+  lonToggle?.addEventListener('change', async () => {
+    accelAutoState.longitudinalEnabled = lonToggle.checked;
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+    if (lonToggle.checked) await ensureMotionAccess();
+  });
+
+  latThr?.addEventListener('input', () => {
+    accelAutoState.lateralThreshold = Number(latThr.value) || 0;
+  });
+
+  lonThr?.addEventListener('input', () => {
+    accelAutoState.longitudinalThreshold = Number(lonThr.value) || 0;
+  });
+
+  setInterval(() => {
+    if (!live) return;
+    live.textContent =
+      `Lateral: ${currentAccel.lateral.toFixed(2)} m/s² | ` +
+      `Longitudinal: ${currentAccel.longitudinal.toFixed(2)} m/s²`;
+  }, 250);
+}
+    
 function loadCorrections() {
   return fetch('corrections.csv')
     .then(r => r.ok ? r.text() : Promise.reject('CSV load failed'))
@@ -1974,7 +2172,7 @@ function startCamera() {
   window.addEventListener('pageshow', () => restart());
 }
     
-    function getCameraConstraints() {
+function getCameraConstraints() {
   return { video: { facingMode: 'environment' } };
 }
 
@@ -2512,8 +2710,8 @@ function logButton(name, isRed) {
   try { playSuccess(isRed ? 'red' : 'normal'); } catch(e) {}
 
   // still record a sampling row with the issue text
-  //recordSample(name);
-  recordSample('');
+  recordSample(name);
+  //recordSample('');
 
   // ⑧ Map marker for this issue (numbered)
   const issueNumber = logTable.length;
@@ -2585,9 +2783,8 @@ function displayLogTable() {
         <th data-export="no">Remove</th>
       </tr>`;
 
-  logTable.forEach((row, i) => {
-    // treat this row as an object as in your current version:
-    // { issue, date, time, phase, temp, condition, lat, lon, dist, speed, roadType, comment, camDataUrl }
+  for (let i = logTable.length - 1; i >= 0; i--) {
+    const row = logTable[i];
     const hasComment = !!(row.comment && row.comment.trim());
 
     mainHtml += `
@@ -2605,7 +2802,6 @@ function displayLogTable() {
         <td>${row.speed      ?? '—'}</td>
         <td>${row.roadType   ?? '—'}</td>
 
-        <!-- editable comment cell with placeholder behaviour -->
         <td class="commentCell ${hasComment ? '' : 'empty'}" contenteditable="true">
           ${hasComment ? row.comment : ''}
         </td>
@@ -2619,12 +2815,11 @@ function displayLogTable() {
           </button>
         </td>
       </tr>`;
-  });
+  }
 
   mainHtml += `</table>`;
   document.getElementById('logTableContainer').innerHTML = mainHtml;
 
-  // attach handlers for editing comments
   attachCommentEditHandlers();
 }
 
@@ -3267,6 +3462,41 @@ function tableToCSV(tableEl) {
     .join('\n');
 }
 
+async function ensureMotionAccess() {
+  try {
+    if (
+      typeof DeviceMotionEvent !== 'undefined' &&
+      typeof DeviceMotionEvent.requestPermission === 'function'
+    ) {
+      const result = await DeviceMotionEvent.requestPermission();
+      motionPermissionGranted = (result === 'granted');
+      if (!motionPermissionGranted) {
+        console.warn('Device motion permission denied');
+        return false;
+      }
+    } else {
+      motionPermissionGranted = true;
+    }
+
+    if (!motionListening) {
+      window.addEventListener('devicemotion', handleDeviceMotion, { passive: true });
+      motionListening = true;
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Failed to enable device motion:', err);
+    return false;
+  }
+}
+
+function stopMotionAccess() {
+  if (motionListening) {
+    window.removeEventListener('devicemotion', handleDeviceMotion);
+    motionListening = false;
+  }
+}
+    
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2025-11-19T14:10:22Z&st=2025-05-19T05:10:22Z&spr=https&sig=EUXvbKk2bF2h%2B2cf5fjyVGkasbqBZJb%2FevLVJ6R%2FYCA%3D";
 //const containerSasUrl = "https://annotationcsv.blob.core.windows.net/csv?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&sr=c&se=2025-12-30T15:55:03Z&st=2025-07-01T06:55:03Z&spr=https&sig=NeNMbZI0PsppH4amjEmNcqMI00oC35rO8cV2swmbsyw%3D";
 const containerSasUrl = "https://annotationcsv.blob.core.windows.net/?sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-12-30T23:33:30Z&st=2026-01-02T15:18:30Z&spr=https&sig=BoWBgheeFkDsFQk8Ckq1xwO3mbqtUZSdMey0pWWkzGk%3D";
@@ -3386,20 +3616,49 @@ async function uploadWorkbookToAzure() {
       return;
     }
 
-    let ws;
+let ws;
 
-    if (id === 'logTable') {
-      // 🔹 Build Issues sheet manually, skipping cells with data-export="no"
-      const rows = Array.from(tblEl.querySelectorAll('tr')).map(tr => {
-        const cells = Array.from(tr.querySelectorAll('th,td'))
-          .filter(cell => cell.dataset.export !== 'no'); // ⬅ skip Remove column
-        return cells.map(cell => cell.textContent);
-      });
-      ws = XLSX.utils.aoa_to_sheet(rows);
-    } else {
-      // default path for all other tables
-      ws = XLSX.utils.table_to_sheet(tblEl);
-    }
+if (id === 'logTable') {
+  // Build Issues sheet from the underlying logTable array
+  // so Excel keeps original chronological order
+  const rows = [[
+    'No.',
+    'Issue',
+    'Date',
+    'Time',
+    'Phase',
+    'Temp',
+    'Weather',
+    'Lat',
+    'Lon',
+    'Distance (km)',
+    'Speed (km/h)',
+    'Road',
+    'Comment'
+  ]];
+
+  logTable.forEach((row, i) => {
+    rows.push([
+      i + 1,
+      row.issue     ?? '—',
+      row.date      ?? '—',
+      row.time      ?? '—',
+      row.phase     ?? '—',
+      row.temp      ?? '—',
+      row.condition ?? '—',
+      row.lat       ?? '—',
+      row.lon       ?? '—',
+      row.dist      ?? '—',
+      row.speed     ?? '—',
+      row.roadType  ?? '—',
+      row.comment   ?? ''
+    ]);
+  });
+
+  ws = XLSX.utils.aoa_to_sheet(rows);
+} else {
+  ws = XLSX.utils.table_to_sheet(tblEl);
+}
 
     // 🔸 Percent sheets: multiply column C by 100 (unchanged)
     if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
@@ -3685,7 +3944,7 @@ const SECTIONS_TO_EXPORT = [
 ];
 
 let sectionTexts = {};
-  async function loadSectionTexts() {
+async function loadSectionTexts() {
     try {
       const resp = await fetch('sectionTexts.json');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
