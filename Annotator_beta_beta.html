@@ -1378,6 +1378,52 @@ function updateToggleDistanceTable() {
    let samplingIntervalId    = null;
    let dateTimeIntervalId    = null;
    let uploadAgoIntervalId   = null; // if you added the minutes-since-upload label
+
+   let uploadInFlight = false;
+let pendingUploadAfterCurrent = false;
+
+async function runCloudUploads(reason = 'auto') {
+  if (!uploadsEnabled) return;
+
+  // Prevent overlapping uploads
+  if (uploadInFlight) {
+    pendingUploadAfterCurrent = true;
+    console.log(`Upload already running, queueing another upload (${reason})`);
+    return;
+  }
+
+  uploadInFlight = true;
+  try {
+    const results = await Promise.allSettled([
+      uploadWorkbookToAzure(),
+      uploadSnapshotsZip()
+    ]);
+
+    results.forEach((result, i) => {
+      const label = i === 0 ? 'workbook' : 'snapshots zip';
+      if (result.status === 'fulfilled') {
+        console.log(`✔ ${label} uploaded (${reason})`);
+      } else {
+        console.error(`✖ ${label} upload failed (${reason}):`, result.reason);
+      }
+    });
+
+    lastUploadTime = Date.now();
+  } finally {
+    uploadInFlight = false;
+
+    if (pendingUploadAfterCurrent) {
+      pendingUploadAfterCurrent = false;
+      runCloudUploads('queued');
+    }
+  }
+}
+
+function triggerImmediateUploadOnNewIssue() {
+  checkUploadEligibility();
+  if (!uploadsEnabled) return;
+  runCloudUploads('new-issue');
+} 
     
     // ── Whitelist of road types we care about ──
     const allowedRoadTypes = new Set([
@@ -2737,6 +2783,7 @@ function logButton(name, isRed) {
   displayCameraTable();
 
   markDirty();
+  triggerImmediateUploadOnNewIssue();
 
   // ⑪ Clear the textbox and snapshot cache
   document.getElementById('textBox').value = '';
@@ -3384,18 +3431,8 @@ async function maybeUpdateTables() {
   }
 
 if (uploadsEnabled && (now - lastUploadTime > UPLOAD_THROTTLE)) {
-  lastUploadTime = now;
-
-  uploadWorkbookToAzure().then(() => console.log('Workbook auto-uploaded'))
-    .catch(err => console.error('Workbook upload failed:', err));
-
-  uploadSnapshotsZip().then(() => console.log('Snapshots ZIP uploaded'))
-    .catch(err => console.error('Snapshots ZIP upload failed:', err));
-
-    //exportCustomSectionsToAzure()
-    //  .then(() => console.log('PDF report uploaded'))
-    //  .catch(err => console.error('PDF upload failed:', err));
-  }
+  runCloudUploads('throttled');
+}
 }
 
 function updatePhaseTable() {
@@ -4193,15 +4230,7 @@ function withSpinner(btn, fn) {
 // 3) Wire it all together
 uploadNowBtn.addEventListener('click', () => {
   withSpinner(uploadNowBtn, async () => {
-    // upload the XLSX
-    await uploadWorkbookToAzure();
-
-    // upload the full PDF
-    //await exportPDFToAzure();
-
-    // upload *your* custom-sections PDF
-    await uploadSnapshotsZip();
-
+    await runCloudUploads('manual');
     console.log('✔ All uploads complete');
   });
 });
