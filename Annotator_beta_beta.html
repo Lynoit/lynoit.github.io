@@ -1223,6 +1223,30 @@ let triToggleSerial = 0;   // stable original order among tri toggles
 let sortTimeoutId   = null;
 const SORT_DELAY_MS = 30000;  // 30 seconds before resorting
 
+// --- usage sorting for normal KPI buttons only ---
+const groupUsageCounts = {};      // total presses per column/group
+const buttonUsageCounts = {};     // total presses per button
+let groupOriginalOrder = 0;       // keeps original CSV order for columns
+let buttonOriginalOrder = 0;      // keeps original CSV order for buttons
+
+function getButtonCountKey(groupKey, logName) {
+  return `${groupKey}||${logName}`;
+}
+
+function isSortableKpiButton(btn) {
+  // Exclude all toggle buttons from this sorter
+  if (btn.dataset.toggleKind === 'tri') return false;
+  if (btn.classList.contains('toggleButton')) return false;
+  if (btn.classList.contains('group-header')) return false;
+
+  return (
+    btn.classList.contains('redButton') ||
+    btn.classList.contains('greenButton') ||
+    btn.classList.contains('blueButton') ||
+    btn.classList.contains('orangeButton')
+  );
+}    
+
 if (buttonGroups) {
   // any click on a KPI button restarts the timer
   buttonGroups.addEventListener('click', () => {
@@ -3103,6 +3127,90 @@ function resortTriToggles() {
     triButtons.forEach(btn => group.appendChild(btn));
   });
 }
+
+function updateKpiUsageLabels() {
+  const groups = document.querySelectorAll('#buttonGroups .button-group');
+
+  groups.forEach(group => {
+    const groupKey = group.dataset.groupKey;
+    const groupCount = groupUsageCounts[groupKey] || 0;
+
+    const headerBtn = group.querySelector('.group-header');
+    if (headerBtn) {
+      const baseLabel = headerBtn.dataset.baseLabel || groupKey;
+      headerBtn.textContent = `${baseLabel} (${groupCount})`;
+    }
+
+    const sortableButtons = group.querySelectorAll('button[data-usage-sortable="1"]');
+    sortableButtons.forEach(btn => {
+      const baseLabel = btn.dataset.baseLabel || '';
+      const logName = btn.dataset.logName || baseLabel;
+      const key = getButtonCountKey(groupKey, logName);
+      const count = buttonUsageCounts[key] || 0;
+      btn.textContent = `${baseLabel} (${count})`;
+    });
+  });
+}
+
+function sortKpiButtonsWithinGroup(groupEl) {
+  const sortableButtons = Array.from(
+    groupEl.querySelectorAll('button[data-usage-sortable="1"]')
+  );
+
+  sortableButtons.sort((a, b) => {
+    const groupKey = groupEl.dataset.groupKey;
+
+    const keyA = getButtonCountKey(groupKey, a.dataset.logName || a.dataset.baseLabel);
+    const keyB = getButtonCountKey(groupKey, b.dataset.logName || b.dataset.baseLabel);
+
+    const countA = buttonUsageCounts[keyA] || 0;
+    const countB = buttonUsageCounts[keyB] || 0;
+
+    if (countB !== countA) return countB - countA;
+
+    return Number(a.dataset.originalOrder) - Number(b.dataset.originalOrder);
+  });
+
+  sortableButtons.forEach(btn => groupEl.appendChild(btn));
+}
+
+function sortKpiGroups() {
+  const buttonGroupsEl = document.getElementById('buttonGroups');
+  if (!buttonGroupsEl) return;
+
+  const groups = Array.from(buttonGroupsEl.querySelectorAll('.button-group'));
+
+  groups.sort((a, b) => {
+    const groupA = a.dataset.groupKey;
+    const groupB = b.dataset.groupKey;
+
+    const countA = groupUsageCounts[groupA] || 0;
+    const countB = groupUsageCounts[groupB] || 0;
+
+    if (countB !== countA) return countB - countA;
+
+    return Number(a.dataset.originalOrder) - Number(b.dataset.originalOrder);
+  });
+
+  groups.forEach(group => buttonGroupsEl.appendChild(group));
+}
+
+function registerKpiUsage(groupKey, logName) {
+  const key = getButtonCountKey(groupKey, logName);
+
+  buttonUsageCounts[key] = (buttonUsageCounts[key] || 0) + 1;
+  groupUsageCounts[groupKey] = (groupUsageCounts[groupKey] || 0) + 1;
+
+  const groupEl = document.querySelector(
+    `#buttonGroups .button-group[data-group-key="${CSS.escape(groupKey)}"]`
+  );
+
+  if (groupEl) {
+    updateKpiUsageLabels();
+    sortKpiButtonsWithinGroup(groupEl);
+    sortKpiGroups();
+  }
+}    
     
 // Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
@@ -3111,6 +3219,9 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
   toggleDefs = []; // reset on rebuild
   toggleNotes = {}; // reset all notes when loading a new button config
   Object.keys(triToggleTouched).forEach(k => delete triToggleTouched[k]);
+
+  groupOriginalOrder = 0;
+  buttonOriginalOrder = 0;
 
   fetch(csvFile)
     .then(r => {
@@ -3138,12 +3249,18 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
         if (!groupKey || !label) return;
 
         // one column per group (header item will be just another row in the group)
-        if (!groups[groupKey]) {
-          const wrap = document.createElement('div');
-          wrap.className = 'button-group';
-          groups[groupKey] = wrap;
-          buttonGroups.appendChild(wrap);
-        }
+if (!groups[groupKey]) {
+  const wrap = document.createElement('div');
+  wrap.className = 'button-group';
+  wrap.dataset.groupKey = groupKey;
+  wrap.dataset.originalOrder = String(groupOriginalOrder++);
+  groups[groupKey] = wrap;
+  buttonGroups.appendChild(wrap);
+
+  if (!(groupKey in groupUsageCounts)) {
+    groupUsageCounts[groupKey] = 0;
+  }
+}
 
         // ─────────────────────────────────────────────
         // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
@@ -3331,16 +3448,62 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   return;
 }
 
-        // ─────────────────────────────────────────────
-        // Normal press-to-log buttons (including grey headers)
-        // ─────────────────────────────────────────────
-        const btn = document.createElement('button');
-        btn.textContent = label;
-        btn.className = `bigButton ${cssClass}`.trim();
-        const isRed = btn.classList.contains('redButton');
-        btn.addEventListener('click', () => logButton(logName, isRed));
-        groups[groupKey].appendChild(btn);
+// ─────────────────────────────────────────────
+// Normal press-to-log buttons (including grey headers)
+// ─────────────────────────────────────────────
+const btn = document.createElement('button');
+btn.type = 'button';
+btn.className = `bigButton ${cssClass}`.trim();
+btn.dataset.baseLabel = label;
+
+// treat a grey row matching the group name as the header
+const isHeaderLike =
+  cssClass.includes('greyButton') &&
+  !type &&
+  !signal &&
+  label === groupKey;
+
+if (isHeaderLike) {
+  btn.classList.add('group-header');
+  btn.dataset.baseLabel = label;
+  btn.textContent = `${label} (${groupUsageCounts[groupKey] || 0})`;
+  btn.disabled = true;
+  groups[groupKey].appendChild(btn);
+  return;
+}
+
+const isRed = btn.classList.contains('redButton');
+const usageTracked = isSortableKpiButton(btn);
+
+btn.dataset.groupKey = groupKey;
+btn.dataset.logName = logName;
+
+if (usageTracked) {
+  btn.dataset.usageSortable = '1';
+  btn.dataset.originalOrder = String(buttonOriginalOrder++);
+
+  const key = getButtonCountKey(groupKey, logName);
+  if (!(key in buttonUsageCounts)) {
+    buttonUsageCounts[key] = 0;
+  }
+
+  btn.textContent = `${label} (${buttonUsageCounts[key] || 0})`;
+} else {
+  btn.textContent = label;
+}
+
+btn.addEventListener('click', () => {
+  logButton(logName, isRed);
+
+  if (usageTracked) {
+    registerKpiUsage(groupKey, logName);
+  }
+});
+
+groups[groupKey].appendChild(btn);
       });
+      updateKpiUsageLabels();
+      sortKpiGroups();
     })
     .catch(err => console.error('Error building buttons:', err));
 }
