@@ -2270,120 +2270,114 @@ async function resumeCameraIfNeeded() {
   // Case 2: track is live, but element is “stuck” → nudge play()
   try { await video.play(); } catch {}
 }
-    
-  function showPosition(pos) {
+
+function showPosition(pos) {
   const { latitude: lat, longitude: lon } = pos.coords;
   const ts = pos.timestamp;
   let segDist = 0; // in meters
 
   if (!startTime) startTime = ts;
-    
-  // 1) Calculate segment distance & apply noise threshold
-  if (lastPos) {
-    segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
-    if (segDist < 10) return; // ignore tiny jitters
 
-    // accumulate total and per‐weather
-    totalDist += segDist;
-    accumulateToggleDistances(segDist);
-    
-    checkUploadEligibility();
-    const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
-    phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
-    const condition = iconEl.alt || 'Unknown';
-    weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
+  // 1) Keep previous position, then ALWAYS store the newest fix
+  const prevPos = lastPos;
+  lastPos = { lat, lon, ts };
 
-        const distKm = (totalDist / 1000).toFixed(2);
-    const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+  // 2) Calculate segment distance, but do not discard the new fix
+  if (prevPos) {
+    segDist = calculateDistance(prevPos.lat, prevPos.lon, lat, lon);
 
-    if (!currentDistMarker) {
-      currentDistMarker = L.marker([lat, lon], {
-        icon: L.divIcon({
-          className: '',        // styling lives in .distance-label
-          html: labelHtml,
-          iconSize: [0, 0],     // let the inner div size itself
-          iconAnchor: [0, -10]  // float just above the point
-        })
-      }).addTo(map);
+    // Treat tiny movement as jitter for distance/speed accumulation only
+    if (segDist < 10) {
+      segDist = 0;
     } else {
-      currentDistMarker.setLatLng([lat, lon]);
-      currentDistMarker.setIcon(L.divIcon({
+      // accumulate total and per-weather
+      totalDist += segDist;
+      accumulateToggleDistances(segDist);
+
+      checkUploadEligibility();
+
+      const phaseText =
+        document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
+      phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
+
+      const condition = iconEl.alt || 'Unknown';
+      weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
+    }
+  }
+
+  // Update distance marker every fix using current total distance
+  const distKm = (totalDist / 1000).toFixed(2);
+  const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+
+  if (!currentDistMarker) {
+    currentDistMarker = L.marker([lat, lon], {
+      icon: L.divIcon({
         className: '',
         html: labelHtml,
         iconSize: [0, 0],
         iconAnchor: [0, -10]
-      }));
-    }    
+      })
+    }).addTo(map);
+  } else {
+    currentDistMarker.setLatLng([lat, lon]);
+    currentDistMarker.setIcon(L.divIcon({
+      className: '',
+      html: labelHtml,
+      iconSize: [0, 0],
+      iconAnchor: [0, -10]
+    }));
   }
 
-  // 2) Update position state & map
-  const prevPos = lastPos;
-  lastPos = { lat, lon, ts };
+  // 3) Update position state & map
   posCount++;
   trackLine.addLatLng([lat, lon]);
+
   if (positions.length === 0) {
     map.setView([lat, lon], 15);
   } else if (posCount % 20 === 0) {
     map.fitBounds(trackLine.getBounds().pad(0.2));
   }
+
   positions.push([lat, lon]);
 
-  // 3) Update speed display
+  // 4) Update speed display
   if (prevPos) {
     const dt = (ts - prevPos.ts) / 1000; // seconds
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
 
-      /* ── reject implausible spikes ───────────────────────── */
-  if (speedKmh > 250) {
-    console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
-    speedEl.textContent = 'Speed: N/A';
-    // skip max-speed bookkeeping and chart push for this sample
-  } else {
-    /* existing “valid sample” logic — keep exactly as you have it */
+    if (speedKmh > 250) {
+      console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
+      speedEl.textContent = 'Speed: N/A';
+      // keep lastSpeedKmh unchanged on unrealistic spikes
+    } else {
+      lastSpeedKmh = speedKmh;
 
-    lastSpeedKmh = speedKmh;
-    
-    // 1. maintain the top-10 speeds list
-    topSpeeds.push(speedKmh);
-    topSpeeds.sort((a, b) => b - a);
-    if (topSpeeds.length > 10) topSpeeds.pop();
-    maxSpeed = topSpeeds.length === 10 ? topSpeeds[9] : topSpeeds[0];
+      // maintain the top-10 speeds list
+      if (speedKmh > 0) {
+        topSpeeds.push(speedKmh);
+        topSpeeds.sort((a, b) => b - a);
+        if (topSpeeds.length > 10) topSpeeds.pop();
 
-    // 2. show live speed read-out
-    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+        maxSpeed = topSpeeds.length === 10
+          ? topSpeeds[9]
+          : topSpeeds[0];
+      }
 
-    // 3. later (in the chart-update section) you already push
-    //    speedData.push(speedKmh);  ← keep that line; it now runs only here
+      speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
+    }
   }
 
-    if (speedKmh > 0) {                    // ignore the very first 0 km/h
-  topSpeeds.push(speedKmh);
-
-  // keep the array sorted descending and trimmed to 10 values
-  topSpeeds.sort((a, b) => b - a);
-  if (topSpeeds.length > 10) topSpeeds.pop();
-
-  // once we have 10 samples, maxSpeed = the lowest of them
-  // (otherwise just use the current highest seen so far)
-  maxSpeed = topSpeeds.length === 10
-               ? topSpeeds[9]                 // index 9 = smallest of the top 10
-               : topSpeeds[0];                // highest sample so far
-}
-    
-    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
-  }
-
-  // 4) Update distance display & charts
+  // 5) Update distance display & charts
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
 
-if (Date.now() - lastChartTs > 5000) {
-  maybeUpdateTables();
-  lastChartTs = Date.now();
-}
+  if (Date.now() - lastChartTs > 5000) {
+    maybeUpdateTables();
+    lastChartTs = Date.now();
+  }
 
-  // 5) Update raw lat/lon display
+  // 6) Update raw lat/lon display
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
   nudge(locEl);
 
@@ -2393,7 +2387,7 @@ if (Date.now() - lastChartTs > 5000) {
     lastPhaseUpdate = now;
   }
 
-  // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
+  // 7) Reverse-geocode + whitelist + accumulate per-type distance
   fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
     .then(r => r.json())
     .then(data => {
@@ -2403,120 +2397,104 @@ if (Date.now() - lastChartTs > 5000) {
       currentRoadType = displayRt;
 
       const isBridge = tags.bridge === 'yes';
+      const isRoundabout =
+        tags.junction === 'roundabout' ||
+        tags.highway === 'mini_roundabout';
+      const isTrafficLight = tags.highway === 'traffic_signals';
+      const isTunnel = tags.tunnel === 'yes';
 
-        const isRoundabout =
-       tags.junction === 'roundabout'
-    || tags.highway  === 'mini_roundabout';
+      if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
+      if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
+      if (isTunnel && !lastWasTunnel) tunnelCount++;
 
-  // traffic-light junctions
-  const isTrafficLight = tags.highway === 'traffic_signals';
-
-  // tunnels
-  const isTunnel      = tags.tunnel === 'yes';
-
-  // now your existing debounce/count logic…
-  if (isRoundabout   && !lastWasRoundabout)   roundaboutCount++;
-  if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
-  if (isTunnel       && !lastWasTunnel)       tunnelCount++;
-
-  lastWasRoundabout   = isRoundabout;
-  lastWasTrafficLight = isTrafficLight;
-  lastWasBridge       = isBridge;
-  lastWasTunnel       = isTunnel;
+      lastWasRoundabout = isRoundabout;
+      lastWasTrafficLight = isTrafficLight;
+      lastWasBridge = isBridge;
+      lastWasTunnel = isTunnel;
 
       if (tags.bridge === 'yes') {
-  bridgeStreak++;
-  if (bridgeStreak === 8) {
-    bridgeCount++;
-  }
-} else {
-  bridgeStreak = 0;
-}
-      
+        bridgeStreak++;
+        if (bridgeStreak === 8) {
+          bridgeCount++;
+        }
+      } else {
+        bridgeStreak = 0;
+      }
+
       const maxTag =
-      data.extratags?.maxspeed
-   || data.extratags?.['maxspeed:forward']
-   || data.extratags?.['maxspeed:backward'];
+        data.extratags?.maxspeed ||
+        data.extratags?.['maxspeed:forward'] ||
+        data.extratags?.['maxspeed:backward'];
 
-const limit = maxTag ? parseMaxSpeed(maxTag) : null;
-legalSpeedEl.textContent = limit ?? '–';
-currentLegalSpeed = limit !== null ? Number(limit) : null;
+      const limit = maxTag ? parseMaxSpeed(maxTag) : null;
+      legalSpeedEl.textContent = limit ?? '–';
+      currentLegalSpeed = limit !== null ? Number(limit) : null;
 
-/* ── count speed-limit transitions ─────────────── */
-if (limit !== null && limit !== lastLimit) {
-  if (lastLimit !== null) limitChanges++;   // skip the very first limit
-  lastLimit = limit;
-}
+      if (limit !== null && limit !== lastLimit) {
+        if (lastLimit !== null) limitChanges++;
+        lastLimit = limit;
+      }
 
-     if (segDist > 0) {    
-       roadDistances[displayRt] =
-      (roadDistances[displayRt] || 0) + segDist;
-     }
+      // Only accumulate road distance when actual movement occurred
+      if (segDist > 0) {
+        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+      }
 
-      // update sidebar & sets
       roadTypeEl.textContent = `Road type: ${displayRt}`;
-      //nudge(roadTypeEl);
-      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
-      // street & city display
-      const street = data.address.road
-        || data.address.pedestrian
-        || data.address.footway
-        || 'Unknown street';
-      const city = data.address.city
-        || data.address.town
-        || data.address.village
-        || 'Unknown city';
+      const street =
+        data.address.road ||
+        data.address.pedestrian ||
+        data.address.footway ||
+        'Unknown street';
+
+      const city =
+        data.address.city ||
+        data.address.town ||
+        data.address.village ||
+        'Unknown city';
 
       const country = data.address.country || 'Unknown country';
 
-      // --- Capture initial country (first time only) ---
-if (initialCountry === null && country) {
-  initialCountry = country;
-}
+      // Capture initial country once
+      if (initialCountry === null && country) {
+        initialCountry = country;
+      }
 
-// --- Fire "test started" after 100 m (one time) ---
-if (!testStartLogged && initialCountry && totalDist >= 100) {
-  logButton(`Test started. Country: ${initialCountry}`, false);
-  testStartLogged = true;
-}
+      // Fire "test started" after 100 m
+      if (!testStartLogged && initialCountry && totalDist >= 100) {
+        logButton(`Test started. Country: ${initialCountry}`, false);
+        testStartLogged = true;
+      }
 
       if (segDist > 0) {
-         countryDistances[country] = (countryDistances[country] || 0) + segDist;
+        countryDistances[country] = (countryDistances[country] || 0) + segDist;
       }
-      
+
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-// ── Country change with 500m hysteresis ──
-if (lastCountry === null) {
-  // first ever country: accept immediately, no issue
-  lastCountry = country;
-  pendingCountry = null;
-  pendingCountryStartDist = 0;
-} else if (country === lastCountry) {
-  // we're back in the accepted country → cancel any pending switch
-  pendingCountry = null;
-  pendingCountryStartDist = 0;
-} else {
-  // country differs from accepted → candidate logic
-  if (pendingCountry !== country) {
-    // new candidate detected
-    pendingCountry = country;
-    pendingCountryStartDist = totalDist; // totalDist is meters in your code
-  } else {
-    // same candidate still being seen → check how far we've gone since it started
-    const deltaM = totalDist - pendingCountryStartDist;
-    if (deltaM >= COUNTRY_HYST_M) {
-      // commit switch + log once
-      logButton(`Entered ${country}`, false);
-      lastCountry = country;
-
-      // reset candidate
-      pendingCountry = null;
-      pendingCountryStartDist = 0;
-    }
-  }
-}
+      // Country change with hysteresis
+      if (lastCountry === null) {
+        lastCountry = country;
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      } else if (country === lastCountry) {
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      } else {
+        if (pendingCountry !== country) {
+          pendingCountry = country;
+          pendingCountryStartDist = totalDist;
+        } else {
+          const deltaM = totalDist - pendingCountryStartDist;
+          if (deltaM >= COUNTRY_HYST_M) {
+            logButton(`Entered ${country}`, false);
+            lastCountry = country;
+            pendingCountry = null;
+            pendingCountryStartDist = 0;
+          }
+        }
+      }
 
       // fetch weather on city change
       if (city !== lastCity) {
@@ -2525,7 +2503,6 @@ if (lastCountry === null) {
         getWeather(city);
       }
 
-      // refresh all tables
       maybeUpdateTables();
     })
     .catch(err => {
@@ -2533,10 +2510,10 @@ if (lastCountry === null) {
       console.error('Reverse geocode error', err);
     });
 
-    if (map2) {
-      map2.setView([lat, lon], 20);  // zoom level 20 ≃ 100 m across
-      currentPosMarker2.setLatLng([lat, lon]);
-    }     
+  if (map2) {
+    map2.setView([lat, lon], 20);
+    currentPosMarker2.setLatLng([lat, lon]);
+  }
 }
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
