@@ -412,46 +412,66 @@
       }
     }
 
-    async function uploadToAzure() {
-      const { accountName, containerName, sasToken } = azureConfig;
-      if (!accountName || !containerName || !sasToken || sasToken.includes('PASTA_IN')) {
-        throw new Error('Azure-inställningar saknas. Lägg in en giltig SAS-token i filen först.');
-      }
+async function uploadToAzure() {
+  const { accountName, containerName, sasToken } = azureConfig;
 
-      const serviceUrl = `https://${accountName}.blob.core.windows.net?${sasToken.replace(/^\?/, '')}`;
-      const blobServiceClient = new azblob.BlobServiceClient(serviceUrl);
-      const containerClient = blobServiceClient.getContainerClient(containerName);
-      await containerClient.createIfNotExists();
+  if (!accountName || !containerName || !sasToken || sasToken.includes('PASTA_IN')) {
+    throw new Error('Azure-inställningar saknas. Lägg in en giltig SAS-token i filen först.');
+  }
 
-      const baseName = timestampBase();
-      const jsonName = `${baseName}.json`;
-      const jpgName = `${baseName}.jpg`;
+  const query = sasToken.replace(/^\?/, '');
+  const baseUrl = `https://${accountName}.blob.core.windows.net/${containerName}`;
 
-      const payload = {
-        timestamp: state.timestampIso,
-        member: state.member,
-        activity: state.activity,
-        hasImage: Boolean(state.photoFile),
-        imageFileName: state.photoFile ? jpgName : null,
-        jsonFileName: jsonName,
-        source: 'SkrojaAktivitet'
-      };
+  const baseName = timestampBase();
+  const jsonName = `${baseName}.json`;
+  const jpgName = `${baseName}.jpg`;
 
-      const jsonBlobClient = containerClient.getBlockBlobClient(jsonName);
-      await jsonBlobClient.uploadData(
-        new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-        { blobHTTPHeaders: { blobContentType: 'application/json' } }
-      );
+  const payload = {
+    timestamp: state.timestampIso,
+    member: state.member,
+    activity: state.activity,
+    hasImage: Boolean(state.photoFile),
+    imageFileName: state.photoFile ? jpgName : null,
+    jsonFileName: jsonName,
+    source: 'SkrojaAktivitet'
+  };
 
-      if (state.photoFile) {
-        const imageBlobClient = containerClient.getBlockBlobClient(jpgName);
-        await imageBlobClient.uploadData(state.photoFile, {
-          blobHTTPHeaders: { blobContentType: state.photoFile.type || 'image/jpeg' }
-        });
-      }
+  const jsonUrl = `${baseUrl}/${encodeURIComponent(jsonName)}?${query}`;
+  const jsonResponse = await fetch(jsonUrl, {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'x-ms-version': '2023-11-03',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload, null, 2)
+  });
 
-      return { jsonName, jpgName: state.photoFile ? jpgName : null };
+  if (!jsonResponse.ok) {
+    const text = await jsonResponse.text().catch(() => '');
+    throw new Error(`Kunde inte ladda upp JSON (${jsonResponse.status}). ${text}`);
+  }
+
+  if (state.photoFile) {
+    const imageUrl = `${baseUrl}/${encodeURIComponent(jpgName)}?${query}`;
+    const imageResponse = await fetch(imageUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'x-ms-version': '2023-11-03',
+        'Content-Type': state.photoFile.type || 'image/jpeg'
+      },
+      body: state.photoFile
+    });
+
+    if (!imageResponse.ok) {
+      const text = await imageResponse.text().catch(() => '');
+      throw new Error(`Kunde inte ladda upp bild (${imageResponse.status}). ${text}`);
     }
+  }
+
+  return { jsonName, jpgName: state.photoFile ? jpgName : null };
+}
 
     document.getElementById('activity-continue').addEventListener('click', () => {
       const manualText = customActivityInput.value.trim();
