@@ -1210,6 +1210,8 @@ const accelAutoState = {
   lastLateralLogTs: 0,
   lastLongitudinalLogTs: 0
 };
+
+let lastAcceptedPos = null;    
     
 // --- button sorting for tri-state toggles ---
 let triToggleSerial = 0;   // stable original order among tri toggles
@@ -2272,30 +2274,37 @@ async function resumeCameraIfNeeded() {
 }
 
 function showPosition(pos) {
-  const { latitude: lat, longitude: lon } = pos.coords;
+  const { latitude: lat, longitude: lon, accuracy } = pos.coords;
   const ts = pos.timestamp;
+
   let segDist = 0;
+  let acceptedForDistance = false;
 
   if (!startTime) startTime = ts;
 
-const prevPos = lastAcceptedPos || lastPos;
-lastPos = { lat, lon, ts, accuracy: pos.coords.accuracy };
+  // Always store the newest raw fix for display / sampling
+  lastPos = { lat, lon, ts, accuracy };
 
-if (prevPos) {
-  const dt = (ts - prevPos.ts) / 1000;
-  const candidateDist = calculateDistance(prevPos.lat, prevPos.lon, lat, lon);
-  const candidateSpeedKmh = dt > 0 ? (candidateDist / dt) * 3.6 : 0;
+  // Distance accumulation should use only accepted fixes
+  if (lastAcceptedPos) {
+    const dt = (ts - lastAcceptedPos.ts) / 1000; // seconds
+    const candidateDist = calculateDistance(
+      lastAcceptedPos.lat, lastAcceptedPos.lon,
+      lat, lon
+    );
 
-  const badAccuracy = (pos.coords.accuracy != null && pos.coords.accuracy > 35);
+    const candidateSpeedKmh = dt > 0 ? (candidateDist / dt) * 3.6 : 0;
 
-  if (candidateDist >= 1 && candidateSpeedKmh <= 250 && !badAccuracy) {
-    segDist = candidateDist;
-    totalDist += segDist;
-    lastAcceptedPos = { lat, lon, ts, accuracy: pos.coords.accuracy };
-  } else {
-    segDist = 0;
-  }
-}
+    // Reject obviously bad fixes before adding distance
+    const accuracyBad = (accuracy != null && accuracy > 35);
+    const tinyJitter  = candidateDist < 1;
+    const speedBad    = candidateSpeedKmh > 250;
+
+    if (!accuracyBad && !tinyJitter && !speedBad) {
+      segDist = candidateDist;
+      acceptedForDistance = true;
+
+      totalDist += segDist;
       accumulateToggleDistances(segDist);
 
       checkUploadEligibility();
@@ -2306,10 +2315,17 @@ if (prevPos) {
 
       const condition = iconEl.alt || 'Unknown';
       weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
+    } else {
+      segDist = 0;
     }
   }
 
-  // Update distance marker every fix using current total distance
+  // First ever accepted point, or a newly accepted good point
+  if (!lastAcceptedPos || acceptedForDistance) {
+    lastAcceptedPos = { lat, lon, ts, accuracy };
+  }
+
+  // Update distance marker using current total distance
   const distKm = (totalDist / 1000).toFixed(2);
   const labelHtml = `<div class="distance-label">${distKm} km</div>`;
 
@@ -2332,7 +2348,7 @@ if (prevPos) {
     }));
   }
 
-  // 3) Update position state & map
+  // Map trace
   posCount++;
   trackLine.addLatLng([lat, lon]);
 
@@ -2344,19 +2360,18 @@ if (prevPos) {
 
   positions.push([lat, lon]);
 
-  // 4) Update speed display
-  if (prevPos) {
-    const dt = (ts - prevPos.ts) / 1000; // seconds
-    const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
+  // Speed display should match accepted movement only
+  if (lastAcceptedPos) {
+    const prev = lastAcceptedPos;
+    const dt = (ts - prev.ts) / 1000;
+    const speedKmh = (acceptedForDistance && dt > 0) ? (segDist / dt) * 3.6 : 0;
 
     if (speedKmh > 250) {
       console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
       speedEl.textContent = 'Speed: N/A';
-      // keep lastSpeedKmh unchanged on unrealistic spikes
     } else {
       lastSpeedKmh = speedKmh;
 
-      // maintain the top-10 speeds list
       if (speedKmh > 0) {
         topSpeeds.push(speedKmh);
         topSpeeds.sort((a, b) => b - a);
@@ -2371,7 +2386,6 @@ if (prevPos) {
     }
   }
 
-  // 5) Update distance display & charts
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
@@ -2381,7 +2395,6 @@ if (prevPos) {
     lastChartTs = Date.now();
   }
 
-  // 6) Update raw lat/lon display
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
   nudge(locEl);
 
@@ -2391,7 +2404,6 @@ if (prevPos) {
     lastPhaseUpdate = now;
   }
 
-  // 7) Reverse-geocode + whitelist + accumulate per-type distance
   fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
     .then(r => r.json())
     .then(data => {
@@ -2439,12 +2451,12 @@ if (prevPos) {
         lastLimit = limit;
       }
 
-      // Only accumulate road distance when actual movement occurred
       if (segDist > 0) {
         roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
       }
 
       roadTypeEl.textContent = `Road type: ${displayRt}`;
+      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
       const street =
         data.address.road ||
@@ -2460,12 +2472,10 @@ if (prevPos) {
 
       const country = data.address.country || 'Unknown country';
 
-      // Capture initial country once
       if (initialCountry === null && country) {
         initialCountry = country;
       }
 
-      // Fire "test started" after 100 m
       if (!testStartLogged && initialCountry && totalDist >= 100) {
         logButton(`Test started. Country: ${initialCountry}`, false);
         testStartLogged = true;
@@ -2477,7 +2487,6 @@ if (prevPos) {
 
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-      // Country change with hysteresis
       if (lastCountry === null) {
         lastCountry = country;
         pendingCountry = null;
@@ -2500,7 +2509,6 @@ if (prevPos) {
         }
       }
 
-      // fetch weather on city change
       if (city !== lastCity) {
         lastCity = city;
         citySet.add(city);
