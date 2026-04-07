@@ -455,6 +455,9 @@
     const rowsContainer = document.getElementById('rows');
     const pollStatus = document.getElementById('poll-status');
 
+    let lastSeenLatestFile = null;
+    let hasLoadedOnce = false;
+
     function buildQrCode() {
       const qrWrap = document.getElementById('qrcode');
       const encodedUrl = encodeURIComponent(activityAppUrl);
@@ -476,20 +479,29 @@
       return `https://${azureConfig.accountName}.blob.core.windows.net/${azureConfig.containerName}`;
     }
 
-    async function listJsonBlobs() {
-      const { accountName, containerName, sasToken } = azureConfig;
-      if (!accountName || !containerName || !sasToken || sasToken.includes('PASTA_IN')) {
-        throw new Error('Azure-inställningar saknas. Lägg in en giltig SAS-token i dashboardfilen.');
-      }
-      const query = sasToken.replace(/^\?/, '');
-      const url = `https://${accountName}.blob.core.windows.net/${containerName}?restype=container&comp=list&include=metadata&${query}`;
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Kunde inte läsa från Azure (${response.status}).`);
-      const xml = await response.text();
-      const doc = new DOMParser().parseFromString(xml, 'application/xml');
-      const blobNodes = Array.from(doc.querySelectorAll('Blob > Name'));
-      return blobNodes.map(node => node.textContent).filter(name => name.endsWith('.json'));
-    }
+async function listJsonBlobs() {
+  const { accountName, containerName, sasToken } = azureConfig;
+  if (!accountName || !containerName || !sasToken || sasToken.includes('PASTA_IN')) {
+    throw new Error('Azure-inställningar saknas. Lägg in en giltig SAS-token i dashboardfilen.');
+  }
+
+  const query = sasToken.replace(/^\?/, '');
+  const url = `https://${accountName}.blob.core.windows.net/${containerName}?restype=container&comp=list&include=metadata&${query}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Kunde inte läsa från Azure (${response.status}).`);
+
+  const xml = await response.text();
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const blobNodes = Array.from(doc.querySelectorAll('Blob'));
+
+  return blobNodes
+    .map(blob => {
+      const name = blob.querySelector('Name')?.textContent || '';
+      const lastModified = blob.querySelector('Properties > Last-Modified')?.textContent || '';
+      return { name, lastModified };
+    })
+    .filter(blob => blob.name.endsWith('.json'));
+}
 
     async function readJsonRecord(fileName) {
       const query = azureConfig.sasToken.replace(/^\?/, '');
@@ -499,32 +511,48 @@
       return response.json();
     }
 
-    async function loadActivities() {
-      if (pollStatus) pollStatus.textContent = '';
+async function loadActivities(force = false) {
+  if (pollStatus) pollStatus.textContent = '';
 
-      const files = await listJsonBlobs();
-      const recentFiles = files.sort().reverse().slice(0, 150);
-      const records = await Promise.all(recentFiles.map(readJsonRecord));
+  const files = await listJsonBlobs();
+  const sortedFiles = files
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .reverse();
 
-      const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
-      const byUser = Object.fromEntries(users.map(user => [user.name, []]));
+  const latestFile = sortedFiles[0]?.name || null;
 
-records
-  .filter(record => record && record.member && record.timestamp)
-  .filter(record => {
-    const ts = new Date(record.timestamp).getTime();
-    return Number.isFinite(ts) && ts >= cutoff;
-  })
-  .filter(record => !hiddenActivities.includes(record.activity))
-  .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-  .forEach(record => {
-    if (!byUser[record.member]) return;
-    if (byUser[record.member].length < 4) byUser[record.member].push(record);
-  });
+  // Första laddningen ska alltid ske
+  // Därefter bara om senaste filen ändrats, eller om force=true
+  if (!force && hasLoadedOnce && latestFile === lastSeenLatestFile) {
+    return;
+  }
 
-      renderRows(byUser);
-      if (pollStatus) pollStatus.textContent = '';
-    }
+  lastSeenLatestFile = latestFile;
+  hasLoadedOnce = true;
+
+  const recentFiles = sortedFiles.slice(0, 20).map(file => file.name);
+  const records = await Promise.all(recentFiles.map(readJsonRecord));
+
+  const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
+  const byUser = Object.fromEntries(users.map(user => [user.name, []]));
+
+  records
+    .filter(record => record && record.member && record.timestamp)
+    .filter(record => {
+      const ts = new Date(record.timestamp).getTime();
+      return Number.isFinite(ts) && ts >= cutoff;
+    })
+    .filter(record => !hiddenActivities.includes(record.activity))
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .forEach(record => {
+      if (!byUser[record.member]) return;
+      if (byUser[record.member].length < 4) byUser[record.member].push(record);
+    });
+
+  renderRows(byUser);
+  if (pollStatus) pollStatus.textContent = '';
+}
 
     function renderRows(byUser) {
       const query = azureConfig.sasToken.replace(/^\?/, '');
