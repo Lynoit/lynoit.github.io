@@ -1223,6 +1223,30 @@ let triToggleSerial = 0;   // stable original order among tri toggles
 let sortTimeoutId   = null;
 const SORT_DELAY_MS = 30000;  // 30 seconds before resorting
 
+// --- usage sorting for normal KPI buttons only ---
+const groupUsageCounts = {};      // total presses per column/group
+const buttonUsageCounts = {};     // total presses per button
+let groupOriginalOrder = 0;       // keeps original CSV order for columns
+let buttonOriginalOrder = 0;      // keeps original CSV order for buttons
+
+function getButtonCountKey(groupKey, logName) {
+  return `${groupKey}||${logName}`;
+}
+
+function isSortableKpiButton(btn) {
+  // Exclude all toggle buttons from this sorter
+  if (btn.dataset.toggleKind === 'tri') return false;
+  if (btn.classList.contains('toggleButton')) return false;
+  if (btn.classList.contains('group-header')) return false;
+
+  return (
+    btn.classList.contains('redButton') ||
+    btn.classList.contains('greenButton') ||
+    btn.classList.contains('blueButton') ||
+    btn.classList.contains('orangeButton')
+  );
+}    
+
 if (buttonGroups) {
   // any click on a KPI button restarts the timer
   buttonGroups.addEventListener('click', () => {
@@ -1454,7 +1478,7 @@ function triggerImmediateUploadOnNewIssue() {
     let maxSpeed  = 0;    // value that ends up in the Statistics table
     let lastTableUpdate = 0;
     let lastPhaseUpdate = 0;
-    let logTable=[], redCounts={}, lastPos=null, totalDist=0;
+    let logTable = [], redCounts = {}, lastPos = null, lastAcceptedPos = null, totalDist = 0;
     let issueMarkers = [];   // one Leaflet marker per issue row
     let positions=[], timeData=[], distData=[], speedData=[];
     let map, trackLine, distanceChart, speedChart;
@@ -2254,119 +2278,123 @@ async function resumeCameraIfNeeded() {
   try { await video.play(); } catch {}
 }
     
-  function showPosition(pos) {
-  const { latitude: lat, longitude: lon } = pos.coords;
+function showPosition(pos) {
+  const { latitude: lat, longitude: lon, accuracy } = pos.coords;
   const ts = pos.timestamp;
-  let segDist = 0; // in meters
+
+  let segDist = 0;
+  let acceptedForDistance = false;
+  const prevAcceptedPos = lastAcceptedPos;
 
   if (!startTime) startTime = ts;
-    
-  // 1) Calculate segment distance & apply noise threshold
-  if (lastPos) {
-    segDist = calculateDistance(lastPos.lat, lastPos.lon, lat, lon);
-    if (segDist < 10) return; // ignore tiny jitters
 
-    // accumulate total and per‐weather
-    totalDist += segDist;
-    accumulateToggleDistances(segDist);
-    
-    checkUploadEligibility();
-    const phaseText = document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
-    phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
-    const condition = iconEl.alt || 'Unknown';
-    weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
+  // Always store newest raw fix
+  lastPos = { lat, lon, ts, accuracy };
 
-        const distKm = (totalDist / 1000).toFixed(2);
-    const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+  // Only accumulate from previously accepted fix
+  if (prevAcceptedPos) {
+    const dt = (ts - prevAcceptedPos.ts) / 1000;
+    const candidateDist = calculateDistance(
+      prevAcceptedPos.lat, prevAcceptedPos.lon,
+      lat, lon
+    );
+    const candidateSpeedKmh = dt > 0 ? (candidateDist / dt) * 3.6 : 0;
 
-    if (!currentDistMarker) {
-      currentDistMarker = L.marker([lat, lon], {
-        icon: L.divIcon({
-          className: '',        // styling lives in .distance-label
-          html: labelHtml,
-          iconSize: [0, 0],     // let the inner div size itself
-          iconAnchor: [0, -10]  // float just above the point
-        })
-      }).addTo(map);
-    } else {
-      currentDistMarker.setLatLng([lat, lon]);
-      currentDistMarker.setIcon(L.divIcon({
+    const accuracyBad = (accuracy != null && accuracy > 35);
+    const tinyJitter = candidateDist < 1;
+    const speedBad = candidateSpeedKmh > 250;
+
+    if (!accuracyBad && !tinyJitter && !speedBad) {
+      segDist = candidateDist;
+      acceptedForDistance = true;
+
+      totalDist += segDist;
+      accumulateToggleDistances(segDist);
+
+      checkUploadEligibility();
+
+      const phaseText =
+        document.getElementById('dayPhase').textContent.split(': ')[1] || 'Unknown';
+      phaseDistances[phaseText] = (phaseDistances[phaseText] || 0) + segDist;
+
+      const condition = iconEl.alt || 'Unknown';
+      weatherDistances[condition] = (weatherDistances[condition] || 0) + segDist;
+    }
+  }
+
+  // initialize first accepted point, or advance accepted point after valid movement
+  if (!lastAcceptedPos || acceptedForDistance) {
+    lastAcceptedPos = { lat, lon, ts, accuracy };
+  }
+
+  // Distance marker
+  const distKm = (totalDist / 1000).toFixed(2);
+  const labelHtml = `<div class="distance-label">${distKm} km</div>`;
+
+  if (!currentDistMarker) {
+    currentDistMarker = L.marker([lat, lon], {
+      icon: L.divIcon({
         className: '',
         html: labelHtml,
         iconSize: [0, 0],
         iconAnchor: [0, -10]
-      }));
-    }    
+      })
+    }).addTo(map);
+  } else {
+    currentDistMarker.setLatLng([lat, lon]);
+    currentDistMarker.setIcon(L.divIcon({
+      className: '',
+      html: labelHtml,
+      iconSize: [0, 0],
+      iconAnchor: [0, -10]
+    }));
   }
 
-  // 2) Update position state & map
-  const prevPos = lastPos;
-  lastPos = { lat, lon, ts };
+  // Map trace
   posCount++;
   trackLine.addLatLng([lat, lon]);
+
   if (positions.length === 0) {
     map.setView([lat, lon], 15);
   } else if (posCount % 20 === 0) {
     map.fitBounds(trackLine.getBounds().pad(0.2));
   }
+
   positions.push([lat, lon]);
 
-  // 3) Update speed display
-  if (prevPos) {
-    const dt = (ts - prevPos.ts) / 1000; // seconds
+  // Speed display: based on previous accepted point
+  if (prevAcceptedPos && acceptedForDistance) {
+    const dt = (ts - prevAcceptedPos.ts) / 1000;
     const speedKmh = dt > 0 ? (segDist / dt) * 3.6 : 0;
 
-      /* ── reject implausible spikes ───────────────────────── */
-  if (speedKmh > 250) {
-    console.warn(`Discarded unrealistic speed: ${speedKmh.toFixed(1)} km/h`);
-    speedEl.textContent = 'Speed: N/A';
-    // skip max-speed bookkeeping and chart push for this sample
-  } else {
-    /* existing “valid sample” logic — keep exactly as you have it */
-
     lastSpeedKmh = speedKmh;
-    
-    // 1. maintain the top-10 speeds list
-    topSpeeds.push(speedKmh);
-    topSpeeds.sort((a, b) => b - a);
-    if (topSpeeds.length > 10) topSpeeds.pop();
-    maxSpeed = topSpeeds.length === 10 ? topSpeeds[9] : topSpeeds[0];
 
-    // 2. show live speed read-out
+    if (speedKmh > 0) {
+      topSpeeds.push(speedKmh);
+      topSpeeds.sort((a, b) => b - a);
+      if (topSpeeds.length > 10) topSpeeds.pop();
+
+      maxSpeed = topSpeeds.length === 10
+        ? topSpeeds[9]
+        : topSpeeds[0];
+    }
+
     speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
-
-    // 3. later (in the chart-update section) you already push
-    //    speedData.push(speedKmh);  ← keep that line; it now runs only here
+  } else {
+    speedEl.textContent = 'Speed: 0.0 km/h';
   }
 
-    if (speedKmh > 0) {                    // ignore the very first 0 km/h
-  topSpeeds.push(speedKmh);
-
-  // keep the array sorted descending and trimmed to 10 values
-  topSpeeds.sort((a, b) => b - a);
-  if (topSpeeds.length > 10) topSpeeds.pop();
-
-  // once we have 10 samples, maxSpeed = the lowest of them
-  // (otherwise just use the current highest seen so far)
-  maxSpeed = topSpeeds.length === 10
-               ? topSpeeds[9]                 // index 9 = smallest of the top 10
-               : topSpeeds[0];                // highest sample so far
-}
-    
-    speedEl.textContent = `Speed: ${speedKmh.toFixed(1)} km/h`;
-  }
-
-  // 4) Update distance display & charts
+  // Distance display
   distEl.textContent = `Distance: ${(totalDist / 1000).toFixed(1)} km`;
   distEl.classList.add('updated');
   setTimeout(() => distEl.classList.remove('updated'), 500);
 
-if (Date.now() - lastChartTs > 5000) {
-  maybeUpdateTables();
-  lastChartTs = Date.now();
-}
+  if (Date.now() - lastChartTs > 5000) {
+    maybeUpdateTables();
+    lastChartTs = Date.now();
+  }
 
-  // 5) Update raw lat/lon display
+  // Raw lat/lon
   locEl.innerHTML = `Lat: ${lat}<br>Lon: ${lon}`;
   nudge(locEl);
 
@@ -2376,7 +2404,7 @@ if (Date.now() - lastChartTs > 5000) {
     lastPhaseUpdate = now;
   }
 
-  // 6) Reverse‐geocode + whitelist + accumulate per‐type distance
+  // Reverse geocode
   fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
     .then(r => r.json())
     .then(data => {
@@ -2386,129 +2414,106 @@ if (Date.now() - lastChartTs > 5000) {
       currentRoadType = displayRt;
 
       const isBridge = tags.bridge === 'yes';
+      const isRoundabout =
+        tags.junction === 'roundabout' ||
+        tags.highway === 'mini_roundabout';
+      const isTrafficLight = tags.highway === 'traffic_signals';
+      const isTunnel = tags.tunnel === 'yes';
 
-        const isRoundabout =
-       tags.junction === 'roundabout'
-    || tags.highway  === 'mini_roundabout';
+      if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
+      if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
+      if (isTunnel && !lastWasTunnel) tunnelCount++;
 
-  // traffic-light junctions
-  const isTrafficLight = tags.highway === 'traffic_signals';
-
-  // tunnels
-  const isTunnel      = tags.tunnel === 'yes';
-
-  // now your existing debounce/count logic…
-  if (isRoundabout   && !lastWasRoundabout)   roundaboutCount++;
-  if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
-  if (isTunnel       && !lastWasTunnel)       tunnelCount++;
-
-  lastWasRoundabout   = isRoundabout;
-  lastWasTrafficLight = isTrafficLight;
-  lastWasBridge       = isBridge;
-  lastWasTunnel       = isTunnel;
+      lastWasRoundabout = isRoundabout;
+      lastWasTrafficLight = isTrafficLight;
+      lastWasBridge = isBridge;
+      lastWasTunnel = isTunnel;
 
       if (tags.bridge === 'yes') {
-  bridgeStreak++;
-  if (bridgeStreak === 8) {
-    bridgeCount++;
-  }
-} else {
-  bridgeStreak = 0;
-}
-      
+        bridgeStreak++;
+        if (bridgeStreak === 8) bridgeCount++;
+      } else {
+        bridgeStreak = 0;
+      }
+
       const maxTag =
-      data.extratags?.maxspeed
-   || data.extratags?.['maxspeed:forward']
-   || data.extratags?.['maxspeed:backward'];
+        data.extratags?.maxspeed ||
+        data.extratags?.['maxspeed:forward'] ||
+        data.extratags?.['maxspeed:backward'];
 
-const limit = maxTag ? parseMaxSpeed(maxTag) : null;
-legalSpeedEl.textContent = limit ?? '–';
-currentLegalSpeed = limit !== null ? Number(limit) : null;
+      const limit = maxTag ? parseMaxSpeed(maxTag) : null;
+      legalSpeedEl.textContent = limit ?? '–';
+      currentLegalSpeed = limit !== null ? Number(limit) : null;
 
-/* ── count speed-limit transitions ─────────────── */
-if (limit !== null && limit !== lastLimit) {
-  if (lastLimit !== null) limitChanges++;   // skip the very first limit
-  lastLimit = limit;
-}
+      if (limit !== null && limit !== lastLimit) {
+        if (lastLimit !== null) limitChanges++;
+        lastLimit = limit;
+      }
 
-     if (segDist > 0) {    
-       roadDistances[displayRt] =
-      (roadDistances[displayRt] || 0) + segDist;
-     }
+      if (segDist > 0) {
+        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
+      }
 
-      // update sidebar & sets
       roadTypeEl.textContent = `Road type: ${displayRt}`;
-      //nudge(roadTypeEl);
       if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
-      // street & city display
-      const street = data.address.road
-        || data.address.pedestrian
-        || data.address.footway
-        || 'Unknown street';
-      const city = data.address.city
-        || data.address.town
-        || data.address.village
-        || 'Unknown city';
+      const street =
+        data.address.road ||
+        data.address.pedestrian ||
+        data.address.footway ||
+        'Unknown street';
+
+      const city =
+        data.address.city ||
+        data.address.town ||
+        data.address.village ||
+        'Unknown city';
 
       const country = data.address.country || 'Unknown country';
 
-      // --- Capture initial country (first time only) ---
-if (initialCountry === null && country) {
-  initialCountry = country;
-}
+      if (initialCountry === null && country) {
+        initialCountry = country;
+      }
 
-// --- Fire "test started" after 100 m (one time) ---
-if (!testStartLogged && initialCountry && totalDist >= 100) {
-  logButton(`Test started. Country: ${initialCountry}`, false);
-  testStartLogged = true;
-}
+      if (!testStartLogged && initialCountry && totalDist >= 100) {
+        logButton(`Test started. Country: ${initialCountry}`, false);
+        testStartLogged = true;
+      }
 
       if (segDist > 0) {
-         countryDistances[country] = (countryDistances[country] || 0) + segDist;
+        countryDistances[country] = (countryDistances[country] || 0) + segDist;
       }
-      
+
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
 
-// ── Country change with 500m hysteresis ──
-if (lastCountry === null) {
-  // first ever country: accept immediately, no issue
-  lastCountry = country;
-  pendingCountry = null;
-  pendingCountryStartDist = 0;
-} else if (country === lastCountry) {
-  // we're back in the accepted country → cancel any pending switch
-  pendingCountry = null;
-  pendingCountryStartDist = 0;
-} else {
-  // country differs from accepted → candidate logic
-  if (pendingCountry !== country) {
-    // new candidate detected
-    pendingCountry = country;
-    pendingCountryStartDist = totalDist; // totalDist is meters in your code
-  } else {
-    // same candidate still being seen → check how far we've gone since it started
-    const deltaM = totalDist - pendingCountryStartDist;
-    if (deltaM >= COUNTRY_HYST_M) {
-      // commit switch + log once
-      logButton(`Entered ${country}`, false);
-      lastCountry = country;
+      if (lastCountry === null) {
+        lastCountry = country;
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      } else if (country === lastCountry) {
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      } else {
+        if (pendingCountry !== country) {
+          pendingCountry = country;
+          pendingCountryStartDist = totalDist;
+        } else {
+          const deltaM = totalDist - pendingCountryStartDist;
+          if (deltaM >= COUNTRY_HYST_M) {
+            logButton(`Entered ${country}`, false);
+            lastCountry = country;
+            pendingCountry = null;
+            pendingCountryStartDist = 0;
+          }
+        }
+      }
 
-      // reset candidate
-      pendingCountry = null;
-      pendingCountryStartDist = 0;
-    }
-  }
-}
-
-      // fetch weather on city change
       if (city !== lastCity) {
         lastCity = city;
         citySet.add(city);
         getWeather(city);
       }
 
-      // refresh all tables
       maybeUpdateTables();
     })
     .catch(err => {
@@ -2516,10 +2521,10 @@ if (lastCountry === null) {
       console.error('Reverse geocode error', err);
     });
 
-    if (map2) {
-      map2.setView([lat, lon], 20);  // zoom level 20 ≃ 100 m across
-      currentPosMarker2.setLatLng([lat, lon]);
-    }     
+  if (map2) {
+    map2.setView([lat, lon], 20);
+    currentPosMarker2.setLatLng([lat, lon]);
+  }
 }
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -3103,6 +3108,90 @@ function resortTriToggles() {
     triButtons.forEach(btn => group.appendChild(btn));
   });
 }
+
+function updateKpiUsageLabels() {
+  const groups = document.querySelectorAll('#buttonGroups .button-group');
+
+  groups.forEach(group => {
+    const groupKey = group.dataset.groupKey;
+    const groupCount = groupUsageCounts[groupKey] || 0;
+
+    const headerBtn = group.querySelector('.group-header');
+    if (headerBtn) {
+      const baseLabel = headerBtn.dataset.baseLabel || groupKey;
+      headerBtn.textContent = `${baseLabel} (${groupCount})`;
+    }
+
+    const sortableButtons = group.querySelectorAll('button[data-usage-sortable="1"]');
+    sortableButtons.forEach(btn => {
+      const baseLabel = btn.dataset.baseLabel || '';
+      const logName = btn.dataset.logName || baseLabel;
+      const key = getButtonCountKey(groupKey, logName);
+      const count = buttonUsageCounts[key] || 0;
+      btn.textContent = `${baseLabel} (${count})`;
+    });
+  });
+}
+
+function sortKpiButtonsWithinGroup(groupEl) {
+  const sortableButtons = Array.from(
+    groupEl.querySelectorAll('button[data-usage-sortable="1"]')
+  );
+
+  sortableButtons.sort((a, b) => {
+    const groupKey = groupEl.dataset.groupKey;
+
+    const keyA = getButtonCountKey(groupKey, a.dataset.logName || a.dataset.baseLabel);
+    const keyB = getButtonCountKey(groupKey, b.dataset.logName || b.dataset.baseLabel);
+
+    const countA = buttonUsageCounts[keyA] || 0;
+    const countB = buttonUsageCounts[keyB] || 0;
+
+    if (countB !== countA) return countB - countA;
+
+    return Number(a.dataset.originalOrder) - Number(b.dataset.originalOrder);
+  });
+
+  sortableButtons.forEach(btn => groupEl.appendChild(btn));
+}
+
+function sortKpiGroups() {
+  const buttonGroupsEl = document.getElementById('buttonGroups');
+  if (!buttonGroupsEl) return;
+
+  const groups = Array.from(buttonGroupsEl.querySelectorAll('.button-group'));
+
+  groups.sort((a, b) => {
+    const groupA = a.dataset.groupKey;
+    const groupB = b.dataset.groupKey;
+
+    const countA = groupUsageCounts[groupA] || 0;
+    const countB = groupUsageCounts[groupB] || 0;
+
+    if (countB !== countA) return countB - countA;
+
+    return Number(a.dataset.originalOrder) - Number(b.dataset.originalOrder);
+  });
+
+  groups.forEach(group => buttonGroupsEl.appendChild(group));
+}
+
+function registerKpiUsage(groupKey, logName) {
+  const key = getButtonCountKey(groupKey, logName);
+
+  buttonUsageCounts[key] = (buttonUsageCounts[key] || 0) + 1;
+  groupUsageCounts[groupKey] = (groupUsageCounts[groupKey] || 0) + 1;
+
+  const groupEl = document.querySelector(
+    `#buttonGroups .button-group[data-group-key="${CSS.escape(groupKey)}"]`
+  );
+
+  if (groupEl) {
+    updateKpiUsageLabels();
+    sortKpiButtonsWithinGroup(groupEl);
+    sortKpiGroups();
+  }
+}    
     
 // Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
@@ -3111,6 +3200,9 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
   toggleDefs = []; // reset on rebuild
   toggleNotes = {}; // reset all notes when loading a new button config
   Object.keys(triToggleTouched).forEach(k => delete triToggleTouched[k]);
+
+  groupOriginalOrder = 0;
+  buttonOriginalOrder = 0;
 
   fetch(csvFile)
     .then(r => {
@@ -3138,12 +3230,18 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
         if (!groupKey || !label) return;
 
         // one column per group (header item will be just another row in the group)
-        if (!groups[groupKey]) {
-          const wrap = document.createElement('div');
-          wrap.className = 'button-group';
-          groups[groupKey] = wrap;
-          buttonGroups.appendChild(wrap);
-        }
+if (!groups[groupKey]) {
+  const wrap = document.createElement('div');
+  wrap.className = 'button-group';
+  wrap.dataset.groupKey = groupKey;
+  wrap.dataset.originalOrder = String(groupOriginalOrder++);
+  groups[groupKey] = wrap;
+  buttonGroups.appendChild(wrap);
+
+  if (!(groupKey in groupUsageCounts)) {
+    groupUsageCounts[groupKey] = 0;
+  }
+}
 
         // ─────────────────────────────────────────────
         // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
@@ -3331,16 +3429,62 @@ if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && sign
   return;
 }
 
-        // ─────────────────────────────────────────────
-        // Normal press-to-log buttons (including grey headers)
-        // ─────────────────────────────────────────────
-        const btn = document.createElement('button');
-        btn.textContent = label;
-        btn.className = `bigButton ${cssClass}`.trim();
-        const isRed = btn.classList.contains('redButton');
-        btn.addEventListener('click', () => logButton(logName, isRed));
-        groups[groupKey].appendChild(btn);
+// ─────────────────────────────────────────────
+// Normal press-to-log buttons (including grey headers)
+// ─────────────────────────────────────────────
+const btn = document.createElement('button');
+btn.type = 'button';
+btn.className = `bigButton ${cssClass}`.trim();
+btn.dataset.baseLabel = label;
+
+// treat a grey row matching the group name as the header
+const isHeaderLike =
+  cssClass.includes('greyButton') &&
+  !type &&
+  !signal &&
+  label === groupKey;
+
+if (isHeaderLike) {
+  btn.classList.add('group-header');
+  btn.dataset.baseLabel = label;
+  btn.textContent = `${label} (${groupUsageCounts[groupKey] || 0})`;
+  btn.disabled = true;
+  groups[groupKey].appendChild(btn);
+  return;
+}
+
+const isRed = btn.classList.contains('redButton');
+const usageTracked = isSortableKpiButton(btn);
+
+btn.dataset.groupKey = groupKey;
+btn.dataset.logName = logName;
+
+if (usageTracked) {
+  btn.dataset.usageSortable = '1';
+  btn.dataset.originalOrder = String(buttonOriginalOrder++);
+
+  const key = getButtonCountKey(groupKey, logName);
+  if (!(key in buttonUsageCounts)) {
+    buttonUsageCounts[key] = 0;
+  }
+
+  btn.textContent = `${label} (${buttonUsageCounts[key] || 0})`;
+} else {
+  btn.textContent = label;
+}
+
+btn.addEventListener('click', () => {
+  logButton(logName, isRed);
+
+  if (usageTracked) {
+    registerKpiUsage(groupKey, logName);
+  }
+});
+
+groups[groupKey].appendChild(btn);
       });
+      updateKpiUsageLabels();
+      sortKpiGroups();
     })
     .catch(err => console.error('Error building buttons:', err));
 }
