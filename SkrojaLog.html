@@ -532,16 +532,18 @@
 
     const hiddenActivities = [];
     const pollIntervalMs = 5000;
+    const excludedRightSideUsers = ['Lerverkstan'];
 
-    const state = {
-      rawRecords: [],
-      users: [],
-      selectedUser: 'Alla',
-      period: '7d',
-      overview: 'month',
-      summaryChart: null,
-      lastLoadedAt: null
-    };
+const state = {
+  rawRecords: [],
+  users: [],
+  rightSideUsers: [],
+  selectedUser: 'Alla',
+  period: '7d',
+  overview: 'month',
+  summaryChart: null,
+  lastLoadedAt: null
+};
 
     const userColors = {
       Camilla: '#5b8cff',
@@ -650,39 +652,40 @@
         .filter(r => !Number.isNaN(new Date(r.timestamp).getTime()))
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
-      state.rawRecords = cleaned;
-      state.users = [...new Set(cleaned.map(r => r.member))].sort((a, b) => a.localeCompare(b, 'sv'));
-      state.lastLoadedAt = new Date();
+state.rawRecords = cleaned;
+state.users = [...new Set(cleaned.map(r => r.member))].sort((a, b) => a.localeCompare(b, 'sv'));
+state.rightSideUsers = state.users.filter(user => !excludedRightSideUsers.includes(user));
+state.lastLoadedAt = new Date();
 
       populateUserSelect();
       renderDashboard();
       setStatus(`Senast uppdaterad ${formatDateTime(state.lastLoadedAt.toISOString())}`);
     }
 
-    function populateUserSelect() {
-      const select = document.getElementById('userSelect');
-      const previous = state.selectedUser;
-      select.innerHTML = '';
+function populateUserSelect() {
+  const select = document.getElementById('userSelect');
+  const previous = state.selectedUser;
+  select.innerHTML = '';
 
-      const allOption = document.createElement('option');
-      allOption.value = 'Alla';
-      allOption.textContent = 'Alla';
-      select.appendChild(allOption);
+  const allOption = document.createElement('option');
+  allOption.value = 'Alla';
+  allOption.textContent = 'Alla';
+  select.appendChild(allOption);
 
-      state.users.forEach(user => {
-        const opt = document.createElement('option');
-        opt.value = user;
-        opt.textContent = user;
-        select.appendChild(opt);
-      });
+  state.rightSideUsers.forEach(user => {
+    const opt = document.createElement('option');
+    opt.value = user;
+    opt.textContent = user;
+    select.appendChild(opt);
+  });
 
-      if ([...select.options].some(o => o.value === previous)) {
-        select.value = previous;
-      } else {
-        select.value = 'Alla';
-        state.selectedUser = 'Alla';
-      }
-    }
+  if ([...select.options].some(o => o.value === previous)) {
+    select.value = previous;
+  } else {
+    select.value = 'Alla';
+    state.selectedUser = 'Alla';
+  }
+}
 
     function getPeriodRange() {
       const now = new Date();
@@ -712,67 +715,75 @@
       };
     }
 
-    function getFilteredRecords() {
-      const { start, end } = getPeriodRange();
-      return state.rawRecords.filter(record => {
-        const ts = new Date(record.timestamp);
-        if (ts < start || ts > end) return false;
-        if (state.selectedUser !== 'Alla' && record.member !== state.selectedUser) return false;
-        return true;
-      });
+function getFilteredRecords() {
+  const { start, end } = getPeriodRange();
+  return state.rawRecords.filter(record => {
+    const ts = new Date(record.timestamp);
+    if (ts < start || ts > end) return false;
+
+    if (state.selectedUser !== 'Alla' && record.member !== state.selectedUser) {
+      return false;
     }
+
+    return true;
+  });
+}
 
     function getCheckinRecords(records) {
       return records.filter(isCheckin);
     }
 
-    function buildSummaryChartData(records) {
-      const checkins = getCheckinRecords(records);
+function buildSummaryChartData(records) {
+  const checkins = getCheckinRecords(records).filter(
+    record => !excludedRightSideUsers.includes(record.member)
+  );
 
-      if (state.selectedUser === 'Alla') {
-        const daysPerUser = {};
-        state.users.forEach(user => { daysPerUser[user] = new Set(); });
+  if (state.selectedUser === 'Alla') {
+    const daysPerUser = {};
+    state.rightSideUsers.forEach(user => { daysPerUser[user] = new Set(); });
 
-        checkins.forEach(record => {
-          const dayKey = formatDateOnly(startOfDay(new Date(record.timestamp)));
-          if (!daysPerUser[record.member]) daysPerUser[record.member] = new Set();
-          daysPerUser[record.member].add(dayKey);
-        });
+    checkins.forEach(record => {
+      const dayKey = formatDateOnly(startOfDay(new Date(record.timestamp)));
+      if (!daysPerUser[record.member]) daysPerUser[record.member] = new Set();
+      daysPerUser[record.member].add(dayKey);
+    });
 
-        return {
-          title: 'Närvarodagar per användare',
-          labels: state.users,
-          datasets: [{
-            label: 'Närvarodagar',
-            data: state.users.map(user => daysPerUser[user]?.size || 0),
-            backgroundColor: state.users.map(user => getUserColor(user, 0.8)),
-            borderColor: state.users.map(user => getUserColor(user, 1)),
-            borderWidth: 1,
-            borderRadius: 6
-          }]
-        };
-      }
+    return {
+      title: 'Närvarodagar per användare',
+      labels: state.rightSideUsers,
+      datasets: [{
+        label: 'Närvarodagar',
+        data: state.rightSideUsers.map(user => daysPerUser[user]?.size || 0),
+        backgroundColor: state.rightSideUsers.map(user => getUserColor(user, 0.8)),
+        borderColor: state.rightSideUsers.map(user => getUserColor(user, 1)),
+        borderWidth: 1,
+        borderRadius: 6
+      }]
+    };
+  }
 
-      const dailyCount = {};
-      checkins.forEach(record => {
-        const dayKey = formatDateOnly(startOfDay(new Date(record.timestamp)));
-        dailyCount[dayKey] = (dailyCount[dayKey] || 0) + 1;
-      });
+  const dailyCount = {};
+  checkins
+    .filter(record => record.member === state.selectedUser)
+    .forEach(record => {
+      const dayKey = formatDateOnly(startOfDay(new Date(record.timestamp)));
+      dailyCount[dayKey] = (dailyCount[dayKey] || 0) + 1;
+    });
 
-      const labels = Object.keys(dailyCount).sort();
-      return {
-        title: `Check-ins för ${state.selectedUser}`,
-        labels,
-        datasets: [{
-          label: 'Check-ins',
-          data: labels.map(label => dailyCount[label]),
-          backgroundColor: getUserColor(state.selectedUser, 0.8),
-          borderColor: getUserColor(state.selectedUser, 1),
-          borderWidth: 1,
-          borderRadius: 6
-        }]
-      };
-    }
+  const labels = Object.keys(dailyCount).sort();
+  return {
+    title: `Check-ins för ${state.selectedUser}`,
+    labels,
+    datasets: [{
+      label: 'Check-ins',
+      data: labels.map(label => dailyCount[label]),
+      backgroundColor: getUserColor(state.selectedUser, 0.8),
+      borderColor: getUserColor(state.selectedUser, 1),
+      borderWidth: 1,
+      borderRadius: 6
+    }]
+  };
+}
 
     function renderLogTable(records) {
       const tbody = document.getElementById('logTableBody');
@@ -800,18 +811,19 @@
       });
     }
 
-    function updateStats(records) {
-      const checkins = getCheckinRecords(records);
-      const uniqueUsers = new Set(records.map(r => r.member)).size;
-      const presenceDays = new Set(
-        checkins.map(r => `${r.member}__${formatDateOnly(startOfDay(new Date(r.timestamp)))}`)
-      ).size;
+function updateStats(records) {
+  const rightSideRecords = records.filter(r => !excludedRightSideUsers.includes(r.member));
+  const checkins = getCheckinRecords(rightSideRecords);
+  const uniqueUsers = new Set(rightSideRecords.map(r => r.member)).size;
+  const presenceDays = new Set(
+    checkins.map(r => `${r.member}__${formatDateOnly(startOfDay(new Date(r.timestamp)))}`)
+  ).size;
 
-      document.getElementById('statActivities').textContent = records.length;
-      document.getElementById('statCheckins').textContent = checkins.length;
-      document.getElementById('statUsers').textContent = uniqueUsers;
-      document.getElementById('statPresenceDays').textContent = presenceDays;
-    }
+  document.getElementById('statActivities').textContent = rightSideRecords.length;
+  document.getElementById('statCheckins').textContent = checkins.length;
+  document.getElementById('statUsers').textContent = uniqueUsers;
+  document.getElementById('statPresenceDays').textContent = presenceDays;
+}
 
     function destroyCharts() {
       if (state.summaryChart) state.summaryChart.destroy();
@@ -852,21 +864,22 @@
       });
     }
 
-    function countCheckinsForUserByDay(records, user) {
-      const result = {};
-      const checkins = getCheckinRecords(records).filter(r => {
-        if (user !== 'Alla' && r.member !== user) return false;
-        return true;
-      });
+function countCheckinsForUserByDay(records, user) {
+  const result = {};
+  const checkins = getCheckinRecords(records).filter(r => {
+    if (excludedRightSideUsers.includes(r.member)) return false;
+    if (user !== 'Alla' && r.member !== user) return false;
+    return true;
+  });
 
-      checkins.forEach(record => {
-        const date = new Date(record.timestamp);
-        const key = formatDateOnly(startOfDay(date));
-        result[key] = (result[key] || 0) + 1;
-      });
+  checkins.forEach(record => {
+    const date = new Date(record.timestamp);
+    const key = formatDateOnly(startOfDay(date));
+    result[key] = (result[key] || 0) + 1;
+  });
 
-      return result;
-    }
+  return result;
+}
 
     function getIntensityColor(count, maxCount) {
       if (!count) return '#18223a';
