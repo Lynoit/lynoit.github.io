@@ -602,31 +602,151 @@ const state = {
       return `https://${azureConfig.accountName}.blob.core.windows.net/${azureConfig.containerName}`;
     }
 
+function getStatsForExport(records) {
+  const rightSideRecords = records.filter(r => !excludedRightSideUsers.includes(r.member));
+  const checkins = getCheckinRecords(rightSideRecords);
+  const uniqueUsers = new Set(rightSideRecords.map(r => r.member)).size;
+  const presenceDays = new Set(
+    checkins.map(r => `${r.member}__${formatDateOnly(startOfDay(new Date(r.timestamp)))}`)
+  ).size;
+
+  return [
+    { Nyckeltal: 'Totala aktiviteter', Varde: rightSideRecords.length },
+    { Nyckeltal: 'Check-ins', Varde: checkins.length },
+    { Nyckeltal: 'Unika användare', Varde: uniqueUsers },
+    { Nyckeltal: 'Närvarodagar', Varde: presenceDays },
+    { Nyckeltal: 'Vald period', Varde: state.period },
+    { Nyckeltal: 'Vald användare', Varde: state.selectedUser },
+    { Nyckeltal: 'Vald översikt', Varde: state.overview }
+  ];
+}
+
+function getSummaryRowsForExport(records) {
+  const chartData = buildSummaryChartData(records);
+  return chartData.labels.map((label, index) => ({
+    Etikett: label,
+    Varde: chartData.datasets[0]?.data?.[index] ?? 0,
+    Serie: chartData.datasets[0]?.label ?? ''
+  }));
+}
+
+function getMonthOverviewRowsForExport(records) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const userForCalendar = state.selectedUser === 'Alla' ? 'Alla' : state.selectedUser;
+  const counts = countCheckinsForUserByDay(records, userForCalendar);
+
+  const rows = [];
+  const lastDay = new Date(year, month + 1, 0).getDate();
+
+  for (let day = 1; day <= lastDay; day++) {
+    const date = new Date(year, month, day);
+    const key = formatDateOnly(date);
+    rows.push({
+      Datum: key,
+      Anvandare: userForCalendar,
+      Checkins: counts[key] || 0
+    });
+  }
+
+  return rows;
+}
+
+function getYearOverviewRowsForExport(records) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const userForCalendar = state.selectedUser === 'Alla' ? 'Alla' : state.selectedUser;
+  const counts = countCheckinsForUserByDay(records, userForCalendar);
+
+  const rows = [];
+
+  for (let month = 0; month < 12; month++) {
+    const lastDay = new Date(year, month + 1, 0).getDate();
+
+    for (let day = 1; day <= lastDay; day++) {
+      const date = new Date(year, month, day);
+      const key = formatDateOnly(date);
+
+      rows.push({
+        Datum: key,
+        Manad: new Date(year, month, 1).toLocaleDateString('sv-SE', { month: 'long' }),
+        Anvandare: userForCalendar,
+        Checkins: counts[key] || 0
+      });
+    }
+  }
+
+  return rows;
+}
+
+function autoFitColumns(worksheet, rows) {
+  if (!rows || !rows.length) return;
+
+  const keys = Object.keys(rows[0]);
+  const colWidths = keys.map(key => ({
+    wch: Math.max(
+      key.length,
+      ...rows.map(row => String(row[key] ?? '').length)
+    ) + 2
+  }));
+
+  worksheet['!cols'] = colWidths;
+}
+
 function exportToExcel() {
   if (!state.rawRecords || !state.rawRecords.length) {
     alert('Det finns ingen data att exportera.');
     return;
   }
 
-  //const exportRows = state.rawRecords.map(record => ({
-  const exportRows = getFilteredRecords().map(record => ({  
-    Timestamp: formatDateTime(record.timestamp),
-    Anvandare: record.member,
-    Aktivitet: record.activity,
-    TimestampISO: record.timestamp
-  }));
-
-  const worksheet = XLSX.utils.json_to_sheet(exportRows);
   const workbook = XLSX.utils.book_new();
 
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Aktiviteter');
+  const allRows = state.rawRecords.map(record => ({
+    Timestamp: formatDateTime(record.timestamp),
+    TimestampISO: record.timestamp,
+    Anvandare: record.member,
+    Aktivitet: record.activity
+  }));
+
+  const filteredRecords = getFilteredRecords();
+
+  const logRows = filteredRecords.map(record => ({
+    Timestamp: formatDateTime(record.timestamp),
+    TimestampISO: record.timestamp,
+    Anvandare: record.member,
+    Aktivitet: record.activity
+  }));
+
+  const statsRows = getStatsForExport(filteredRecords);
+  const summaryRows = getSummaryRowsForExport(filteredRecords);
+
+  const overviewRows =
+    state.overview === 'month'
+      ? getMonthOverviewRowsForExport(filteredRecords)
+      : getYearOverviewRowsForExport(filteredRecords);
+
+  const sheets = [
+    { name: 'All data', rows: allRows },
+    { name: 'Aktivitetslogg', rows: logRows },
+    { name: 'Statistik', rows: statsRows },
+    { name: 'Diagramdata', rows: summaryRows },
+    { name: state.overview === 'month' ? 'Manadsoversikt' : 'Arsoversikt', rows: overviewRows }
+  ];
+
+  sheets.forEach(sheet => {
+    const rows = sheet.rows.length ? sheet.rows : [{ Info: 'Ingen data' }];
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    autoFitColumns(worksheet, rows);
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name);
+  });
 
   const now = new Date();
   const fileStamp = now.toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  const fileName = `aktiviteter-${fileStamp}.xlsx`;
+  const fileName = `aktivitet-och-narvaro-${fileStamp}.xlsx`;
 
   XLSX.writeFile(workbook, fileName);
-}    
+}
 
     async function listJsonBlobs() {
       const { accountName, containerName, sasToken } = azureConfig;
