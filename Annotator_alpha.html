@@ -2027,6 +2027,8 @@ function formatLocalTimestamp(d = new Date()) {
 }   
     
 function updateCountryTable() {
+  const countryDistancesFromSampling = buildDistanceSummaryFromSampling('country');
+
   let html = `
     <tr>
       <th>Country</th>
@@ -2035,8 +2037,16 @@ function updateCountryTable() {
       <th>No of issues</th>
     </tr>`;
 
-  for (const c in countryDistances) {
-    const meters = countryDistances[c] || 0;
+  const countriesToShow = Object.keys(countryDistancesFromSampling);
+
+  if (countriesToShow.length === 0) {
+    html += `<tr><td colspan="4">&nbsp;</td></tr>`;
+    countryTable.innerHTML = html;
+    return;
+  }
+
+  countriesToShow.forEach(c => {
+    const meters = countryDistancesFromSampling[c] || 0;
     const km     = (meters / 1000).toFixed(1);
     const pct    = totalDist > 0
       ? ((meters / totalDist) * 100).toFixed(1)
@@ -2050,7 +2060,7 @@ function updateCountryTable() {
         <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
-  }
+  });
 
   countryTable.innerHTML = html;
 }
@@ -2450,10 +2460,6 @@ function showPosition(pos) {
         lastLimit = limit;
       }
 
-      if (segDist > 0) {
-        roadDistances[displayRt] = (roadDistances[displayRt] || 0) + segDist;
-      }
-
       roadTypeEl.textContent = `Road type: ${displayRt}`;
       if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
 
@@ -2478,10 +2484,6 @@ function showPosition(pos) {
       if (!testStartLogged && initialCountry && totalDist >= 100) {
         logButton(`Test started. Country: ${initialCountry}`, false);
         testStartLogged = true;
-      }
-
-      if (segDist > 0) {
-        countryDistances[country] = (countryDistances[country] || 0) + segDist;
       }
 
       streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
@@ -2546,7 +2548,8 @@ function showPosition(pos) {
     }
     
 function updateStreetTable() {
-  // 1) header now has an extra column
+  const roadDistancesFromSampling = buildDistanceSummaryFromSampling('roadType');
+
   let html = `
     <tr>
       <th>Road type</th>
@@ -2555,18 +2558,22 @@ function updateStreetTable() {
       <th>No of issues</th>
     </tr>`;
 
-  // 2) loop each road type
-  for (const rt of roadTypes) {
-    const meters = roadDistances[rt] || 0;
+  const roadTypesToShow = Object.keys(roadDistancesFromSampling);
+
+  if (roadTypesToShow.length === 0) {
+    html += `<tr><td colspan="4">&nbsp;</td></tr>`;
+    streetTbl.innerHTML = html;
+    return;
+  }
+
+  roadTypesToShow.forEach(rt => {
+    const meters = roadDistancesFromSampling[rt] || 0;
     const km     = (meters / 1000).toFixed(1);
-    // guard against division by zero
     const pct    = totalDist > 0
       ? ((meters / totalDist) * 100).toFixed(1)
       : '0.0';
-
     const count  = roadRedCounts[rt] || 0;
 
-    // 3) inject the new <td> for pct
     html += `
       <tr>
         <td>${rt}</td>
@@ -2574,7 +2581,7 @@ function updateStreetTable() {
         <td>${pct}%</td>
         <td>${count}</td>
       </tr>`;
-  }
+  });
 
   streetTbl.innerHTML = html;
 }
@@ -2674,7 +2681,7 @@ function recordSample(issueText = '', dt = new Date()) {
   if (!lastPos) return;
 
   const rowNo      = samplingTable.length + 1;
-  const timestamp  = formatLocalTimestamp(dt); // ✅ local time, safe
+  const timestamp  = formatLocalTimestamp(dt);
   const latitude   = lastPos.lat;
   const longitude  = lastPos.lon;
   const distanceKm = (totalDist / 1000).toFixed(3);
@@ -2701,11 +2708,42 @@ function recordSample(issueText = '', dt = new Date()) {
     speed:      speed,
     maxspeed:   maxSpd,
     legalSpeed: legalSpd,
-    roadType:   currentRoadType,
+    roadType:   currentRoadType || 'Unknown',
+    country:    lastCountry || 'Unknown',
     issue:      issueText || '',
     toggles:    toggleSnapshot
   });
 }
+
+function buildDistanceSummaryFromSampling(key) {
+  const out = {};
+
+  if (!Array.isArray(samplingTable) || samplingTable.length < 2) {
+    return out;
+  }
+
+  let prevDistKm = Number(samplingTable[0].distance);
+  let prevValue  = samplingTable[0][key] || 'Unknown';
+
+  for (let i = 1; i < samplingTable.length; i++) {
+    const row = samplingTable[i];
+    const currDistKm = Number(row.distance);
+    const currValue  = row[key] || 'Unknown';
+
+    if (Number.isFinite(prevDistKm) && Number.isFinite(currDistKm)) {
+      const deltaKm = Math.max(0, currDistKm - prevDistKm);
+
+      // Attribute the segment to the value active at the START of the segment
+      const bucket = prevValue || 'Unknown';
+      out[bucket] = (out[bucket] || 0) + deltaKm * 1000; // store meters
+    }
+
+    prevDistKm = currDistKm;
+    prevValue  = currValue;
+  }
+
+  return out;
+}    
     
 function logButton(name, isRed) {
   // ① Timestamp
@@ -3785,87 +3823,69 @@ const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 }
 
 async function uploadWorkbookToAzure() {
-  // 1. Create a new workbook
   const wb = XLSX.utils.book_new();
 
-  // 2. For each visible table: convert and append
   workbookTables.forEach(({ id, name }) => {
     if (id === 'toggleDistanceTable' && !toggleDistanceEnabled) return;
+
     const tblEl = document.getElementById(id);
     if (!tblEl) {
       console.warn(`Table #${id} not found—skipping sheet "${name}"`);
       return;
     }
 
-let ws;
+    let ws;
 
-if (id === 'logTable') {
-  // Build Issues sheet from the underlying logTable array
-  // so Excel keeps original chronological order
-  const rows = [[
-    'No.',
-    'Issue',
-    'Date',
-    'Time',
-    'Phase',
-    'Temp',
-    'Weather',
-    'Lat',
-    'Lon',
-    'Distance (km)',
-    'Speed (km/h)',
-    'Road',
-    'Comment'
-  ]];
+    if (id === 'logTable') {
+      const rows = [[
+        'No.',
+        'Issue',
+        'Date',
+        'Time',
+        'Phase',
+        'Temp',
+        'Weather',
+        'Lat',
+        'Lon',
+        'Distance (km)',
+        'Speed (km/h)',
+        'Road',
+        'Comment'
+      ]];
 
-  logTable.forEach((row, i) => {
-    rows.push([
-      i + 1,
-      row.issue     ?? '—',
-      row.date      ?? '—',
-      row.time      ?? '—',
-      row.phase     ?? '—',
-      row.temp      ?? '—',
-      row.condition ?? '—',
-      row.lat       ?? '—',
-      row.lon       ?? '—',
-      row.dist      ?? '—',
-      row.speed     ?? '—',
-      row.roadType  ?? '—',
-      row.comment   ?? ''
-    ]);
-  });
+      logTable.forEach((row, i) => {
+        rows.push([
+          i + 1,
+          row.issue     ?? '—',
+          row.date      ?? '—',
+          row.time      ?? '—',
+          row.phase     ?? '—',
+          row.temp      ?? '—',
+          row.condition ?? '—',
+          row.lat       ?? '—',
+          row.lon       ?? '—',
+          row.dist      ?? '—',
+          row.speed     ?? '—',
+          row.roadType  ?? '—',
+          row.comment   ?? ''
+        ]);
+      });
 
-  ws = XLSX.utils.aoa_to_sheet(rows);
-} else {
-  ws = XLSX.utils.table_to_sheet(tblEl);
-}
-
-    // 🔸 Percent sheets: multiply column C by 100 (unchanged)
-    if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
-      const range = XLSX.utils.decode_range(ws['!ref']);
-      for (let row = range.s.r + 1; row <= range.e.r; ++row) {
-        const cellRef = XLSX.utils.encode_cell({ r: row, c: 2 }); // column C
-        const cell = ws[cellRef];
-        if (cell && typeof cell.v === 'number') {
-          cell.v = cell.v * 100;
-        }
-      }
+      ws = XLSX.utils.aoa_to_sheet(rows);
+    } else {
+      ws = XLSX.utils.table_to_sheet(tblEl);
     }
 
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-  // 3. --- Sampling sheet (as before, but toggle-aware) ---
-const samplingHeader = [
-  "No","Timestamp","Latitude","Longitude",
-  "Distance (km)","Speed (km/h)","Legal Speed (km/h)",
-  "Road type",
-  "Issue"
-];
-toggleDefs.forEach(def => samplingHeader.push(def.signal));
+  const samplingHeader = [
+    "No","Timestamp","Latitude","Longitude",
+    "Distance (km)","Speed (km/h)","Legal Speed (km/h)",
+    "Road type","Country","Issue"
+  ];
 
-  const samplingAoA = [ samplingHeader ];
+  const samplingAoA = [samplingHeader];
 
   samplingTable.forEach(entry => {
     const row = [
@@ -3877,8 +3897,10 @@ toggleDefs.forEach(def => samplingHeader.push(def.signal));
       entry.speed,
       entry.legalSpeed,
       entry.roadType || '',
+      entry.country || '',
       entry.issue || ''
     ];
+
     toggleDefs.forEach(def => {
       const valFromEntry = entry.toggles?.[def.signal];
       if (def.kind === 'tri') {
@@ -3888,16 +3910,14 @@ toggleDefs.forEach(def => samplingHeader.push(def.signal));
         row.push(valFromEntry ?? def.offValue);
       }
     });
+
     samplingAoA.push(row);
   });
 
   const wsSampling = XLSX.utils.aoa_to_sheet(samplingAoA);
   XLSX.utils.book_append_sheet(wb, wsSampling, "Sampling");
 
-  // 4. --- Benchmark sheet: ONLY tri-state toggles, and ONLY if at least one was used ---
   const triDefs = toggleDefs.filter(def => def.kind === 'tri');
-
-  // keep only tri-toggles that have been changed from default at least once
   const changedTriDefs = triDefs.filter(def => triToggleTouched[def.signal]);
 
   if (changedTriDefs.length > 0) {
@@ -3924,29 +3944,21 @@ toggleDefs.forEach(def => samplingHeader.push(def.signal));
     console.log('No tri-state buttons pressed – skipping Benchmark sheet.');
   }
 
-  // 5. Generate the binary workbook
   const wbout = XLSX.write(wb, {
     bookType: 'xlsx',
-    type:      'array'
+    type: 'array'
   });
 
-  // 6. Wrap in a Blob
   const blob = new Blob([wbout], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   });
 
-  // 7. Determine filename using your appStartTime helper
   const blobName = `${reportBaseName}.xlsx`;
 
-const [rawBaseUrl, token] = containerSasUrl.split('?');
+  const [rawBaseUrl, token] = containerSasUrl.split('?');
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
+  const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
-// remove trailing slash from account url, just in case
-const baseUrl = rawBaseUrl.replace(/\/$/, '');
-
-// now build: https://account.blob.core.windows.net/csv/<blob>?<sas>
-const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
-
-  // 9. Try cloud upload, fallback to local download if offline / failed
   try {
     if (!navigator.onLine) {
       throw new Error('Offline – skipping cloud upload');
@@ -3956,7 +3968,7 @@ const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
       method: 'PUT',
       headers: {
         'x-ms-blob-type': 'BlockBlob',
-        'Content-Type':   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       },
       body: blob
     });
