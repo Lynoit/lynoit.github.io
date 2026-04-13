@@ -1415,6 +1415,54 @@ function maybeLogTestStart() {
   testStartLogged = true;
 }    
 
+function applyExcelPercentFormat(ws, percentColIndex = 2) {
+  if (!ws || !ws['!ref']) return;
+
+  const range = XLSX.utils.decode_range(ws['!ref']);
+
+  for (let row = range.s.r + 1; row <= range.e.r; row++) {
+    const cellRef = XLSX.utils.encode_cell({ r: row, c: percentColIndex });
+    const cell = ws[cellRef];
+    if (!cell) continue;
+
+    let v = cell.v;
+
+    // Skip blanks
+    if (v == null || v === '') continue;
+
+    // Case 1: text like "18.3%"
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+
+      if (trimmed.endsWith('%')) {
+        const num = Number(trimmed.slice(0, -1).trim().replace(',', '.'));
+        if (Number.isFinite(num)) {
+          cell.t = 'n';
+          cell.v = num / 100;
+          cell.z = '0.0%';
+        }
+        continue;
+      }
+
+      // Case 2: text like "0.183" or "18.3"
+      const num = Number(trimmed.replace(',', '.'));
+      if (Number.isFinite(num)) {
+        cell.t = 'n';
+        cell.v = num > 1 ? num / 100 : num;
+        cell.z = '0.0%';
+      }
+      continue;
+    }
+
+    // Case 3: already numeric
+    if (typeof v === 'number') {
+      // If it's 18.3, convert to 0.183. If already 0.183, keep it.
+      cell.v = v > 1 ? v / 100 : v;
+      cell.z = '0.0%';
+    }
+  }
+}    
+
 async function runCloudUploads(reason = 'auto') {
   if (!uploadsEnabled) return;
 
@@ -3844,45 +3892,49 @@ async function uploadWorkbookToAzure() {
 
     let ws;
 
-    if (id === 'logTable') {
-      const rows = [[
-        'No.',
-        'Issue',
-        'Date',
-        'Time',
-        'Phase',
-        'Temp',
-        'Weather',
-        'Lat',
-        'Lon',
-        'Distance (km)',
-        'Speed (km/h)',
-        'Road',
-        'Comment'
-      ]];
+if (id === 'logTable') {
+  const rows = [[
+    'No.',
+    'Issue',
+    'Date',
+    'Time',
+    'Phase',
+    'Temp',
+    'Weather',
+    'Lat',
+    'Lon',
+    'Distance (km)',
+    'Speed (km/h)',
+    'Road',
+    'Comment'
+  ]];
 
-      logTable.forEach((row, i) => {
-        rows.push([
-          i + 1,
-          row.issue     ?? '—',
-          row.date      ?? '—',
-          row.time      ?? '—',
-          row.phase     ?? '—',
-          row.temp      ?? '—',
-          row.condition ?? '—',
-          row.lat       ?? '—',
-          row.lon       ?? '—',
-          row.dist      ?? '—',
-          row.speed     ?? '—',
-          row.roadType  ?? '—',
-          row.comment   ?? ''
-        ]);
-      });
+  logTable.forEach((row, i) => {
+    rows.push([
+      i + 1,
+      row.issue     ?? '—',
+      row.date      ?? '—',
+      row.time      ?? '—',
+      row.phase     ?? '—',
+      row.temp      ?? '—',
+      row.condition ?? '—',
+      row.lat       ?? '—',
+      row.lon       ?? '—',
+      row.dist      ?? '—',
+      row.speed     ?? '—',
+      row.roadType  ?? '—',
+      row.comment   ?? ''
+    ]);
+  });
 
-      ws = XLSX.utils.aoa_to_sheet(rows);
-    } else {
-      ws = XLSX.utils.table_to_sheet(tblEl);
-    }
+  ws = XLSX.utils.aoa_to_sheet(rows);
+} else {
+  ws = XLSX.utils.table_to_sheet(tblEl);
+}
+
+if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
+  applyExcelPercentFormat(ws, 2);
+}
 
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
