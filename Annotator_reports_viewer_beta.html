@@ -696,6 +696,36 @@ body.initial-loading #overview {
 
 .session-filter-option input{
   margin:0;
+}
+
+.session-text-filter{
+  padding:0 16px 12px 16px;
+  border-bottom:1px solid #ddd;
+  background:#f5f5f5;
+}
+
+.session-text-filter label{
+  display:block;
+  font-size:12px;
+  color:#333;
+  margin:0 0 6px 0;
+  font-weight:600;
+}
+
+.session-text-filter input{
+  width:100%;
+  box-sizing:border-box;
+  padding:6px 8px;
+  font-size:13px;
+  border:1px solid #bbb;
+  border-radius:4px;
+  background:#fff;
+}
+
+.session-text-filter .hint{
+  margin-top:6px;
+  font-size:11px;
+  color:#666;
 }    
     
 /* Optional: remove default print margins in some browsers */
@@ -885,6 +915,76 @@ function setSessionAgeFilter(value){
 
     sessionStorage.setItem(SESSION_KEY, "1");
   })();
+
+const SESSION_TEXT_FILTER_STORAGE_KEY = 'annotator_session_text_filter';
+let currentSessionTextFilter =
+  sessionStorage.getItem(SESSION_TEXT_FILTER_STORAGE_KEY) || '';
+
+function setSessionTextFilter(value){
+  currentSessionTextFilter = value || '';
+  sessionStorage.setItem(SESSION_TEXT_FILTER_STORAGE_KEY, currentSessionTextFilter);
+}
+
+function normalizeSearchText(s){
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractSearchableTestDetailsText(wb){
+  const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+  if (!sheetName) return '';
+
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false });
+  if (!rows || !rows.length) return '';
+
+  const parts = [];
+  for (let r = 0; r < rows.length; r++){
+    const row = rows[r];
+    if (!row || !row.length) continue;
+
+    for (let c = 0; c < row.length; c++){
+      const val = row[c];
+      if (val == null) continue;
+      const s = String(val).trim();
+      if (s) parts.push(s);
+    }
+  }
+
+  return normalizeSearchText(parts.join(' '));
+}
+
+const testDetailsSearchCache = new Map(); // filename -> normalized searchable text
+
+async function getSearchableTestDetailsText(filename){
+  if (testDetailsSearchCache.has(filename)) {
+    return testDetailsSearchCache.get(filename);
+  }
+
+  const { wb } = await loadWorkbook(filename);
+  const text = extractSearchableTestDetailsText(wb);
+  testDetailsSearchCache.set(filename, text);
+  return text;
+}
+
+async function filterFilesByTestDetailsText(files, searchText){
+  const q = normalizeSearchText(searchText);
+  if (!q) return files.slice();
+
+  const out = [];
+  for (const filename of files){
+    try{
+      const haystack = await getSearchableTestDetailsText(filename);
+      if (haystack.includes(q)) {
+        out.push(filename);
+      }
+    }catch(e){
+      console.warn('Failed text-filter read for', filename, e);
+    }
+  }
+  return out;
+}    
     
 const workbookCache = new Map(); // filename -> Promise<{ wb, buf }>
 
@@ -2139,117 +2239,134 @@ function listBlobs() {
         blobMeta.set(b.name, b.lastModifiedMs);
       });
 
-// 2) Filter xlsx
-const xlsxAll = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
-if (xlsxAll.length === 0) {
-  showError('No .xlsx files found.');
-  return;
-}
+      // 2) Filter xlsx
+      const xlsxAll = blobs.filter(b => b.name.toLowerCase().endsWith('.xlsx'));
+      if (xlsxAll.length === 0) {
+        showError('No .xlsx files found.');
+        return;
+      }
 
-// 3) Apply age filter
-const xlsx = filterBlobsByAge(xlsxAll, currentSessionAgeFilter);
+      // 3) Apply age filter
+      let xlsx = filterBlobsByAge(xlsxAll, currentSessionAgeFilter);
 
-// Sort newest → oldest
-xlsx.sort((a, b) => {
-  const ta = getSessionTimestampMs(a);
-  const tb = getSessionTimestampMs(b);
-  if (tb !== ta) return tb - ta;
+      // Sort newest -> oldest before text filtering too
+      xlsx.sort((a, b) => {
+        const ta = getSessionTimestampMs(a);
+        const tb = getSessionTimestampMs(b);
+        if (tb !== ta) return tb - ta;
 
-  const la = a.lastModifiedMs || 0;
-  const lb = b.lastModifiedMs || 0;
-  if (lb !== la) return lb - la;
+        const la = a.lastModifiedMs || 0;
+        const lb = b.lastModifiedMs || 0;
+        if (lb !== la) return lb - la;
 
-  return b.name.localeCompare(a.name);
-});
+        return b.name.localeCompare(a.name);
+      });
 
-if (xlsx.length === 0) {
-  buildSidebar([]);
-  allFiles = [];
-  hideGlobalLoading();
+      // 4) Apply free-text filter in Test details
+      const xlsxNamesAfterAge = xlsx.map(b => b.name);
+      const searchText = currentSessionTextFilter.trim();
 
-  const content = document.getElementById('content');
-  if (content) {
-    content.innerHTML = `
-      <div class="error">
-        No sessions found for the selected range.
-      </div>
-    `;
-  }
-  return;
-}
-
-const xlsxNames = xlsx.map(b => b.name);
-allFiles = xlsxNames;
-
-buildSidebar(xlsxNames);
-
-const wanted = getSessionFromUrlHash();
-const hasWanted = wanted && xlsxNames.includes(wanted);
-
-initGlobalProgress(xlsxNames.length);
-
-// always preload summaries first
-    return preloadSummariesSequentially(xlsxNames)
-      .then(() => {
-        if (hasWanted) {
+      const proceedWithNames = (xlsxNames) => {
+        if (xlsxNames.length === 0) {
+          buildSidebar([]);
+          allFiles = [];
           hideGlobalLoading();
-          endInitialLoading();
-          loadFile(wanted);
+
+          const content = document.getElementById('content');
+          if (content) {
+            content.innerHTML = `
+              <div class="error">
+                No sessions found for the selected filters.
+              </div>
+            `;
+          }
           return;
         }
 
-        const h1  = document.getElementById('title-overview');
-        const h2  = document.getElementById('title-latest-routes');
-        const hEU = document.getElementById('title-eu-mileage');
+        allFiles = xlsxNames;
+        buildSidebar(xlsxNames);
 
-        setTitleLoading(h1, true, 'Loading');
-        setTitleLoading(h2, true, 'Loading');
-        setTitleLoading(hEU, true, 'Loading');
+        const wanted = getSessionFromUrlHash();
+        const hasWanted = wanted && xlsxNames.includes(wanted);
 
-        endInitialLoading();
-        applyOverviewFlagsToDom();
-        applyOverviewVisibilityToDom();
+        initGlobalProgress(xlsxNames.length);
 
-        const tasks = [];
+        // always preload summaries first
+        return preloadSummariesSequentially(xlsxNames)
+          .then(() => {
+            if (hasWanted) {
+              hideGlobalLoading();
+              endInitialLoading();
+              loadFile(wanted);
+              return;
+            }
 
-        if (!DISABLE_OVERVIEW_HEATMAPS) {
-          tasks.push(
-            buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
-            buildCountryMonthChart(xlsxNames),
-            buildTempMonthChart(xlsxNames),
-            buildWeatherMonthChart(xlsxNames)
-          );
-        } else {
-          setTitleLoading(h1, false);
-          document.getElementById('heatmap-host')?.insertAdjacentHTML(
-            'beforeend',
-            `<div style="color:#666;font-size:12px;">(Overview heatmaps disabled)</div>`
-          );
-        }
+            const h1  = document.getElementById('title-overview');
+            const h2  = document.getElementById('title-latest-routes');
+            const hEU = document.getElementById('title-eu-mileage');
 
-        if (!DISABLE_EU_MILEAGE_MAP) {
-          tasks.push(
-            buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false))
-          );
-        } else {
-          setTitleLoading(hEU, false);
-          document.getElementById('eu-mileage-map')?.insertAdjacentHTML(
-            'beforeend',
-            `<div style="padding:10px;color:#666;font-size:12px;">(EU mileage map disabled)</div>`
-          );
-        }
+            setTitleLoading(h1, true, 'Loading');
+            setTitleLoading(h2, true, 'Loading');
+            setTitleLoading(hEU, true, 'Loading');
 
-        tasks.push(
-          buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
-          buildTestGroupsSection(xlsxNames)
-        );
+            endInitialLoading();
+            applyOverviewFlagsToDom();
+            applyOverviewVisibilityToDom();
 
-        return Promise.all(tasks).then(() => {
-          hideGlobalLoading();
-          setTimeout(hideGlobalLoading, 800);
-        });
-      });
-  });
+            const tasks = [];
+
+            if (!DISABLE_OVERVIEW_HEATMAPS) {
+              tasks.push(
+                buildOverviewHeatmap(xlsxNames).finally(() => setTitleLoading(h1, false)),
+                buildCountryMonthChart(xlsxNames),
+                buildTempMonthChart(xlsxNames),
+                buildWeatherMonthChart(xlsxNames)
+              );
+            } else {
+              setTitleLoading(h1, false);
+              document.getElementById('heatmap-host')?.insertAdjacentHTML(
+                'beforeend',
+                `<div style="color:#666;font-size:12px;">(Overview heatmaps disabled)</div>`
+              );
+            }
+
+            if (!DISABLE_EU_MILEAGE_MAP) {
+              tasks.push(
+                buildEUMileageMap(xlsxNames).finally(() => setTitleLoading(hEU, false))
+              );
+            } else {
+              setTitleLoading(hEU, false);
+              document.getElementById('eu-mileage-map')?.insertAdjacentHTML(
+                'beforeend',
+                `<div style="padding:10px;color:#666;font-size:12px;">(EU mileage map disabled)</div>`
+              );
+            }
+
+            tasks.push(
+              buildLatestRoutePreviews(xlsxNames).finally(() => setTitleLoading(h2, false)),
+              buildTestGroupsSection(xlsxNames)
+            );
+
+            return Promise.all(tasks).then(() => {
+              hideGlobalLoading();
+              setTimeout(hideGlobalLoading, 800);
+            });
+          });
+      };
+
+      if (!searchText) {
+        return proceedWithNames(xlsxNamesAfterAge);
+      }
+
+      setGlobalLoading('Searching Test details…', 0);
+
+      return filterFilesByTestDetailsText(xlsxNamesAfterAge, searchText)
+        .then(filteredNames => proceedWithNames(filteredNames));
+    })
+    .catch(err => {
+      console.error(err);
+      showError(`Failed to list blobs: ${err.message || err}`);
+    });
 }         // <-- closes function listBlobs
 
 function renderSessionAgeFilter(parentEl){
@@ -2293,6 +2410,43 @@ function renderSessionAgeFilter(parentEl){
 
   parentEl.appendChild(row);
 }
+
+function renderSessionTextFilter(parentEl){
+  const wrap = document.createElement('div');
+  wrap.className = 'session-text-filter';
+
+  const label = document.createElement('label');
+  label.setAttribute('for', 'session-text-filter-input');
+  label.textContent = 'Free text';
+  wrap.appendChild(label);
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'session-text-filter-input';
+  input.placeholder = 'Search in Test details...';
+  input.value = currentSessionTextFilter;
+  wrap.appendChild(input);
+
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent = 'Live search in Test details';
+  wrap.appendChild(hint);
+
+  let debounceTimer = null;
+  input.addEventListener('input', () => {
+    const value = input.value || '';
+
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      if (value === currentSessionTextFilter) return;
+      setSessionTextFilter(value);
+      setGlobalLoading('Applying text filter…', 0);
+      listBlobs();
+    }, 250);
+  });
+
+  parentEl.appendChild(wrap);
+}
     
     // ---------- SIDEBAR ----------
 function buildSidebar(files) {
@@ -2323,6 +2477,7 @@ header.style.borderBottom = '1px solid #ddd';
   });
   sb.appendChild(header);
   renderSessionAgeFilter(sb);
+  renderSessionTextFilter(sb);
 
   // Group by day
   const groups = files.reduce((acc, f) => {
