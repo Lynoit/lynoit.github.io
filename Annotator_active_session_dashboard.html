@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Active Session Dashboard</title>
+
+  <!--
+    Dependencies loaded from CDN:
+    - SheetJS/xlsx: reads .xlsx workbooks in the browser
+    - Leaflet: OpenStreetMap map rendering
+
+    Important security note:
+    This client-only example embeds the SAS token in JavaScript, just like the Python script.
+    That is convenient for internal tooling, but anyone who can open this page can see and use the SAS token.
+    For production, put Azure access behind a small backend/proxy that keeps the SAS token server-side.
+  -->
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIINfQWckS1ccZN3L5SCwqM4Z2Ax4pL+RI="
+    crossorigin=""
+  />
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #172033;
+      --muted: #657084;
+      --line: #dce3ee;
+      --good: #147a3e;
+      --warn: #a35f00;
+      --bad: #a61b1b;
+      --shadow: 0 10px 25px rgba(22, 34, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 22px;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .header-meta {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    button {
+      border: 1px solid #c7d2e3;
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-weight: 650;
+      color: #1d2a3f;
+    }
+
+    button:hover { background: #f1f5fb; }
+
+    main {
+      padding: 18px 22px 28px;
+    }
+
+    .status-bar {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .stat {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .stat .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }
+
+    .stat .value {
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .dashboard {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .empty {
+      background: var(--card);
+      border: 1px dashed #b7c2d5;
+      border-radius: 18px;
+      padding: 30px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .session-row {
+      display: grid;
+      grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.25fr) minmax(320px, 1fr);
+      gap: 14px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      min-width: 0;
+      border: 1px solid #e5ebf4;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      background: #f8fafd;
+      border-bottom: 1px solid #e5ebf4;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .panel-body { padding: 12px; }
+
+    .session-name {
+      word-break: break-word;
+      font-weight: 850;
+      font-size: 15px;
+      line-height: 1.3;
+      margin-bottom: 6px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 750;
+      white-space: nowrap;
+      background: #e8f7ee;
+      color: var(--good);
+    }
+
+    .badge.warn { background: #fff2d9; color: var(--warn); }
+    .badge.bad { background: #ffe5e5; color: var(--bad); }
+
+    dl {
+      display: grid;
+      grid-template-columns: minmax(100px, 42%) 1fr;
+      gap: 7px 10px;
+      margin: 12px 0 0;
+      font-size: 13px;
+    }
+
+    dt { color: var(--muted); overflow-wrap: anywhere; }
+    dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+    .issue-box {
+      margin-top: 12px;
+      border-top: 1px solid #e5ebf4;
+      padding-top: 10px;
+    }
+
+    .issue-title {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .map,
+    .streetview {
+      height: 360px;
+      width: 100%;
+      border: 0;
+      display: block;
+      background: #eef3f8;
+    }
+
+    .map-message,
+    .streetview-message {
+      height: 360px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      text-align: center;
+      padding: 24px;
+      background: #eef3f8;
+    }
+
+    .small-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 1150px) {
+      .session-row { grid-template-columns: 1fr; }
+      .map, .streetview, .map-message, .streetview-message { height: 320px; }
+    }
+
+    @media (max-width: 720px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .header-meta { justify-content: flex-start; }
+      main { padding: 14px; }
+      .status-bar { grid-template-columns: 1fr 1fr; }
+      dl { grid-template-columns: 1fr; }
+      dt { font-weight: 750; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Active Session Dashboard</h1>
+      <div class="small-note">Shows recently modified Excel sessions from Azure Blob Storage.</div>
+    </div>
+    <div class="header-meta">
+      <span id="statusText">Ready</span>
+      <span id="lastUpdatedText">Never updated</span>
+      <button id="refreshButton" type="button">Refresh now</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="status-bar">
+      <div class="stat">
+        <div class="label">Active sessions</div>
+        <div id="activeCount" class="value">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Active window</div>
+        <div id="activeWindow" class="value">10 min</div>
+      </div>
+      <div class="stat">
+        <div class="label">Session refresh</div>
+        <div id="sessionRefresh" class="value">10 s</div>
+      </div>
+      <div class="stat">
+        <div class="label">Workbook refresh</div>
+        <div id="workbookRefresh" class="value">5 s</div>
+      </div>
+    </section>
+
+    <section id="dashboard" class="dashboard">
+      <div class="empty">No active sessions loaded yet.</div>
+    </section>
+  </main>
+
+  <script>
+    /***************************************************************************
+     * Configuration copied from the Python script
+     **************************************************************************/
+
+    const ACCOUNT = "annotationcsv";
+    const CONTAINER = "csv";
+    const SAS_TOKEN = "sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2026-12-31T14:25:22Z&st=2026-01-02T06:10:22Z&spr=https&sig=EYJzJkVswHh9jljAsy506gTIQ7fQMGuF6kJUCSIx%2BZQ%3D";
+
+    const BASE_URL = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
+    const ACTIVE_WINDOW_SECONDS = 10 * 60;
+    const SESSION_REFRESH_MS = 10_000;
+    const WORKBOOK_REFRESH_MS = 5_000;
+    const REQUEST_TIMEOUT_MS = 20_000;
+
+    /*
+      Google Street View:
+      - For production use, replace this with your Google Maps Embed API key.
+      - The dashboard still works without a key; Street View panels will show a message.
+    */
+    const GOOGLE_MAPS_EMBED_API_KEY = "";
+
+    /*
+      Trace/current-position extraction is based on flexible header matching.
+      Add your exact workbook headers here if needed.
+    */
+    const LATITUDE_HEADERS = ["latitude", "lat", "gps latitude", "gps_lat", "position latitude", "y"];
+    const LONGITUDE_HEADERS = ["longitude", "lon", "lng", "gps longitude", "gps_lon", "gps_lng", "position longitude", "x"];
+    const TRACE_SHEET_CANDIDATES = ["trace", "gps", "positions", "position", "location", "locations", "coordinates", "route"];
+    const ISSUE_SHEET_CANDIDATES = ["issues", "issue"];
+    const TEST_DETAILS_SHEET_NAME = "test details";
+
+    const TIMESTAMP_CANDIDATES = ["timestamp", "datetime", "created", "created at", "event time", "date time", "time"];
+
+    /***************************************************************************
+     * State
+     **************************************************************************/
+
+    const state = {
+      sessions: new Map(),
+      sessionRefreshRunning: false,
+      workbookRefreshRunning: false,
+      maps: new Map()
+    };
+
+    const els = {
+      dashboard: document.getElementById("dashboard"),
+      statusText: document.getElementById("statusText"),
+      lastUpdatedText: document.getElementById("lastUpdatedText"),
+      activeCount: document.getElementById("activeCount"),
+      activeWindow: document.getElementById("activeWindow"),
+      sessionRefresh: document.getElementById("sessionRefresh"),
+      workbookRefresh: document.getElementById("workbookRefresh"),
+      refreshButton: document.getElementById("refreshButton")
+    };
+
+    els.activeWindow.textContent = `${Math.round(ACTIVE_WINDOW_SECONDS / 60)} min`;
+    els.sessionRefresh.textContent = `${Math.round(SESSION_REFRESH_MS / 1000)} s`;
+    els.workbookRefresh.textContent = `${Math.round(WORKBOOK_REFRESH_MS / 1000)} s`;
+
+    /***************************************************************************
+     * Basic helpers
+     **************************************************************************/
+
+    function utcNow() {
+      return new Date();
+    }
+
+    function listBlobsUrl() {
+      return `${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`;
+    }
+
+    function blobUrl(blobName) {
+      return `${BASE_URL}/${encodeBlobPath(blobName)}?${SAS_TOKEN}`;
+    }
+
+    function encodeBlobPath(blobName) {
+      return blobName.split("/").map(encodeURIComponent).join("/");
+    }
+
+    function setStatus(text) {
+      els.statusText.textContent = text;
+    }
+
+    function setLastUpdated() {
+      els.lastUpdatedText.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    function normalizeHeader(value) {
+      if (value === null || value === undefined) return "";
+      return String(value).trim().toLowerCase();
+    }
+
+    function valueToText(value) {
+      if (value === null || value === undefined) return "";
+      if (value instanceof Date) return value.toISOString().replace("T", " ").slice(0, 19);
+      return String(value).trim();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function parseAzureLastModified(value) {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function ageSeconds(date) {
+      return Math.max(0, Math.round((utcNow().getTime() - date.getTime()) / 1000));
+    }
+
+    function formatAge(date) {
+      const seconds = ageSeconds(date);
+      if (seconds < 60) return `${seconds}s old`;
+      const minutes = Math.floor(seconds / 60);
+      const remainder = seconds % 60;
+      return `${minutes}m ${remainder}s old`;
+    }
+
+    function formatDateTime(value) {
+      if (!value) return "";
+      const d = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(d.getTime())) return valueToText(value);
+      return d.toLocaleString();
+    }
+
+    function timeoutFetch(url, options = {}) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timeout));
+    }
+
+    function tryParseDate(value) {
+      if (value === null || value === undefined || value === "") return null;
+      if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+      if (typeof value === "number") {
+        const parsed = XLSX.SSF.parse_date_code(value);
+        if (!parsed) return null;
+        return new Date(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, Math.floor(parsed.S || 0));
+      }
+
+      const text = String(value).trim();
+      if (!text) return null;
+
+      const direct = new Date(text.replace(" ", "T"));
+      if (!Number.isNaN(direct.getTime())) return direct;
+
+      const formats = [
+        /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/,
+        /^(\d{4})\/(\d{2})\/(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/,
+        /^(\d{2})\/(\d{2})\/(\d{4})[ T](\d{2}):(\d{2})(?::(\d{2}))?/
+      ];
+
+      for (const regex of formats) {
+        const match = text.match(regex);
+        if (!match) continue;
+
+        if (regex === formats[2]) {
+          const dd = Number(match[1]);
+          const mm = Number(match[2]);
+          const yyyy = Number(match[3]);
+          return new Date(yyyy, mm - 1, dd, Number(match[4]), Number(match[5]), Number(match[6] || 0));
+        }
+
+        return new Date(
+          Number(match[1]),
+          Number(match[2]) - 1,
+          Number(match[3]),
+          Number(match[4]),
+          Number(match[5]),
+          Number(match[6] || 0)
+        );
+      }
+
+      return null;
+    }
+
+    function findSheetName(workbook, candidates) {
+      const normalizedCandidates = candidates.map(c => c.trim().toLowerCase());
+      for (const name of workbook.SheetNames) {
+        if (normalizedCandidates.includes(name.trim().toLowerCase())) return name;
+      }
+      for (const name of workbook.SheetNames) {
+        const normalized = name.trim().toLowerCase();
+        if (normalizedCandidates.some(candidate => normalized.includes(candidate))) return name;
+      }
+      return null;
+    }
+
+    function sheetToRows(workbook, sheetName) {
+      if (!sheetName || !workbook.Sheets[sheetName]) return [];
+      return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+        header: 1,
+        raw: true,
+        defval: "",
+        blankrows: false
+      });
+    }
+
+    function rowsToObjects(rows) {
+      if (!rows || rows.length < 2) return [];
+      const headers = rows[0].map((h, i) => valueToText(h) || `Column ${i + 1}`);
+      return rows.slice(1)
+        .filter(row => row.some(cell => valueToText(cell) !== ""))
+        .map((row, index) => {
+          const obj = {};
+          headers.forEach((header, i) => { obj[header] = row[i] ?? ""; });
+          return { obj, row, rowIndex: index + 2, headers };
+        });
+    }
+
+    function findHeaderIndex(headers, candidates) {
+      const normalized = headers.map(normalizeHeader);
+      const normalizedCandidates = candidates.map(normalizeHeader);
+      for (let i = 0; i < normalized.length; i += 1) {
+        if (normalizedCandidates.includes(normalized[i])) return i;
+      }
+      for (let i = 0; i < normalized.length; i += 1) {
+        if (normalizedCandidates.some(candidate => normalized[i].includes(candidate))) return i;
+      }
+      return -1;
+    }
+
+    function isLikelyLatitude(value) {
+      const n = Number(String(value).replace(",", "."));
+      return Number.isFinite(n) && n >= -90 && n <= 90;
+    }
+
+    function isLikelyLongitude(value) {
+      const n = Number(String(value).replace(",", "."));
+      return Number.isFinite(n) && n >= -180 && n <= 180;
+    }
+
+    function asNumber(value) {
+      const n = Number(String(value).replace(",", "."));
+      return Number.isFinite(n) ? n : null;
+    }
+
+    /***************************************************************************
+     * Azure session discovery
+     **************************************************************************/
+
+    async function fetchActiveSessions() {
+      const response = await timeoutFetch(listBlobsUrl());
+      if (!response.ok) throw new Error(`Azure list failed: ${response.status} ${response.statusText}`);
+
+      const xmlText = await response.text();
+      const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+      const blobs = Array.from(xml.querySelectorAll("Blob"));
+      const sessions = [];
+
+      for (const blob of blobs) {
+        const blobName = blob.querySelector("Name")?.textContent?.trim();
+        if (!blobName || !blobName.toLowerCase().endsWith(".xlsx")) continue;
+
+        const lastModifiedText = blob.querySelector("Properties > Last-Modified")?.textContent?.trim();
+        const lastModified = parseAzureLastModified(lastModifiedText);
+        if (!lastModified) continue;
+
+        if (ageSeconds(lastModified) <= ACTIVE_WINDOW_SECONDS) {
+          sessions.push({
+            blobName,
+            name: blobName.split("/").pop(),
+            lastModified
+          });
+        }
+      }
+
+      sessions.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
+      return sessions;
+    }
+
+    async function refreshSessions() {
+      if (state.sessionRefreshRunning) return;
+      state.sessionRefreshRunning = true;
+      setStatus("Refreshing active sessions...");
+
+      try {
+        const activeSessions = await fetchActiveSessions();
+        const activeNames = new Set(activeSessions.map(s => s.blobName));
+
+        for (const session of activeSessions) {
+          const existing = state.sessions.get(session.blobName) || {};
+          state.sessions.set(session.blobName, {
+            ...existing,
+            ...session,
+            workbookStatus: existing.workbookStatus || "Waiting for workbook read...",
+            testDetails: existing.testDetails || [],
+            latestIssue: existing.latestIssue || null,
+            trace: existing.trace || [],
+            currentPosition: existing.currentPosition || null,
+            lastWorkbookRead: existing.lastWorkbookRead || null,
+            workbookError: null
+          });
+        }
+
+        for (const blobName of Array.from(state.sessions.keys())) {
+          if (!activeNames.has(blobName)) {
+            state.sessions.delete(blobName);
+            destroyMap(blobName);
+          }
+        }
+
+        renderDashboard();
+        setStatus("Active sessions refreshed");
+        setLastUpdated();
+      } catch (error) {
+        console.error(error);
+        setStatus(`Failed to refresh sessions: ${error.message}`);
+      } finally {
+        state.sessionRefreshRunning = false;
+      }
+    }
+
+    /***************************************************************************
+     * Workbook parsing
+     **************************************************************************/
+
+    async function fetchWorkbook(blobName) {
+      const response = await timeoutFetch(blobUrl(blobName));
+      if (!response.ok) throw new Error(`Workbook download failed: ${response.status} ${response.statusText}`);
+      const arrayBuffer = await response.arrayBuffer();
+      return XLSX.read(arrayBuffer, { type: "array", cellDates: true });
+    }
+
+    function extractTestDetails(workbook) {
+      const sheetName = findSheetName(workbook, [TEST_DETAILS_SHEET_NAME]);
+      const rows = sheetToRows(workbook, sheetName);
+      const details = [];
+
+      for (const row of rows) {
+        const key = valueToText(row[0]);
+        const value = valueToText(row[1]);
+        if (!key && !value) continue;
+        details.push([key, value]);
+      }
+
+      return details;
+    }
+
+    function extractLatestIssue(workbook) {
+      const sheetName = findSheetName(workbook, ISSUE_SHEET_CANDIDATES);
+      const rows = sheetToRows(workbook, sheetName);
+      if (!sheetName || rows.length < 2) return null;
+
+      const headers = rows[0].map((h, i) => valueToText(h) || `Column ${i + 1}`);
+      const timestampIndex = findHeaderIndex(headers, TIMESTAMP_CANDIDATES);
+      const dateIndex = findHeaderIndex(headers, ["date"]);
+      const timeIndex = findHeaderIndex(headers, ["time"]);
+
+      const dataRows = rowsToObjects(rows).map(item => {
+        let timestamp = null;
+
+        if (timestampIndex >= 0) {
+          timestamp = tryParseDate(item.row[timestampIndex]);
+        } else if (dateIndex >= 0 && timeIndex >= 0) {
+          timestamp = tryParseDate(`${valueToText(item.row[dateIndex])} ${valueToText(item.row[timeIndex])}`);
+        } else if (dateIndex >= 0) {
+          timestamp = tryParseDate(item.row[dateIndex]);
+        }
+
+        return { ...item, timestamp };
+      });
+
+      if (!dataRows.length) return null;
+
+      const timestamped = dataRows.filter(r => r.timestamp);
+      const latest = timestamped.length
+        ? timestamped.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())[0]
+        : dataRows[dataRows.length - 1];
+
+      return {
+        sheetName,
+        rowIndex: latest.rowIndex,
+        timestampColumn: timestampIndex >= 0 ? headers[timestampIndex] : (dateIndex >= 0 ? "Date + Time" : ""),
+        issueTimestamp: latest.timestamp ? latest.timestamp.toISOString().replace("T", " ").slice(0, 19) : "",
+        rowData: latest.obj,
+        signature: JSON.stringify([sheetName, latest.rowIndex, latest.row.map(valueToText)])
+      };
+    }
+
+    function extractTrace(workbook) {
+      let best = null;
+
+      for (const sheetName of workbook.SheetNames) {
+        const normalizedSheetName = sheetName.trim().toLowerCase();
+        const rows = sheetToRows(workbook, sheetName);
+        if (rows.length < 2) continue;
+
+        const headers = rows[0].map((h, i) => valueToText(h) || `Column ${i + 1}`);
+        const latIndex = findHeaderIndex(headers, LATITUDE_HEADERS);
+        const lonIndex = findHeaderIndex(headers, LONGITUDE_HEADERS);
+        if (latIndex < 0 || lonIndex < 0) continue;
+
+        const timestampIndex = findHeaderIndex(headers, TIMESTAMP_CANDIDATES);
+        const points = [];
+
+        for (const row of rows.slice(1)) {
+          const lat = asNumber(row[latIndex]);
+          const lon = asNumber(row[lonIndex]);
+          if (!isLikelyLatitude(lat) || !isLikelyLongitude(lon)) continue;
+
+          points.push({
+            lat,
+            lon,
+            timestamp: timestampIndex >= 0 ? tryParseDate(row[timestampIndex]) : null,
+            raw: row
+          });
+        }
+
+        if (!points.length) continue;
+
+        const score = points.length + (TRACE_SHEET_CANDIDATES.some(candidate => normalizedSheetName.includes(candidate)) ? 10_000 : 0);
+        if (!best || score > best.score) {
+          best = { sheetName, headers, latIndex, lonIndex, timestampIndex, points, score };
+        }
+      }
+
+      if (!best) return { trace: [], currentPosition: null, traceSheetName: "" };
+
+      const ordered = best.points.some(p => p.timestamp)
+        ? best.points.slice().sort((a, b) => (a.timestamp?.getTime() || 0) - (b.timestamp?.getTime() || 0))
+        : best.points;
+
+      return {
+        trace: ordered,
+        currentPosition: ordered[ordered.length - 1] || null,
+        traceSheetName: best.sheetName
+      };
+    }
+
+    async function refreshWorkbooks() {
+      if (state.workbookRefreshRunning) return;
+      state.workbookRefreshRunning = true;
+
+      const sessions = Array.from(state.sessions.values());
+      if (!sessions.length) {
+        state.workbookRefreshRunning = false;
+        return;
+      }
+
+      try {
+        await Promise.allSettled(sessions.map(async session => {
+          const stored = state.sessions.get(session.blobName);
+          if (!stored) return;
+
+          try {
+            stored.workbookStatus = "Reading workbook...";
+            const workbook = await fetchWorkbook(session.blobName);
+            const traceResult = extractTrace(workbook);
+
+            stored.testDetails = extractTestDetails(workbook);
+            stored.latestIssue = extractLatestIssue(workbook);
+            stored.trace = traceResult.trace;
+            stored.currentPosition = traceResult.currentPosition;
+            stored.traceSheetName = traceResult.traceSheetName;
+            stored.lastWorkbookRead = new Date();
+            stored.workbookStatus = "Workbook loaded";
+            stored.workbookError = null;
+          } catch (error) {
+            console.error(error);
+            stored.workbookStatus = "Workbook read failed";
+            stored.workbookError = error.message;
+          }
+        }));
+
+        renderDashboard();
+      } finally {
+        state.workbookRefreshRunning = false;
+      }
+    }
+
+    /***************************************************************************
+     * Rendering
+     **************************************************************************/
+
+    function sessionStatusBadge(session) {
+      if (session.workbookError) return `<span class="badge bad">Error</span>`;
+      const age = ageSeconds(session.lastModified);
+      if (age > ACTIVE_WINDOW_SECONDS * 0.75) return `<span class="badge warn">Stale soon</span>`;
+      return `<span class="badge">Active</span>`;
+    }
+
+    function renderDashboard() {
+      const sessions = Array.from(state.sessions.values()).sort((a, b) => b.lastModified - a.lastModified);
+      els.activeCount.textContent = String(sessions.length);
+
+      if (!sessions.length) {
+        els.dashboard.innerHTML = `<div class="empty">No active sessions found in the last ${Math.round(ACTIVE_WINDOW_SECONDS / 60)} minutes.</div>`;
+        return;
+      }
+
+      els.dashboard.innerHTML = sessions.map(renderSessionRow).join("");
+
+      for (const session of sessions) {
+        renderMap(session);
+      }
+    }
+
+    function renderSessionRow(session) {
+      const details = session.testDetails?.length
+        ? session.testDetails.slice(0, 14)
+        : [["Test details", "No test details found"]];
+
+      const issueRows = session.latestIssue
+        ? Object.entries(session.latestIssue.rowData).slice(0, 8)
+        : [["Latest issue", "No Issues sheet or issue rows found"]];
+
+      const current = session.currentPosition;
+      const mapId = idFor(session.blobName, "map");
+      const streetId = idFor(session.blobName, "streetview");
+
+      return `
+        <article class="session-row" data-blob-name="${escapeHtml(session.blobName)}">
+          <section class="panel">
+            <div class="panel-title">
+              <span>Test details</span>
+              ${sessionStatusBadge(session)}
+            </div>
+            <div class="panel-body">
+              <div class="session-name">${escapeHtml(session.name)}</div>
+              <dl>
+                <dt>Blob</dt><dd>${escapeHtml(session.blobName)}</dd>
+                <dt>Last modified</dt><dd>${escapeHtml(formatDateTime(session.lastModified))}</dd>
+                <dt>Age</dt><dd>${escapeHtml(formatAge(session.lastModified))}</dd>
+                <dt>Workbook</dt><dd>${escapeHtml(session.workbookError || session.workbookStatus || "")}</dd>
+                <dt>Last workbook read</dt><dd>${escapeHtml(session.lastWorkbookRead ? formatDateTime(session.lastWorkbookRead) : "Not yet")}</dd>
+                <dt>Trace sheet</dt><dd>${escapeHtml(session.traceSheetName || "Not found")}</dd>
+                <dt>Trace points</dt><dd>${escapeHtml(session.trace?.length || 0)}</dd>
+                <dt>Current position</dt><dd>${current ? `${current.lat.toFixed(6)}, ${current.lon.toFixed(6)}` : "Not found"}</dd>
+              </dl>
+
+              <div class="issue-box">
+                <div class="issue-title">Workbook test details</div>
+                <dl>${details.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join("")}</dl>
+              </div>
+
+              <div class="issue-box">
+                <div class="issue-title">Latest issue row</div>
+                <dl>
+                  ${session.latestIssue ? `
+                    <dt>Sheet</dt><dd>${escapeHtml(session.latestIssue.sheetName)}</dd>
+                    <dt>Row</dt><dd>${escapeHtml(session.latestIssue.rowIndex)}</dd>
+                    <dt>Issue time</dt><dd>${escapeHtml(session.latestIssue.issueTimestamp || "Not found")}</dd>
+                  ` : ""}
+                  ${issueRows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(valueToText(v))}</dd>`).join("")}
+                </dl>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <span>Trace map and current position</span>
+              <span class="small-note">OSM / Leaflet</span>
+            </div>
+            <div id="${mapId}" class="map"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <span>Google Street View</span>
+              <span class="small-note">Current position</span>
+            </div>
+            ${renderStreetView(session, streetId)}
+          </section>
+        </article>
+      `;
+    }
+
+    function renderStreetView(session, streetId) {
+      const current = session.currentPosition;
+      if (!current) {
+        return `<div id="${streetId}" class="streetview-message">No current GPS position found for this workbook.</div>`;
+      }
+
+      if (!GOOGLE_MAPS_EMBED_API_KEY) {
+        const mapsUrl = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${current.lat},${current.lon}`;
+        return `
+          <div id="${streetId}" class="streetview-message">
+            <div>
+              <div>Set <strong>GOOGLE_MAPS_EMBED_API_KEY</strong> to embed Street View here.</div>
+              <div class="small-note"><a href="${escapeHtml(mapsUrl)}" target="_blank" rel="noopener">Open Street View in Google Maps</a></div>
+            </div>
+          </div>
+        `;
+      }
+
+      const src = `https://www.google.com/maps/embed/v1/streetview?key=${encodeURIComponent(GOOGLE_MAPS_EMBED_API_KEY)}&location=${encodeURIComponent(`${current.lat},${current.lon}`)}&heading=0&pitch=0&fov=80`;
+      return `<iframe id="${streetId}" class="streetview" loading="lazy" allowfullscreen referrerpolicy="no-referrer-when-downgrade" src="${src}"></iframe>`;
+    }
+
+    function idFor(blobName, prefix) {
+      let hash = 0;
+      for (let i = 0; i < blobName.length; i += 1) {
+        hash = ((hash << 5) - hash) + blobName.charCodeAt(i);
+        hash |= 0;
+      }
+      return `${prefix}-${Math.abs(hash)}`;
+    }
+
+    function destroyMap(blobName) {
+      const existing = state.maps.get(blobName);
+      if (existing) {
+        existing.map.remove();
+        state.maps.delete(blobName);
+      }
+    }
+
+    function renderMap(session) {
+      const mapId = idFor(session.blobName, "map");
+      const mapElement = document.getElementById(mapId);
+      if (!mapElement) return;
+
+      const points = session.trace || [];
+      if (!points.length) {
+        destroyMap(session.blobName);
+        mapElement.classList.remove("map");
+        mapElement.classList.add("map-message");
+        mapElement.textContent = "No GPS trace found. Add/adjust latitude and longitude header names in the configuration.";
+        return;
+      }
+
+      mapElement.classList.add("map");
+      mapElement.classList.remove("map-message");
+      mapElement.textContent = "";
+
+      let mapState = state.maps.get(session.blobName);
+      if (!mapState) {
+        const map = L.map(mapElement, { zoomControl: true });
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          attribution: "&copy; OpenStreetMap contributors"
+        }).addTo(map);
+
+        mapState = {
+          map,
+          polyline: L.polyline([], { weight: 4 }).addTo(map),
+          marker: L.marker([points[points.length - 1].lat, points[points.length - 1].lon]).addTo(map),
+          lastSignature: ""
+        };
+        state.maps.set(session.blobName, mapState);
+      }
+
+      const latLngs = points.map(p => [p.lat, p.lon]);
+      const current = session.currentPosition || points[points.length - 1];
+      const signature = `${points.length}:${current.lat}:${current.lon}`;
+
+      if (signature !== mapState.lastSignature) {
+        mapState.polyline.setLatLngs(latLngs);
+        mapState.marker.setLatLng([current.lat, current.lon]);
+        mapState.marker.bindPopup(`Current position<br>${current.lat.toFixed(6)}, ${current.lon.toFixed(6)}`);
+
+        if (latLngs.length > 1) {
+          mapState.map.fitBounds(L.latLngBounds(latLngs), { padding: [20, 20], maxZoom: 17 });
+        } else {
+          mapState.map.setView([current.lat, current.lon], 16);
+        }
+
+        mapState.lastSignature = signature;
+      }
+
+      setTimeout(() => mapState.map.invalidateSize(), 0);
+    }
+
+    /***************************************************************************
+     * Startup and periodic refresh
+     **************************************************************************/
+
+    async function refreshAll() {
+      await refreshSessions();
+      await refreshWorkbooks();
+    }
+
+    els.refreshButton.addEventListener("click", refreshAll);
+
+    refreshAll();
+    window.setInterval(refreshSessions, SESSION_REFRESH_MS);
+    window.setInterval(refreshWorkbooks, WORKBOOK_REFRESH_MS);
+  </script>
+</body>
+</html>
