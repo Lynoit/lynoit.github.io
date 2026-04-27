@@ -844,28 +844,78 @@
       const sessions = Array.from(state.sessions.values()).sort((a, b) => b.lastModified - a.lastModified);
       els.activeCount.textContent = String(sessions.length);
 
-      /*
-        Leaflet maps are tied to their DOM element. Replacing dashboard.innerHTML
-        every refresh leaves Leaflet holding references to removed elements, which
-        can make the map flash briefly and then blank out. Before replacing rows,
-        destroy all existing Leaflet instances and recreate them on the new DOM.
-      */
-      for (const blobName of Array.from(state.maps.keys())) {
-        destroyMap(blobName);
-      }
-
       if (!sessions.length) {
+        for (const blobName of Array.from(state.maps.keys())) {
+          destroyMap(blobName);
+        }
         els.dashboard.innerHTML = `<div class="empty">No active sessions found in the last ${Math.round(ACTIVE_WINDOW_SECONDS / 60)} minutes.</div>`;
         return;
       }
 
-      els.dashboard.innerHTML = sessions.map(renderSessionRow).join("");
+      const existingRows = new Set(
+        Array.from(els.dashboard.querySelectorAll(".session-row")).map(row => row.dataset.blobName)
+      );
+      const activeRows = new Set(sessions.map(session => session.blobName));
+
+      for (const blobName of existingRows) {
+        if (!activeRows.has(blobName)) {
+          const row = els.dashboard.querySelector(`.session-row[data-blob-name="${cssEscape(blobName)}"]`);
+          if (row) row.remove();
+          destroyMap(blobName);
+        }
+      }
+
+      for (const session of sessions) {
+        let row = els.dashboard.querySelector(`.session-row[data-blob-name="${cssEscape(session.blobName)}"]`);
+        if (!row) {
+          const wrapper = document.createElement("div");
+          wrapper.innerHTML = renderSessionRow(session).trim();
+          row = wrapper.firstElementChild;
+          els.dashboard.appendChild(row);
+        } else {
+          updateSessionRow(row, session);
+        }
+      }
+
+      for (const session of sessions) {
+        const row = els.dashboard.querySelector(`.session-row[data-blob-name="${cssEscape(session.blobName)}"]`);
+        if (row && row !== els.dashboard.children[sessions.indexOf(session)]) {
+          els.dashboard.appendChild(row);
+        }
+      }
 
       window.requestAnimationFrame(() => {
         for (const session of sessions) {
           renderMap(session);
         }
       });
+    }
+
+    function cssEscape(value) {
+      if (window.CSS && CSS.escape) return CSS.escape(value);
+      return String(value).replaceAll('"', '\"');
+    }
+
+    function updateSessionRow(row, session) {
+      const detailsPanel = row.querySelector(".panel:first-child");
+      if (!detailsPanel) return;
+
+      const freshDetailsHtml = renderSessionRow(session);
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = freshDetailsHtml.trim();
+      const freshRow = wrapper.firstElementChild;
+      const freshDetailsPanel = freshRow.querySelector(".panel:first-child");
+      const freshStreetViewPanel = freshRow.querySelector(".panel:last-child");
+      const currentStreetViewPanel = row.querySelector(".panel:last-child");
+
+      if (freshDetailsPanel) detailsPanel.replaceWith(freshDetailsPanel);
+
+      const oldCurrent = row.dataset.currentPosition || "";
+      const current = session.currentPosition ? `${session.currentPosition.lat},${session.currentPosition.lon}` : "";
+      if (freshStreetViewPanel && currentStreetViewPanel && oldCurrent !== current) {
+        currentStreetViewPanel.replaceWith(freshStreetViewPanel);
+      }
+      row.dataset.currentPosition = current;
     }
 
     function renderSessionRow(session) {
