@@ -37,6 +37,12 @@
     .matrix-table thead th.freeze{z-index:3;}
     .cell{min-width:62px;text-align:right;font-variant-numeric:tabular-nums;}
     .status{font-size:12px;color:#555;line-height:1.45;}
+    .progress-wrap{display:none;align-items:center;gap:8px;width:min(520px,90vw);font-size:12px;color:#555;}
+    .progress-track{flex:1;height:10px;border-radius:999px;background:#e9ecf5;overflow:hidden;border:1px solid var(--line);}
+    .progress-bar{height:100%;width:0%;background:#111;transition:width .18s ease;}
+    .progress-text{min-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .hint{font-size:12px;color:#555;background:#f6f7fb;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:8px 0 12px;line-height:1.45;}
+    .hint-icon{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;border:1px solid #bbb;color:#555;font-size:11px;font-weight:800;margin-left:6px;cursor:help;}
     .warn{color:#9b5c00;}
     .err{color:#b00020;}
     .kpi-chip{display:inline-block;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;}
@@ -55,6 +61,10 @@
       <button id="exportCsv" class="secondary">Export current matrix CSV</button>
       <button id="clear" class="secondary">Clear</button>
       <span id="status" class="status">Auto-loading Excel reports from ./CC_Expeditions_2026/ ...</span>
+      <div id="progressWrap" class="progress-wrap" aria-live="polite">
+        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+        <span id="progressText" class="progress-text"></span>
+      </div>
     </div>
     <div class="tabs">
       <button class="tab active" data-category="Road">Road type</button>
@@ -85,6 +95,30 @@ const CATEGORY_CONFIG = {
 
 let CURRENT_CATEGORY = 'Road';
 let STATE = null;
+
+const ROAD_OTHER_HINT = 'Other / Unclassified = track, construction, pedestrian/path/cycleway/footway/bridleway, and unexpected OSM road classes. It is kept separate so these map-matching or non-standard road types do not distort Highway, City road, or Country road KPI rates.';
+function categoryHint(category){
+  return category === 'Road' ? ROAD_OTHER_HINT : '';
+}
+function setProgress(done, total, label){
+  const wrap = document.getElementById('progressWrap');
+  const bar = document.getElementById('progressBar');
+  const text = document.getElementById('progressText');
+  if (!wrap || !bar || !text) return;
+  if (!total || total <= 0){
+    wrap.style.display = 'none';
+    bar.style.width = '0%';
+    text.textContent = '';
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  wrap.style.display = 'flex';
+  bar.style.width = pct + '%';
+  text.textContent = `${pct}% ${label || ''}`.trim();
+}
+function hideProgressSoon(){
+  window.setTimeout(() => setProgress(0, 0, ''), 700);
+}
 
 function norm(s){
   return String(s ?? '').toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
@@ -339,7 +373,7 @@ function mergeAgg(target, category, value, distance, issuesByKpi, fileName){
   }
   b.files.add(fileName);
 }
-async function parseFolderFiles(fileList){
+async function parseFolderFiles(fileList, onProgress){
   const excelFiles = [...fileList].filter(f => /\.xlsx?$/i.test(f.name) && !/^\~\$/.test(f.name));
   const geoFile = [...fileList].find(f => /\.(geojson|json)$/i.test(f.name) && /countr/i.test(f.name));
   let geojson = null;
@@ -351,7 +385,9 @@ async function parseFolderFiles(fileList){
   const fileSummaries = [];
   const warnings = [];
 
-  for (const file of excelFiles){
+  for (let fileIndex = 0; fileIndex < excelFiles.length; fileIndex++){
+    const file = excelFiles[fileIndex];
+    if (typeof onProgress === 'function') onProgress(fileIndex, excelFiles.length, `Parsing ${file.name}`);
     let wb;
     try {
       wb = XLSX.read(await file.arrayBuffer(), {type:'array', cellDates:false});
@@ -414,6 +450,7 @@ async function parseFolderFiles(fileList){
       countedIssues: [...issueCountsByCategory.Road.values()].reduce((s,m)=>s + [...m.values()].reduce((a,b)=>a+b,0),0),
       totalDistance: totalDistance
     });
+    if (typeof onProgress === 'function') onProgress(fileIndex + 1, excelFiles.length, `Parsed ${file.name}`);
   }
 
   return {agg, fileSummaries, warnings, excelCount:excelFiles.length, hasGeoJSON:!!geojson};
@@ -447,6 +484,8 @@ function render(){
   const summary = root.append('div').attr('class','chart-card full');
   summary.append('div').attr('class','title').text(`${CURRENT_CATEGORY} summary`);
   summary.append('div').attr('class','sub').text(`${STATE.excelCount} workbook(s), ${STATE.fileSummaries.length} parsed. Total displayed distance ${totalDist.toFixed(1)} km. Overall ${overallRate == null ? 'n/a' : overallRate.toFixed(1)} issues/1000 km.`);
+  const hint = categoryHint(CURRENT_CATEGORY);
+  if (hint) summary.append('div').attr('class','hint').text(hint);
 
   const t = summary.append('table');
   const trh = t.append('thead').append('tr');
@@ -454,7 +493,11 @@ function render(){
   const tb = t.append('tbody');
   categories.forEach(d => {
     const tr = tb.append('tr');
-    tr.append('td').text(d.name);
+    const nameCell = tr.append('td');
+    nameCell.text(d.name);
+    if (CURRENT_CATEGORY === 'Road' && d.name === 'Other / Unclassified') {
+      nameCell.append('span').attr('class','hint-icon').attr('title', ROAD_OTHER_HINT).text('i');
+    }
     tr.append('td').attr('class','num').text(d.distance.toFixed(1));
     tr.append('td').attr('class','num').text(d.totalIssues);
     tr.append('td').attr('class','num').text(d.issues.size);
@@ -497,6 +540,8 @@ function renderMatrix(root, categories, kpis){
   const card = root.append('div').attr('class','chart-card full');
   card.append('div').attr('class','title').text(`KPI × ${CURRENT_CATEGORY} matrix`);
   card.append('div').attr('class','sub').text('Each cell is KPI count normalized by the accumulated distance for that category value: count / distance × 1000.');
+  const hint = categoryHint(CURRENT_CATEGORY);
+  if (hint) card.append('div').attr('class','hint').text(hint);
   if (!categories.length || !kpis.length){
     card.append('div').attr('class','small').text('No matrix rows after filters.');
     return;
@@ -573,17 +618,37 @@ async function fetchAutoFile(name){
 async function autoLoadFromFolder(){
   const status = document.getElementById('status');
   status.textContent = `Auto-loading Excel reports from ./${AUTO_EXCEL_FOLDER}/ ...`;
+  setProgress(0, 1, 'Finding manifest');
   try {
     const names = await discoverAutoFiles();
     const wanted = names.filter(name => /\.(xlsx?|geojson|json)$/i.test(name) && !/^\~\$/.test(name));
     if (!wanted.length) throw new Error(`No .xlsx/.xls files found in ./${AUTO_EXCEL_FOLDER}/`);
-    const files = await Promise.all(wanted.map(fetchAutoFile));
-    STATE = await parseFolderFiles(files);
-    status.innerHTML = `${STATE.excelCount} workbook(s) auto-loaded from <code>./${AUTO_EXCEL_FOLDER}/</code>.${STATE.hasGeoJSON ? ' Country GeoJSON loaded.' : ' Country is inferred from Sampling.Country, issue text, or Lat/Lon fallback.'}`;
+
+    const files = [];
+    const skipped = [];
+    for (let i = 0; i < wanted.length; i++){
+      setProgress(i, wanted.length, `Fetching ${wanted[i]}`);
+      try {
+        files.push(await fetchAutoFile(wanted[i]));
+      } catch(e) {
+        skipped.push(`${wanted[i]}: ${e.message}`);
+        console.warn('Skipped file from manifest:', e);
+      }
+    }
+    setProgress(wanted.length, wanted.length, 'Fetched files');
+
+    const excelCount = files.filter(f => /\.xlsx?$/i.test(f.name)).length;
+    if (!excelCount) throw new Error(`No listed Excel files could be loaded from ./${AUTO_EXCEL_FOLDER}/`);
+
+    STATE = await parseFolderFiles(files, (done, total, label) => setProgress(done, total, label));
+    for (const msg of skipped) STATE.warnings.push(`Manifest entry skipped: ${msg}`);
+    status.innerHTML = `${STATE.excelCount} workbook(s) auto-loaded from <code>./${AUTO_EXCEL_FOLDER}/</code>.${skipped.length ? ` ${skipped.length} manifest file(s) were skipped.` : ''}${STATE.hasGeoJSON ? ' Country GeoJSON loaded.' : ' Country is inferred from Sampling.Country, issue text, or Lat/Lon fallback.'}`;
     render();
+    hideProgressSoon();
   } catch(err) {
     console.error(err);
     status.innerHTML = `<span class="warn">Automatic loading failed: ${err.message}. Create <code>./${AUTO_EXCEL_FOLDER}/manifest.json</code> listing the Excel files, or serve the folder with directory listing enabled. Folder picker remains available as fallback.</span>`;
+    setProgress(0, 0, '');
     render();
   }
 }
@@ -599,13 +664,16 @@ document.getElementById('folderInput').addEventListener('change', async e => {
   const files = e.target.files;
   if (!files || !files.length) return;
   document.getElementById('status').textContent = 'Reading Excel files locally...';
+  setProgress(0, 1, 'Preparing local files');
   try {
-    STATE = await parseFolderFiles(files);
+    STATE = await parseFolderFiles(files, (done, total, label) => setProgress(done, total, label));
     document.getElementById('status').innerHTML = `${STATE.excelCount} workbook(s) loaded.${STATE.hasGeoJSON ? ' Country GeoJSON loaded.' : ' Country is inferred from Sampling.Country, issue text, or Lat/Lon fallback.'}`;
     render();
+    hideProgressSoon();
   } catch(err) {
     console.error(err);
     document.getElementById('status').innerHTML = `<span class="err">Failed: ${err.message}</span>`;
+    setProgress(0, 0, '');
   }
 });
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
