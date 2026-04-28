@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KPI Category Visualizer</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root{ --bg:#fff; --ink:#111; --muted:#666; --card:#f6f7fb; --line:#e6e9f2; --accent:#111; }
+    html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif; color:var(--ink); background:var(--bg);}
+    .topbar{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid var(--line);}
+    .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 16px;}
+    .tabs{display:flex;gap:8px;padding:0 16px 12px;}
+    .tab{appearance:none;border:none;border-radius:999px;padding:8px 14px;cursor:pointer;font-weight:700;background:#e9ecf5;color:#111;}
+    .tab.active{background:#111;color:#fff;}
+    .container{padding:16px;}
+    .panel{background:var(--card);border-radius:14px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,.06);}
+    .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(680px,1fr));gap:16px;}
+    .chart-card{background:#fff;border-radius:14px;padding:14px;box-shadow:0 3px 12px rgba(0,0,0,.08);position:relative;overflow:auto;}
+    .full{grid-column:1 / -1;}
+    .title{font-weight:800;font-size:18px;margin:0 0 8px;}
+    .sub{font-size:12px;color:#666;margin:2px 0 12px;}
+    .small{font-size:12px;color:#666;}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;background:#fff;padding:6px 10px;font-size:12px;}
+    input[type="file"]{max-width:440px;}
+    input[type="search"], input[type="number"]{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;font-size:13px;}
+    button.action{border:1px solid #111;background:#111;color:#fff;border-radius:8px;padding:8px 12px;font-weight:700;cursor:pointer;}
+    button.secondary{border:1px solid var(--line);background:#fff;color:#111;border-radius:8px;padding:8px 12px;font-weight:700;cursor:pointer;}
+    table{border-collapse:separate;border-spacing:0;font-size:12px;width:100%;}
+    th,td{padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:middle;}
+    th{position:sticky;top:0;background:#f6f7fb;text-align:left;z-index:1;}
+    td.num, th.num{text-align:right;white-space:nowrap;}
+    .matrix-wrap{overflow:auto;max-height:70vh;scrollbar-gutter:stable;}
+    .matrix-table{min-width:900px;width:max-content;}
+    .matrix-table th.freeze,.matrix-table td.freeze{position:sticky;left:0;background:#f6f7fb;z-index:2;min-width:300px;max-width:440px;}
+    .matrix-table thead th.freeze{z-index:3;}
+    .cell{min-width:62px;text-align:right;font-variant-numeric:tabular-nums;}
+    .status{font-size:12px;color:#555;line-height:1.45;}
+    .warn{color:#9b5c00;}
+    .err{color:#b00020;}
+    .kpi-chip{display:inline-block;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;}
+    svg text{font-family:inherit;}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="toolbar">
+      <label class="pill">
+        Excel folder fallback
+        <input id="folderInput" type="file" webkitdirectory directory multiple accept=".xlsx,.xls,.geojson,.json" />
+      </label>
+      <label class="pill">KPI search <input id="kpiSearch" type="search" placeholder="e.g. False brake" /></label>
+      <label class="pill">Min distance km <input id="minDistance" type="number" value="0" min="0" step="1" style="width:72px" /></label>
+      <button id="exportCsv" class="secondary">Export current matrix CSV</button>
+      <button id="clear" class="secondary">Clear</button>
+      <span id="status" class="status">Auto-loading Excel reports from ./CC_Expeditions_2026/ ...</span>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-category="Road">Road type</button>
+      <button class="tab" data-category="Phase">Phase</button>
+      <button class="tab" data-category="Weather">Weather</button>
+      <button class="tab" data-category="Country">Country</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="panel">
+      <div id="charts" class="charts"></div>
+    </div>
+  </div>
+
+<script>
+const AUTO_EXCEL_FOLDER = 'CC_Expeditions_2026';
+const AUTO_MANIFEST = `/manifest.json`;
+const SCORE_THRESHOLDS = [100,50,20,10,5,2,1.5,1,0.5,0];
+const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
+const GREY_10 = '#DDE2EA';
+const CATEGORY_CONFIG = {
+  Road:    { distanceSheets:['Road types','Road type','Road'], distanceKey:['Road type','Road'], issueKey:['Road','Road type'] },
+  Phase:   { distanceSheets:['Phase'], distanceKey:['Phase'], issueKey:['Phase'] },
+  Weather: { distanceSheets:['Weather'], distanceKey:['Condition','Weather'], issueKey:['Weather'] },
+  Country: { distanceSheets:['Country'], distanceKey:['Country'], issueKey:['Country'] }
+};
+
+let CURRENT_CATEGORY = 'Road';
+let STATE = null;
+
+function norm(s){
+  return String(s ?? '').toLowerCase().replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/[^a-z0-9 ]/g,'').trim();
+}
+function clean(s){
+  const v = String(s ?? '').trim();
+  return v && v.toLowerCase() !== 'n/a' && v !== 'undefined' && v !== 'null' ? v : '';
+}
+function num(v){
+  if (v == null || v === '') return null;
+  const n = Number(String(v).replace(',', '.').replace(/[^\d.\-]/g,''));
+  return Number.isFinite(n) ? n : null;
+}
+function get(obj, names){
+  const map = new Map(Object.keys(obj).map(k => [norm(k), obj[k]]));
+  for (const n of names){
+    const v = map.get(norm(n));
+    if (v != null && v !== '') return v;
+  }
+  return null;
+}
+function sheetRows(wb, sheetNames){
+  const names = Array.isArray(sheetNames) ? sheetNames : [sheetNames];
+  const found = names.map(n => wb.SheetNames.find(s => norm(s) === norm(n))).find(Boolean);
+  if (!found) return [];
+  return XLSX.utils.sheet_to_json(wb.Sheets[found], {defval:null, raw:false});
+}
+function statisticsDistance(rows){
+  for (const r of rows){
+    const metric = clean(get(r, ['Metric']));
+    if (/total test distance/i.test(metric)) return num(get(r, ['Value']));
+  }
+  return null;
+}
+function kpiSetFromWorkbook(wb){
+  const rows = sheetRows(wb, ['KPI']);
+  const s = new Set();
+  for (const r of rows){
+    const k = clean(get(r, ['Issue']));
+    if (k) s.add(k);
+  }
+  return s;
+}
+function shouldCountIssue(issue, kpiSet){
+  const v = clean(issue);
+  if (!v) return false;
+  if (kpiSet && kpiSet.size) return kpiSet.has(v);
+  if (/^test started/i.test(v)) return false;
+  if (/^manual annotation/i.test(v)) return false;
+  return true;
+}
+function parseCountryFromIssueText(issue){
+  const m = String(issue || '').match(/country\s*:\s*([^,;]+)/i);
+  return m ? clean(m[1]) : '';
+}
+function normalizeCountryName(name){
+  const v = clean(name);
+  const k = norm(v);
+  if (['sweden','sverige','se'].includes(k)) return 'Sverige';
+  if (['norway','norge','no'].includes(k)) return 'Norge';
+  if (['denmark','danmark','dk'].includes(k)) return 'Danmark';
+  if (['finland','suomi','fi'].includes(k)) return 'Finland';
+  return v;
+}
+function fallbackCountryFromLatLon(lat, lon){
+  if (lat == null || lon == null) return '';
+  if (lat >= 54.4 && lat <= 69.2 && lon >= 10.8 && lon <= 24.3) return 'Sverige';
+  if (lat >= 57.8 && lat <= 71.4 && lon >= 4.0 && lon <= 31.5) return 'Norge';
+  if (lat >= 54.4 && lat <= 57.9 && lon >= 7.8 && lon <= 15.5) return 'Danmark';
+  if (lat >= 59.5 && lat <= 70.2 && lon >= 20.0 && lon <= 31.7) return 'Finland';
+  return '';
+}
+function pointInRing(point, ring){
+  const x = point[0], y = point[1];
+  let inside = false;
+  for (let i=0, j=ring.length-1; i<ring.length; j=i++){
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    const intersect = ((yi > y) !== (yj > y)) && (x < (xj-xi) * (y-yi) / ((yj-yi) || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function pointInPolygon(point, polygon){
+  if (!polygon || !polygon.length) return false;
+  if (!pointInRing(point, polygon[0])) return false;
+  for (let i=1;i<polygon.length;i++) if (pointInRing(point, polygon[i])) return false;
+  return true;
+}
+function countryFromGeoJSON(lat, lon, geojson){
+  if (!geojson || !Array.isArray(geojson.features) || lat == null || lon == null) return '';
+  const p = [lon, lat];
+  for (const f of geojson.features){
+    const g = f.geometry || {};
+    let hit = false;
+    if (g.type === 'Polygon') hit = pointInPolygon(p, g.coordinates);
+    if (g.type === 'MultiPolygon') hit = g.coordinates.some(poly => pointInPolygon(p, poly));
+    if (hit){
+      const props = f.properties || {};
+      return normalizeCountryName(props.ADMIN || props.NAME || props.name || props.country || props.COUNTRY || '');
+    }
+  }
+  return '';
+}
+function nearestSamplingCountry(issueRow, samplingRows){
+  if (!samplingRows || !samplingRows.length) return '';
+  const d = num(get(issueRow, ['Distance (km)','Distance']));
+  const lat = num(get(issueRow, ['Lat','Latitude']));
+  const lon = num(get(issueRow, ['Lon','Longitude','Lng']));
+  let best = null, bestScore = Infinity;
+  for (const r of samplingRows){
+    const c = normalizeCountryName(get(r, ['Country']));
+    if (!c) continue;
+    const sd = num(get(r, ['Distance (km)','Distance']));
+    let score = Infinity;
+    if (d != null && sd != null) score = Math.abs(d - sd);
+    else {
+      const slat = num(get(r, ['Latitude','Lat']));
+      const slon = num(get(r, ['Longitude','Lon','Lng']));
+      if (lat != null && lon != null && slat != null && slon != null) score = Math.hypot((lat-slat)*111, (lon-slon)*60);
+    }
+    if (score < bestScore){ bestScore = score; best = c; }
+  }
+  return best || '';
+}
+function calculateCountry(issueRow, samplingRows, geojson){
+  const direct = normalizeCountryName(get(issueRow, ['Country']));
+  if (direct) return direct;
+  const fromText = normalizeCountryName(parseCountryFromIssueText(get(issueRow, ['Issue'])));
+  if (fromText) return fromText;
+  const nearest = nearestSamplingCountry(issueRow, samplingRows);
+  if (nearest) return nearest;
+  const lat = num(get(issueRow, ['Lat','Latitude']));
+  const lon = num(get(issueRow, ['Lon','Longitude','Lng']));
+  return countryFromGeoJSON(lat, lon, geojson) || fallbackCountryFromLatLon(lat, lon) || 'Unknown';
+}
+function readDistanceMap(wb, category, totalDistance, samplingRows, geojson){
+  const cfg = CATEGORY_CONFIG[category];
+  const rows = sheetRows(wb, cfg.distanceSheets);
+  const out = new Map();
+  for (const r of rows){
+    const key = clean(get(r, cfg.distanceKey));
+    const d = num(get(r, ['Distance (km)','Distance km','Distance']));
+    if (key && d != null) out.set(normalizeCountryName(key), (out.get(normalizeCountryName(key)) || 0) + d);
+  }
+  if (out.size) return out;
+
+  if ((category === 'Road' || category === 'Country') && samplingRows.length > 1){
+    for (let i=1;i<samplingRows.length;i++){
+      const prevD = num(get(samplingRows[i-1], ['Distance (km)','Distance']));
+      const curD = num(get(samplingRows[i], ['Distance (km)','Distance']));
+      const delta = curD != null && prevD != null ? Math.max(0, curD - prevD) : 0;
+      if (!delta) continue;
+      let key = '';
+      if (category === 'Road') key = clean(get(samplingRows[i], ['Road type','Road']));
+      else {
+        const lat = num(get(samplingRows[i], ['Latitude','Lat']));
+        const lon = num(get(samplingRows[i], ['Longitude','Lon','Lng']));
+        key = normalizeCountryName(get(samplingRows[i], ['Country'])) || countryFromGeoJSON(lat, lon, geojson) || fallbackCountryFromLatLon(lat, lon);
+      }
+      if (key) out.set(key, (out.get(key) || 0) + delta);
+    }
+  }
+
+  if (!out.size && totalDistance != null) out.set('All', totalDistance);
+  return out;
+}
+function scoreFromRate(rate){
+  if (rate == null || !Number.isFinite(rate)) return null;
+  if (rate === 0) return 10;
+  for (let i=0;i<9;i++) if (rate >= SCORE_THRESHOLDS[i]) return i+1;
+  return 10;
+}
+function colorForRate(rate){
+  const s = scoreFromRate(rate);
+  if (s == null) return '#f1f3f8';
+  return s === 10 ? GREY_10 : scoreColors[s-1];
+}
+function mergeAgg(target, category, value, distance, issuesByKpi, fileName){
+  if (!target[category]) target[category] = { values:new Map(), kpis:new Set() };
+  const bucket = target[category].values;
+  const key = clean(value) || 'Unknown';
+  if (!bucket.has(key)) bucket.set(key, { distance:0, totalIssues:0, issues:new Map(), files:new Set() });
+  const b = bucket.get(key);
+  b.distance += distance || 0;
+  for (const [kpi,count] of issuesByKpi.entries()){
+    b.issues.set(kpi, (b.issues.get(kpi) || 0) + count);
+    b.totalIssues += count;
+    target[category].kpis.add(kpi);
+  }
+  b.files.add(fileName);
+}
+async function parseFolderFiles(fileList){
+  const excelFiles = [...fileList].filter(f => /\.xlsx?$/i.test(f.name) && !/^\~\$/.test(f.name));
+  const geoFile = [...fileList].find(f => /\.(geojson|json)$/i.test(f.name) && /countr/i.test(f.name));
+  let geojson = null;
+  if (geoFile) {
+    try { geojson = JSON.parse(await geoFile.text()); } catch(e) { console.warn('Could not parse country GeoJSON', e); }
+  }
+
+  const agg = {};
+  const fileSummaries = [];
+  const warnings = [];
+
+  for (const file of excelFiles){
+    let wb;
+    try {
+      wb = XLSX.read(await file.arrayBuffer(), {type:'array', cellDates:false});
+    } catch(e) {
+      warnings.push(`${file.name}: could not read workbook`);
+      continue;
+    }
+
+    const issues = sheetRows(wb, ['Issues']);
+    const sampling = sheetRows(wb, ['Sampling']);
+    const stats = sheetRows(wb, ['Statistics']);
+    const totalDistance = statisticsDistance(stats);
+    const kpiSet = kpiSetFromWorkbook(wb);
+
+    if (!issues.length) warnings.push(`${file.name}: missing or empty Issues sheet`);
+
+    const issueCountsByCategory = {
+      Road:new Map(), Phase:new Map(), Weather:new Map(), Country:new Map()
+    };
+
+    for (const row of issues){
+      const issue = clean(get(row, ['Issue']));
+      if (!shouldCountIssue(issue, kpiSet)) continue;
+
+      const road = clean(get(row, CATEGORY_CONFIG.Road.issueKey)) || 'Unknown';
+      const phase = clean(get(row, CATEGORY_CONFIG.Phase.issueKey)) || 'Unknown';
+      const weather = clean(get(row, CATEGORY_CONFIG.Weather.issueKey)) || 'Unknown';
+      const country = calculateCountry(row, sampling, geojson);
+
+      const values = {Road:road, Phase:phase, Weather:weather, Country:country || 'Unknown'};
+      for (const cat of Object.keys(values)){
+        const val = normalizeCountryName(values[cat]);
+        if (!issueCountsByCategory[cat].has(val)) issueCountsByCategory[cat].set(val, new Map());
+        const byKpi = issueCountsByCategory[cat].get(val);
+        byKpi.set(issue, (byKpi.get(issue) || 0) + 1);
+      }
+    }
+
+    for (const cat of ['Road','Phase','Weather','Country']){
+      const distMap = readDistanceMap(wb, cat, totalDistance, sampling, geojson);
+      const keys = new Set([...distMap.keys(), ...issueCountsByCategory[cat].keys()]);
+      for (const key of keys){
+        mergeAgg(
+          agg,
+          cat,
+          key,
+          distMap.get(key) || 0,
+          issueCountsByCategory[cat].get(key) || new Map(),
+          file.name
+        );
+      }
+    }
+
+    fileSummaries.push({
+      file:file.name,
+      issues: issues.length,
+      countedIssues: [...issueCountsByCategory.Road.values()].reduce((s,m)=>s + [...m.values()].reduce((a,b)=>a+b,0),0),
+      totalDistance: totalDistance
+    });
+  }
+
+  return {agg, fileSummaries, warnings, excelCount:excelFiles.length, hasGeoJSON:!!geojson};
+}
+function currentRows(){
+  if (!STATE || !STATE.agg[CURRENT_CATEGORY]) return {categories:[], kpis:[]};
+  const minD = Number(document.getElementById('minDistance').value || 0);
+  const q = norm(document.getElementById('kpiSearch').value);
+  const catData = STATE.agg[CURRENT_CATEGORY];
+  const categories = [...catData.values.entries()]
+    .map(([name,b]) => ({name, ...b, rate:b.distance ? b.totalIssues / b.distance * 1000 : null}))
+    .filter(d => d.distance >= minD)
+    .sort((a,b) => (b.rate ?? -1) - (a.rate ?? -1));
+  let kpis = [...catData.kpis].sort((a,b)=>a.localeCompare(b));
+  if (q) kpis = kpis.filter(k => norm(k).includes(q));
+  return {categories, kpis};
+}
+function render(){
+  const root = d3.select('#charts').html('');
+  if (!STATE){
+    root.append('div').attr('class','chart-card full').html('<div class="title">No data loaded</div><div class="sub">The page auto-loads Excel files from <code>./CC_Expeditions_2026/manifest.json</code>. Use the folder picker only as a fallback.</div>');
+    return;
+  }
+
+  const {categories,kpis} = currentRows();
+
+  const totalDist = d3.sum(categories, d => d.distance);
+  const totalIssues = d3.sum(categories, d => d.totalIssues);
+  const overallRate = totalDist ? totalIssues / totalDist * 1000 : null;
+
+  const summary = root.append('div').attr('class','chart-card full');
+  summary.append('div').attr('class','title').text(`${CURRENT_CATEGORY} summary`);
+  summary.append('div').attr('class','sub').text(`${STATE.excelCount} workbook(s), ${STATE.fileSummaries.length} parsed. Total displayed distance ${totalDist.toFixed(1)} km. Overall ${overallRate == null ? 'n/a' : overallRate.toFixed(1)} issues/1000 km.`);
+
+  const t = summary.append('table');
+  const trh = t.append('thead').append('tr');
+  ['Category value','Distance km','Issues','Unique KPIs','Issues / 1000 km','Files'].forEach((h,i)=>trh.append('th').attr('class', i>0?'num':null).text(h));
+  const tb = t.append('tbody');
+  categories.forEach(d => {
+    const tr = tb.append('tr');
+    tr.append('td').text(d.name);
+    tr.append('td').attr('class','num').text(d.distance.toFixed(1));
+    tr.append('td').attr('class','num').text(d.totalIssues);
+    tr.append('td').attr('class','num').text(d.issues.size);
+    tr.append('td').attr('class','num').text(d.rate == null ? '—' : d.rate.toFixed(1));
+    tr.append('td').attr('class','num').text(d.files.size);
+  });
+
+  renderBar(root, categories);
+  renderMatrix(root, categories, kpis);
+
+  if (STATE.warnings.length){
+    const warn = root.append('div').attr('class','chart-card full');
+    warn.append('div').attr('class','title').text('Warnings');
+    warn.selectAll('div.warn').data(STATE.warnings).enter().append('div').attr('class','warn small').text(d=>d);
+  }
+}
+function renderBar(root, categories){
+  const card = root.append('div').attr('class','chart-card full');
+  card.append('div').attr('class','title').text(`Total issue rate by ${CURRENT_CATEGORY}`);
+  card.append('div').attr('class','sub').text('Bars show accumulated issues per 1000 km for each category value. Color follows the scoring thresholds from the original visualizer.');
+  const data = categories.filter(d => d.rate != null).slice(0, 40);
+  const w = Math.max(780, data.length * 46 + 120), h = 360;
+  const m = {top:20,right:24,bottom:96,left:58};
+  const svg = card.append('div').style('overflow','auto').append('svg').attr('width',w).attr('height',h);
+  const x = d3.scaleBand().domain(data.map(d=>d.name)).range([m.left,w-m.right]).padding(0.22);
+  const y = d3.scaleLinear().domain([0, d3.max(data,d=>d.rate) || 1]).nice().range([h-m.bottom,m.top]);
+  svg.append('g').attr('transform',`translate(0,${h-m.bottom})`).call(d3.axisBottom(x).tickSizeOuter(0))
+    .selectAll('text').attr('transform','rotate(-35)').attr('text-anchor','end');
+  svg.append('g').attr('transform',`translate(${m.left},0)`).call(d3.axisLeft(y).ticks(6));
+  svg.append('text').attr('x',m.left).attr('y',12).attr('font-size',12).attr('fill','#666').text('issues / 1000 km');
+  svg.selectAll('rect').data(data).enter().append('rect')
+    .attr('x',d=>x(d.name)).attr('y',d=>y(d.rate)).attr('width',x.bandwidth()).attr('height',d=>y(0)-y(d.rate))
+    .attr('fill',d=>colorForRate(d.rate)).attr('stroke','#fff')
+    .append('title').text(d=>`${d.name}\n${d.totalIssues} issues\n${d.distance.toFixed(1)} km\n${d.rate.toFixed(1)} /1000 km`);
+  svg.selectAll('.val').data(data).enter().append('text')
+    .attr('x',d=>x(d.name)+x.bandwidth()/2).attr('y',d=>y(d.rate)-5)
+    .attr('text-anchor','middle').attr('font-size',11).attr('font-weight',700).text(d=>d.rate.toFixed(1));
+}
+function renderMatrix(root, categories, kpis){
+  const card = root.append('div').attr('class','chart-card full');
+  card.append('div').attr('class','title').text(`KPI × ${CURRENT_CATEGORY} matrix`);
+  card.append('div').attr('class','sub').text('Each cell is KPI count normalized by the accumulated distance for that category value: count / distance × 1000.');
+  if (!categories.length || !kpis.length){
+    card.append('div').attr('class','small').text('No matrix rows after filters.');
+    return;
+  }
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const table = wrap.append('table').attr('class','matrix-table');
+  const th = table.append('thead').append('tr');
+  th.append('th').attr('class','freeze').text('KPI');
+  categories.forEach(c => th.append('th').attr('class','num cell').text(c.name).append('title').text(`${c.distance.toFixed(1)} km`));
+
+  const tb = table.append('tbody');
+  kpis.forEach(kpi => {
+    const tr = tb.append('tr');
+    tr.append('td').attr('class','freeze').append('span').attr('class','kpi-chip').attr('title',kpi).text(kpi);
+    categories.forEach(cat => {
+      const count = cat.issues.get(kpi) || 0;
+      const rate = cat.distance ? count / cat.distance * 1000 : null;
+      tr.append('td').attr('class','num cell')
+        .style('background', colorForRate(rate))
+        .style('color', scoreFromRate(rate) <= 2 ? '#fff' : '#111')
+        .text(rate == null ? '—' : rate.toFixed(1))
+        .append('title').text(`${kpi}\n${cat.name}\nCount: ${count}\nDistance: ${cat.distance.toFixed(1)} km\nRate: ${rate == null ? 'n/a' : rate.toFixed(2)} /1000 km`);
+    });
+  });
+}
+function matrixCsv(){
+  const {categories,kpis} = currentRows();
+  const rows = [['KPI', ...categories.map(c=>c.name)]];
+  for (const kpi of kpis){
+    rows.push([kpi, ...categories.map(cat => {
+      const count = cat.issues.get(kpi) || 0;
+      const rate = cat.distance ? count / cat.distance * 1000 : '';
+      return rate === '' ? '' : rate.toFixed(4);
+    })]);
+  }
+  return rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+}
+async function fetchTextIfOk(url){
+  const res = await fetch(url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(), {cache:'no-store'});
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  return await res.text();
+}
+function manifestToFileList(manifest){
+  const raw = Array.isArray(manifest) ? manifest : (manifest.files || manifest.excels || []);
+  return raw.map(x => typeof x === 'string' ? x : (x.name || x.file || x.path)).filter(Boolean);
+}
+async function discoverAutoFiles(){
+  try {
+    const txt = await fetchTextIfOk(AUTO_MANIFEST);
+    const manifest = JSON.parse(txt);
+    return manifestToFileList(manifest);
+  } catch(manifestErr) {
+    // Fallback for simple web servers that expose directory indexes.
+    const res = await fetch(`${AUTO_EXCEL_FOLDER}/`, {cache:'no-store'});
+    if (!res.ok) throw manifestErr;
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    return [...doc.querySelectorAll('a')]
+      .map(a => decodeURIComponent(a.getAttribute('href') || ''))
+      .map(h => h.split('/').pop())
+      .filter(name => /\.(xlsx?|geojson|json)$/i.test(name) && name !== 'manifest.json' && !/^\~\$/.test(name));
+  }
+}
+async function fetchAutoFile(name){
+  const safeName = String(name).split('/').pop();
+  const url = `${AUTO_EXCEL_FOLDER}/${encodeURIComponent(safeName)}`;
+  const res = await fetch(url + '?t=' + Date.now(), {cache:'no-store'});
+  if (!res.ok) throw new Error(`${safeName}: HTTP ${res.status}`);
+  const blob = await res.blob();
+  return new File([blob], safeName, {type: blob.type || 'application/octet-stream'});
+}
+async function autoLoadFromFolder(){
+  const status = document.getElementById('status');
+  status.textContent = `Auto-loading Excel reports from ./${AUTO_EXCEL_FOLDER}/ ...`;
+  try {
+    const names = await discoverAutoFiles();
+    const wanted = names.filter(name => /\.(xlsx?|geojson|json)$/i.test(name) && !/^\~\$/.test(name));
+    if (!wanted.length) throw new Error(`No .xlsx/.xls files found in ./${AUTO_EXCEL_FOLDER}/`);
+    const files = await Promise.all(wanted.map(fetchAutoFile));
+    STATE = await parseFolderFiles(files);
+    status.innerHTML = `${STATE.excelCount} workbook(s) auto-loaded from <code>./${AUTO_EXCEL_FOLDER}/</code>.${STATE.hasGeoJSON ? ' Country GeoJSON loaded.' : ' Country is inferred from Sampling.Country, issue text, or Lat/Lon fallback.'}`;
+    render();
+  } catch(err) {
+    console.error(err);
+    status.innerHTML = `<span class="warn">Automatic loading failed: ${err.message}. Create <code>./${AUTO_EXCEL_FOLDER}/manifest.json</code> listing the Excel files, or serve the folder with directory listing enabled. Folder picker remains available as fallback.</span>`;
+    render();
+  }
+}
+function downloadCsv(){
+  const blob = new Blob([matrixCsv()], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `kpi_${CURRENT_CATEGORY.toLowerCase()}_matrix.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+document.getElementById('folderInput').addEventListener('change', async e => {
+  const files = e.target.files;
+  if (!files || !files.length) return;
+  document.getElementById('status').textContent = 'Reading Excel files locally...';
+  try {
+    STATE = await parseFolderFiles(files);
+    document.getElementById('status').innerHTML = `${STATE.excelCount} workbook(s) loaded.${STATE.hasGeoJSON ? ' Country GeoJSON loaded.' : ' Country is inferred from Sampling.Country, issue text, or Lat/Lon fallback.'}`;
+    render();
+  } catch(err) {
+    console.error(err);
+    document.getElementById('status').innerHTML = `<span class="err">Failed: ${err.message}</span>`;
+  }
+});
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  CURRENT_CATEGORY = btn.dataset.category;
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+  render();
+}));
+document.getElementById('kpiSearch').addEventListener('input', render);
+document.getElementById('minDistance').addEventListener('input', render);
+document.getElementById('exportCsv').addEventListener('click', downloadCsv);
+document.getElementById('clear').addEventListener('click', () => {
+  STATE = null;
+  document.getElementById('folderInput').value = '';
+  document.getElementById('status').textContent = `Auto-loading Excel reports from ./${AUTO_EXCEL_FOLDER}/ ...`;
+  autoLoadFromFolder();
+});
+autoLoadFromFolder();
+</script>
+</body>
+</html>
