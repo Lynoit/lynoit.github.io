@@ -76,6 +76,7 @@
       <button class="tab" data-category="Phase">Phase</button>
       <button class="tab" data-category="Weather">Weather</button>
       <button class="tab" data-category="Country">Country</button>
+      <button class="tab" data-category="TestEvent">Test event</button>
     </div>
   </div>
 
@@ -92,11 +93,20 @@ const SCORE_THRESHOLDS = [100,50,20,10,5,2,1.5,1,0.5,0];
 const scoreColors = ['#e60000','#ff1e1e','#ff6a00','#ffa000','#ffe07a','#ffff33','#9acd32','#66bb6a','#00a878','#2e7d32'];
 const GREY_10 = '#DDE2EA';
 const CATEGORY_CONFIG = {
-  Road:    { distanceSheets:['Road types','Road type','Road'], distanceKey:['Road type','Road'], issueKey:['Road','Road type'] },
-  Phase:   { distanceSheets:['Phase'], distanceKey:['Phase'], issueKey:['Phase'] },
-  Weather: { distanceSheets:['Weather'], distanceKey:['Condition','Weather'], issueKey:['Weather'] },
-  Country: { distanceSheets:['Country'], distanceKey:['Country'], issueKey:['Country'] }
+  Road:      { distanceSheets:['Road types','Road type','Road'], distanceKey:['Road type','Road'], issueKey:['Road','Road type'] },
+  Phase:     { distanceSheets:['Phase'], distanceKey:['Phase'], issueKey:['Phase'] },
+  Weather:   { distanceSheets:['Weather'], distanceKey:['Condition','Weather'], issueKey:['Weather'] },
+  Country:   { distanceSheets:['Country'], distanceKey:['Country'], issueKey:['Country'] },
+  TestEvent: { distanceSheets:[], distanceKey:[], issueKey:[] }
 };
+const CATEGORY_LABELS = {
+  Road: 'Road type',
+  Phase: 'Phase',
+  Weather: 'Weather',
+  Country: 'Country',
+  TestEvent: 'Test event'
+};
+function categoryLabel(category){ return CATEGORY_LABELS[category] || category; }
 
 let CURRENT_CATEGORY = 'Road';
 let STATE = null;
@@ -155,6 +165,16 @@ function sheetRows(wb, sheetNames){
   const found = names.map(n => wb.SheetNames.find(s => norm(s) === norm(n))).find(Boolean);
   if (!found) return [];
   return XLSX.utils.sheet_to_json(wb.Sheets[found], {defval:null, raw:false});
+}
+function sheetCell(wb, sheetNames, address){
+  const names = Array.isArray(sheetNames) ? sheetNames : [sheetNames];
+  const found = names.map(n => wb.SheetNames.find(s => norm(s) === norm(n))).find(Boolean);
+  if (!found || !wb.Sheets[found]) return '';
+  const cell = wb.Sheets[found][address];
+  return cell && cell.v != null ? clean(cell.v) : '';
+}
+function testEventFromWorkbook(wb){
+  return sheetCell(wb, ['Test details','Test detail','TestDetails'], 'B6') || 'Unknown';
 }
 function statisticsDistance(rows){
   for (const r of rows){
@@ -415,8 +435,9 @@ async function parseFolderFiles(fileList, onProgress){
     if (!issues.length) warnings.push(`${file.name}: missing or empty Issues sheet`);
 
     const issueCountsByCategory = {
-      Road:new Map(), Phase:new Map(), Weather:new Map(), Country:new Map()
+      Road:new Map(), Phase:new Map(), Weather:new Map(), Country:new Map(), TestEvent:new Map()
     };
+    const testEvent = testEventFromWorkbook(wb);
 
     for (const row of issues){
       const issue = clean(get(row, ['Issue']));
@@ -427,7 +448,7 @@ async function parseFolderFiles(fileList, onProgress){
       const weather = clean(get(row, CATEGORY_CONFIG.Weather.issueKey)) || 'Unknown';
       const country = calculateCountry(row, sampling, geojson);
 
-      const values = {Road:road, Phase:phase, Weather:weather, Country:country || 'Unknown'};
+      const values = {Road:road, Phase:phase, Weather:weather, Country:country || 'Unknown', TestEvent:testEvent};
       for (const cat of Object.keys(values)){
         let val = values[cat];
         if (cat === 'Road') val = normalizeRoadType(val);
@@ -439,8 +460,8 @@ async function parseFolderFiles(fileList, onProgress){
       }
     }
 
-    for (const cat of ['Road','Phase','Weather','Country']){
-      const distMap = readDistanceMap(wb, cat, totalDistance, sampling, geojson);
+    for (const cat of ['Road','Phase','Weather','Country','TestEvent']){
+      const distMap = (cat === 'TestEvent') ? new Map([[testEvent || 'Unknown', totalDistance || 0]]) : readDistanceMap(wb, cat, totalDistance, sampling, geojson);
       const keys = new Set([...distMap.keys(), ...issueCountsByCategory[cat].keys()]);
       for (const key of keys){
         mergeAgg(
@@ -492,7 +513,7 @@ function render(){
   const overallRate = totalDist ? totalIssues / totalDist * 1000 : null;
 
   const summary = root.append('div').attr('class','chart-card full');
-  summary.append('div').attr('class','title').text(`${CURRENT_CATEGORY} summary`);
+  summary.append('div').attr('class','title').text(`${categoryLabel(CURRENT_CATEGORY)} summary`);
   summary.append('div').attr('class','sub').text(`${STATE.excelCount} workbook(s), ${STATE.fileSummaries.length} parsed. Total displayed distance ${totalDist.toFixed(1)} km. Overall ${overallRate == null ? 'n/a' : overallRate.toFixed(1)} issues/1000 km.`);
   const t = summary.append('table');
   const trh = t.append('thead').append('tr');
@@ -523,7 +544,7 @@ function render(){
 }
 function renderBar(root, categories){
   const card = root.append('div').attr('class','chart-card full');
-  card.append('div').attr('class','title').text(`Total issue rate by ${CURRENT_CATEGORY}`);
+  card.append('div').attr('class','title').text(`Total issue rate by ${categoryLabel(CURRENT_CATEGORY)}`);
   card.append('div').attr('class','sub').text('Bars show accumulated issues per 1000 km for each category value. Color follows the scoring thresholds from the original visualizer.');
   const data = categories.filter(d => d.rate != null).slice(0, 40);
   const w = Math.max(780, data.length * 46 + 120), h = 360;
@@ -545,7 +566,7 @@ function renderBar(root, categories){
 }
 function renderMatrix(root, categories, kpis){
   const card = root.append('div').attr('class','chart-card full');
-  card.append('div').attr('class','title').text(`KPI × ${CURRENT_CATEGORY} matrix`);
+  card.append('div').attr('class','title').text(`KPI × ${categoryLabel(CURRENT_CATEGORY)} matrix`);
   card.append('div').attr('class','sub').text('Each cell is KPI count normalized by the accumulated distance for that category value: count / distance × 1000.');
   if (!categories.length || !kpis.length){
     card.append('div').attr('class','small').text('No matrix rows after filters.');
@@ -663,7 +684,7 @@ function downloadCsv(){
   const blob = new Blob([matrixCsv()], {type:'text/csv;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `kpi_${CURRENT_CATEGORY.toLowerCase()}_matrix.csv`;
+  a.download = `kpi_${categoryLabel(CURRENT_CATEGORY).toLowerCase().replace(/\s+/g,'_')}_matrix.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
 }
