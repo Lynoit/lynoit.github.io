@@ -138,10 +138,17 @@ function shouldCountIssue(issue, kpiSet){
 }
 
 function normalizeRoadType(value){
-  const t = String(value || '')
-    .trim()
+  const raw = String(value || '').trim();
+  if (!raw) return 'Unknown';
+
+  const t = raw
     .toLowerCase()
     .replace(/\s+/g, '_');
+
+  // Idempotent handling: already-grouped values must stay grouped.
+  if (t === 'highway') return 'Highway';
+  if (t === 'city_road' || t === 'cityroad') return 'City road';
+  if (t === 'country_road' || t === 'countryroad') return 'Country road';
 
   // High-speed roads
   if (
@@ -159,15 +166,10 @@ function normalizeRoadType(value){
     return 'City road';
   }
 
-  // Explicit separate buckets
-  if (t === 'construction') return 'Construction';
-  if (t === 'unclassified') return 'Unclassified';
-
-  // Everything else: primary / secondary / tertiary / *_link / etc.
-  if (t) return 'Country road';
-  return 'Unknown';
+  // Everything else: primary / secondary / tertiary / *_link,
+  // construction, unclassified, other, etc.
+  return 'Country road';
 }
-
 function parseCountryFromIssueText(issue){
   const m = String(issue || '').match(/country\s*:\s*([^,;]+)/i);
   return m ? clean(m[1]) : '';
@@ -259,7 +261,8 @@ function readDistanceMap(wb, category, totalDistance, samplingRows, geojson){
   for (const r of rows){
     let key = clean(get(r, cfg.distanceKey));
     if (category === 'Road') key = normalizeRoadType(key);
-    else key = normalizeCountryName(key);
+    else if (category === 'Country') key = normalizeCountryName(key);
+    // Phase and Weather keep their original labels.
     const d = num(get(r, ['Distance (km)','Distance km','Distance']));
     if (key && d != null) out.set(key, (out.get(key) || 0) + d);
   }
@@ -354,7 +357,10 @@ async function parseFolderFiles(fileList){
 
       const values = {Road:road, Phase:phase, Weather:weather, Country:country || 'Unknown'};
       for (const cat of Object.keys(values)){
-        const val = cat === 'Road' ? normalizeRoadType(values[cat]) : normalizeCountryName(values[cat]);
+        let val = values[cat];
+        if (cat === 'Road') val = normalizeRoadType(val);
+        else if (cat === 'Country') val = normalizeCountryName(val);
+        else val = clean(val) || 'Unknown';
         if (!issueCountsByCategory[cat].has(val)) issueCountsByCategory[cat].set(val, new Map());
         const byKpi = issueCountsByCategory[cat].get(val);
         byKpi.set(issue, (byKpi.get(issue) || 0) + 1);
