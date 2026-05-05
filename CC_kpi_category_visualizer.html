@@ -7,6 +7,9 @@
   <link rel="icon" href="./favicon_speed_K_carbon_bold.svg" type="image/svg+xml" sizes="any">
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <style>
     :root{ --bg:#fff; --ink:#111; --muted:#666; --card:#f6f7fb; --line:#e6e9f2; --accent:#111; }
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif; color:var(--ink); background:var(--bg);}
@@ -50,6 +53,25 @@
     .err{color:#b00020;}
     .kpi-chip{display:inline-block;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom;}
     svg text{font-family:inherit;}
+
+    .map-skin-wrap{display:none;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;background:#fff;padding:6px 10px;font-size:12px;}
+    .map-skin-wrap select{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;font-size:12px;background:#fff;}
+    .map-grid{display:grid;grid-template-columns:minmax(420px,1fr) 340px;gap:14px;align-items:start;}
+    .map-grid.wide{grid-template-columns:1fr;}
+    .geo-map{height:620px;min-height:420px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#d9ecff;}
+    .map-side{background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px;box-shadow:0 2px 8px rgba(0,0,0,.04);}
+    .map-side .legend-row{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:12px;}
+    .dot{display:inline-block;width:11px;height:11px;border-radius:50%;border:1px solid rgba(0,0,0,.16);vertical-align:middle;}
+    .skin-note{font-size:12px;color:#555;line-height:1.45;margin:8px 0 0;}
+    .map-popup{font-size:12px;line-height:1.35;}
+    .timeline-panel{margin-top:12px;border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff;overflow:auto;}
+    .timeline-axis{position:relative;height:120px;min-width:900px;border-top:1px solid #d9deea;margin:36px 16px 8px;}
+    .timeline-event{position:absolute;top:-8px;width:12px;height:12px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.15);cursor:pointer;}
+    .timeline-event:hover{transform:scale(1.25);}
+    .timeline-route{position:absolute;top:36px;left:0;right:0;height:3px;background:#9aa6b8;border-radius:99px;}
+    .metric-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;}
+    .metric-card{border:1px solid var(--line);border-radius:10px;padding:9px;background:#fafbff;}
+    .metric-card .label{font-size:11px;color:#667;}.metric-card .value{font-weight:800;font-size:17px;margin-top:2px;}
   </style>
 </head>
 <body>
@@ -58,7 +80,7 @@
       <div id="manualControls" class="manual-controls" hidden>
         <label class="pill">
           Excel folder fallback
-          <input id="folderInput" type="file" webkitdirectory directory multiple accept=".xlsx,.xls,.geojson,.json" />
+          <input id="folderInput" type="file" webkitdirectory directory multiple accept=".xlsx,.xls,.xlsm,.geojson,.json" />
         </label>
         <label class="pill">KPI search <input id="kpiSearch" type="search" placeholder="e.g. False brake" /></label>
         <label class="pill">Min distance km <input id="minDistance" type="number" value="0" min="0" step="1" style="width:72px" /></label>
@@ -70,6 +92,15 @@
         <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
         <span id="progressText" class="progress-text"></span>
       </div>
+      <label id="mapSkinWrap" class="map-skin-wrap">
+        Map skin
+        <select id="mapSkinSelect">
+          <option value="points">Option 1 — Event points</option>
+          <option value="heatmap">Option 2 — Density heatmap</option>
+          <option value="area">Option 5 — Geographic comparison</option>
+          <option value="timeline">Option 6 — Timeline + map</option>
+        </select>
+      </label>
     </div>
     <div class="tabs">
       <button class="tab active" data-category="Road">Road type</button>
@@ -77,6 +108,7 @@
       <button class="tab" data-category="Weather">Weather</button>
       <button class="tab" data-category="Country">Country</button>
       <button class="tab" data-category="TestEvent">Test event</button>
+      <button class="tab" data-category="Map">Map</button>
     </div>
   </div>
 
@@ -104,12 +136,16 @@ const CATEGORY_LABELS = {
   Phase: 'Phase',
   Weather: 'Weather',
   Country: 'Country',
-  TestEvent: 'Test event'
+  TestEvent: 'Test event',
+  Map: 'Map'
 };
 function categoryLabel(category){ return CATEGORY_LABELS[category] || category; }
 
 let CURRENT_CATEGORY = 'Road';
+let CURRENT_MAP_SKIN = 'points';
 let STATE = null;
+let GEO_MAP = null;
+let GEO_LAYERS = [];
 
 const ROAD_OTHER_HINT = 'Other / Unclassified = track, construction, pedestrian/path/cycleway/footway/bridleway, and unexpected OSM road classes. It is kept separate so these map-matching or non-standard road types do not distort Highway, City road, or Country road KPI rates.';
 function categoryHint(category){
@@ -119,6 +155,10 @@ function categoryHint(category){
 function setManualControlsVisible(visible){
   const el = document.getElementById('manualControls');
   if (el) el.hidden = !visible;
+}
+function setMapSkinSelectorVisible(visible){
+  const el = document.getElementById('mapSkinWrap');
+  if (el) el.style.display = visible ? 'inline-flex' : 'none';
 }
 function setProgress(done, total, label){
   const wrap = document.getElementById('progressWrap');
@@ -404,7 +444,7 @@ function mergeAgg(target, category, value, distance, issuesByKpi, fileName){
   b.files.add(fileName);
 }
 async function parseFolderFiles(fileList, onProgress){
-  const excelFiles = [...fileList].filter(f => /\.xlsx?$/i.test(f.name) && !/^\~\$/.test(f.name));
+  const excelFiles = [...fileList].filter(f => /\.(xlsx|xls|xlsm)$/i.test(f.name) && !/^\~\$/.test(f.name));
   const geoFile = [...fileList].find(f => /\.(geojson|json)$/i.test(f.name) && /countr/i.test(f.name));
   let geojson = null;
   if (geoFile) {
@@ -412,6 +452,8 @@ async function parseFolderFiles(fileList, onProgress){
   }
 
   const agg = {};
+  const mapEvents = [];
+  const routePoints = [];
   const fileSummaries = [];
   const warnings = [];
 
@@ -439,6 +481,21 @@ async function parseFolderFiles(fileList, onProgress){
     };
     const testEvent = testEventFromWorkbook(wb);
 
+    for (const srow of sampling){
+      const slat = num(get(srow, ['Latitude','Lat']));
+      const slon = num(get(srow, ['Longitude','Lon','Lng']));
+      if (slat != null && slon != null){
+        routePoints.push({
+          lat:slat, lon:slon,
+          distance:num(get(srow, ['Distance (km)','Distance'])) || 0,
+          road:normalizeRoadType(get(srow, ['Road type','Road'])),
+          country:normalizeCountryName(get(srow, ['Country'])) || fallbackCountryFromLatLon(slat, slon) || 'Unknown',
+          testEvent:testEvent || 'Unknown',
+          file:file.name
+        });
+      }
+    }
+
     for (const row of issues){
       const issue = clean(get(row, ['Issue']));
       if (!shouldCountIssue(issue, kpiSet)) continue;
@@ -449,6 +506,16 @@ async function parseFolderFiles(fileList, onProgress){
       const country = calculateCountry(row, sampling, geojson);
 
       const values = {Road:road, Phase:phase, Weather:weather, Country:country || 'Unknown', TestEvent:testEvent};
+      const lat = num(get(row, ['Lat','Latitude']));
+      const lon = num(get(row, ['Lon','Longitude','Lng']));
+      const distance = num(get(row, ['Distance (km)','Distance']));
+      if (lat != null && lon != null){
+        mapEvents.push({
+          lat, lon, distance:distance || 0, issue,
+          road, phase, weather, country:country || 'Unknown',
+          testEvent:testEvent || 'Unknown', file:file.name
+        });
+      }
       for (const cat of Object.keys(values)){
         let val = values[cat];
         if (cat === 'Road') val = normalizeRoadType(val);
@@ -484,7 +551,7 @@ async function parseFolderFiles(fileList, onProgress){
     if (typeof onProgress === 'function') onProgress(fileIndex + 1, excelFiles.length, `Parsed ${file.name}`);
   }
 
-  return {agg, fileSummaries, warnings, excelCount:excelFiles.length, hasGeoJSON:!!geojson};
+  return {agg, mapEvents, routePoints, fileSummaries, warnings, excelCount:excelFiles.length, hasGeoJSON:!!geojson};
 }
 function currentRows(){
   if (!STATE || !STATE.agg[CURRENT_CATEGORY]) return {categories:[], kpis:[]};
@@ -499,12 +566,190 @@ function currentRows(){
   if (q) kpis = kpis.filter(k => norm(k).includes(q));
   return {categories, kpis};
 }
+
+function htmlEscape(v){
+  return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+const KPI_PALETTE = ['#e53935','#fb8c00','#fdd835','#1e88e5','#8e24aa','#00a99d','#43a047','#6d4c41','#3949ab','#d81b60'];
+function colorForKpi(kpi){
+  const s = String(kpi || 'Other');
+  let h = 0;
+  for (let i=0;i<s.length;i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return KPI_PALETTE[h % KPI_PALETTE.length];
+}
+function filteredMapEvents(){
+  if (!STATE) return [];
+  const q = norm(document.getElementById('kpiSearch')?.value || '');
+  let events = (STATE.mapEvents || []).filter(e => e.lat != null && e.lon != null);
+  if (q) events = events.filter(e => norm(e.issue).includes(q));
+  return events;
+}
+function destroyGeoMap(){
+  if (GEO_MAP){ GEO_MAP.remove(); GEO_MAP = null; GEO_LAYERS = []; }
+}
+function initGeoMap(containerId, events, routePoints){
+  destroyGeoMap();
+  GEO_MAP = L.map(containerId, {scrollWheelZoom:true});
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(GEO_MAP);
+  const latlngs = [];
+  for (const e of events) latlngs.push([e.lat, e.lon]);
+  for (const p of (routePoints || [])) latlngs.push([p.lat, p.lon]);
+  if (latlngs.length) GEO_MAP.fitBounds(latlngs, {padding:[28,28], maxZoom:8});
+  else GEO_MAP.setView([62.0, 15.0], 5);
+  return GEO_MAP;
+}
+function eventPopup(e){
+  return `<div class="map-popup"><b>${htmlEscape(e.issue)}</b><br>` +
+    `Distance: ${htmlEscape(e.distance?.toFixed ? e.distance.toFixed(1) : e.distance)} km<br>` +
+    `Road: ${htmlEscape(e.road)}<br>Phase: ${htmlEscape(e.phase)}<br>` +
+    `Weather: ${htmlEscape(e.weather)}<br>Country: ${htmlEscape(e.country)}<br>` +
+    `Test event: ${htmlEscape(e.testEvent)}<br><span class="small">${htmlEscape(e.file)}</span></div>`;
+}
+function addEventPointLayer(map, events){
+  const group = L.layerGroup().addTo(map);
+  for (const e of events){
+    L.circleMarker([e.lat, e.lon], {
+      radius:6, color:'#fff', weight:1.5, fillColor:colorForKpi(e.issue), fillOpacity:.88
+    }).bindPopup(eventPopup(e)).addTo(group);
+  }
+  return group;
+}
+function addRouteLayer(map, routePoints){
+  const byFile = d3.group((routePoints || []).filter(p => p.lat != null && p.lon != null), d => d.file);
+  const group = L.layerGroup().addTo(map);
+  for (const pts of byFile.values()){
+    const sorted = pts.slice().sort((a,b) => (a.distance || 0) - (b.distance || 0));
+    if (sorted.length > 1){
+      L.polyline(sorted.map(p => [p.lat, p.lon]), {color:'#6f7f91', weight:3, opacity:.55}).addTo(group);
+    }
+  }
+  return group;
+}
+function buildKpiLegend(events){
+  const counts = d3.rollups(events, v => v.length, d => d.issue).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const rows = counts.map(([k,c]) => `<div class="legend-row"><span class="dot" style="background:${colorForKpi(k)}"></span><span>${htmlEscape(k)}</span><span style="margin-left:auto">${c}</span></div>`).join('');
+  return rows || '<div class="small">No geocoded KPI events after filters.</div>';
+}
+function renderMapDashboard(root){
+  setMapSkinSelectorVisible(true);
+  destroyGeoMap();
+  const events = filteredMapEvents();
+  const routePoints = STATE.routePoints || [];
+  const card = root.append('div').attr('class','chart-card full');
+  const skinLabel = document.getElementById('mapSkinSelect')?.selectedOptions?.[0]?.textContent || 'Map';
+  card.append('div').attr('class','title').text(skinLabel);
+  card.append('div').attr('class','sub').text(`${events.length} geocoded KPI event(s). Use KPI search to filter the map. The skin selector in the top bar switches between map concepts.`);
+  if (!events.length && !routePoints.length){
+    card.append('div').attr('class','small').text('No Lat/Lon data found in the loaded Excel files. The map needs geocoded Issues and/or Sampling rows.');
+    return;
+  }
+  if (CURRENT_MAP_SKIN === 'area') renderAreaMap(card, events);
+  else if (CURRENT_MAP_SKIN === 'timeline') renderTimelineMap(card, events, routePoints);
+  else if (CURRENT_MAP_SKIN === 'heatmap') renderHeatMap(card, events);
+  else renderPointMap(card, events, routePoints);
+}
+function renderPointMap(card, events, routePoints){
+  const layout = card.append('div').attr('class','map-grid');
+  layout.append('div').attr('id','geoMap').attr('class','geo-map');
+  const side = layout.append('div').attr('class','map-side');
+  side.append('div').attr('class','title').style('font-size','15px').text('Legend');
+  side.html(side.html() + buildKpiLegend(events));
+  side.append('div').attr('class','skin-note').text('Option 1: each marker is one counted KPI issue. Click a point for issue, road, phase, weather, country, test event, and source file.');
+  window.setTimeout(() => {
+    const map = initGeoMap('geoMap', events, routePoints);
+    addRouteLayer(map, routePoints);
+    addEventPointLayer(map, events);
+  }, 0);
+}
+function renderHeatMap(card, events){
+  const layout = card.append('div').attr('class','map-grid');
+  layout.append('div').attr('id','geoMap').attr('class','geo-map');
+  const side = layout.append('div').attr('class','map-side');
+  side.append('div').attr('class','title').style('font-size','15px').text('Event density');
+  side.html(side.html() + '<div class="legend-row"><span class="dot" style="background:#e53935"></span>Very high</div><div class="legend-row"><span class="dot" style="background:#fb8c00"></span>High</div><div class="legend-row"><span class="dot" style="background:#fdd835"></span>Medium</div><div class="legend-row"><span class="dot" style="background:#64b5f6"></span>Low</div>');
+  side.append('div').attr('class','skin-note').text('Option 2: shows raw KPI event density. Use this to find hotspots, but remember it is not normalized by driven distance.');
+  window.setTimeout(() => {
+    const map = initGeoMap('geoMap', events, []);
+    if (L.heatLayer){
+      L.heatLayer(events.map(e => [e.lat, e.lon, 0.75]), {radius:28, blur:22, maxZoom:9}).addTo(map);
+    } else addEventPointLayer(map, events);
+  }, 0);
+}
+function renderAreaMap(card, events){
+  const countryAgg = d3.rollups(events, v => ({count:v.length, lat:d3.mean(v,d=>d.lat), lon:d3.mean(v,d=>d.lon)}), d => d.country || 'Unknown')
+    .map(([country, v]) => ({country, ...v}))
+    .sort((a,b)=>b.count-a.count);
+  const layout = card.append('div').attr('class','map-grid');
+  layout.append('div').attr('id','geoMap').attr('class','geo-map');
+  const side = layout.append('div').attr('class','map-side');
+  side.append('div').attr('class','title').style('font-size','15px').text('Area comparison');
+  const tbl = side.append('table');
+  const head = tbl.append('thead').append('tr');
+  ['Area','Issues'].forEach(h=>head.append('th').text(h));
+  const body = tbl.append('tbody');
+  countryAgg.forEach(d => { const tr=body.append('tr'); tr.append('td').text(d.country); tr.append('td').attr('class','num').text(d.count); });
+  side.append('div').attr('class','skin-note').text('Option 5: compares geographic areas. This simple browser version groups geocoded issues by country; it can be extended to regions or geofences later.');
+  window.setTimeout(() => {
+    const map = initGeoMap('geoMap', events, []);
+    const max = d3.max(countryAgg, d=>d.count) || 1;
+    for (const d of countryAgg){
+      if (d.lat == null || d.lon == null) continue;
+      L.circleMarker([d.lat, d.lon], {radius:10 + 24*Math.sqrt(d.count/max), color:'#fff', weight:2, fillColor:colorForRate(d.count), fillOpacity:.7})
+        .bindPopup(`<b>${htmlEscape(d.country)}</b><br>${d.count} KPI issue(s)`).addTo(map);
+    }
+  }, 0);
+}
+function renderTimelineMap(card, events, routePoints){
+  const layout = card.append('div').attr('class','map-grid');
+  layout.append('div').attr('id','geoMap').attr('class','geo-map');
+  const side = layout.append('div').attr('class','map-side');
+  side.append('div').attr('class','title').style('font-size','15px').text('Selected event');
+  side.append('div').attr('id','timelineDetails').attr('class','small').text('Click a marker or timeline dot to see details.');
+  side.append('div').attr('class','metric-row').html(`<div class="metric-card"><div class="label">Events</div><div class="value">${events.length}</div></div><div class="metric-card"><div class="label">Route points</div><div class="value">${routePoints.length}</div></div>`);
+  const panel = card.append('div').attr('class','timeline-panel full');
+  panel.append('div').attr('class','title').style('font-size','15px').text('Timeline / distance view');
+  panel.append('div').attr('class','sub').text('Selecting a dot highlights the matching map location. Position is based on Distance (km) when available.');
+  const axis = panel.append('div').attr('class','timeline-axis');
+  axis.append('div').attr('class','timeline-route');
+  const maxD = d3.max(events, d=>d.distance) || d3.max(routePoints, d=>d.distance) || 1;
+  const sample = events.slice().sort((a,b)=>(a.distance||0)-(b.distance||0)).slice(0,350);
+  window.setTimeout(() => {
+    const map = initGeoMap('geoMap', events, routePoints);
+    addRouteLayer(map, routePoints);
+    const markers = new Map();
+    const details = document.getElementById('timelineDetails');
+    function selectEvent(e){
+      if (details) details.innerHTML = eventPopup(e);
+      map.setView([e.lat,e.lon], Math.max(map.getZoom(), 9));
+      const m = markers.get(e);
+      if (m) m.openPopup();
+    }
+    for (const e of sample){
+      const m = L.circleMarker([e.lat,e.lon], {radius:6, color:'#fff', weight:1.5, fillColor:colorForKpi(e.issue), fillOpacity:.88}).bindPopup(eventPopup(e)).addTo(map);
+      m.on('click', () => selectEvent(e));
+      markers.set(e, m);
+    }
+    axis.selectAll('.timeline-event').data(sample).enter().append('span')
+      .attr('class','timeline-event')
+      .style('left', d => `${Math.max(0, Math.min(99, ((d.distance || 0) / maxD) * 100))}%`)
+      .style('background', d => colorForKpi(d.issue))
+      .attr('title', d => `${d.issue} @ ${(d.distance || 0).toFixed(1)} km`)
+      .on('click', (ev,d) => selectEvent(d));
+  }, 0);
+}
 function render(){
   const root = d3.select('#charts').html('');
+  setMapSkinSelectorVisible(CURRENT_CATEGORY === 'Map');
+  if (CURRENT_CATEGORY !== 'Map') destroyGeoMap();
   if (!STATE){
     root.append('div').attr('class','chart-card full').html('<div class="title">No data loaded</div><div class="sub">The page auto-loads Excel files from <code>./CC_Expeditions_2026/manifest.json</code>. Use the folder picker only as a fallback.</div>');
     return;
   }
+
+  if (CURRENT_CATEGORY === 'Map') { renderMapDashboard(root); return; }
 
   const {categories,kpis} = currentRows();
 
@@ -595,6 +840,8 @@ function renderMatrix(root, categories, kpis){
   });
 }
 function matrixCsv(){
+  if (CURRENT_CATEGORY === 'Map') return 'Map skin export is not available as CSV. Use category tabs for matrix CSV export.';
+
   const {categories,kpis} = currentRows();
   const rows = [['KPI', ...categories.map(c=>c.name)]];
   for (const kpi of kpis){
@@ -630,7 +877,7 @@ async function discoverAutoFiles(){
     return [...doc.querySelectorAll('a')]
       .map(a => decodeURIComponent(a.getAttribute('href') || ''))
       .map(h => h.split('/').pop())
-      .filter(name => /\.(xlsx?|geojson|json)$/i.test(name) && name !== 'manifest.json' && !/^\~\$/.test(name));
+      .filter(name => /\.(xlsx|xls|xlsm|geojson|json)$/i.test(name) && name !== 'manifest.json' && !/^\~\$/.test(name));
   }
 }
 async function fetchAutoFile(name){
@@ -648,7 +895,7 @@ async function autoLoadFromFolder(){
   setProgress(0, 1, 'Finding manifest');
   try {
     const names = await discoverAutoFiles();
-    const wanted = names.filter(name => /\.(xlsx?|geojson|json)$/i.test(name) && !/^\~\$/.test(name));
+    const wanted = names.filter(name => /\.(xlsx|xls|xlsm|geojson|json)$/i.test(name) && !/^\~\$/.test(name));
     if (!wanted.length) throw new Error(`No .xlsx/.xls files found in ./${AUTO_EXCEL_FOLDER}/`);
 
     const files = [];
@@ -664,7 +911,7 @@ async function autoLoadFromFolder(){
     }
     setProgress(wanted.length, wanted.length, 'Fetched files');
 
-    const excelCount = files.filter(f => /\.xlsx?$/i.test(f.name)).length;
+    const excelCount = files.filter(f => /\.(xlsx|xls|xlsm)$/i.test(f.name)).length;
     if (!excelCount) throw new Error(`No listed Excel files could be loaded from ./${AUTO_EXCEL_FOLDER}/`);
 
     STATE = await parseFolderFiles(files, (done, total, label) => setProgress(done, total, label));
@@ -703,6 +950,10 @@ document.getElementById('folderInput').addEventListener('change', async e => {
     document.getElementById('status').innerHTML = `<span class="err">Failed: ${err.message}</span>`;
     setProgress(0, 0, '');
   }
+});
+document.getElementById('mapSkinSelect').addEventListener('change', e => {
+  CURRENT_MAP_SKIN = e.target.value;
+  if (CURRENT_CATEGORY === 'Map') render();
 });
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
   CURRENT_CATEGORY = btn.dataset.category;
