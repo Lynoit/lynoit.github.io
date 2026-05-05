@@ -2229,9 +2229,434 @@ recognizer.recognizing = (_, e) => {
   recognizer.startContinuousRecognitionAsync();
 }
 
- function parseMaxSpeed(tag){
-  const m = /(\d+)/.exec(tag);        // first number in the tag
-  return m ? m[1] : null;             // e.g. "80"  (null if none)
+/* ─────────────────────────────────────────────
+   OSM / speed-limit helpers
+   ───────────────────────────────────────────── */
+
+let osmLookupSeq = 0;
+let lastOsmLookupMs = 0;
+let lastOsmLookupPos = null;
+
+const OSM_MIN_INTERVAL_MS = 1500; // avoid hammering Nominatim
+const OSM_MIN_DISTANCE_M  = 25;   // avoid repeated lookup at same place
+
+const osmCache = new Map();
+
+let acceptedLegalSpeed = null;
+let candidateLegalSpeed = null;
+let candidateLegalSpeedSince = 0;
+let candidateLegalSpeedStartDist = 0;
+
+const SPEED_LIMIT_HYST_MS = 8000; // require stable new limit for 8 s
+const SPEED_LIMIT_HYST_M  = 80;   // or after 80 m of travel
+
+function roundedCoordKey(lat, lon, decimals = 4) {
+  // 4 decimals ≈ 11 m latitude, enough to reduce duplicate lookups
+  return `${lat.toFixed(decimals)},${lon.toFixed(decimals)}`;
+}
+
+function shouldLookupOsm(lat, lon) {
+  const now = Date.now();
+
+  if (now - lastOsmLookupMs < OSM_MIN_INTERVAL_MS) {
+    return false;
+  }
+
+  if (lastOsmLookupPos) {
+    const d = calculateDistance(
+      lastOsmLookupPos.lat,
+      lastOsmLookupPos.lon,
+      lat,
+      lon
+    );
+
+    if (d < OSM_MIN_DISTANCE_M) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function updateOsmContext(lat, lon, gpsTs) {
+  lastOsmLookupMs = Date.now();
+  lastOsmLookupPos = { lat, lon };
+
+  const key = roundedCoordKey(lat, lon);
+
+  let data = osmCache.get(key);
+  const seq = ++osmLookupSeq;
+
+  if (!data) {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse` +
+      `?format=jsonv2` +
+      `&addressdetails=1` +
+      `&extratags=1` +
+      `&zoom=18` +
+      `&lat=${encodeURIComponent(lat)}` +
+      `&lon=${encodeURIComponent(lon)}`;
+
+    const resp = await fetch(url, { cache: 'force-cache' });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+
+    data = await resp.json();
+    osmCache.set(key, data);
+  }
+
+  // Ignore older slow responses that arrive after a newer lookup
+  if (seq !== osmLookupSeq) {
+    return;
+  }
+
+  applyOsmContext(data, lat, lon, gpsTs);
+}
+
+function getCandidateMaxSpeedTag(tags) {
+  if (!tags) {
+    return {
+      raw: null,
+      source: 'missing',
+      directional: false
+    };
+  }
+
+  if (tags.maxspeed) {
+    return {
+      raw: tags.maxspeed,
+      source: 'maxspeed',
+      directional: false
+    };
+  }
+
+  const fwd = tags['maxspeed:forward'];
+  const bwd = tags['maxspeed:backward'];
+
+  if (fwd && bwd && fwd === bwd) {
+    return {
+      raw: fwd,
+      source: 'maxspeed:forward/backward equal',
+      directional: false
+    };
+  }
+
+  if (fwd || bwd) {
+    return {
+      raw: null,
+      source: 'directional maxspeed present, but direction unknown',
+      directional: true,
+      forward: fwd || null,
+      backward: bwd || null
+    };
+  }
+
+  if (tags['maxspeed:conditional']) {
+    return {
+      raw: null,
+      source: 'conditional maxspeed present',
+      conditional: tags['maxspeed:conditional']
+    };
+  }
+
+  return {
+    raw: null,
+    source: 'missing',
+    directional: false
+  };
+}
+
+function implicitSpeedLimitKmh(tag, countryCode = '') {
+  const t = String(tag || '').toLowerCase();
+
+  // Conservative initial defaults. Extend only where you are confident.
+  const table = {
+    'se:urban': 50,
+    'se:rural': 70
+  };
+
+  return table[t] ?? null;
+}
+
+function parseMaxSpeedTag(raw, countryCode = '') {
+  if (!raw) {
+    return {
+      valueKmh: null,
+      raw: '',
+      confidence: 'none',
+      reason: 'missing'
+    };
+  }
+
+  const tag = String(raw).trim().toLowerCase();
+
+  if (tag === 'none') {
+    return {
+      valueKmh: null,
+      raw,
+      confidence: 'known',
+      reason: 'no fixed limit'
+    };
+  }
+
+  if (tag === 'signals' || tag === 'variable') {
+    return {
+      valueKmh: null,
+      raw,
+      confidence: 'variable',
+      reason: 'variable/signals'
+    };
+  }
+
+  if (tag === 'walk') {
+    return {
+      valueKmh: 7,
+      raw,
+      confidence: 'estimated',
+      reason: 'walk speed estimate'
+    };
+  }
+
+  // Example: "50 mph"
+  let m = tag.match(/^(\d+(?:\.\d+)?)\s*mph$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1]) * 1.60934),
+      raw,
+      confidence: 'converted',
+      reason: 'mph converted to km/h'
+    };
+  }
+
+  // Example: "20 knots"
+  m = tag.match(/^(\d+(?:\.\d+)?)\s*knots?$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1]) * 1.852),
+      raw,
+      confidence: 'converted',
+      reason: 'knots converted to km/h'
+    };
+  }
+
+  // Example: "50", "50 km/h", "50kmh"
+  m = tag.match(/^(\d+(?:\.\d+)?)(?:\s*km\/?h)?$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1])),
+      raw,
+      confidence: 'explicit',
+      reason: 'numeric'
+    };
+  }
+
+  // Example: "SE:urban"
+  const implicit = implicitSpeedLimitKmh(tag, countryCode);
+  if (implicit != null) {
+    return {
+      valueKmh: implicit,
+      raw,
+      confidence: 'implicit',
+      reason: 'country/context default'
+    };
+  }
+
+  return {
+    valueKmh: null,
+    raw,
+    confidence: 'unknown',
+    reason: 'unparsed'
+  };
+}
+
+function updateLegalSpeedWithHysteresis(parsed) {
+  const proposed = parsed.valueKmh;
+  const now = Date.now();
+
+  // Do not immediately clear the sign because one lookup missed maxspeed.
+  if (proposed == null) {
+    if (legalSpeedEl) {
+      legalSpeedEl.title =
+        `${parsed.raw || 'missing'} | ${parsed.confidence}: ${parsed.reason}`;
+    }
+    return;
+  }
+
+  if (acceptedLegalSpeed === null) {
+    acceptedLegalSpeed = proposed;
+    currentLegalSpeed = proposed;
+    legalSpeedEl.textContent = String(proposed);
+    lastLimit = proposed;
+    return;
+  }
+
+  if (proposed === acceptedLegalSpeed) {
+    candidateLegalSpeed = null;
+    candidateLegalSpeedSince = 0;
+    candidateLegalSpeedStartDist = 0;
+    return;
+  }
+
+  if (candidateLegalSpeed !== proposed) {
+    candidateLegalSpeed = proposed;
+    candidateLegalSpeedSince = now;
+    candidateLegalSpeedStartDist = totalDist;
+    return;
+  }
+
+  const stableLongEnough =
+    now - candidateLegalSpeedSince >= SPEED_LIMIT_HYST_MS;
+
+  const movedEnough =
+    totalDist - candidateLegalSpeedStartDist >= SPEED_LIMIT_HYST_M;
+
+  if (stableLongEnough || movedEnough) {
+    acceptedLegalSpeed = proposed;
+    currentLegalSpeed = proposed;
+    legalSpeedEl.textContent = String(proposed);
+
+    if (lastLimit !== null && proposed !== lastLimit) {
+      limitChanges++;
+    }
+
+    lastLimit = proposed;
+
+    candidateLegalSpeed = null;
+    candidateLegalSpeedSince = 0;
+    candidateLegalSpeedStartDist = 0;
+  }
+}
+
+function applyOsmContext(data, lat, lon, gpsTs) {
+  const tags = data.extratags || {};
+
+  const rawRt =
+    tags.highway ||
+    data.type ||
+    'unknown';
+
+  const displayRt =
+    allowedRoadTypes.has(rawRt)
+      ? rawRt
+      : 'Other';
+
+  currentRoadType = displayRt;
+
+  const isBridge = tags.bridge === 'yes';
+
+  const isRoundabout =
+    tags.junction === 'roundabout' ||
+    tags.highway === 'mini_roundabout';
+
+  const isTrafficLight =
+    tags.highway === 'traffic_signals';
+
+  const isTunnel =
+    tags.tunnel === 'yes';
+
+  if (isRoundabout && !lastWasRoundabout) {
+    roundaboutCount++;
+  }
+
+  if (isTrafficLight && !lastWasTrafficLight) {
+    trafficLightCount++;
+  }
+
+  if (isTunnel && !lastWasTunnel) {
+    tunnelCount++;
+  }
+
+  lastWasRoundabout = isRoundabout;
+  lastWasTrafficLight = isTrafficLight;
+  lastWasBridge = isBridge;
+  lastWasTunnel = isTunnel;
+
+  if (tags.bridge === 'yes') {
+    bridgeStreak++;
+    if (bridgeStreak === 8) {
+      bridgeCount++;
+    }
+  } else {
+    bridgeStreak = 0;
+  }
+
+  const speedCandidate = getCandidateMaxSpeedTag(tags);
+
+  const parsedSpeed = parseMaxSpeedTag(
+    speedCandidate.raw,
+    data.address?.country_code
+  );
+
+  updateLegalSpeedWithHysteresis(parsedSpeed);
+
+  if (legalSpeedEl) {
+    legalSpeedEl.title =
+      `${speedCandidate.source || 'unknown'} | ` +
+      `${parsedSpeed.raw || 'missing'} | ` +
+      `${parsedSpeed.confidence}: ${parsedSpeed.reason}`;
+  }
+
+  roadTypeEl.textContent = `Road type: ${displayRt}`;
+
+  if (allowedRoadTypes.has(rawRt)) {
+    roadTypes.add(rawRt);
+  }
+
+  const street =
+    data.address?.road ||
+    data.address?.pedestrian ||
+    data.address?.footway ||
+    'Unknown street';
+
+  const city =
+    data.address?.city ||
+    data.address?.town ||
+    data.address?.village ||
+    'Unknown city';
+
+  const country =
+    data.address?.country ||
+    'Unknown country';
+
+  if (initialCountry === null && country) {
+    initialCountry = country;
+  }
+
+  streetCityEl.innerHTML =
+    `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
+
+  if (lastCountry === null) {
+    lastCountry = country;
+    pendingCountry = null;
+    pendingCountryStartDist = 0;
+  } else if (country === lastCountry) {
+    pendingCountry = null;
+    pendingCountryStartDist = 0;
+  } else {
+    if (pendingCountry !== country) {
+      pendingCountry = country;
+      pendingCountryStartDist = totalDist;
+    } else {
+      const deltaM = totalDist - pendingCountryStartDist;
+
+      if (deltaM >= COUNTRY_HYST_M) {
+        logButton(`Entered ${country}`, false);
+        lastCountry = country;
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      }
+    }
+  }
+
+  if (city !== lastCity) {
+    lastCity = city;
+    citySet.add(city);
+    getWeather(city);
+  }
+
+  maybeUpdateTables();
 }
     
   function initMap () {
@@ -2509,109 +2934,13 @@ if (acceptedForDistance) {
     lastPhaseUpdate = now;
   }
 
-  // Reverse geocode
-  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
-    .then(r => r.json())
-    .then(data => {
-      const rawRt = data.extratags?.highway || data.type || 'unknown';
-      const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
-      const tags = data.extratags || {};
-      currentRoadType = displayRt;
-
-      const isBridge = tags.bridge === 'yes';
-      const isRoundabout =
-        tags.junction === 'roundabout' ||
-        tags.highway === 'mini_roundabout';
-      const isTrafficLight = tags.highway === 'traffic_signals';
-      const isTunnel = tags.tunnel === 'yes';
-
-      if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
-      if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
-      if (isTunnel && !lastWasTunnel) tunnelCount++;
-
-      lastWasRoundabout = isRoundabout;
-      lastWasTrafficLight = isTrafficLight;
-      lastWasBridge = isBridge;
-      lastWasTunnel = isTunnel;
-
-      if (tags.bridge === 'yes') {
-        bridgeStreak++;
-        if (bridgeStreak === 8) bridgeCount++;
-      } else {
-        bridgeStreak = 0;
-      }
-
-      const maxTag =
-        data.extratags?.maxspeed ||
-        data.extratags?.['maxspeed:forward'] ||
-        data.extratags?.['maxspeed:backward'];
-
-      const limit = maxTag ? parseMaxSpeed(maxTag) : null;
-      legalSpeedEl.textContent = limit ?? '–';
-      currentLegalSpeed = limit !== null ? Number(limit) : null;
-
-      if (limit !== null && limit !== lastLimit) {
-        if (lastLimit !== null) limitChanges++;
-        lastLimit = limit;
-      }
-
-      roadTypeEl.textContent = `Road type: ${displayRt}`;
-      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
-
-      const street =
-        data.address.road ||
-        data.address.pedestrian ||
-        data.address.footway ||
-        'Unknown street';
-
-      const city =
-        data.address.city ||
-        data.address.town ||
-        data.address.village ||
-        'Unknown city';
-
-      const country = data.address.country || 'Unknown country';
-
-if (initialCountry === null && country) {
-  initialCountry = country;
+// OSM context lookup: throttled, cached, and stale-response safe
+if (shouldLookupOsm(lat, lon)) {
+  updateOsmContext(lat, lon, ts).catch(err => {
+    streetCityEl.textContent = 'OSM error: ' + err.message;
+    console.error('OSM lookup error', err);
+  });
 }
-
-      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
-
-      if (lastCountry === null) {
-        lastCountry = country;
-        pendingCountry = null;
-        pendingCountryStartDist = 0;
-      } else if (country === lastCountry) {
-        pendingCountry = null;
-        pendingCountryStartDist = 0;
-      } else {
-        if (pendingCountry !== country) {
-          pendingCountry = country;
-          pendingCountryStartDist = totalDist;
-        } else {
-          const deltaM = totalDist - pendingCountryStartDist;
-          if (deltaM >= COUNTRY_HYST_M) {
-            logButton(`Entered ${country}`, false);
-            lastCountry = country;
-            pendingCountry = null;
-            pendingCountryStartDist = 0;
-          }
-        }
-      }
-
-      if (city !== lastCity) {
-        lastCity = city;
-        citySet.add(city);
-        getWeather(city);
-      }
-
-      maybeUpdateTables();
-    })
-    .catch(err => {
-      streetCityEl.textContent = 'Error: ' + err.message;
-      console.error('Reverse geocode error', err);
-    });
 
   if (map2) {
     map2.setView([lat, lon], 20);
@@ -2814,7 +3143,7 @@ function recordSample(issueText = '', dt = new Date()) {
   const distanceKm = (totalDist / 1000).toFixed(3);
   const speed      = lastSpeedKmh.toFixed(1);
   const maxSpd     = maxSpeed.toFixed(1);
-  const legalSpd   = (currentLegalSpeed ?? '');
+  const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
 
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
