@@ -1403,6 +1403,21 @@ function updateToggleDistanceTable() {
     let currentLegalSpeed = null;
     let currentRoadType   = 'Unknown';  // ← track latest road type for sampling
 
+    // --- HERE speed-limit lookup ---
+const HERE_API_KEY = 'YOUR_HERE_API_KEY_HERE'; // do not commit real key publicly
+
+let currentHereLegalSpeed = null;
+
+let hereLookupSeq = 0;
+let lastHereLookupMs = 0;
+let lastHereLookupPos = null;
+
+const HERE_MIN_INTERVAL_MS = 3000;
+const HERE_MIN_DISTANCE_M  = 25;
+
+const hereTracePoints = [];
+const HERE_TRACE_MAX_POINTS = 6;
+
     let sessionEnded = false;
 
    let geoWatchId            = null;
@@ -1467,6 +1482,139 @@ function applyExcelPercentFormat(ws, percentColIndex = 2) {
       cell.v = v > 1 ? v / 100 : v;
       cell.z = '0.0%';
     }
+  }
+}
+
+function shouldLookupHere(lat, lon) {
+  const now = Date.now();
+
+  if (!HERE_API_KEY || HERE_API_KEY === 'YOUR_HERE_API_KEY_HERE') {
+    return false;
+  }
+
+  if (now - lastHereLookupMs < HERE_MIN_INTERVAL_MS) {
+    return false;
+  }
+
+  if (lastHereLookupPos) {
+    const d = calculateDistance(
+      lastHereLookupPos.lat,
+      lastHereLookupPos.lon,
+      lat,
+      lon
+    );
+
+    if (d < HERE_MIN_DISTANCE_M) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function addHereTracePoint(lat, lon, gpsTs) {
+  hereTracePoints.push({
+    lat,
+    lon,
+    ts: new Date(gpsTs || Date.now()).toISOString()
+  });
+
+  while (hereTracePoints.length > HERE_TRACE_MAX_POINTS) {
+    hereTracePoints.shift();
+  }
+}
+
+function buildHereGpx(points) {
+  const trkpts = points.map(p =>
+    `<trkpt lat="${p.lat}" lon="${p.lon}"><time>${p.ts}</time></trkpt>`
+  ).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Annotator">
+  <trk><name>annotator-live-trace</name><trkseg>${trkpts}</trkseg></trk>
+</gpx>`;
+}
+
+function extractHereSpeedLimitKmh(json) {
+  const candidates = [];
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+
+    // HERE speed-limit layer fields
+    const fromRef = node.FROM_REF_SPEED_LIMIT ?? node.fromRefSpeedLimit;
+    const toRef   = node.TO_REF_SPEED_LIMIT   ?? node.toRefSpeedLimit;
+    const unit    = String(node.UNIT ?? node.unit ?? 'K').toUpperCase();
+
+    [fromRef, toRef].forEach(v => {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) {
+        candidates.push(unit === 'M' ? Math.round(n * 1.60934) : Math.round(n));
+      }
+    });
+
+    // Fallback for possible normalized response names
+    for (const [k, v] of Object.entries(node)) {
+      if (/speed.*limit/i.test(k)) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 0) {
+          candidates.push(Math.round(n));
+        }
+      }
+
+      if (v && typeof v === 'object') {
+        walk(v);
+      }
+    }
+  }
+
+  walk(json);
+
+  // Use the last candidate because the latest route link is usually the current one.
+  return candidates.length ? candidates[candidates.length - 1] : null;
+}
+
+async function updateHereSpeedLimit(lat, lon, gpsTs) {
+  addHereTracePoint(lat, lon, gpsTs);
+
+  // Route matching needs a trace, not just one standalone point.
+  if (hereTracePoints.length < 2) return;
+
+  lastHereLookupMs = Date.now();
+  lastHereLookupPos = { lat, lon };
+
+  const seq = ++hereLookupSeq;
+
+  const url =
+    `https://routematching.hereapi.com/v8/match/routelinks` +
+    `?routeMatch=1` +
+    `&mode=fastest;car` +
+    `&attributes=SPEED_LIMITS_FCn(FROM_REF_SPEED_LIMIT,TO_REF_SPEED_LIMIT,UNIT)` +
+    `&apiKey=${encodeURIComponent(HERE_API_KEY)}`;
+
+  const gpx = buildHereGpx(hereTracePoints);
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/binary'
+    },
+    body: gpx
+  });
+
+  if (!resp.ok) {
+    throw new Error(`HERE HTTP ${resp.status}`);
+  }
+
+  const data = await resp.json();
+
+  // Ignore stale slow responses.
+  if (seq !== hereLookupSeq) return;
+
+  const speed = extractHereSpeedLimitKmh(data);
+
+  if (speed != null) {
+    currentHereLegalSpeed = speed;
   }
 }    
 
@@ -2940,6 +3088,12 @@ if (shouldLookupOsm(lat, lon)) {
     streetCityEl.textContent = 'OSM error: ' + err.message;
     console.error('OSM lookup error', err);
   });
+
+if (shouldLookupHere(lat, lon)) {
+  updateHereSpeedLimit(lat, lon, ts).catch(err => {
+    console.warn('HERE speed-limit lookup error:', err);
+  });  
+  
 }
 
   if (map2) {
@@ -3143,7 +3297,8 @@ function recordSample(issueText = '', dt = new Date()) {
   const distanceKm = (totalDist / 1000).toFixed(3);
   const speed      = lastSpeedKmh.toFixed(1);
   const maxSpd     = maxSpeed.toFixed(1);
-  const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
+const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
+const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
 
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
@@ -3163,8 +3318,9 @@ function recordSample(issueText = '', dt = new Date()) {
     distance:   distanceKm,
     speed:      speed,
     maxspeed:   maxSpd,
-    legalSpeed: legalSpd,
-    roadType:   currentRoadType || 'Unknown',
+    legalSpeed:     legalSpd,
+    hereLegalSpeed: hereLegalSpd,
+    roadType:       currentRoadType || 'Unknown',
     country:    lastCountry || 'Unknown',
     issue:      issueText || '',
     toggles:    toggleSnapshot
@@ -4341,7 +4497,9 @@ if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
 
 const samplingHeader = [
   "No","Timestamp","Latitude","Longitude",
-  "Distance (km)","Speed (km/h)","Legal Speed (km/h)",
+  "Distance (km)","Speed (km/h)",
+  "Legal Speed (km/h)",
+  "HERE Legal Speed (km/h)",
   "Road type","Country","Issue"
 ];
 toggleDefs.forEach(def => samplingHeader.push(def.signal));
@@ -4349,18 +4507,19 @@ toggleDefs.forEach(def => samplingHeader.push(def.signal));
   const samplingAoA = [samplingHeader];
 
   samplingTable.forEach(entry => {
-    const row = [
-      entry.no,
-      entry.timestamp,
-      entry.lat,
-      entry.lon,
-      entry.distance,
-      entry.speed,
-      entry.legalSpeed,
-      entry.roadType || '',
-      entry.country || '',
-      entry.issue || ''
-    ];
+const row = [
+  entry.no,
+  entry.timestamp,
+  entry.lat,
+  entry.lon,
+  entry.distance,
+  entry.speed,
+  entry.legalSpeed,
+  entry.hereLegalSpeed,
+  entry.roadType || '',
+  entry.country || '',
+  entry.issue || ''
+];
 
     toggleDefs.forEach(def => {
       const valFromEntry = entry.toggles?.[def.signal];
