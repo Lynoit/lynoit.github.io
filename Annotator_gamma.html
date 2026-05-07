@@ -1589,7 +1589,7 @@ async function updateHereSpeedLimit(lat, lon, gpsTs) {
     `https://routematching.hereapi.com/v8/match/routelinks` +
     `?routeMatch=1` +
     `&mode=fastest;car` +
-    `&attributes=SPEED_LIMITS_FCn(FROM_REF_SPEED_LIMIT,TO_REF_SPEED_LIMIT,UNIT)` +
+    `&attributes=SPEED_LIMITS_FCn(FROM_REF_SPEED_LIMIT,TO_REF_SPEED_LIMIT,UNIT),LINK_ATTRIBUTE_FCn(*)` +
     `&apiKey=${encodeURIComponent(HERE_API_KEY)}`;
 
   const gpx = buildHereGpx(hereTracePoints);
@@ -1616,6 +1616,13 @@ async function updateHereSpeedLimit(lat, lon, gpsTs) {
   if (speed != null) {
     currentHereLegalSpeed = speed;
   }
+
+const hereRoadType = extractHereRoadType(data);
+
+if (hereRoadType) {
+  currentHereRoadType = hereRoadType;
+}
+  
 }    
 
 async function runCloudUploads(reason = 'auto') {
@@ -1727,6 +1734,8 @@ const PHASE_HYST_MS = 2 * 60 * 1000; // require 2 minutes stable before logging
     // near other globals
 let uploadsEnabled = false;
 
+let currentHereRoadType = '';
+    
 function checkUploadEligibility() {
   uploadsEnabled = (totalDist >= 100) || (logTable.length > 0); // totalDist is meters
   const btn = document.getElementById('uploadNowButton');
@@ -1795,6 +1804,50 @@ function updateUploadAgo() {
       startApp();
     });
 };
+
+function extractHereRoadType(json) {
+  const candidates = [];
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+
+    const functionalClass =
+      node.FUNCTIONAL_CLASS ??
+      node.functionalClass ??
+      node.FC ??
+      node.fc;
+
+    const controlledAccess =
+      node.CONTROLLED_ACCESS ??
+      node.controlledAccess;
+
+    const ramp =
+      node.RAMP ??
+      node.ramp;
+
+    if (functionalClass != null) {
+      let label = `FC${functionalClass}`;
+
+      if (String(controlledAccess).toUpperCase() === 'Y' || controlledAccess === true) {
+        label += ' controlled-access';
+      }
+
+      if (String(ramp).toUpperCase() === 'Y' || ramp === true) {
+        label += ' ramp';
+      }
+
+      candidates.push(label);
+    }
+
+    for (const v of Object.values(node)) {
+      if (v && typeof v === 'object') walk(v);
+    }
+  }
+
+  walk(json);
+
+  return candidates.length ? candidates[candidates.length - 1] : '';
+}    
 
   async function requestWakeLock() {
     if ('wakeLock' in navigator) {
@@ -3300,6 +3353,7 @@ function recordSample(issueText = '', dt = new Date()) {
   const maxSpd     = maxSpeed.toFixed(1);
 const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
 const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
+  const hereRoadType = currentHereRoadType || '';
 
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
@@ -3322,6 +3376,7 @@ const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
     legalSpeed:     legalSpd,
     hereLegalSpeed: hereLegalSpd,
     roadType:       currentRoadType || 'Unknown',
+    hereRoadType,
     country:    lastCountry || 'Unknown',
     issue:      issueText || '',
     toggles:    toggleSnapshot
@@ -4501,7 +4556,9 @@ const samplingHeader = [
   "Distance (km)","Speed (km/h)",
   "OSM Speed Limit (km/h)",
   "HERE Speed Limit (km/h)",
-  "Road type","Country","Issue"
+  "OSM Road type",
+  "HERE Road type",
+  "Country","Issue"
 ];
 toggleDefs.forEach(def => samplingHeader.push(def.signal));
 
@@ -4518,6 +4575,7 @@ const row = [
   entry.legalSpeed,
   entry.hereLegalSpeed,
   entry.roadType || '',
+  entry.hereRoadType || '',
   entry.country || '',
   entry.issue || ''
 ];
