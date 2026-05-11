@@ -603,7 +603,6 @@ form.addEventListener('submit', async e => {
   padding: 6px 8px;
   text-align: center;
 }
-   }
 
     .center-groups { display: flex; justify-content: center; align-items: flex-start; gap: 20px; }
 
@@ -665,24 +664,6 @@ form.addEventListener('submit', async e => {
   line-height: 1;
   color: #e0e0e0;
 }
-
-.condSign{
-  display: none;              /* hidden by default */
-  min-width: 38px;
-  padding: 2px 5px;
-  border: 2px solid #111;
-  border-radius: 3px;
-  background: #fff;
-  color: #000 !important;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1.1;
-  text-align: center;
-  text-transform: uppercase;
-  box-sizing: border-box;
-}  
-    
-/* --- GitHub-like button styles mapped onto your existing classes --- */
 
 /* Base */
 .bigButton{
@@ -1343,9 +1324,7 @@ textBox.addEventListener('input', () => {
 const legalSpeedEl = document.getElementById('legalSpeed');
 const hereLegalSpeedEl = document.getElementById('hereLegalSpeed');
 const hereConditionalPlateEl = document.getElementById('hereConditionalPlate');
-let currentHereConditionalSpeedPresent = false;
-let currentHereConditionalSpeedRaw = '';    
-const hereCondSignEl = document.getElementById('hereCondSign');
+
 const samplingTable = [];
 
 // --- Toggle system ---
@@ -1600,6 +1579,20 @@ function buildHereGpx(points) {
 function extractHereConditionalSpeedInfo(json) {
   const hits = [];
 
+  function hasMeaningfulValue(value) {
+    if (value === null || value === undefined || value === '') return false;
+
+    if (Array.isArray(value)) {
+      return value.some(hasMeaningfulValue);
+    }
+
+    if (typeof value === 'object') {
+      return Object.values(value).some(hasMeaningfulValue);
+    }
+
+    return true;
+  }
+
   function walk(node) {
     if (!node || typeof node !== 'object') return;
 
@@ -1608,34 +1601,24 @@ function extractHereConditionalSpeedInfo(json) {
       return;
     }
 
-    const keys = Object.keys(node);
+    for (const [key, value] of Object.entries(node)) {
+      const isConditionalSpeedKey =
+        /SPEED_LIMITS?_COND/i.test(key) ||
+        /CONDITIONAL_SPEED/i.test(key) ||
+        /COND_SPEED/i.test(key);
 
-    const hasTrueConditionalKey = keys.some(k =>
-      /SPEED_LIMITS?_COND/i.test(k) ||
-      /CONDITION_ID/i.test(k) ||
-      /TIME_DOMAIN/i.test(k) ||
-      /DATE_TIME/i.test(k) ||
-      /DAY_OF_WEEK/i.test(k) ||
-      /APPLICABLE_TIME/i.test(k)
-    );
+      const isConditionDetailKey =
+        /TIME_DOMAIN/i.test(key) ||
+        /DATE_TIME/i.test(key) ||
+        /DAY_OF_WEEK/i.test(key) ||
+        /APPLICABLE_TIME/i.test(key);
 
-    if (hasTrueConditionalKey) {
-      hits.push(node);
-    }
-
-    for (const [k, v] of Object.entries(node)) {
-      // These are common in your workbook, but they are NOT the time/speed condition
-      // you want to show as "Cond".
-      if (
-        k === 'VEHICLE_TYPES' ||
-        k === 'matchedVehicleType' ||
-        k === 'matchedVehicleTypes'
-      ) {
-        continue;
+      if ((isConditionalSpeedKey || isConditionDetailKey) && hasMeaningfulValue(value)) {
+        hits.push({ [key]: value });
       }
 
-      if (v && typeof v === 'object') {
-        walk(v);
+      if (value && typeof value === 'object') {
+        walk(value);
       }
     }
   }
@@ -1699,95 +1682,6 @@ function extractHereSpeedLimitKmh(json) {
   return candidates.length ? candidates[candidates.length - 1] : null;
 }
 
-function extractHereConditionalSpeedInfo(json) {
-  const matches = [];
-
-  function isNonEmptyObject(v) {
-    return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length > 0;
-  }
-
-  function isNonEmptyArray(v) {
-    return Array.isArray(v) && v.length > 0;
-  }
-
-  function walk(node, path = '') {
-    if (!node || typeof node !== 'object') return;
-
-    for (const [key, value] of Object.entries(node)) {
-      const keyUpper = String(key).toUpperCase();
-      const pathUpper = String(path).toUpperCase();
-
-      const looksLikeConditionalLayer =
-        keyUpper.includes('SPEED_LIMITS_COND') ||
-        keyUpper.includes('COND_SPEED') ||
-        keyUpper.includes('CONDITIONAL') ||
-        pathUpper.includes('SPEED_LIMITS_COND');
-
-      const looksLikeConditionField =
-        keyUpper.includes('CONDITION') ||
-        keyUpper.includes('COND') ||
-        keyUpper.includes('TIME_DOMAIN') ||
-        keyUpper.includes('DAYS') ||
-        keyUpper.includes('VEHICLE') ||
-        keyUpper.includes('WEATHER');
-
-      if (
-        looksLikeConditionalLayer &&
-        (isNonEmptyObject(value) || isNonEmptyArray(value))
-      ) {
-        matches.push(value);
-      }
-
-      if (
-        looksLikeConditionField &&
-        value !== null &&
-        value !== undefined &&
-        value !== '' &&
-        !(Array.isArray(value) && value.length === 0)
-      ) {
-        matches.push({ [key]: value });
-      }
-
-      if (value && typeof value === 'object') {
-        walk(value, `${path}.${key}`);
-      }
-    }
-  }
-
-  walk(json);
-
-  if (matches.length === 0) {
-    return {
-      present: false,
-      raw: ''
-    };
-  }
-
-  let raw = '';
-  try {
-    raw = JSON.stringify(matches.slice(0, 3));
-  } catch {
-    raw = 'Conditional speed data present';
-  }
-
-  return {
-    present: true,
-    raw
-  };
-}
-
-function updateHereConditionalSign(present, raw = '') {
-  currentHereConditionalSpeedPresent = !!present;
-  currentHereConditionalSpeedRaw = raw || '';
-
-  if (!hereCondSignEl) return;
-
-  hereCondSignEl.style.display = present ? 'block' : 'none';
-  hereCondSignEl.title = present
-    ? `HERE conditional speed limit present${raw ? ': ' + raw.slice(0, 250) : ''}`
-    : 'No HERE conditional speed limit detected';
-}   
-
 async function updateHereSpeedLimit(lat, lon, gpsTs) {
   addHereTracePoint(lat, lon, gpsTs);
 
@@ -1822,36 +1716,34 @@ async function updateHereSpeedLimit(lat, lon, gpsTs) {
 
   const data = await resp.json();
 
- // Ignore stale slow responses.
+// Ignore stale slow responses.
 if (seq !== hereLookupSeq) return;
-const conditionalInfo = extractHereConditionalSpeedInfo(data);
-updateHereConditionalPlate(conditionalInfo.present, conditionalInfo.raw); 
 
-const speed = extractHereSpeedLimitKmh(data);
-const conditionalInfo = extractHereConditionalSpeedInfo(data);
+  const conditionalInfo = extractHereConditionalSpeedInfo(data);
+  updateHereConditionalPlate(conditionalInfo.present, conditionalInfo.raw);
 
-updateHereConditionalSign(conditionalInfo.present, conditionalInfo.raw);
+  const speed = extractHereSpeedLimitKmh(data);
 
-if (speed != null) {
-  currentHereLegalSpeed = speed;
+  if (speed != null) {
+    currentHereLegalSpeed = speed;
 
-  if (hereLegalSpeedEl) {
-    hereLegalSpeedEl.textContent = String(speed);
-    hereLegalSpeedEl.title = conditionalInfo.present
-      ? 'HERE speed limit. Conditional speed data is also present.'
-      : 'HERE speed limit';
+    if (hereLegalSpeedEl) {
+      hereLegalSpeedEl.textContent = String(speed);
+      hereLegalSpeedEl.title = conditionalInfo.present
+        ? 'HERE speed limit. Conditional speed data is also present.'
+        : 'HERE speed limit';
+    }
+  } else if (conditionalInfo.present && hereLegalSpeedEl) {
+    hereLegalSpeedEl.title =
+      'No fixed HERE speed limit found, but conditional speed data is present.';
   }
-} else if (conditionalInfo.present && hereLegalSpeedEl) {
-  hereLegalSpeedEl.title = 'No fixed HERE speed limit found, but conditional speed data is present.';
-}
 
-const hereRoadType = extractHereRoadType(data);
+  const hereRoadType = extractHereRoadType(data);
 
-if (hereRoadType) {
-  currentHereRoadType = hereRoadType;
+  if (hereRoadType) {
+    currentHereRoadType = hereRoadType;
+  }
 }
-  
-}    
 
 async function runCloudUploads(reason = 'auto') {
   if (!uploadsEnabled) return;
@@ -2592,16 +2484,15 @@ function stripHotWord(text) {
 }
 
 async function initAzureSpeech() {
-  console.log('initAzureSpeech started');    //  ← already added last time?
+  console.log('initAzureSpeech started');
   const warn = msg => console.warn('Speech init:', msg);
 
   if (!window.SpeechSDK) {
     warn('SpeechSDK global missing – script failed to load?');
-    micLamp.style.background = '#ffc107';   // 🟡  error
+    micLamp.style.background = '#ffc107';
     return;
   }
 
-  let recognizer;
   try {
     const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
       AZURE_KEY, AZURE_REGION
