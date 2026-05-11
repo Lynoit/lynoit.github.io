@@ -640,6 +640,25 @@ form.addEventListener('submit', async e => {
   gap: 4px;
 }
 
+.conditionalPlate {
+  margin-top: 2px;
+  padding: 1px 7px;
+  min-width: 34px;
+  border: 2px solid #111;
+  border-radius: 4px;
+  background: #fff;
+  color: #000 !important;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.2;
+  text-align: center;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.25);
+}
+
+.conditionalPlate.hidden {
+  display: none;
+}
+    
 .speedLabel{
   font-size: 12px;
   font-weight: 600;
@@ -898,7 +917,7 @@ form.addEventListener('submit', async e => {
 <div class="speedSignBlock">
   <div class="speedLabel">HERE</div>
   <div id="hereLegalSpeed" class="speedSign" title="HERE speed limit">–</div>
-  <div id="hereCondSign" class="condSign" title="HERE conditional speed limit present">Cond</div>
+  <div id="hereConditionalPlate" class="conditionalPlate hidden" title="HERE conditional speed">Cond</div>
 </div>
 </div>
     <div class="distanceContainer">
@@ -1323,6 +1342,9 @@ textBox.addEventListener('input', () => {
     const citySet = new Set();   // unique city names encountered
 const legalSpeedEl = document.getElementById('legalSpeed');
 const hereLegalSpeedEl = document.getElementById('hereLegalSpeed');
+const hereConditionalPlateEl = document.getElementById('hereConditionalPlate');
+let currentHereConditionalSpeedPresent = false;
+let currentHereConditionalSpeedRaw = '';    
 const hereCondSignEl = document.getElementById('hereCondSign');
 const samplingTable = [];
 
@@ -1575,6 +1597,69 @@ function buildHereGpx(points) {
 </gpx>`;
 }
 
+function extractHereConditionalSpeedInfo(json) {
+  const hits = [];
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+
+    const keys = Object.keys(node);
+
+    const hasTrueConditionalKey = keys.some(k =>
+      /SPEED_LIMITS?_COND/i.test(k) ||
+      /CONDITION_ID/i.test(k) ||
+      /TIME_DOMAIN/i.test(k) ||
+      /DATE_TIME/i.test(k) ||
+      /DAY_OF_WEEK/i.test(k) ||
+      /APPLICABLE_TIME/i.test(k)
+    );
+
+    if (hasTrueConditionalKey) {
+      hits.push(node);
+    }
+
+    for (const [k, v] of Object.entries(node)) {
+      // These are common in your workbook, but they are NOT the time/speed condition
+      // you want to show as "Cond".
+      if (
+        k === 'VEHICLE_TYPES' ||
+        k === 'matchedVehicleType' ||
+        k === 'matchedVehicleTypes'
+      ) {
+        continue;
+      }
+
+      if (v && typeof v === 'object') {
+        walk(v);
+      }
+    }
+  }
+
+  walk(json);
+
+  return {
+    present: hits.length > 0,
+    raw: hits.length ? JSON.stringify(hits.slice(0, 5)) : ''
+  };
+}
+
+function updateHereConditionalPlate(isConditional, raw = '') {
+  currentHereConditionalSpeedPresent = !!isConditional;
+  currentHereConditionalSpeedRaw = raw || '';
+
+  if (!hereConditionalPlateEl) return;
+
+  hereConditionalPlateEl.classList.toggle('hidden', !isConditional);
+  hereConditionalPlateEl.title = isConditional
+    ? `HERE conditional speed: ${raw}`
+    : 'No HERE conditional speed detected';
+}    
+
 function extractHereSpeedLimitKmh(json) {
   const candidates = [];
 
@@ -1737,8 +1822,10 @@ async function updateHereSpeedLimit(lat, lon, gpsTs) {
 
   const data = await resp.json();
 
-  // Ignore stale slow responses.
-  if (seq !== hereLookupSeq) return;
+ // Ignore stale slow responses.
+if (seq !== hereLookupSeq) return;
+const conditionalInfo = extractHereConditionalSpeedInfo(data);
+updateHereConditionalPlate(conditionalInfo.present, conditionalInfo.raw); 
 
 const speed = extractHereSpeedLimitKmh(data);
 const conditionalInfo = extractHereConditionalSpeedInfo(data);
@@ -3492,11 +3579,16 @@ function recordSample(issueText = '', dt = new Date()) {
   const distanceKm = (totalDist / 1000).toFixed(3);
   const speed      = lastSpeedKmh.toFixed(1);
   const maxSpd     = maxSpeed.toFixed(1);
-const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
-const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
-const hereCondPresent = currentHereConditionalSpeedPresent ? 'Yes' : 'No';
-const hereCondRaw = currentHereConditionalSpeedRaw || '';
-const hereRoadType = currentHereRoadType || ''
+
+  const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
+  const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
+  const hereRoadType = currentHereRoadType || '';
+
+  const hereConditionalSpeedPresent =
+    currentHereConditionalSpeedPresent ? 'Yes' : 'No';
+
+  const hereConditionalSpeedRaw =
+    currentHereConditionalSpeedRaw || '';
 
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
@@ -3508,24 +3600,24 @@ const hereRoadType = currentHereRoadType || ''
     }
   });
 
-  samplingTable.push({
-    no:         rowNo,
-    timestamp,
-    lat:        latitude,
-    lon:        longitude,
-    distance:   distanceKm,
-    speed:      speed,
-    maxspeed:   maxSpd,
-    legalSpeed:     legalSpd,
-    hereLegalSpeed: hereLegalSpd,
-    hereConditionalSpeedPresent: hereCondPresent,
-    hereConditionalSpeedRaw: hereCondRaw,
-    roadType:       currentRoadType || 'Unknown',
-    hereRoadType,
-    country:    lastCountry || 'Unknown',
-    issue:      issueText || '',
-    toggles:    toggleSnapshot
-  });
+samplingTable.push({
+  no:         rowNo,
+  timestamp,
+  lat:        latitude,
+  lon:        longitude,
+  distance:   distanceKm,
+  speed:      speed,
+  maxspeed:   maxSpd,
+  legalSpeed:     legalSpd,
+  hereLegalSpeed: hereLegalSpd,
+  hereConditionalSpeedPresent,
+  hereConditionalSpeedRaw,
+  roadType:       currentRoadType || 'Unknown',
+  hereRoadType,
+  country:    lastCountry || 'Unknown',
+  issue:      issueText || '',
+  toggles:    toggleSnapshot
+});
 }
 
 function buildDistanceSummaryFromSampling(key) {
