@@ -12,11 +12,8 @@
     :root{ --bg:#ffffff; --ink:#111; --muted:#666; --card:#f6f7fb; }
     html,body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; color:var(--ink); background:var(--bg);}
 
-    /* Top tabs */
+    /* Top feature selector */
     .topbar{ position:sticky; top:0; z-index:5; background:#fff; border-bottom:1px solid #eef1fb; }
-    .tabs{ display:flex; gap:8px; padding:10px 16px; }
-    .tab{ appearance:none; border:none; border-radius:999px; padding:8px 14px; cursor:pointer; font-weight:600; background:#e9ecf5; }
-    .tab.active{ background:#111; color:#fff; }
 
 
     /* Feature/KPI selector */
@@ -187,10 +184,6 @@ body.modal-open{ overflow: hidden; }
 </head>
 <body>
   <div class="topbar">
-    <div class="tabs">
-      <button class="tab active" data-mode="internal" aria-pressed="true">Internal</button>
-      <button class="tab" data-mode="external" aria-pressed="false">External</button>
-    </div>
     <div id="featureControls" class="feature-filter" aria-label="KPI feature selection"></div>
   </div>
 
@@ -220,32 +213,6 @@ const DEFAULT_THRESH_STR = '100,60,40,30,20,15,10,5,3,2';
 const SCORE_THRESHOLDS = [100,50,20,10,5,2,1.5,1,0.5,0];
 const LS_KEY = 'segRadarKPI.thresholds';
 
-const MODES = { INTERNAL:'internal', EXTERNAL:'external' };
-let CURRENT_MODE = MODES.INTERNAL;
-
-const urlMode = new URLSearchParams(location.search).get('mode');
-if (urlMode && (urlMode.toLowerCase() in MODES)) CURRENT_MODE = urlMode.toLowerCase();
-
-const EXTERNAL_CARD_VISIBILITY = {
-  summary: false,
-  calendar: false,
-  ccMatrix: true,
-  nonCCPlusLatestCC: true,
-  softwareCards: false
-};
-
-const EXTERNAL_WHITELIST = [
-  'ACC — False brake',
-  'LCC — False brake',
-  'ALCA — Cancel for no reason',
-  'ALCA — Not available within ODD',
-  'ALCA — ALCA Available outside ODD',
-  'TSI — Wrong speed detected',
-  'LKA — LDW False positive',
-  'LKA — LDP False positive',
-  'LKA — ELKA False positive'
-];
-
 function normKey(s){
   return String(s || '')
     .toLowerCase()
@@ -253,8 +220,6 @@ function normKey(s){
     .replace(/\s+/g, ' ')
     .trim();
 }
-const EXTERNAL_WL_KEYS = new Set(EXTERNAL_WHITELIST.map(normKey));
-
 /* Weather (Open-Meteo archive, aggregated 10–14) */
 const GOTHENBURG = { lat: 57.7089, lon: 11.9746, tz: 'Europe/Stockholm' };
 const WEATHER_LS_KEY = 'segRadarKPI.weather.GOT.10to14';
@@ -701,15 +666,6 @@ async function fetchWeatherForDates(dates){
   return cache;
 }
 
-/* ==================== External filtering ==================== */
-function filterEntriesForMode(parsed){
-  if (CURRENT_MODE === MODES.INTERNAL) return parsed;
-  const filteredEntries = (parsed.entries || []).filter(e =>
-    EXTERNAL_WL_KEYS.has(normKey(`${e.func} — ${e.kpi}`))
-  );
-  return { ...parsed, entries: filteredEntries };
-}
-
 /* ==================== Summary (unchanged visuals) ==================== */
 function scoreFromAvg(a, T){ if (a==null||Number.isNaN(a)) return null; if (a===0) return 10; for(let i=0;i<9;i++){ if(a>=T[i]) return i+1; } return 10; }
 function scoreRangeLabels(T){
@@ -990,10 +946,7 @@ function renderSummary(container, parsed){
 
   // ==== CARD
   const card = container.append('div').attr('class', 'chart-card summary-card');
-  const modeLabel = (CURRENT_MODE === MODES.EXTERNAL)
-    ? 'Summary Weekly KPI — External (whitelisted)'
-    : 'Summary Weekly KPI';
-  card.append('div').attr('class','summary-title').text(modeLabel);
+  card.append('div').attr('class','summary-title').text('Summary Weekly KPI');
 
   // ==== TABLE
   const table = card.append('table').attr('class', 'summary-table');
@@ -1745,7 +1698,7 @@ function renderSoftwareCards(container, parsed){
 
     const svg = card.append('svg').attr('width', w);
 
-    const titleText = (CURRENT_MODE === MODES.EXTERNAL ? 'External — ' : '') + (sw.date ? `${swLabel}. ${sw.date}` : swLabel);
+    const titleText = sw.date ? `${swLabel}. ${sw.date}` : swLabel;
     svg.append('text').attr('x', w/2).attr('y', TITLE_Y).attr('text-anchor','middle').attr('font-weight',700).text(titleText);
 
     // Build rows for this software
@@ -1755,9 +1708,7 @@ function renderSoftwareCards(container, parsed){
 
     if (rows.length === 0) {
       card.append('div').attr('class','small').style('margin','8px 10px 12px')
-        .text(CURRENT_MODE === MODES.EXTERNAL
-          ? 'No KPIs remain for this software after External whitelist filtering.'
-          : 'No KPI values for this software.');
+        .text('No KPI values for this software.');
       svg.remove();
       return;
     }
@@ -1777,9 +1728,7 @@ function renderSoftwareCards(container, parsed){
     const functions = Array.from(new Set(rows.map(r => r.func)));
     if (!functions.length){
       card.append('div').attr('class','small')
-        .text(CURRENT_MODE === MODES.EXTERNAL
-          ? 'No KPIs remain for this software after External whitelist filtering.'
-          : 'No KPI values for this software.');
+        .text('No KPI values for this software.');
       svg.remove();
       return;
     }
@@ -1951,24 +1900,25 @@ function renderSoftwareCards(container, parsed){
 
 /* ==================== Main renderer ==================== */
 function renderCharts(parsedFull){
-  const parsed = makeParsedViewForSelectedFeatures(filterEntriesForMode(parsedFull));
+  const parsed = makeParsedViewForSelectedFeatures(parsedFull);
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length || !parsed.software || !parsed.software.length){
     container.append('div').attr('class','small').text('No valid cars/software for the selected KPI groups.');
     return;
   }
 
-  const ext = (CURRENT_MODE === MODES.EXTERNAL);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.summary)               renderSummary(container, parsed);
+  renderSummary(container, parsed);
 
-  // ⬇️ REMOVE the old stand-alone CC timeline card
+  // Stand-alone CC timeline cards remain disabled; the timeline is rendered inside the summary card.
   // renderCCTimeline(container, parsed);
   // renderCCTimelineCard(container, parsed);
   // renderCCTimelineBar(container, parsed);
 
-  if (!ext || EXTERNAL_CARD_VISIBILITY.ccMatrix)              renderCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.nonCCPlusLatestCC)     renderNonCCPlusLatestCCMatrix(container, parsed);
-  if (!ext || EXTERNAL_CARD_VISIBILITY.softwareCards)         renderSoftwareCards(container, parsed);
+  renderCCMatrix(container, parsed);
+  renderNonCCPlusLatestCCMatrix(container, parsed);
+
+  // Per-software radar cards are optional; uncomment if you want them shown.
+  // renderSoftwareCards(container, parsed);
 }
 
 
@@ -2011,7 +1961,7 @@ async function loadCsvAndRender(){
   }
 }
 
-/* ==================== Modal & tabs ==================== */
+/* ==================== Modal ==================== */
 function openReleaseNoteModal(title, noteText){
   const backdrop = document.getElementById('modalBackdrop');
   const titleEl  = document.getElementById('modalTitle');
@@ -2028,15 +1978,8 @@ document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeRelease
 document.getElementById('modalBackdrop').addEventListener('click', (e)=>{ if (e.target.id === 'modalBackdrop') closeReleaseNoteModal(); });
 document.getElementById('modalClose').addEventListener('click', closeReleaseNoteModal);
 
-function updateTabsUI(){ document.querySelectorAll('.tab').forEach(btn=>{ const on = (btn.dataset.mode === CURRENT_MODE); btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', on ? 'true' : 'false'); }); }
-document.querySelectorAll('.tab').forEach(btn=>{
-  btn.addEventListener('click', (e)=>{ e.preventDefault(); const mode = btn.dataset.mode; if (!mode || mode === CURRENT_MODE) return; CURRENT_MODE = mode; updateTabsUI(); if (LAST_PARSED) renderCharts(LAST_PARSED); });
-  btn.setAttribute('role','tab'); btn.setAttribute('tabindex','0');
-  btn.addEventListener('keydown', (e)=>{ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
-});
-
 /* ==================== Boot ==================== */
-document.addEventListener('DOMContentLoaded', ()=>{ updateTabsUI(); loadCsvAndRender(); });
+document.addEventListener('DOMContentLoaded', ()=>{ loadCsvAndRender(); });
 </script>
 </body>
 </html>
