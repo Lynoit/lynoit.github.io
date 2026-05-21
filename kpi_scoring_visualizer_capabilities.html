@@ -343,16 +343,16 @@ function featureAvailableInAnySoftware(parsed, featKey){
   const capsBySoftware = parsed.capabilities || {};
   const swLabels = Object.keys(capsBySoftware);
 
-  // Old CSV without capability rows: keep legacy behavior and show all detected groups.
+  // Old CSV without capability rows: keep legacy behavior.
   const hasAnyCapabilityRows = swLabels.some(sw =>
     Object.keys(capsBySoftware[sw] || {}).length > 0
   );
-
   if (!hasAnyCapabilityRows) return true;
 
-  // Capability-aware CSV: show a group only if at least one car/software has it.
+  // If capability rows exist, show this feature only if at least one car/software has it.
   return swLabels.some(sw => capsBySoftware[sw]?.[featKey] === true);
 }
+
 function getFeatureOptions(parsed){
   const byKey = new Map();
   KPI_CATALOG.forEach(k => { if (k.featureKey) byKey.set(k.featureKey, k.feature); });
@@ -411,54 +411,96 @@ function setupFeatureControls(parsed){
   noneBtn.onclick = () => { SELECTED_FEATURE_KEYS = new Set(); setupFeatureControls(parsed); renderCharts(parsed); };
   actions.appendChild(allBtn); actions.appendChild(noneBtn); host.appendChild(actions);
 }
+function softwareHasAllSelectedFeatures(parsed, swLabel, active){
+  const caps = parsed.capabilities?.[swLabel];
+
+  // Old CSV without capability rows: keep legacy behavior.
+  if (!caps || Object.keys(caps).length === 0) return true;
+
+  // Strict rule:
+  // every checked feature must explicitly be available for this software/car.
+  for (const featKey of active){
+    if (caps[featKey] !== true) return false;
+  }
+
+  return true;
+}
+
 function makeParsedViewForSelectedFeatures(parsed){
-  const software = parsed.software || [];
+  const softwareAll = parsed.software || [];
   const active = SELECTED_FEATURE_KEYS && SELECTED_FEATURE_KEYS.size
     ? SELECTED_FEATURE_KEYS
-    : new Set(getFeatureOptions(parsed).map(o=>o.key));
+    : new Set(getFeatureOptions(parsed).map(o => o.key));
+
+  // Strict behavior:
+  // A car/software is valid only if it has ALL selected KPI groups.
+  const validSoftware = softwareAll.filter(sw =>
+    softwareHasAllSelectedFeatures(parsed, sw.label, active)
+  );
+
+  const validSoftwareLabels = new Set(validSoftware.map(sw => sw.label));
 
   const viewEntries = (parsed.entries || [])
     .filter(e => active.has(featureKey(e.func)))
     .map(e => {
       const fKey = featureKey(e.func);
       const values = {};
-      software.forEach(sw => {
-        values[sw.label] = availableForSoftware(parsed, sw.label, fKey) ? e.values[sw.label] : null;
+
+      softwareAll.forEach(sw => {
+        if (!validSoftwareLabels.has(sw.label)) {
+          values[sw.label] = null;
+          return;
+        }
+
+        values[sw.label] = availableForSoftware(parsed, sw.label, fKey)
+          ? e.values[sw.label]
+          : null;
       });
+
       return { ...e, values };
     });
 
   const kpiCountBySoftware = {};
-  software.forEach(sw => {
+
+  softwareAll.forEach(sw => {
+    if (!validSoftwareLabels.has(sw.label)) {
+      kpiCountBySoftware[sw.label] = 0;
+      return;
+    }
+
     let count = 0;
+
     if (KPI_CATALOG.length){
       count = KPI_CATALOG.filter(k =>
-        active.has(k.featureKey) && availableForSoftware(parsed, sw.label, k.featureKey)
+        active.has(k.featureKey) &&
+        availableForSoftware(parsed, sw.label, k.featureKey)
       ).length;
     } else {
       count = viewEntries.filter(e =>
-        active.has(featureKey(e.func)) && availableForSoftware(parsed, sw.label, featureKey(e.func))
+        active.has(featureKey(e.func)) &&
+        availableForSoftware(parsed, sw.label, featureKey(e.func))
       ).length;
     }
+
     kpiCountBySoftware[sw.label] = count;
   });
 
-  // Hide car/software columns that have no selected applicable KPIs.
-  // Example: if only LCC+ is selected and no car has LCC+, no cars are shown.
-  const visibleSoftware = software.filter(sw => (kpiCountBySoftware[sw.label] || 0) > 0);
-
-  return { ...parsed, software: visibleSoftware, entries: viewEntries, kpiCountBySoftware };
+  return {
+    ...parsed,
+    software: validSoftware,
+    entries: viewEntries,
+    kpiCountBySoftware
+  };
 }
+
 function denominatorForSoftware(parsed, swLabel, fallback){
   const counts = parsed.kpiCountBySoftware;
 
-  // If capability-aware counts exist, trust them.
-  // Important: 0 means this car/software has no selected applicable KPIs.
+  // Important: 0 is valid and means "hide / do not score".
   if (counts && Object.prototype.hasOwnProperty.call(counts, swLabel)) {
     return counts[swLabel] || 0;
   }
 
-  // Legacy fallback only for old CSVs without capability logic.
   return fallback || 0;
 }
 
@@ -915,7 +957,7 @@ function renderSummary(container, parsed){
     const swLabel = sw.label;
     const vals = parsed.entries.map(e => e.values[swLabel]).filter(v => v!=null && !Number.isNaN(v));
     const sumVals = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
-    const denom = denominatorForSoftware(parsed, swLabel, vals.length);
+    const denom = denominatorForSoftware(parsed, sw.label, vals.length);
     const avg = denom ? (sumVals / denom) : null;
     const score = avg == null ? null : scoreFromAvg(avg, T);
     const note = (parsed.releaseNotes?.[swLabel] || '').trim();
@@ -924,14 +966,13 @@ function renderSummary(container, parsed){
       sw: swLabel,
       base: sw.base,
       date: sw.date,
-      denom,
       avg,
       score,
       text: score==null ? 'n/a' : scoreText[score-1],
       note,
       weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
     };
-  }).filter(r => r.denom > 0);
+  });
 
   const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
@@ -1913,7 +1954,7 @@ function renderCharts(parsedFull){
   const parsed = makeParsedViewForSelectedFeatures(filterEntriesForMode(parsedFull));
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length || !parsed.software || !parsed.software.length){
-    container.append('div').attr('class','small').text('No data to render for the selected KPI groups.');
+    container.append('div').attr('class','small').text('No valid cars/software for the selected KPI groups.');
     return;
   }
 
@@ -1946,7 +1987,8 @@ async function loadCsvAndRender(){
     const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
     const weatherByDate = await fetchWeatherForDates(dates);
 
-    // Read KPI_buttons.csv as the fixed KPI catalogue. It is not modified.
+    // Read KPI_buttons.csv as a read-only KPI catalogue.
+    // It is used to count selected KPI items per feature group.
     try{
       const txt = await readTextOrNull(KPI_BUTTONS_CSV);
       if (txt){
