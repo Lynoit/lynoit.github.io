@@ -270,6 +270,11 @@ function featureKey(s){
   return canonicalFeatureLabel(s).toUpperCase().replace(/\s+/g, '').replace('LCCPLUS','LCC+');
 }
 function featureLabelFromKey(key, fallback){
+  const special = {
+    IACC: 'iACC',
+    'LCC+': 'LCC+'
+  };
+  if (special[key]) return special[key];
   const known = KNOWN_FEATURES.find(f => featureKey(f) === key);
   return known || fallback || key;
 }
@@ -320,11 +325,29 @@ function featureAvailableInAnySoftware(parsed, featKey){
 
 function getFeatureOptions(parsed){
   const byKey = new Map();
-  KPI_CATALOG.forEach(k => { if (k.featureKey) byKey.set(k.featureKey, k.feature); });
-  (parsed.entries || []).forEach(e => { const k = featureKey(e.func); if (k) byKey.set(k, canonicalFeatureLabel(e.func)); });
+
+  // Primary source: capability rows in weekly_kpi_data_capabilities.csv.
+  // This makes the checkbox row match the benchmark file exactly.
   Object.values(parsed.capabilities || {}).forEach(caps => {
-    Object.keys(caps || {}).forEach(k => byKey.set(k, featureLabelFromKey(k)));
+    Object.keys(caps || {}).forEach(k => {
+      byKey.set(k, featureLabelFromKey(k));
+    });
   });
+
+  // Fallback for old CSV files without Capability rows.
+  if (byKey.size === 0) {
+    KPI_CATALOG.forEach(k => {
+      if (k.featureKey) byKey.set(k.featureKey, k.feature);
+    });
+
+    (parsed.entries || []).forEach(e => {
+      const k = featureKey(e.func);
+      if (k) byKey.set(k, canonicalFeatureLabel(e.func));
+    });
+  }
+
+  // Hide groups that are explicitly unavailable for every car/software.
+  // Example: Capability — LCC+ = 0 for all cars => do not show LCC+.
   return Array.from(byKey, ([key,label]) => ({key,label}))
     .filter(o => featureAvailableInAnySoftware(parsed, o.key))
     .sort((a,b)=>a.label.localeCompare(b.label));
@@ -393,9 +416,7 @@ function softwareHasAllSelectedFeatures(parsed, swLabel, active){
 
 function makeParsedViewForSelectedFeatures(parsed){
   const softwareAll = parsed.software || [];
-  const active = SELECTED_FEATURE_KEYS && SELECTED_FEATURE_KEYS.size
-    ? SELECTED_FEATURE_KEYS
-    : new Set(getFeatureOptions(parsed).map(o => o.key));
+  const active = SELECTED_FEATURE_KEYS || new Set(getFeatureOptions(parsed).map(o => o.key));
 
   // Strict behavior:
   // A car/software is valid only if it has ALL selected KPI groups.
