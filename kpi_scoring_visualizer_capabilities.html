@@ -339,6 +339,20 @@ function availableForSoftware(parsed, swLabel, featKey){
   if (Object.prototype.hasOwnProperty.call(caps, featKey)) return caps[featKey] === true;
   return false; // if capability rows exist, missing feature means not available
 }
+function featureAvailableInAnySoftware(parsed, featKey){
+  const capsBySoftware = parsed.capabilities || {};
+  const swLabels = Object.keys(capsBySoftware);
+
+  // Old CSV without capability rows: keep legacy behavior and show all detected groups.
+  const hasAnyCapabilityRows = swLabels.some(sw =>
+    Object.keys(capsBySoftware[sw] || {}).length > 0
+  );
+
+  if (!hasAnyCapabilityRows) return true;
+
+  // Capability-aware CSV: show a group only if at least one car/software has it.
+  return swLabels.some(sw => capsBySoftware[sw]?.[featKey] === true);
+}
 function getFeatureOptions(parsed){
   const byKey = new Map();
   KPI_CATALOG.forEach(k => { if (k.featureKey) byKey.set(k.featureKey, k.feature); });
@@ -346,7 +360,9 @@ function getFeatureOptions(parsed){
   Object.values(parsed.capabilities || {}).forEach(caps => {
     Object.keys(caps || {}).forEach(k => byKey.set(k, featureLabelFromKey(k)));
   });
-  return Array.from(byKey, ([key,label]) => ({key,label})).sort((a,b)=>a.label.localeCompare(b.label));
+  return Array.from(byKey, ([key,label]) => ({key,label}))
+    .filter(o => featureAvailableInAnySoftware(parsed, o.key))
+    .sort((a,b)=>a.label.localeCompare(b.label));
 }
 function setupFeatureControls(parsed){
   const host = document.getElementById('featureControls');
@@ -397,7 +413,9 @@ function setupFeatureControls(parsed){
 }
 function makeParsedViewForSelectedFeatures(parsed){
   const software = parsed.software || [];
-  const active = SELECTED_FEATURE_KEYS && SELECTED_FEATURE_KEYS.size ? SELECTED_FEATURE_KEYS : new Set(getFeatureOptions(parsed).map(o=>o.key));
+  const active = SELECTED_FEATURE_KEYS && SELECTED_FEATURE_KEYS.size
+    ? SELECTED_FEATURE_KEYS
+    : new Set(getFeatureOptions(parsed).map(o=>o.key));
 
   const viewEntries = (parsed.entries || [])
     .filter(e => active.has(featureKey(e.func)))
@@ -414,19 +432,27 @@ function makeParsedViewForSelectedFeatures(parsed){
   software.forEach(sw => {
     let count = 0;
     if (KPI_CATALOG.length){
-      count = KPI_CATALOG.filter(k => active.has(k.featureKey) && availableForSoftware(parsed, sw.label, k.featureKey)).length;
+      count = KPI_CATALOG.filter(k =>
+        active.has(k.featureKey) && availableForSoftware(parsed, sw.label, k.featureKey)
+      ).length;
     } else {
-      count = viewEntries.filter(e => availableForSoftware(parsed, sw.label, featureKey(e.func))).length;
+      count = viewEntries.filter(e =>
+        active.has(featureKey(e.func)) && availableForSoftware(parsed, sw.label, featureKey(e.func))
+      ).length;
     }
     kpiCountBySoftware[sw.label] = count;
   });
 
-  return { ...parsed, entries: viewEntries, kpiCountBySoftware };
+  // Hide car/software columns that have no selected applicable KPIs.
+  // Example: if only LCC+ is selected and no car has LCC+, no cars are shown.
+  const visibleSoftware = software.filter(sw => (kpiCountBySoftware[sw.label] || 0) > 0);
+
+  return { ...parsed, software: visibleSoftware, entries: viewEntries, kpiCountBySoftware };
 }
 function denominatorForSoftware(parsed, swLabel, fallback){
   const counts = parsed.kpiCountBySoftware;
 
-  // If the capability-aware count exists, trust it.
+  // If capability-aware counts exist, trust them.
   // Important: 0 means this car/software has no selected applicable KPIs.
   if (counts && Object.prototype.hasOwnProperty.call(counts, swLabel)) {
     return counts[swLabel] || 0;
@@ -898,13 +924,14 @@ function renderSummary(container, parsed){
       sw: swLabel,
       base: sw.base,
       date: sw.date,
+      denom,
       avg,
       score,
       text: score==null ? 'n/a' : scoreText[score-1],
       note,
       weatherText: wx ? `${wx.tmax ?? '—'}°/${wx.tmin ?? '—'}°, ${wx.text}` : '—'
     };
-  });
+  }).filter(r => r.denom > 0);
 
   const hasAnyNotes = rowsRaw.some(r => r.note.length > 0);
 
@@ -1885,8 +1912,8 @@ function renderSoftwareCards(container, parsed){
 function renderCharts(parsedFull){
   const parsed = makeParsedViewForSelectedFeatures(filterEntriesForMode(parsedFull));
   const container = d3.select('#charts').html('');
-  if (!parsed || !parsed.entries || !parsed.entries.length){
-    container.append('div').attr('class','small').text('No data to render.');
+  if (!parsed || !parsed.entries || !parsed.entries.length || !parsed.software || !parsed.software.length){
+    container.append('div').attr('class','small').text('No data to render for the selected KPI groups.');
     return;
   }
 
@@ -1919,7 +1946,7 @@ async function loadCsvAndRender(){
     const dates = Array.from(new Set((parsed.software||[]).map(sw => sw.date).filter(Boolean)));
     const weatherByDate = await fetchWeatherForDates(dates);
 
-    // Optional: read KPI_buttons catalogue. The CSV stays read-only.
+    // Read KPI_buttons.csv as the fixed KPI catalogue. It is not modified.
     try{
       const txt = await readTextOrNull(KPI_BUTTONS_CSV);
       if (txt){
