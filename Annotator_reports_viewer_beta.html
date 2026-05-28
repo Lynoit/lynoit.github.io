@@ -5383,6 +5383,84 @@ function showDeleteConfirmDialog(filename, filesToDelete) {
       });
   });
 }
+
+function encodeBlobName(blobName) {
+  return String(blobName)
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/');
+}
+
+function getSessionFiles(baseNoExt, xlsxFilename) {
+  return Array.from(blobMeta.keys())
+    .filter(name =>
+      name !== xlsxFilename &&
+      name.startsWith(baseNoExt)
+    )
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function downloadSessionZip(filename, buttonEl) {
+  const baseNoExt = filename.replace(/\.xlsx$/i, '');
+  const sessionFiles = getSessionFiles(baseNoExt, filename);
+
+  if (!sessionFiles.length) {
+    alert('No extra session files found.');
+    return;
+  }
+
+  const zip = new JSZip();
+  const originalText = buttonEl ? buttonEl.textContent : '';
+
+  try {
+    if (buttonEl) {
+      buttonEl.disabled = true;
+      buttonEl.textContent = `Preparing ZIP 0/${sessionFiles.length}…`;
+    }
+
+    for (let i = 0; i < sessionFiles.length; i++) {
+      const blobName = sessionFiles[i];
+
+      if (buttonEl) {
+        buttonEl.textContent = `Adding ${i + 1}/${sessionFiles.length}…`;
+      }
+
+      const url = `${BASE_URL}/${encodeBlobName(blobName)}?${SAS_TOKEN}`;
+      const res = await fetch(url, { cache: 'no-store' });
+
+      if (!res.ok) {
+        throw new Error(`Failed to download ${blobName} (HTTP ${res.status})`);
+      }
+
+      const data = await res.arrayBuffer();
+      zip.file(`${baseNoExt}/${blobName}`, data);
+    }
+
+    if (buttonEl) {
+      buttonEl.textContent = 'Creating ZIP…';
+    }
+
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const zipUrl = URL.createObjectURL(zipBlob);
+
+    const a = document.createElement('a');
+    a.href = zipUrl;
+    a.download = `${baseNoExt}_session_files.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(zipUrl);
+  } catch (err) {
+    console.error(err);
+    alert('Could not create session ZIP:\n' + err.message);
+  } finally {
+    if (buttonEl) {
+      buttonEl.disabled = false;
+      buttonEl.textContent = originalText || 'Download all session files';
+    }
+  }
+}
     
 function loadFile(filename) {
   setSessionInUrlHash(filename);
@@ -5508,23 +5586,15 @@ const filesToDelete = [
   xlsxLink.setAttribute('download', filename);
   content.appendChild(xlsxLink);
 
-  // 1) Download issue images (always shown)
-  const imgZipFilename = `${baseNoExt}.zip`;
-  const imgZipLink = document.createElement('a');
-  imgZipLink.href = `${BASE_URL}/${imgZipFilename}?${SAS_TOKEN}`;
-  imgZipLink.textContent = 'Download images';
-  imgZipLink.className = 'download-button';
-  imgZipLink.setAttribute('download', imgZipFilename);
-  content.appendChild(imgZipLink);
-
-  // 2) Download issue speed/acceleration plots (always shown)
-  const accelZipFilename = `${baseNoExt}_2.zip`;
-  const accelZipLink = document.createElement('a');
-  accelZipLink.href = `${BASE_URL}/${accelZipFilename}?${SAS_TOKEN}`;
-  accelZipLink.textContent = 'Download speed/acceleration plots';
-  accelZipLink.className = 'download-button';
-  accelZipLink.setAttribute('download', accelZipFilename);
-  content.appendChild(accelZipLink);
+// Download all non-XLSX files for this session as one ZIP
+const allFilesZipBtn = document.createElement('button');
+allFilesZipBtn.type = 'button';
+allFilesZipBtn.textContent = 'Download all session files';
+allFilesZipBtn.className = 'download-button';
+allFilesZipBtn.addEventListener('click', () => {
+  downloadSessionZip(filename, allFilesZipBtn);
+});
+content.appendChild(allFilesZipBtn);
 
   const copyLinkBtn = document.createElement('button');
   copyLinkBtn.type = 'button';
