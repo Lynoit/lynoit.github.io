@@ -5391,26 +5391,44 @@ function encodeBlobName(blobName) {
     .join('/');
 }
 
-function getSessionFiles(baseNoExt, xlsxFilename) {
-  return Array.from(blobMeta.keys())
-    .filter(name =>
-      name !== xlsxFilename &&
-      name.startsWith(baseNoExt)
-    )
+function uniqueSorted(arr) {
+  return Array.from(new Set(arr.filter(Boolean)))
     .sort((a, b) => a.localeCompare(b));
+}
+
+function getSessionFiles(filename) {
+  const baseNoExt = filename.replace(/\.xlsx$/i, '');
+
+  // Canonical expected files for one session.
+  // Keep this in sync with filesToDelete.
+  const expectedFiles = [
+    filename,                            // Excel report
+    `${baseNoExt}.json`,                 // parsed summary JSON
+    `${baseNoExt}.zip`,                  // issue images
+    `${baseNoExt}_2.zip`,                // speed/acceleration plots
+    `${baseNoExt}.txt`,                  // generated report text
+    `${baseNoExt}_route_infographic.png` // route infographic
+  ];
+
+  // Also include future/extra files that follow the same session prefix,
+  // but avoid accidentally zipping an old generated "session_files" ZIP.
+  const discoveredFiles = Array.from(blobMeta.keys())
+    .filter(name =>
+      name.startsWith(baseNoExt) &&
+      !/_session_files\.zip$/i.test(name)
+    );
+
+  return uniqueSorted([...expectedFiles, ...discoveredFiles]);
 }
 
 async function downloadSessionZip(filename, buttonEl) {
   const baseNoExt = filename.replace(/\.xlsx$/i, '');
-  const sessionFiles = getSessionFiles(baseNoExt, filename);
-
-  if (!sessionFiles.length) {
-    alert('No extra session files found.');
-    return;
-  }
+  const sessionFiles = getSessionFiles(filename);
 
   const zip = new JSZip();
   const originalText = buttonEl ? buttonEl.textContent : '';
+  const missingFiles = [];
+  let addedCount = 0;
 
   try {
     if (buttonEl) {
@@ -5428,12 +5446,30 @@ async function downloadSessionZip(filename, buttonEl) {
       const url = `${BASE_URL}/${encodeBlobName(blobName)}?${SAS_TOKEN}`;
       const res = await fetch(url, { cache: 'no-store' });
 
+      // Some sessions may not have every optional file yet.
+      // Skip missing optional files instead of failing the whole ZIP.
+      if (res.status === 404) {
+        missingFiles.push(blobName);
+        continue;
+      }
+
       if (!res.ok) {
         throw new Error(`Failed to download ${blobName} (HTTP ${res.status})`);
       }
 
       const data = await res.arrayBuffer();
-      zip.file(`${baseNoExt}/${blobName}`, data);
+
+      // Store only the file name inside the session folder.
+      // If blobName ever contains folders, this avoids duplicating paths.
+      const shortName = blobName.split('/').pop();
+      zip.file(`${baseNoExt}/${shortName}`, data);
+
+      addedCount++;
+    }
+
+    if (!addedCount) {
+      alert('No downloadable files were found for this session.');
+      return;
     }
 
     if (buttonEl) {
@@ -5451,6 +5487,10 @@ async function downloadSessionZip(filename, buttonEl) {
     a.remove();
 
     URL.revokeObjectURL(zipUrl);
+
+    if (missingFiles.length) {
+      console.warn('Missing optional session files:', missingFiles);
+    }
   } catch (err) {
     console.error(err);
     alert('Could not create session ZIP:\n' + err.message);
