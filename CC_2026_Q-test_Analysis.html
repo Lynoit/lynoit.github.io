@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Standalone Route & Event Analyzer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQyBM2e38jYdE3Vy9ms/3A6Z7k8Qo7E=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --panel2:#1f2937; --text:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --bad:#ef4444; --warn:#f59e0b; --ok:#22c55e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:18px 22px; border-bottom:1px solid var(--line); background:linear-gradient(90deg,#111827,#172554); }
+    h1 { margin:0 0 6px 0; font-size:22px; }
+    .sub { color:var(--muted); font-size:13px; }
+    .wrap { display:grid; grid-template-columns: 390px 1fr; min-height: calc(100vh - 80px); }
+    aside { padding:16px; border-right:1px solid var(--line); background:var(--panel); overflow:auto; max-height:calc(100vh - 80px); }
+    main { display:grid; grid-template-rows: minmax(420px, 60vh) auto; min-width:0; }
+    #map { width:100%; height:100%; background:#0b1220; }
+    .card { background:var(--panel2); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+    .card h2 { margin:0 0 10px 0; font-size:15px; }
+    label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+    input[type=file], select, input[type=text] { width:100%; padding:8px; border-radius:8px; border:1px solid var(--line); background:#0b1220; color:var(--text); }
+    input[type=checkbox] { transform: translateY(1px); }
+    button { border:0; border-radius:8px; padding:9px 10px; margin:6px 4px 0 0; color:#07111f; background:var(--accent); font-weight:700; cursor:pointer; }
+    button.secondary { background:#9ca3af; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .metrics { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .metric { background:#0b1220; border:1px solid var(--line); border-radius:10px; padding:10px; }
+    .metric b { display:block; font-size:22px; margin-bottom:2px; }
+    .metric span { color:var(--muted); font-size:12px; }
+    .small { font-size:12px; color:var(--muted); line-height:1.4; }
+    .pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#0b1220; border:1px solid var(--line); margin:2px; font-size:12px; }
+    .tabs { display:flex; gap:6px; padding:10px 12px; border-top:1px solid var(--line); background:#111827; }
+    .tab { background:#1f2937; color:var(--text); }
+    .tab.active { background:var(--accent); color:#07111f; }
+    .panel { display:none; padding:12px; overflow:auto; max-height:38vh; background:#0b1220; }
+    .panel.active { display:block; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { border-bottom:1px solid #253044; padding:7px 8px; vertical-align:top; text-align:left; }
+    th { position:sticky; top:0; background:#111827; z-index:1; }
+    .critical-1,.critical-2 { color:#fecaca; font-weight:700; }
+    .critical-3 { color:#fde68a; font-weight:700; }
+    .critical-4,.critical-5 { color:#bbf7d0; }
+    .legend { background:white; color:#111827; padding:8px 10px; border-radius:8px; box-shadow:0 1px 8px rgba(0,0,0,.3); font-size:12px; }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; }
+    .log { white-space:pre-wrap; max-height:150px; overflow:auto; background:#0b1220; border:1px solid var(--line); border-radius:8px; padding:8px; color:#cbd5e1; }
+    @media (max-width: 900px) { .wrap { grid-template-columns:1fr; } aside { max-height:none; border-right:0; } main { grid-template-rows:420px auto; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
+  <div class="sub">Välj foldern med Excel- och CSV-filer. Analysen sker lokalt i webbläsaren.</div>
+</header>
+<div class="wrap">
+  <aside>
+    <div class="card">
+      <h2>1. Läs in filer</h2>
+      <input id="fileInput" type="file" multiple webkitdirectory directory accept=".csv,.xlsx,.xls" />
+      <button id="analyzeBtn">Analysera</button>
+      <button id="clearBtn" class="secondary">Rensa</button>
+      <p class="small">Tips: I Chrome/Edge kan du välja en hel folder. I andra browsers kan du välja flera filer manuellt om folder-val inte stöds.</p>
+      <div id="log" class="log">Ingen data inläst ännu.</div>
+    </div>
+
+    <div class="card">
+      <h2>2. Filter</h2>
+      <label>Land</label><select id="countryFilter"><option value="">Alla</option></select>
+      <label>System/funktion</label><select id="systemFilter"><option value="">Alla</option></select>
+      <label>Vägtyp</label><select id="roadFilter"><option value="">Alla</option></select>
+      <label>Critical score</label><select id="criticalFilter"><option value="">Alla</option></select>
+      <label>Sök i kommentar</label><input id="searchFilter" type="text" placeholder="t.ex. warning, ACC, curve" />
+      <label><input id="issuesOnly" type="checkbox" /> Visa endast issues, critical <= 3 eller negativa nyckelord</label>
+      <label><input id="drawLines" type="checkbox" checked /> Rita körspår per land</label>
+      <button id="applyFilterBtn">Uppdatera karta</button>
+    </div>
+
+    <div class="card">
+      <h2>3. Nyckeltal</h2>
+      <div class="metrics">
+        <div class="metric"><b id="mFiles">0</b><span>filer</span></div>
+        <div class="metric"><b id="mEvents">0</b><span>unika events</span></div>
+        <div class="metric"><b id="mIssues">0</b><span>issues</span></div>
+        <div class="metric"><b id="mCoords">0</b><span>events med GPS</span></div>
+      </div>
+      <div id="topPills" style="margin-top:10px"></div>
+      <button id="downloadCsvBtn" disabled>Exportera clean CSV</button>
+      <button id="downloadJsonBtn" disabled>Exportera summary JSON</button>
+    </div>
+  </aside>
+
+  <main>
+    <div id="map"></div>
+    <section>
+      <div class="tabs">
+        <button class="tab active" data-tab="eventsPanel">Events</button>
+        <button class="tab" data-tab="summaryPanel">Summering</button>
+        <button class="tab" data-tab="routesPanel">Excel/rutter</button>
+        <button class="tab" data-tab="filesPanel">Filer</button>
+      </div>
+      <div id="eventsPanel" class="panel active"></div>
+      <div id="summaryPanel" class="panel"></div>
+      <div id="routesPanel" class="panel"></div>
+      <div id="filesPanel" class="panel"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+'use strict';
+
+const state = {
+  files: [],
+  eventsRaw: [],
+  events: [],
+  filtered: [],
+  routeFiles: [],
+  routeRows: [],
+  fileReports: [],
+  map: null,
+  eventLayer: null,
+  lineLayer: null
+};
+
+const COUNTRY_BOUNDS = {
+  Spain: {lat:[35,44], lon:[-10,5]},
+  Switzerland: {lat:[45,48.5], lon:[5,11]},
+  Czech: {lat:[48,52], lon:[12,19]},
+  Austria: {lat:[46,49.5], lon:[9,17.5]},
+  Slovakia: {lat:[47,50], lon:[16,23]}
+};
+const COUNTRY_ALIASES = [
+  ['spain','Spain'], ['switzerland','Switzerland'], ['czech','Czech'],
+  ['austria','Austria'], ['slovakia','Slovakia']
+];
+const ROAD_MAP = { city:'Urban', urban:'Urban', interurban:'Interurban', highway:'Highway', motorway:'Highway' };
+const NEGATIVE_WORDS = ['fail','failed','warning','sudden','suddenly','restricted','wrong','late','missing','missed','blocked','blockage','phantom','brake','jerk','issue','problem','error','not detected','no detection','cut in','poor'];
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent = msg;
+}
+function appendLog(msg) {
+  const el = document.getElementById('log');
+  el.textContent += '\n' + msg;
+  el.scrollTop = el.scrollHeight;
+}
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+function detectCountry(filename, row) {
+  const hay = (filename + ' ' + Object.values(row || {}).join(' ')).toLowerCase();
+  for (const [needle, country] of COUNTRY_ALIASES) if (hay.includes(needle)) return country;
+  return 'Unknown';
+}
+function normalizeHeader(h) {
+  return String(h || '').trim().replace(/^\uFEFF/, '');
+}
+function pick(row, names) {
+  const keys = Object.keys(row);
+  for (const name of names) {
+    const found = keys.find(k => k.toLowerCase().trim() === name.toLowerCase());
+    if (found) return row[found];
+  }
+  for (const name of names) {
+    const found = keys.find(k => k.toLowerCase().includes(name.toLowerCase()));
+    if (found) return row[found];
+  }
+  return '';
+}
+function normalizeRoad(v) {
+  const key = String(v || '').trim().toLowerCase();
+  return ROAD_MAP[key] || (v ? String(v).trim() : 'Unknown');
+}
+function normalizeCritical(v) {
+  const n = Number(String(v || '').replace(',', '.').match(/-?\d+(\.\d+)?/)?.[0]);
+  return Number.isFinite(n) ? n : null;
+}
+function parseDateTime(day, time) {
+  const d = String(day || '').trim();
+  const t = String(time || '').trim();
+  const m = d.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (!m) return {dateISO:'', sortKey: String(day || '') + ' ' + String(time || '')};
+  let dd = Number(m[1]), mm = Number(m[2]), yyyy = Number(m[3]);
+  if (yyyy < 100) yyyy += 2000;
+  const dateISO = `${yyyy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+  const tm = t.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  const timeISO = tm ? `${String(tm[1]).padStart(2,'0')}:${tm[2]}:${tm[3] || '00'}` : '00:00:00';
+  return {dateISO, timeISO, sortKey: `${dateISO}T${timeISO}`};
+}
+function withinBounds(lat, lon, country) {
+  const b = COUNTRY_BOUNDS[country];
+  if (!b) return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  return lat >= b.lat[0] && lat <= b.lat[1] && lon >= b.lon[0] && lon <= b.lon[1];
+}
+function candidateNumbers(raw, type, country) {
+  const s = String(raw ?? '').trim().replace(',', '.');
+  const out = [];
+  const direct = Number(s);
+  if (Number.isFinite(direct)) out.push(direct);
+  const digits = s.replace(/[^0-9-]/g, '');
+  if (digits && digits !== '-') {
+    const sign = digits.startsWith('-') ? -1 : 1;
+    const absDigits = digits.replace('-', '');
+    const intVal = Number(absDigits);
+    if (Number.isFinite(intVal)) {
+      for (let p = 0; p <= 8; p++) out.push(sign * intVal / Math.pow(10, p));
+    }
+  }
+  return [...new Set(out.filter(Number.isFinite))];
+}
+function parseLatLon(rawLat, rawLon, country) {
+  const latCandidates = candidateNumbers(rawLat, 'lat', country);
+  const lonCandidates = candidateNumbers(rawLon, 'lon', country);
+  let best = null;
+  for (const lat of latCandidates) {
+    for (const lon of lonCandidates) {
+      if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+        const inB = withinBounds(lat, lon, country);
+        const score = inB ? 0 : 1 + Math.abs(lat) + Math.abs(lon) / 1000;
+        if (!best || score < best.score) best = {lat, lon, score, repaired: String(rawLat) !== String(lat) || String(rawLon) !== String(lon)};
+      }
+    }
+  }
+  if (!best || !Number.isFinite(best.lat) || !Number.isFinite(best.lon)) return {lat:null, lon:null, repaired:false, valid:false};
+  return {lat:best.lat, lon:best.lon, repaired:best.repaired, valid:withinBounds(best.lat, best.lon, country) || best.score < 1};
+}
+function isIssue(ev) {
+  const c = ev.critical;
+  const comment = (ev.comment || '').toLowerCase();
+  return (Number.isFinite(c) && c <= 3) || NEGATIVE_WORDS.some(w => comment.includes(w));
+}
+function markerColor(ev) {
+  if (!Number.isFinite(ev.critical)) return '#60a5fa';
+  if (ev.critical <= 2) return '#ef4444';
+  if (ev.critical <= 3) return '#f59e0b';
+  return '#22c55e';
+}
+function parseDelimited(text) {
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const firstLines = text.split('\n').slice(0,5).join('\n');
+  const commaCount = (firstLines.match(/,/g) || []).length;
+  const semiCount = (firstLines.match(/;/g) || []).length;
+  const delim = semiCount > commaCount ? ';' : ',';
+  const rows = [];
+  let row = [], cell = '', inQuotes = false;
+  for (let i=0; i<text.length; i++) {
+    const ch = text[i], next = text[i+1];
+    if (ch === '"') {
+      if (inQuotes && next === '"') { cell += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if (ch === delim && !inQuotes) {
+      row.push(cell); cell = '';
+    } else if (ch === '\n' && !inQuotes) {
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell.length || row.length) { row.push(cell); rows.push(row); }
+  const headerRaw = rows.shift() || [];
+  const headers = headerRaw.map(normalizeHeader);
+  const keepIdx = headers.map((h,i)=> h || headerRaw[i]).map((h,i)=> h ? i : null).filter(i => i !== null);
+  return rows.filter(r => r.some(c => String(c || '').trim() !== '')).map(r => {
+    const obj = {};
+    for (const i of keepIdx) obj[headers[i]] = String(r[i] ?? '').trim();
+    return obj;
+  });
+}
+async function readTextFile(file) {
+  return await file.text();
+}
+async function readArrayBuffer(file) {
+  return await file.arrayBuffer();
+}
+function normalizeEvent(row, fileName, rowIndex) {
+  const country = detectCountry(fileName, row);
+  const day = pick(row, ['Day','Date','Datum']);
+  const time = pick(row, ['Time','Tid']);
+  const dt = parseDateTime(day, time);
+  const system = String(pick(row, ['System','Function','Feature','Funktion']) || 'Unknown').trim() || 'Unknown';
+  const critical = normalizeCritical(pick(row, ['Critical','Critical Score','Score']));
+  const road = normalizeRoad(pick(row, ['Road','Road type','Vägtyp']));
+  const weather = String(pick(row, ['Weather','Väder']) || '').trim();
+  const light = String(pick(row, ['Light','Ljus']) || '').trim();
+  const comment = String(pick(row, ['Comment','Kommentar','Issue']) || '').trim();
+  const eventCode = String(pick(row, ['Event Code','EventCode']) || '').trim();
+  const odometer = String(pick(row, ['Odometer','Mileage','Km']) || '').trim();
+  const rawLat = pick(row, ['Latitude','Lat']);
+  const rawLon = pick(row, ['Longitude','Lon','Lng']);
+  const ll = parseLatLon(rawLat, rawLon, country);
+  const ev = { fileName, rowIndex, country, day, time, dateISO:dt.dateISO, timeISO:dt.timeISO || '', sortKey:dt.sortKey,
+    critical, system, weather, light, road, latitude:ll.lat, longitude:ll.lon, gpsValid:ll.valid,
+    gpsRepaired:ll.repaired, rawLatitude:rawLat, rawLongitude:rawLon, eventCode, odometer, comment };
+  ev.issue = isIssue(ev);
+  ev.dedupeKey = [country, ev.dateISO, time, critical, system, road, ll.lat?.toFixed(5), ll.lon?.toFixed(5), comment.slice(0,80)].join('|').toLowerCase();
+  return ev;
+}
+function parseWorkbookRoutes(workbook, fileName) {
+  const rows = [];
+  for (const sheetName of workbook.SheetNames) {
+    const ws = workbook.Sheets[sheetName];
+    const arr = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+    arr.forEach((r, idx) => {
+      const textCells = r.map(v => String(v ?? '').trim()).filter(Boolean);
+      if (!textCells.length) return;
+      const joined = textCells.join(' | ');
+      const isRouteLike = /urban|city|interurban|highway|total|route|night|maps\.app\.goo\.gl|google/i.test(joined);
+      if (!isRouteLike && sheetName.toLowerCase() !== 'results') return;
+      rows.push({fileName, sheetName, rowNumber: idx + 1, cells: textCells.slice(0,12), text: joined});
+    });
+  }
+  return rows;
+}
+async function analyzeFiles() {
+  const input = document.getElementById('fileInput');
+  state.files = Array.from(input.files || []).filter(f => /\.(csv|xlsx|xls)$/i.test(f.name));
+  if (!state.files.length) { alert('Välj minst en CSV-, XLSX- eller XLS-fil.'); return; }
+  resetData(false);
+  log(`Läser ${state.files.length} filer...`);
+  for (const file of state.files) {
+    const name = file.webkitRelativePath || file.name;
+    try {
+      if (/\.csv$/i.test(file.name)) {
+        const text = await readTextFile(file);
+        const rows = parseDelimited(text);
+        const events = rows.map((r,i) => normalizeEvent(r, name, i + 2));
+        state.eventsRaw.push(...events);
+        state.fileReports.push({fileName:name, type:'CSV', rows:rows.length, events:events.length, note:'Eventlogg'});
+        appendLog(`CSV: ${name} - ${events.length} rader`);
+      } else if (/\.(xlsx|xls)$/i.test(file.name)) {
+        const buf = await readArrayBuffer(file);
+        const wb = XLSX.read(buf, {type:'array', cellDates:true});
+        const routeRows = parseWorkbookRoutes(wb, name);
+        state.routeRows.push(...routeRows);
+        state.routeFiles.push({fileName:name, sheets:wb.SheetNames, routeRows:routeRows.length});
+        state.fileReports.push({fileName:name, type:'Excel', rows:routeRows.length, events:0, note:`Blad: ${wb.SheetNames.join(', ')}`});
+        appendLog(`Excel: ${name} - ${wb.SheetNames.length} blad, ${routeRows.length} relevanta rader`);
+      }
+    } catch (err) {
+      console.error(err);
+      state.fileReports.push({fileName:name, type:'ERROR', rows:0, events:0, note:String(err.message || err)});
+      appendLog(`FEL: ${name} - ${err.message || err}`);
+    }
+  }
+  dedupeEvents();
+  populateFilters();
+  applyFilters();
+  updateDownloads(true);
+}
+function dedupeEvents() {
+  const seen = new Map();
+  for (const ev of state.eventsRaw) {
+    if (!seen.has(ev.dedupeKey)) seen.set(ev.dedupeKey, ev);
+    else {
+      const prev = seen.get(ev.dedupeKey);
+      prev.duplicates = (prev.duplicates || 0) + 1;
+      prev.duplicateFiles = [...new Set([...(prev.duplicateFiles || []), ev.fileName])];
+    }
+  }
+  state.events = Array.from(seen.values()).sort((a,b) => String(a.sortKey).localeCompare(String(b.sortKey)));
+}
+function populateFilters() {
+  fillSelect('countryFilter', unique(state.events.map(e=>e.country)));
+  fillSelect('systemFilter', unique(state.events.map(e=>e.system)));
+  fillSelect('roadFilter', unique(state.events.map(e=>e.road)));
+  fillSelect('criticalFilter', unique(state.events.map(e=>e.critical).filter(v=>v!==null).sort((a,b)=>a-b)));
+}
+function unique(arr) { return [...new Set(arr.filter(v => v !== undefined && v !== null && String(v).trim() !== ''))].sort((a,b)=>String(a).localeCompare(String(b))); }
+function fillSelect(id, values) {
+  const el = document.getElementById(id);
+  const old = el.value;
+  el.innerHTML = '<option value="">Alla</option>' + values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+  if (values.map(String).includes(old)) el.value = old;
+}
+function applyFilters() {
+  const cf = document.getElementById('countryFilter').value;
+  const sf = document.getElementById('systemFilter').value;
+  const rf = document.getElementById('roadFilter').value;
+  const crf = document.getElementById('criticalFilter').value;
+  const search = document.getElementById('searchFilter').value.trim().toLowerCase();
+  const issues = document.getElementById('issuesOnly').checked;
+  state.filtered = state.events.filter(e => {
+    if (cf && e.country !== cf) return false;
+    if (sf && e.system !== sf) return false;
+    if (rf && e.road !== rf) return false;
+    if (crf && String(e.critical) !== crf) return false;
+    if (issues && !e.issue) return false;
+    if (search && ![e.comment,e.system,e.road,e.country,e.weather,e.light,e.eventCode].join(' ').toLowerCase().includes(search)) return false;
+    return true;
+  });
+  renderAll();
+}
+function initMap() {
+  if (state.map) return;
+  state.map = L.map('map', {preferCanvas:true}).setView([48.2, 12.5], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(state.map);
+  state.eventLayer = L.layerGroup().addTo(state.map);
+  state.lineLayer = L.layerGroup().addTo(state.map);
+  const legend = L.control({position:'bottomright'});
+  legend.onAdd = () => {
+    const div = L.DomUtil.create('div','legend');
+    div.innerHTML = '<b>Critical</b><br><span class="dot" style="background:#ef4444"></span>1-2 issue<br><span class="dot" style="background:#f59e0b"></span>3 warning<br><span class="dot" style="background:#22c55e"></span>4-5 OK<br><span class="dot" style="background:#60a5fa"></span>okänd';
+    return div;
+  };
+  legend.addTo(state.map);
+}
+function renderMap() {
+  initMap();
+  state.eventLayer.clearLayers();
+  state.lineLayer.clearLayers();
+  const points = state.filtered.filter(e => e.gpsValid && Number.isFinite(e.latitude) && Number.isFinite(e.longitude));
+  for (const e of points) {
+    const m = L.circleMarker([e.latitude, e.longitude], {
+      radius: e.issue ? 7 : 5,
+      color: markerColor(e), fillColor: markerColor(e), fillOpacity: e.issue ? 0.85 : 0.55, weight: e.issue ? 2 : 1
+    });
+    m.bindPopup(`<b>${escapeHtml(e.country)} - ${escapeHtml(e.system)}</b><br>` +
+      `Datum: ${escapeHtml(e.day)} ${escapeHtml(e.time)}<br>` +
+      `Critical: ${escapeHtml(e.critical ?? '')}<br>` +
+      `Väg: ${escapeHtml(e.road)}<br>` +
+      `Väder/ljus: ${escapeHtml(e.weather)} / ${escapeHtml(e.light)}<br>` +
+      `GPS: ${e.latitude?.toFixed(5)}, ${e.longitude?.toFixed(5)} ${e.gpsRepaired ? '(reparerad)' : ''}<hr>` +
+      `<div style="max-width:320px">${escapeHtml(e.comment)}</div><br>` +
+      `<small>${escapeHtml(e.fileName)}</small>`);
+    m.addTo(state.eventLayer);
+  }
+  if (document.getElementById('drawLines').checked) {
+    const byCountry = groupBy(points, e => e.country);
+    Object.entries(byCountry).forEach(([country, arr]) => {
+      const coords = arr.sort((a,b)=>String(a.sortKey).localeCompare(String(b.sortKey))).map(e => [e.latitude, e.longitude]);
+      if (coords.length > 1) L.polyline(coords, {weight:2, opacity:.35}).addTo(state.lineLayer).bindPopup(`Körspår: ${escapeHtml(country)} (${coords.length} punkter)`);
+    });
+  }
+  if (points.length) state.map.fitBounds(L.latLngBounds(points.map(e => [e.latitude, e.longitude])).pad(0.15));
+}
+function groupBy(arr, fn) {
+  return arr.reduce((acc,x) => { const k = fn(x); (acc[k] ||= []).push(x); return acc; }, {});
+}
+function countsBy(arr, fn) {
+  const out = {};
+  arr.forEach(x => out[fn(x)] = (out[fn(x)] || 0) + 1);
+  return Object.entries(out).sort((a,b)=>b[1]-a[1]);
+}
+function renderMetrics() {
+  document.getElementById('mFiles').textContent = state.files.length;
+  document.getElementById('mEvents').textContent = state.events.length;
+  document.getElementById('mIssues').textContent = state.events.filter(e=>e.issue).length;
+  document.getElementById('mCoords').textContent = state.events.filter(e=>e.gpsValid).length;
+  const topCountries = countsBy(state.events, e=>e.country).slice(0,8).map(([k,v])=>`<span class="pill">${escapeHtml(k)}: ${v}</span>`).join('');
+  const topSystems = countsBy(state.events, e=>e.system).slice(0,8).map(([k,v])=>`<span class="pill">${escapeHtml(k)}: ${v}</span>`).join('');
+  document.getElementById('topPills').innerHTML = `<div class="small">Land</div>${topCountries}<div class="small" style="margin-top:6px">System</div>${topSystems}`;
+}
+function renderEventsTable() {
+  const rows = state.filtered.slice(0,1000).map(e => `<tr>
+    <td>${escapeHtml(e.dateISO || e.day)} ${escapeHtml(e.time || '')}</td>
+    <td>${escapeHtml(e.country)}</td>
+    <td>${escapeHtml(e.system)}</td>
+    <td class="critical-${escapeHtml(e.critical)}">${escapeHtml(e.critical ?? '')}</td>
+    <td>${escapeHtml(e.road)}</td>
+    <td>${e.gpsValid ? `${e.latitude.toFixed(5)}, ${e.longitude.toFixed(5)}${e.gpsRepaired ? ' *' : ''}` : ''}</td>
+    <td>${escapeHtml(e.comment)}</td>
+    <td>${escapeHtml(e.fileName)}</td>
+  </tr>`).join('');
+  document.getElementById('eventsPanel').innerHTML = `<p class="small">Visar ${Math.min(state.filtered.length,1000)} av ${state.filtered.length} filtrerade events. * betyder att koordinaten troligen har reparerats.</p>
+    <table><thead><tr><th>Datum/tid</th><th>Land</th><th>System</th><th>Critical</th><th>Väg</th><th>GPS</th><th>Kommentar</th><th>Fil</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderSummary() {
+  const blocks = [
+    ['Events per land', countsBy(state.events, e=>e.country)],
+    ['Events per system', countsBy(state.events, e=>e.system)],
+    ['Events per vägtyp', countsBy(state.events, e=>e.road)],
+    ['Issues per land', countsBy(state.events.filter(e=>e.issue), e=>e.country)],
+    ['Reparerade GPS-koordinater per land', countsBy(state.events.filter(e=>e.gpsRepaired), e=>e.country)]
+  ];
+  document.getElementById('summaryPanel').innerHTML = blocks.map(([title, rows]) => `<h3>${escapeHtml(title)}</h3>` +
+    `<table><thead><tr><th>Grupp</th><th>Antal</th></tr></thead><tbody>${rows.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>`).join('');
+}
+function renderRoutes() {
+  const fileTable = state.routeFiles.map(f => `<tr><td>${escapeHtml(f.fileName)}</td><td>${escapeHtml(f.sheets.join(', '))}</td><td>${f.routeRows}</td></tr>`).join('');
+  const rows = state.routeRows.slice(0,500).map(r => `<tr><td>${escapeHtml(r.fileName)}</td><td>${escapeHtml(r.sheetName)}</td><td>${r.rowNumber}</td><td>${escapeHtml(r.text)}</td></tr>`).join('');
+  document.getElementById('routesPanel').innerHTML = `<h3>Excel-filer</h3><table><thead><tr><th>Fil</th><th>Blad</th><th>Relevanta rader</th></tr></thead><tbody>${fileTable}</tbody></table>
+    <h3>Rutt-/resultatrader hittade i Excel</h3><p class="small">Detta är rader där scriptet hittar ord som Urban, Interurban, Highway, Total, Route, Night eller Google Maps-länkar.</p>
+    <table><thead><tr><th>Fil</th><th>Blad</th><th>Rad</th><th>Innehåll</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderFiles() {
+  const rows = state.fileReports.map(f => `<tr><td>${escapeHtml(f.fileName)}</td><td>${escapeHtml(f.type)}</td><td>${f.rows}</td><td>${f.events}</td><td>${escapeHtml(f.note)}</td></tr>`).join('');
+  document.getElementById('filesPanel').innerHTML = `<table><thead><tr><th>Fil</th><th>Typ</th><th>Rader</th><th>Events</th><th>Notering</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderAll() {
+  renderMetrics();
+  renderMap();
+  renderEventsTable();
+  renderSummary();
+  renderRoutes();
+  renderFiles();
+}
+function makeCleanCsv() {
+  const cols = ['country','dateISO','time','critical','system','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
+  const lines = [cols.join(',')];
+  for (const e of state.events) {
+    lines.push(cols.map(c => csvEscape(e[c])).join(','));
+  }
+  return lines.join('\n');
+}
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function makeSummaryJson() {
+  return JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    files: state.fileReports,
+    totalEventsRaw: state.eventsRaw.length,
+    totalEventsUnique: state.events.length,
+    issues: state.events.filter(e=>e.issue).length,
+    withGps: state.events.filter(e=>e.gpsValid).length,
+    repairedGps: state.events.filter(e=>e.gpsRepaired).length,
+    byCountry: Object.fromEntries(countsBy(state.events, e=>e.country)),
+    bySystem: Object.fromEntries(countsBy(state.events, e=>e.system)),
+    byRoad: Object.fromEntries(countsBy(state.events, e=>e.road)),
+    routes: state.routeFiles
+  }, null, 2);
+}
+function downloadText(filename, text, mime) {
+  const blob = new Blob([text], {type:mime});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+function updateDownloads(enabled) {
+  document.getElementById('downloadCsvBtn').disabled = !enabled;
+  document.getElementById('downloadJsonBtn').disabled = !enabled;
+}
+function resetData(clearInput=true) {
+  state.eventsRaw = []; state.events = []; state.filtered = []; state.routeFiles = []; state.routeRows = []; state.fileReports = [];
+  if (clearInput) document.getElementById('fileInput').value = '';
+  if (state.eventLayer) state.eventLayer.clearLayers();
+  if (state.lineLayer) state.lineLayer.clearLayers();
+  ['eventsPanel','summaryPanel','routesPanel','filesPanel'].forEach(id => document.getElementById(id).innerHTML = '');
+  renderMetrics();
+  updateDownloads(false);
+  log('Ingen data inläst ännu.');
+}
+
+document.getElementById('analyzeBtn').addEventListener('click', analyzeFiles);
+document.getElementById('clearBtn').addEventListener('click', () => resetData(true));
+document.getElementById('applyFilterBtn').addEventListener('click', applyFilters);
+['countryFilter','systemFilter','roadFilter','criticalFilter','issuesOnly','drawLines'].forEach(id => document.getElementById(id).addEventListener('change', applyFilters));
+document.getElementById('searchFilter').addEventListener('input', () => { clearTimeout(window.__searchTimer); window.__searchTimer = setTimeout(applyFilters, 250); });
+document.getElementById('downloadCsvBtn').addEventListener('click', () => downloadText('events_clean.csv', makeCleanCsv(), 'text/csv;charset=utf-8'));
+document.getElementById('downloadJsonBtn').addEventListener('click', () => downloadText('summary.json', makeSummaryJson(), 'application/json;charset=utf-8'));
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(btn.dataset.tab).classList.add('active');
+  if (btn.dataset.tab === 'eventsPanel' && state.map) setTimeout(() => state.map.invalidateSize(), 50);
+}));
+
+initMap();
+renderMetrics();
+</script>
+</body>
+</html>
