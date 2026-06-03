@@ -54,6 +54,12 @@
     .score-scale b { color:var(--text); }
     details.score-details summary { cursor:pointer; font-weight:700; margin-bottom:8px; }
     @media (max-width: 900px) { .wrap { grid-template-columns:1fr; } aside { max-height:none; border-right:0; } #map { height:420px; min-height:420px; } }
+  
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 14px; }
+    .file-import-label { display:inline-flex; align-items:center; gap:8px; background:#111827; border:1px solid var(--border); border-radius:10px; padding:8px 10px; color:var(--text); cursor:pointer; }
+    .file-import-label input { display:none; }
+    #kpiRulesBody input, #kpiRulesBody select { width:100%; min-width:80px; }
+
   </style>
 
 <style>
@@ -68,7 +74,13 @@
   .critical-score-scale li:last-child {
     margin-bottom: 0;
   }
-</style>
+
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 14px; }
+    .file-import-label { display:inline-flex; align-items:center; gap:8px; background:#111827; border:1px solid var(--border); border-radius:10px; padding:8px 10px; color:var(--text); cursor:pointer; }
+    .file-import-label input { display:none; }
+    #kpiRulesBody input, #kpiRulesBody select { width:100%; min-width:80px; }
+
+  </style>
 
 </head>
 <body>
@@ -129,12 +141,14 @@
       <div class="tabs">
         <button class="tab active" data-tab="mapPanel">Map</button>
         <button class="tab" data-tab="eventsPanel">Events</button>
+        <button class="tab" data-tab="kpiPanel">KPI Mapping</button>
         <button class="tab" data-tab="summaryPanel">Summary</button>
         <button class="tab" data-tab="routesPanel">Excel/routes</button>
         <button class="tab" data-tab="filesPanel">Files</button>
       </div>
       <div id="mapPanel" class="panel active"><div id="map"></div></div>
       <div id="eventsPanel" class="panel"></div>
+      <div id="kpiPanel" class="panel"></div>
       <div id="summaryPanel" class="panel"></div>
       <div id="routesPanel" class="panel"></div>
       <div id="filesPanel" class="panel"></div>
@@ -155,7 +169,8 @@ const state = {
   fileReports: [],
   map: null,
   eventLayer: null,
-  lineLayer: null
+  lineLayer: null,
+  kpiRules: []
 };
 
 const COUNTRY_BOUNDS = {
@@ -172,19 +187,188 @@ const COUNTRY_ALIASES = [
 const ROAD_MAP = { city:'Urban', urban:'Urban', interurban:'Interurban', highway:'Highway', motorway:'Highway' };
 const NEGATIVE_WORDS = ['fail','failed','warning','sudden','suddenly','restricted','wrong','late','missing','missed','blocked','blockage','phantom','brake','jerk','issue','problem','error','not detected','no detection','cut in','poor'];
 const CRITICAL_SCORE_TEXT = {
-  1: 'Dangerous or scary performance. Driver patience is exhausted. System does not work. Must be improved.',
-  2: 'Uncomfortable or dissatisfying performance. System does not work correctly, but it is not critical. Customer complaints are possible.',
-  3: 'Neutral. The behavior may be correct or wrong, but it is indifferent for the driver and drivability. Customer complaints are not expected.',
-  4: 'Initially strange or odd, but acceptable once understood. Correct behavior, but less comfortable than expected. Customer complaints are not expected.',
+  1: 'Dangerous or scary performance. The driver has run out of patience with it. The system does not work. Must be improved.',
+  2: 'The driver feels uncomfortable or dissatisfied. The system does not work correctly, but it is not critical. Customer complaints are possible.',
+  3: 'Neutral. The system may perform as expected or incorrectly, but it is indifferent for the driver and drivability. Customer complaints are not expected.',
+  4: 'The behavior may initially seem strange or odd, but once understood it is acceptable. The behavior is correct, but the performance was not as comfortable as expected. Customer complaints are not expected.',
   5: 'Good performance as expected or above. Customer complaints are not expected.'
 };
+
+const KPI_RULE_FIELDS = [
+  ['system', 'System'],
+  ['comment', 'Comment / issue'],
+  ['road', 'Road type'],
+  ['country', 'Country'],
+  ['weather', 'Weather'],
+  ['light', 'Light'],
+  ['eventCode', 'Event code'],
+  ['critical', 'Critical score'],
+  ['fileName', 'File name'],
+  ['any', 'Any text']
+];
+
+const KPI_RULE_OPERATORS = [
+  ['contains', 'contains'],
+  ['equals', 'equals'],
+  ['startsWith', 'starts with'],
+  ['regex', 'regex'],
+  ['lte', '<='],
+  ['gte', '>='],
+  ['lt', '<'],
+  ['gt', '>']
+];
+
+const DEFAULT_KPI_RULES = [
+  { enabled:true, priority:10, field:'system', operator:'contains', value:'ACC', category:'ACC / longitudinal control' },
+  { enabled:true, priority:20, field:'system', operator:'contains', value:'LCC', category:'LCC / lateral control' },
+  { enabled:true, priority:30, field:'system', operator:'contains', value:'ALC', category:'ALC / lane change' },
+  { enabled:true, priority:40, field:'system', operator:'contains', value:'TSI', category:'TSI / traffic sign information' },
+  { enabled:true, priority:50, field:'system', operator:'contains', value:'BSM', category:'BSM / blind spot monitoring' },
+  { enabled:true, priority:60, field:'comment', operator:'contains', value:'brake', category:'Longitudinal comfort' },
+  { enabled:true, priority:70, field:'comment', operator:'contains', value:'lane', category:'Lateral control' }
+];
+
+function loadKpiRules() {
+  try {
+    const saved = localStorage.getItem('routeEventAnalyzer.kpiRules');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return sanitizeKpiRules(parsed);
+    }
+  } catch (err) {
+    console.warn('Could not load KPI rules from localStorage', err);
+  }
+  return sanitizeKpiRules(DEFAULT_KPI_RULES);
+}
+
+function sanitizeKpiRules(rules) {
+  return (rules || []).map((r, i) => ({
+    enabled: r.enabled !== false,
+    priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : (i + 1) * 10,
+    field: String(r.field || 'system'),
+    operator: String(r.operator || 'contains'),
+    value: String(r.value ?? ''),
+    category: String(r.category || 'Uncategorized')
+  }));
+}
+
+function saveKpiRules() {
+  localStorage.setItem('routeEventAnalyzer.kpiRules', JSON.stringify(state.kpiRules, null, 2));
+}
+
+function getEventFieldValue(ev, field) {
+  if (field === 'any') {
+    return [ev.country, ev.system, ev.road, ev.weather, ev.light, ev.eventCode, ev.comment, ev.fileName, ev.critical]
+      .map(v => String(v ?? '')).join(' ');
+  }
+  return ev[field];
+}
+
+function kpiRuleMatches(ev, rule) {
+  if (!rule.enabled || !rule.category) return false;
+  const op = rule.operator || 'contains';
+  const rawValue = getEventFieldValue(ev, rule.field);
+  const target = String(rule.value ?? '').trim();
+  if (target === '') return false;
+
+  if (['lte','gte','lt','gt'].includes(op)) {
+    const a = Number(rawValue);
+    const b = Number(target.replace(',', '.'));
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    if (op === 'lte') return a <= b;
+    if (op === 'gte') return a >= b;
+    if (op === 'lt') return a < b;
+    if (op === 'gt') return a > b;
+  }
+
+  const value = String(rawValue ?? '').toLowerCase();
+  const needle = target.toLowerCase();
+  if (op === 'equals') return value === needle;
+  if (op === 'startsWith') return value.startsWith(needle);
+  if (op === 'regex') {
+    try { return new RegExp(target, 'i').test(String(rawValue ?? '')); }
+    catch { return false; }
+  }
+  return value.includes(needle);
+}
+
+function applyKpiMapping() {
+  const rules = sanitizeKpiRules(state.kpiRules)
+    .filter(r => r.enabled)
+    .sort((a,b) => a.priority - b.priority);
+  for (const ev of state.events) {
+    const match = rules.find(rule => kpiRuleMatches(ev, rule));
+    ev.kpiCategory = match ? match.category : 'Uncategorized';
+  }
+  for (const ev of state.eventsRaw) {
+    const match = rules.find(rule => kpiRuleMatches(ev, rule));
+    ev.kpiCategory = match ? match.category : 'Uncategorized';
+  }
+}
+
+function optionHtml(options, selected) {
+  return options.map(([value, label]) => `<option value="${escapeHtml(value)}"${String(value) === String(selected) ? ' selected' : ''}>${escapeHtml(label)}</option>`).join('');
+}
+
+function readKpiRulesFromTable() {
+  const rows = Array.from(document.querySelectorAll('#kpiRulesBody tr'));
+  state.kpiRules = sanitizeKpiRules(rows.map(row => ({
+    enabled: row.querySelector('[data-kpi="enabled"]').checked,
+    priority: row.querySelector('[data-kpi="priority"]').value,
+    field: row.querySelector('[data-kpi="field"]').value,
+    operator: row.querySelector('[data-kpi="operator"]').value,
+    value: row.querySelector('[data-kpi="value"]').value,
+    category: row.querySelector('[data-kpi="category"]').value
+  })));
+}
+
+function addKpiRule(rule = null) {
+  readKpiRulesFromTable();
+  state.kpiRules.push(rule || {
+    enabled:true,
+    priority:(state.kpiRules.length + 1) * 10,
+    field:'system',
+    operator:'contains',
+    value:'',
+    category:''
+  });
+  renderKpiMapping();
+}
+
+function updateKpiMappingAndRender(save = true) {
+  readKpiRulesFromTable();
+  if (save) saveKpiRules();
+  applyKpiMapping();
+  populateFileters();
+  applyFileters();
+  renderKpiMapping();
+}
+
+function downloadKpiRules() {
+  readKpiRulesFromTable();
+  downloadText('kpi_mapping_rules.json', JSON.stringify(state.kpiRules, null, 2), 'application/json;charset=utf-8');
+}
+
+async function importKpiRules(file) {
+  if (!file) return;
+  const text = await file.text();
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) throw new Error('KPI mapping JSON must contain an array of rules.');
+  state.kpiRules = sanitizeKpiRules(parsed);
+  saveKpiRules();
+  applyKpiMapping();
+  populateFileters();
+  applyFileters();
+  renderKpiMapping();
+}
+
 function criticalScoreDescription(score) {
   const n = Number(score);
   return CRITICAL_SCORE_TEXT[n] || 'No critical score description available.';
 }
 function criticalScaleHtml() {
   return `<details class="score-details" open><summary>Critical score scale</summary><ol class="score-scale">` +
-    [1,2,3,4,5].map(n => `<li><b>${n}:</b> ${escapeHtml(CRITICAL_SCORE_TEXT[n])}</li>`).join('') +
+    [1,2,3,4,5].map(n => `<li>${escapeHtml(CRITICAL_SCORE_TEXT[n])}</li>`).join('') +
     `</ol></details>`;
 }
 
@@ -345,6 +529,7 @@ function normalizeEvent(row, fileName, rowIndex) {
     critical, system, weather, light, road, latitude:ll.lat, longitude:ll.lon, gpsValid:ll.valid,
     gpsRepaired:ll.repaired, rawLatitude:rawLat, rawLongitude:rawLon, eventCode, odometer, comment };
   ev.issue = isIssue(ev);
+  ev.kpiCategory = 'Uncategorized';
   ev.dedupeKey = [country, ev.dateISO, time, critical, system, road, ll.lat?.toFixed(5), ll.lon?.toFixed(5), comment.slice(0,80)].join('|').toLowerCase();
   return ev;
 }
@@ -396,6 +581,7 @@ async function analyzeFilees() {
     }
   }
   dedupeEvents();
+  applyKpiMapping();
   populateFileters();
   applyFileters();
   updateDownloads(true);
@@ -415,6 +601,7 @@ function dedupeEvents() {
 function populateFileters() {
   fillSelect('countryFileter', unique(state.events.map(e=>e.country)));
   fillSelect('systemFileter', unique(state.events.map(e=>e.system)));
+  fillSelect('kpiFileter', unique(state.events.map(e=>e.kpiCategory)));
   fillSelect('roadFileter', unique(state.events.map(e=>e.road)));
   fillSelect('criticalFileter', unique(state.events.map(e=>e.critical).filter(v=>v!==null).sort((a,b)=>a-b)));
 }
@@ -428,6 +615,7 @@ function fillSelect(id, values) {
 function applyFileters() {
   const cf = document.getElementById('countryFileter').value;
   const sf = document.getElementById('systemFileter').value;
+  const kf = document.getElementById('kpiFileter').value;
   const rf = document.getElementById('roadFileter').value;
   const crf = document.getElementById('criticalFileter').value;
   const search = document.getElementById('searchFileter').value.trim().toLowerCase();
@@ -435,6 +623,7 @@ function applyFileters() {
   state.filtered = state.events.filter(e => {
     if (cf && e.country !== cf) return false;
     if (sf && e.system !== sf) return false;
+    if (kf && e.kpiCategory !== kf) return false;
     if (rf && e.road !== rf) return false;
     if (crf && String(e.critical) !== crf) return false;
     if (issues && !e.issue) return false;
@@ -469,6 +658,7 @@ function renderMap() {
     });
     m.bindPopup(`<b>${escapeHtml(e.country)} - ${escapeHtml(e.system)}</b><br>` +
       `Date: ${escapeHtml(e.day)} ${escapeHtml(e.time)}<br>` +
+      `KPI category: ${escapeHtml(e.kpiCategory || 'Uncategorized')}<br>` +
       `Critical: ${escapeHtml(e.critical ?? '')} - ${escapeHtml(criticalScoreDescription(e.critical))}<br>` +
       `Road: ${escapeHtml(e.road)}<br>` +
       `Weather/light: ${escapeHtml(e.weather)} / ${escapeHtml(e.light)}<br>` +
@@ -501,13 +691,15 @@ function renderMetrics() {
   document.getElementById('mCoords').textContent = state.events.filter(e=>e.gpsValid).length;
   const topCountries = countsBy(state.events, e=>e.country).slice(0,8).map(([k,v])=>`<span class="pill">${escapeHtml(k)}: ${v}</span>`).join('');
   const topSystems = countsBy(state.events, e=>e.system).slice(0,8).map(([k,v])=>`<span class="pill">${escapeHtml(k)}: ${v}</span>`).join('');
-  document.getElementById('topPills').innerHTML = `<div class="small">Country</div>${topCountries}<div class="small" style="margin-top:6px">System</div>${topSystems}`;
+  const topKpis = countsBy(state.events, e=>e.kpiCategory || 'Uncategorized').slice(0,8).map(([k,v])=>`<span class="pill">${escapeHtml(k)}: ${v}</span>`).join('');
+  document.getElementById('topPills').innerHTML = `<div class="small">Country</div>${topCountries}<div class="small" style="margin-top:6px">System</div>${topSystems}<div class="small" style="margin-top:6px">KPI category</div>${topKpis}`;
 }
 function renderEventsTable() {
   const rows = state.filtered.slice(0,1000).map(e => `<tr>
     <td>${escapeHtml(e.dateISO || e.day)} ${escapeHtml(e.time || '')}</td>
     <td>${escapeHtml(e.country)}</td>
     <td>${escapeHtml(e.system)}</td>
+    <td>${escapeHtml(e.kpiCategory || 'Uncategorized')}</td>
     <td class="critical-${escapeHtml(e.critical)}" title="${escapeHtml(criticalScoreDescription(e.critical))}">${escapeHtml(e.critical ?? '')}</td>
     <td>${escapeHtml(e.road)}</td>
     <td>${e.gpsValid ? `${e.latitude.toFixed(5)}, ${e.longitude.toFixed(5)}${e.gpsRepaired ? ' *' : ''}` : ''}</td>
@@ -515,12 +707,71 @@ function renderEventsTable() {
     <td>${escapeHtml(e.fileName)}</td>
   </tr>`).join('');
   document.getElementById('eventsPanel').innerHTML = `<p class="small">Showing ${Math.min(state.filtered.length,1000)} of ${state.filtered.length} filtered events. * means the coordinate was probably repaired.</p>
-    <table><thead><tr><th>Date/time</th><th>Country</th><th>System</th><th title="Hover a score to see the scale description">Critical</th><th>Road</th><th>GPS</th><th>Comment</th><th>File</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table><thead><tr><th>Date/time</th><th>Country</th><th>System</th><th>KPI category</th><th title="Hover a score to see the scale description">Critical</th><th>Road</th><th>GPS</th><th>Comment</th><th>File</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
+
+function renderKpiMapping() {
+  const rules = sanitizeKpiRules(state.kpiRules).sort((a,b) => a.priority - b.priority);
+  const rows = rules.map((r, idx) => `<tr data-index="${idx}">
+    <td><input type="checkbox" data-kpi="enabled" ${r.enabled ? 'checked' : ''}></td>
+    <td><input type="number" data-kpi="priority" value="${escapeHtml(r.priority)}" style="width:70px"></td>
+    <td><select data-kpi="field">${optionHtml(KPI_RULE_FIELDS, r.field)}</select></td>
+    <td><select data-kpi="operator">${optionHtml(KPI_RULE_OPERATORS, r.operator)}</select></td>
+    <td><input data-kpi="value" value="${escapeHtml(r.value)}" placeholder="e.g. ACC, lane, brake"></td>
+    <td><input data-kpi="category" value="${escapeHtml(r.category)}" placeholder="e.g. Longitudinal control"></td>
+    <td><button class="kpi-delete-rule" data-index="${idx}">Delete</button></td>
+  </tr>`).join('');
+
+  const categories = countsBy(state.events, e => e.kpiCategory || 'Uncategorized');
+  const categoryTable = categories.length ? `<h3>Current KPI category counts</h3>
+    <table><thead><tr><th>KPI category</th><th>Events</th></tr></thead><tbody>${categories.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>` : '';
+
+  document.getElementById('kpiPanel').innerHTML = `
+    <h2>KPI Mapping</h2>
+    <p class="small">Rules are evaluated from lowest priority number to highest. The first matching rule assigns the event's KPI category. Events that do not match any rule become <b>Uncategorized</b>. Rules are saved in this browser using localStorage.</p>
+    <div class="toolbar">
+      <button id="addKpiRuleBtn">Add rule</button>
+      <button id="applyKpiRulesBtn">Apply mapping</button>
+      <button id="saveKpiRulesBtn">Save rules in browser</button>
+      <button id="resetKpiRulesBtn">Reset to defaults</button>
+      <button id="exportKpiRulesBtn">Export rules JSON</button>
+      <label class="file-import-label">Import rules JSON <input id="importKpiRulesInput" type="file" accept=".json,application/json"></label>
+    </div>
+    <table>
+      <thead><tr><th>On</th><th>Priority</th><th>Field</th><th>Operator</th><th>Value</th><th>KPI category</th><th></th></tr></thead>
+      <tbody id="kpiRulesBody">${rows}</tbody>
+    </table>
+    ${categoryTable}`;
+
+  document.getElementById('addKpiRuleBtn').addEventListener('click', () => addKpiRule());
+  document.getElementById('applyKpiRulesBtn').addEventListener('click', () => updateKpiMappingAndRender(false));
+  document.getElementById('saveKpiRulesBtn').addEventListener('click', () => { readKpiRulesFromTable(); saveKpiRules(); alert('KPI mapping rules saved in this browser.'); });
+  document.getElementById('resetKpiRulesBtn').addEventListener('click', () => {
+    if (!confirm('Reset KPI mapping rules to default rules?')) return;
+    state.kpiRules = sanitizeKpiRules(DEFAULT_KPI_RULES);
+    saveKpiRules();
+    applyKpiMapping();
+    populateFileters();
+    applyFileters();
+    renderKpiMapping();
+  });
+  document.getElementById('exportKpiRulesBtn').addEventListener('click', downloadKpiRules);
+  document.getElementById('importKpiRulesInput').addEventListener('change', async (e) => {
+    try { await importKpiRules(e.target.files[0]); }
+    catch (err) { alert(err.message || err); }
+  });
+  document.querySelectorAll('.kpi-delete-rule').forEach(btn => btn.addEventListener('click', () => {
+    readKpiRulesFromTable();
+    state.kpiRules.splice(Number(btn.dataset.index), 1);
+    renderKpiMapping();
+  }));
+}
+
 function renderSummary() {
   const blocks = [
     ['Events by country', countsBy(state.events, e=>e.country)],
     ['Events per system', countsBy(state.events, e=>e.system)],
+    ['Events by KPI category', countsBy(state.events, e=>e.kpiCategory || 'Uncategorized')],
     ['Events by road type', countsBy(state.events, e=>e.road)],
     ['Issues by country', countsBy(state.events.filter(e=>e.issue), e=>e.country)],
     ['Repaired GPS coordinates by country', countsBy(state.events.filter(e=>e.gpsRepaired), e=>e.country)]
@@ -543,12 +794,13 @@ function renderAll() {
   renderMetrics();
   renderMap();
   renderEventsTable();
+  renderKpiMapping();
   renderSummary();
   renderRoutes();
   renderFilees();
 }
 function makeCleanCsv() {
-  const cols = ['country','dateISO','time','critical','system','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
+  const cols = ['country','dateISO','time','critical','system','kpiCategory','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
   const lines = [cols.join(',')];
   for (const e of state.events) {
     lines.push(cols.map(c => csvEscape(e[c])).join(','));
@@ -571,6 +823,8 @@ function makeSummaryJson() {
     repairedGps: state.events.filter(e=>e.gpsRepaired).length,
     byCountry: Object.fromEntries(countsBy(state.events, e=>e.country)),
     bySystem: Object.fromEntries(countsBy(state.events, e=>e.system)),
+    byKpiCategory: Object.fromEntries(countsBy(state.events, e=>e.kpiCategory || 'Uncategorized')),
+    kpiRules: state.kpiRules,
     byRoad: Object.fromEntries(countsBy(state.events, e=>e.road)),
     routes: state.routeFilees
   }, null, 2);
@@ -593,7 +847,7 @@ function resetData(clearInput=true) {
   if (clearInput) document.getElementById('fileInput').value = '';
   if (state.eventLayer) state.eventLayer.clearLayers();
   if (state.lineLayer) state.lineLayer.clearLayers();
-  ['eventsPanel','summaryPanel','routesPanel','filesPanel'].forEach(id => document.getElementById(id).innerHTML = '');
+  ['eventsPanel','kpiPanel','summaryPanel','routesPanel','filesPanel'].forEach(id => document.getElementById(id).innerHTML = '');
   renderMetrics();
   updateDownloads(false);
   log('No data loaded yet.');
@@ -602,7 +856,7 @@ function resetData(clearInput=true) {
 document.getElementById('analyzeBtn').addEventListener('click', analyzeFilees);
 document.getElementById('clearBtn').addEventListener('click', () => resetData(true));
 document.getElementById('applyFileterBtn').addEventListener('click', applyFileters);
-['countryFileter','systemFileter','roadFileter','criticalFileter','issuesOnly','drawLines'].forEach(id => document.getElementById(id).addEventListener('change', applyFileters));
+['countryFileter','systemFileter','kpiFileter','roadFileter','criticalFileter','issuesOnly','drawLines'].forEach(id => document.getElementById(id).addEventListener('change', applyFileters));
 document.getElementById('searchFileter').addEventListener('input', () => { clearTimeout(window.__searchTimer); window.__searchTimer = setTimeout(applyFileters, 250); });
 document.getElementById('downloadCsvBtn').addEventListener('click', () => downloadText('events_clean.csv', makeCleanCsv(), 'text/csv;charset=utf-8'));
 document.getElementById('downloadJsonBtn').addEventListener('click', () => downloadText('summary.json', makeSummaryJson(), 'application/json;charset=utf-8'));
@@ -614,8 +868,10 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
   if (btn.dataset.tab === 'mapPanel' && state.map) setTimeout(() => state.map.invalidateSize(), 50);
 }));
 
+state.kpiRules = loadKpiRules();
 initMap();
 renderMetrics();
+renderKpiMapping();
 </script>
 </body>
 </html>
