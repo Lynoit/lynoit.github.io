@@ -86,7 +86,7 @@
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -197,6 +197,7 @@ const CRITICAL_SCORE_TEXT = {
 
 const KPI_RULE_FIELDS = [
   ['system', 'System'],
+  ['rawSystem', 'Raw system'],
   ['comment', 'Comment / issue'],
   ['road', 'Road type'],
   ['country', 'Country'],
@@ -219,10 +220,17 @@ const KPI_RULE_OPERATORS = [
   ['gt', '>']
 ];
 
+const KPI_RULE_LOGICS = [
+  ['', ''],
+  ['AND', 'AND'],
+  ['OR', 'OR'],
+  ['NOT', 'NOT']
+];
+
 const DEFAULT_KPI_RULES = [
-  { enabled:true, priority:10, field:'system', operator:'contains', value:'ACC', category:'ACC / longitudinal control' },
+  { enabled:true, priority:10, field:'system', operator:'equals', value:'HWA', logic:'', field2:'comment', operator2:'contains', value2:'', category:'HWA / longitudinal control' },
   { enabled:true, priority:20, field:'system', operator:'contains', value:'LCC', category:'LCC / lateral control' },
-  { enabled:true, priority:30, field:'system', operator:'contains', value:'ALC', category:'ALC / lane change' },
+  { enabled:true, priority:30, field:'system', operator:'equals', value:'HWA+', logic:'', field2:'comment', operator2:'contains', value2:'', category:'HWA+ / lane change' },
   { enabled:true, priority:40, field:'system', operator:'contains', value:'TSI', category:'TSI / traffic sign information' },
   { enabled:true, priority:50, field:'system', operator:'contains', value:'BSM', category:'BSM / blind spot monitoring' },
   { enabled:true, priority:60, field:'comment', operator:'contains', value:'brake', category:'Longitudinal comfort' },
@@ -242,15 +250,35 @@ function loadKpiRules() {
   return sanitizeKpiRules(DEFAULT_KPI_RULES);
 }
 
+function normalizeRuleValue(field, value) {
+  const v = String(value ?? '');
+  if (String(field || '').toLowerCase() === 'system') {
+    if (v.trim().toUpperCase() === 'ACC') return 'HWA';
+    if (v.trim().toUpperCase() === 'ALC') return 'HWA+';
+  }
+  return v;
+}
+
 function sanitizeKpiRules(rules) {
-  return (rules || []).map((r, i) => ({
-    enabled: r.enabled !== false,
-    priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : (i + 1) * 10,
-    field: String(r.field || 'system'),
-    operator: String(r.operator || 'contains'),
-    value: String(r.value ?? ''),
-    category: String(r.category || 'Uncategorized')
-  }));
+  return (rules || []).map((r, i) => {
+    const field = String(r.field || 'system');
+    const field2 = String(r.field2 || 'comment');
+    return {
+      enabled: r.enabled !== false,
+      priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : (i + 1) * 10,
+
+      field,
+      operator: String(r.operator || 'contains'),
+      value: normalizeRuleValue(field, r.value ?? ''),
+
+      logic: String(r.logic || ''),
+      field2,
+      operator2: String(r.operator2 || 'contains'),
+      value2: normalizeRuleValue(field2, r.value2 ?? ''),
+
+      category: String(r.category || 'Uncategorized')
+    };
+  });
 }
 
 function saveKpiRules() {
@@ -265,11 +293,10 @@ function getEventFieldValue(ev, field) {
   return ev[field];
 }
 
-function kpiRuleMatches(ev, rule) {
-  if (!rule.enabled || !rule.category) return false;
-  const op = rule.operator || 'contains';
-  const rawValue = getEventFieldValue(ev, rule.field);
-  const target = String(rule.value ?? '').trim();
+function conditionMatches(ev, field, operator, value) {
+  const op = operator || 'contains';
+  const rawValue = getEventFieldValue(ev, field);
+  const target = String(value ?? '').trim();
   if (target === '') return false;
 
   if (['lte','gte','lt','gt'].includes(op)) {
@@ -282,17 +309,40 @@ function kpiRuleMatches(ev, rule) {
     if (op === 'gt') return a > b;
   }
 
-  const value = String(rawValue ?? '').toLowerCase();
+  const eventValue = String(rawValue ?? '').toLowerCase();
   const needle = target.toLowerCase();
-  if (op === 'equals') return value === needle;
-  if (op === 'startsWith') return value.startsWith(needle);
+
+  if (op === 'equals') return eventValue === needle;
+  if (op === 'startsWith') return eventValue.startsWith(needle);
   if (op === 'regex') {
     try { return new RegExp(target, 'i').test(String(rawValue ?? '')); }
     catch { return false; }
   }
-  return value.includes(needle);
+
+  return eventValue.includes(needle);
 }
 
+function kpiRuleMatches(ev, rule) {
+  if (!rule.enabled || !rule.category) return false;
+
+  const first = conditionMatches(ev, rule.field, rule.operator, rule.value);
+  const logic = String(rule.logic || '').toUpperCase();
+
+  // Backwards compatible simple rule:
+  // if no logic is selected, only the first condition is used.
+  if (!logic) return first;
+
+  const second = conditionMatches(ev, rule.field2, rule.operator2, rule.value2);
+
+  if (logic === 'AND') return first && second;
+  if (logic === 'OR') return first || second;
+
+  // NOT means: first condition must match AND the second condition must NOT match.
+  // Example: System equals HWA NOT Comment contains correctly -> KPI category.
+  if (logic === 'NOT') return first && !second;
+
+  return first;
+}
 
 function normalizeSystemCategory(system) {
   const s = String(system || '').trim();
@@ -327,9 +377,16 @@ function readKpiRulesFromTable() {
   state.kpiRules = sanitizeKpiRules(rows.map(row => ({
     enabled: row.querySelector('[data-kpi="enabled"]').checked,
     priority: row.querySelector('[data-kpi="priority"]').value,
+
     field: row.querySelector('[data-kpi="field"]').value,
     operator: row.querySelector('[data-kpi="operator"]').value,
     value: row.querySelector('[data-kpi="value"]').value,
+
+    logic: row.querySelector('[data-kpi="logic"]').value,
+    field2: row.querySelector('[data-kpi="field2"]').value,
+    operator2: row.querySelector('[data-kpi="operator2"]').value,
+    value2: row.querySelector('[data-kpi="value2"]').value,
+
     category: row.querySelector('[data-kpi="category"]').value
   })));
 }
@@ -342,6 +399,10 @@ function addKpiRule(rule = null) {
     field:'system',
     operator:'contains',
     value:'',
+    logic:'',
+    field2:'comment',
+    operator2:'contains',
+    value2:'',
     category:''
   });
   renderKpiMapping();
@@ -745,9 +806,17 @@ function renderKpiMapping() {
   const rows = rules.map((r, idx) => `<tr data-index="${idx}">
     <td><input type="checkbox" data-kpi="enabled" ${r.enabled ? 'checked' : ''}></td>
     <td><input type="number" data-kpi="priority" value="${escapeHtml(r.priority)}" style="width:70px"></td>
+
     <td><select data-kpi="field">${optionHtml(KPI_RULE_FIELDS, r.field)}</select></td>
     <td><select data-kpi="operator">${optionHtml(KPI_RULE_OPERATORS, r.operator)}</select></td>
-    <td><input data-kpi="value" value="${escapeHtml(r.value)}" placeholder="e.g. ACC, lane, brake"></td>
+    <td><input data-kpi="value" value="${escapeHtml(r.value)}" placeholder="e.g. HWA, lane, brake"></td>
+
+    <td><select data-kpi="logic">${optionHtml(KPI_RULE_LOGICS, r.logic)}</select></td>
+
+    <td><select data-kpi="field2">${optionHtml(KPI_RULE_FIELDS, r.field2)}</select></td>
+    <td><select data-kpi="operator2">${optionHtml(KPI_RULE_OPERATORS, r.operator2)}</select></td>
+    <td><input data-kpi="value2" value="${escapeHtml(r.value2)}" placeholder="optional second condition"></td>
+
     <td><input data-kpi="category" value="${escapeHtml(r.category)}" placeholder="e.g. Longitudinal control"></td>
     <td><button class="kpi-delete-rule" data-index="${idx}">Delete</button></td>
   </tr>`).join('');
@@ -758,8 +827,12 @@ function renderKpiMapping() {
 
   document.getElementById('kpiPanel').innerHTML = `
     <h2>KPI Mapping</h2>
-      <p class="muted"><b>System normalization:</b> ACC is displayed as HWA, and ALC is displayed as HWA+. The raw CSV files are not modified.</p>
-    <p class="small">Rules are evaluated from lowest priority number to highest. The first matching rule assigns the event's KPI category. Events that do not match any rule become <b>Uncategorized</b>. Rules are saved in this browser using localStorage.</p>
+    <p class="muted"><b>System normalization:</b> ACC is displayed as HWA, and ALC is displayed as HWA+. The raw CSV files are not modified.</p>
+    <p class="small">
+      Compound rules are evaluated from lowest priority number to highest. The first matching rule assigns the event's KPI category.
+      Rule format: <b>(Field + Operator + Value) [AND / OR / NOT] (Field + Operator + Value) → KPI category</b>.
+      If the logic field is empty, only the first condition is used. <b>NOT</b> means: first condition matches and the second condition does not match.
+    </p>
     <div class="toolbar">
       <button id="addKpiRuleBtn">Add rule</button>
       <button id="applyKpiRulesBtn">Apply mapping</button>
@@ -769,7 +842,21 @@ function renderKpiMapping() {
       <label class="file-import-label">Import rules JSON <input id="importKpiRulesInput" type="file" accept=".json,application/json"></label>
     </div>
     <table>
-      <thead><tr><th>On</th><th>Priority</th><th>Field</th><th>Operator</th><th>Value</th><th>KPI category</th><th></th></tr></thead>
+      <thead>
+        <tr>
+          <th>On</th>
+          <th>Priority</th>
+          <th>Field 1</th>
+          <th>Operator 1</th>
+          <th>Value 1</th>
+          <th>Logic</th>
+          <th>Field 2</th>
+          <th>Operator 2</th>
+          <th>Value 2</th>
+          <th>KPI category</th>
+          <th></th>
+        </tr>
+      </thead>
       <tbody id="kpiRulesBody">${rows}</tbody>
     </table>
     ${categoryTable}`;
