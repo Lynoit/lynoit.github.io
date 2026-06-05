@@ -95,7 +95,7 @@
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper and r-scope sanitizer bug. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -431,25 +431,48 @@ function applyKpiMapping() {
   }
 }
 
+
+function readKpiRulesFromTable() {
+  const body = document.getElementById('kpiRulesBody');
+  if (!body) return;
+
+  const rows = Array.from(body.querySelectorAll('tr'));
+
+  state.kpiRules = sanitizeKpiRules(rows.map(row => {
+    const get = (name, fallback = '') => {
+      const el = row.querySelector(`[data-kpi="${name}"]`);
+      if (!el) return fallback;
+      if (el.type === 'checkbox') return el.checked;
+      return el.value;
+    };
+
+    return {
+      enabled: get('enabled', true),
+      priority: get('priority', 999),
+      field: get('field', 'system'),
+      operator: get('operator', 'contains'),
+      value: get('value', ''),
+      logic: get('logic', ''),
+      field2: get('field2', 'comment'),
+      operator2: get('operator2', 'contains'),
+      value2: get('value2', ''),
+      category: get('category', 'Uncategorized')
+    };
+  }));
+}
+
 function updateKpiMappingAndRender(save = true) {
   readKpiRulesFromTable();
-  if (save) saveKpiRules();
-
-  state.manualKpiOverrides = loadManualKpiOverrides();
-  state.events.forEach(e => {
-    e.eventId = e.eventId || eventStableId(e);
-    e.manualKpiCategory = state.manualKpiOverrides[e.eventId] || '';
-  });
   applyKpiMapping();
 
-  allEvents.forEach(e => {
-    e.system = normalizeSystemCategory(e.system);
-  });
+  if (save && typeof saveKpiRules === 'function') {
+    saveKpiRules();
+  }
+
   populateFileters();
   applyFileters();
   renderKpiMapping();
 }
-
 
 function downloadManualKpiOverrides() {
   const overrides = state.manualKpiOverrides || loadManualKpiOverrides();
@@ -885,6 +908,13 @@ function renderEventsTable() {
   });
 
 
+
+function addListenerIfPresent(id, eventName, handler) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener(eventName, handler);
+  else console.warn(`Missing element: #${id}`);
+}
+
 function renderKpiMapping() {
   const rules = sanitizeKpiRules(state.kpiRules).sort((a,b) => a.priority - b.priority);
   const rows = rules.map((r, idx) => `<tr data-index="${idx}">
@@ -948,10 +978,10 @@ function renderKpiMapping() {
     </table>
     ${categoryTable}`;
 
-  document.getElementById('addKpiRuleBtn').addEventListener('click', () => addKpiRule());
-  document.getElementById('applyKpiRulesBtn').addEventListener('click', () => updateKpiMappingAndRender(false));
-  document.getElementById('saveKpiRulesBtn').addEventListener('click', () => { readKpiRulesFromTable(); saveKpiRules(); alert('KPI mapping rules saved in this browser.'); });
-  document.getElementById('resetKpiRulesBtn').addEventListener('click', () => {
+  addListenerIfPresent('addKpiRuleBtn', 'click', () => addKpiRule());
+  addListenerIfPresent('applyKpiRulesBtn', 'click', () => updateKpiMappingAndRender(false));
+  addListenerIfPresent('saveKpiRulesBtn', 'click', () => { readKpiRulesFromTable(); saveKpiRules(); alert('KPI mapping rules saved in this browser.'); });
+  addListenerIfPresent('resetKpiRulesBtn', 'click', () => {
     if (!confirm('Reset KPI mapping rules to default rules?')) return;
     state.kpiRules = sanitizeKpiRules(DEFAULT_KPI_RULES);
     saveKpiRules();
@@ -960,7 +990,7 @@ function renderKpiMapping() {
     applyFileters();
     renderKpiMapping();
   });
-  document.getElementById('exportKpiRulesBtn').addEventListener('click', downloadKpiRules);
+  addListenerIfPresent('exportKpiRulesBtn', 'click', downloadKpiRules);
   const exportManualKpiBtn = document.getElementById('exportManualKpiBtn');
   if (exportManualKpiBtn) exportManualKpiBtn.addEventListener('click', downloadManualKpiOverrides);
   const importManualKpiInput = document.getElementById('importManualKpiInput');
@@ -1089,6 +1119,25 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', (
 state.kpiRules = loadKpiRules();
 initMap();
 renderMetrics();
+
+function runStartupSelfTest() {
+  const requiredFunctions = [
+    'readKpiRulesFromTable',
+    'optionHtml',
+    'applyKpiMapping',
+    'renderKpiMapping',
+    'setManualKpiCategory'
+  ];
+
+  const missing = requiredFunctions.filter(name => typeof globalThis[name] !== 'function');
+  if (missing.length) {
+    console.error('Startup self-test failed. Missing functions:', missing);
+  } else {
+    console.info('Startup self-test OK: KPI mapping and manual override functions are available.');
+  }
+}
+
+runStartupSelfTest();
 renderKpiMapping();
 </script>
 </body>
