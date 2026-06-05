@@ -107,7 +107,7 @@
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. Summary and tables now use current filters. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -944,7 +944,8 @@ function renderKpiMapping() {
     <td><button class="kpi-delete-rule" data-index="${idx}">Delete</button></td>
   </tr>`).join('');
 
-  const categories = countsBy(state.events, e => e.kpiCategory || 'Uncategorized');
+  const activeEvents = state.filtered && state.filtered.length ? state.filtered : state.events;
+  const categories = countsBy(activeEvents, e => e.kpiCategory || 'Uncategorized');
   const categoryTable = categories.length ? `<h3>Current KPI category counts</h3>
     <table><thead><tr><th>KPI category</th><th>KPI source</th><th>Manual KPI override</th><th>Events</th></tr></thead><tbody>${categories.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>` : '';
 
@@ -1021,13 +1022,15 @@ function renderKpiMapping() {
 }
 
 function renderSummary() {
+  const activeEvents = state.filtered || [];
+  const activeLabel = `${activeEvents.length} filtered event${activeEvents.length === 1 ? '' : 's'}`;
   const blocks = [
-    ['Events by country', countsBy(state.events, e=>e.country)],
-    ['Events per system', countsBy(state.events, e=>e.system)],
-    ['Events by KPI category', countsBy(state.events, e=>e.kpiCategory || 'Uncategorized')],
-    ['Events by road type', countsBy(state.events, e=>e.road)],
-    ['Issues by country', countsBy(state.events.filter(e=>e.issue), e=>e.country)],
-    ['Repaired GPS coordinates by country', countsBy(state.events.filter(e=>e.gpsRepaired), e=>e.country)]
+    ['Events by country', countsBy(activeEvents, e=>e.country)],
+    ['Events per system', countsBy(activeEvents, e=>e.system)],
+    ['Events by KPI category', countsBy(activeEvents, e=>e.kpiCategory || 'Uncategorized')],
+    ['Events by road type', countsBy(activeEvents, e=>e.road)],
+    ['Issues by country', countsBy(activeEvents.filter(e=>e.issue), e=>e.country)],
+    ['Repaired GPS coordinates by country', countsBy(activeEvents.filter(e=>e.gpsRepaired), e=>e.country)]
   ];
   document.getElementById('summaryPanel').innerHTML = criticalScaleHtml() + blocks.map(([title, rows]) => `<h3>${escapeHtml(title)}</h3>` +
     `<table><thead><tr><th>Group</th><th>Count</th></tr></thead><tbody>${rows.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>`).join('');
@@ -1055,7 +1058,7 @@ function renderAll() {
 function makeCleanCsv() {
   const cols = ['country','dateISO','time','critical','system','kpiCategory','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
   const lines = [cols.join(',')];
-  for (const e of state.events) {
+  for (const e of activeEvents) {
     lines.push(cols.map(c => csvEscape(e[c])).join(','));
   }
   return lines.join('\n');
@@ -1069,16 +1072,16 @@ function makeSummaryJson() {
   return JSON.stringify({
     generatedAt: new Date().toISOString(),
     files: state.fileReports,
-    totalEventsRaw: state.eventsRaw.length,
-    totalEventsUnique: state.events.length,
-    issues: state.events.filter(e=>e.issue).length,
-    withGps: state.events.filter(e=>e.gpsValid).length,
-    repairedGps: state.events.filter(e=>e.gpsRepaired).length,
-    byCountry: Object.fromEntries(countsBy(state.events, e=>e.country)),
-    bySystem: Object.fromEntries(countsBy(state.events, e=>e.system)),
-    byKpiCategory: Object.fromEntries(countsBy(state.events, e=>e.kpiCategory || 'Uncategorized')),
+    totalEventsRaw: activeEventsRaw.length,
+    totalEventsUnique: activeEvents.length,
+    issues: activeEvents.filter(e=>e.issue).length,
+    withGps: activeEvents.filter(e=>e.gpsValid).length,
+    repairedGps: activeEvents.filter(e=>e.gpsRepaired).length,
+    byCountry: Object.fromEntries(countsBy(activeEvents, e=>e.country)),
+    bySystem: Object.fromEntries(countsBy(activeEvents, e=>e.system)),
+    byKpiCategory: Object.fromEntries(countsBy(activeEvents, e=>e.kpiCategory || 'Uncategorized')),
     kpiRules: state.kpiRules,
-    byRoad: Object.fromEntries(countsBy(state.events, e=>e.road)),
+    byRoad: Object.fromEntries(countsBy(activeEvents, e=>e.road)),
     routes: state.routeFilees
   }, null, 2);
 }
@@ -1096,7 +1099,7 @@ function updateDownloads(enabled) {
   document.getElementById('downloadJsonBtn').disabled = !enabled;
 }
 function resetData(clearInput=true) {
-  state.eventsRaw = []; state.events = []; state.filtered = []; state.routeFilees = []; state.routeRows = []; state.fileReports = [];
+  activeEventsRaw = []; activeEvents = []; state.filtered = []; state.routeFilees = []; state.routeRows = []; state.fileReports = [];
   if (clearInput) document.getElementById('fileInput').value = '';
   if (state.eventLayer) state.eventLayer.clearLayers();
   if (state.lineLayer) state.lineLayer.clearLayers();
