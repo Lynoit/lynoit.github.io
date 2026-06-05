@@ -107,7 +107,7 @@
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. Summary, KPI counts, and exports use current filters. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. Filter-driven summary v4 with safe reset and visible error reporting. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -741,6 +741,8 @@ function parseWorkbookRoutes(workbook, fileName) {
   return rows;
 }
 async function analyzeFilees() {
+  try {
+
   const input = document.getElementById('fileInput');
   state.files = Array.from(input.files || []).filter(f => /\.(csv|xlsx|xls)$/i.test(f.name));
   if (!state.files.length) { alert('Select at least one CSV, XLSX, or XLS file.'); return; }
@@ -776,6 +778,13 @@ async function analyzeFilees() {
   populateFileters();
   applyFileters();
   updateDownloads(true);
+
+  } catch (err) {
+    console.error('analyzeFilees failed:', err);
+    const fileSummary = document.getElementById('fileSummary');
+    if (fileSummary) fileSummary.textContent = 'Error while analyzing files: ' + (err && err.message ? err.message : err);
+    alert('Error while analyzing files: ' + (err && err.message ? err.message : err));
+  }
 }
 function dedupeEvents() {
   const seen = new Map();
@@ -944,7 +953,7 @@ function renderKpiMapping() {
     <td><button class="kpi-delete-rule" data-index="${idx}">Delete</button></td>
   </tr>`).join('');
 
-  const activeEventsForKpiCounts = state.filtered || state.events;
+  const activeEventsForKpiCounts = Array.isArray(state.filtered) ? state.filtered : state.events;
   const categories = countsBy(activeEventsForKpiCounts, e => e.kpiCategory || 'Uncategorized');
   const categoryTable = categories.length ? `<h3>Current KPI category counts</h3>
     <table><thead><tr><th>KPI category</th><th>KPI source</th><th>Manual KPI override</th><th>Events</th></tr></thead><tbody>${categories.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>` : '';
@@ -1022,7 +1031,8 @@ function renderKpiMapping() {
 }
 
 function renderSummary() {
-  const activeEvents = state.filtered || [];
+  const activeEvents = Array.isArray(state.filtered) ? state.filtered : [];
+
   const table = (title, rows) => `<h3>${escapeHtml(title)}</h3><table><thead><tr><th>Group</th><th>Events</th></tr></thead><tbody>${
     rows.map(([k,v]) => `<tr><td>${escapeHtml(k || 'Unknown')}</td><td>${v}</td></tr>`).join('')
   }</tbody></table>`;
@@ -1043,7 +1053,10 @@ function renderSummary() {
     table('Issues by country', countsBy(activeEvents.filter(e => e.issue), e => e.country))
   ].join('');
 
-  document.getElementById('summaryPanel').innerHTML = `
+  const panel = document.getElementById('summaryPanel');
+  if (!panel) return;
+
+  panel.innerHTML = `
     <h2>Summary</h2>
     <p class="small">All summary tables use the currently filtered events.</p>
     <div class="metrics">
@@ -1056,6 +1069,117 @@ function renderSummary() {
     ${sections}
   `;
 }
+function renderRoutes() {
+  const fileTable = state.routeFilees.map(f => `<tr><td>${escapeHtml(f.fileName)}</td><td>${escapeHtml(f.sheets.join(', '))}</td><td>${f.routeRows}</td></tr>`).join('');
+  const rows = state.routeRows.slice(0,500).map(r => `<tr><td>${escapeHtml(r.fileName)}</td><td>${escapeHtml(r.sheetName)}</td><td>${r.rowNumber}</td><td>${escapeHtml(r.text)}</td></tr>`).join('');
+  document.getElementById('routesPanel').innerHTML = `<h3>Excel files</h3><table><thead><tr><th>File</th><th>Sheets</th><th>Relevanta rows</th></tr></thead><tbody>${fileTable}</tbody></table>
+    <h3>Route/result rows found in Excel</h3><p class="small">These are rows where the script finds words such as Urban, Interurban, Highway, Total, Route, Night, or Google Maps links.</p>
+    <table><thead><tr><th>File</th><th>Sheets</th><th>Row</th><th>Content</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderFilees() {
+  const rows = state.fileReports.map(f => `<tr><td>${escapeHtml(f.fileName)}</td><td>${escapeHtml(f.type)}</td><td>${f.rows}</td><td>${f.events}</td><td>${escapeHtml(f.note)}</td></tr>`).join('');
+  document.getElementById('filesPanel').innerHTML = `<table><thead><tr><th>File</th><th>Type</th><th>Rows</th><th>Events</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderAll() {
+  renderMetrics();
+  renderMap();
+  renderEventsTable();
+  renderKpiMapping();
+  renderSummary();
+  renderRoutes();
+  renderFilees();
+}
+function makeCleanCsv() {
+  const cols = ['country','dateISO','time','critical','system','kpiCategory','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
+  const lines = [cols.join(',')];
+  for (const e of state.events) {
+    lines.push(cols.map(c => csvEscape(e[c])).join(','));
+  }
+  return lines.join('\n');
+}
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function makeSummaryJson() {
+  return JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    files: state.fileReports,
+    totalEventsRaw: state.eventsRaw.length,
+    totalEventsUnique: state.events.length,
+    issues: state.events.filter(e=>e.issue).length,
+    withGps: state.events.filter(e=>e.gpsValid).length,
+    repairedGps: state.events.filter(e=>e.gpsRepaired).length,
+    byCountry: Object.fromEntries(countsBy(state.events, e=>e.country)),
+    bySystem: Object.fromEntries(countsBy(state.events, e=>e.system)),
+    byKpiCategory: Object.fromEntries(countsBy(state.events, e=>e.kpiCategory || 'Uncategorized')),
+    kpiRules: state.kpiRules,
+    byRoad: Object.fromEntries(countsBy(state.events, e=>e.road)),
+    routes: state.routeFilees
+  }, null, 2);
+}
+function downloadText(filename, text, mime) {
+  const blob = new Blob([text], {type:mime});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+function updateDownloads(enabled) {
+  document.getElementById('downloadCsvBtn').disabled = !enabled;
+  document.getElementById('downloadJsonBtn').disabled = !enabled;
+}
+function resetData() {
+  state.files = [];
+  state.csvFiles = [];
+  state.excelFiles = [];
+  state.eventsRaw = [];
+  state.events = [];
+  state.filtered = [];
+  state.routeRows = [];
+  state.manualKpiOverrides = loadManualKpiOverrides();
+
+  if (state.markersLayer) state.markersLayer.clearLayers();
+  if (state.linesLayer) state.linesLayer.clearLayers();
+
+  const fileSummary = document.getElementById('fileSummary');
+  if (fileSummary) fileSummary.textContent = '';
+
+  const eventsPanel = document.getElementById('eventsPanel');
+  if (eventsPanel) eventsPanel.innerHTML = '<p class="muted">Load files to see events.</p>';
+
+  const summaryPanel = document.getElementById('summaryPanel');
+  if (summaryPanel) summaryPanel.innerHTML = '<p class="muted">Load files to see summary.</p>';
+
+  const excelPanel = document.getElementById('excelPanel');
+  if (excelPanel) excelPanel.innerHTML = '<p class="muted">Load files to see Excel route data.</p>';
+}
+
+document.getElementById('analyzeBtn').addEventListener('click', analyzeFilees);
+document.getElementById('clearBtn').addEventListener('click', () => resetData(true));
+document.getElementById('applyFileterBtn').addEventListener('click', applyFileters);
+['countryFileter','systemFileter','kpiFileter','roadFileter','criticalFileter','issuesOnly','drawLines'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', applyFileters);
+  else console.warn(`Missing control element: #${id}`);
+});
+document.getElementById('searchFileter').addEventListener('input', () => { clearTimeout(window.__searchTimer); window.__searchTimer = setTimeout(applyFileters, 250); });
+document.getElementById('downloadCsvBtn').addEventListener('click', () => downloadText('events_clean.csv', makeCleanCsv(), 'text/csv;charset=utf-8'));
+document.getElementById('downloadJsonBtn').addEventListener('click', () => downloadText('summary.json', makeSummaryJson(), 'application/json;charset=utf-8'));
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(btn.dataset.tab).classList.add('active');
+  if (btn.dataset.tab === 'mapPanel' && state.map) setTimeout(() => state.map.invalidateSize(), 50);
+}));
+
+state.kpiRules = loadKpiRules();
+initMap();
+renderMetrics();
 
 function runStartupSelfTest() {
   const requiredFunctions = [
