@@ -91,11 +91,23 @@
   }
 </style>
 
+
+<style>
+  [data-kpi-source-cell] {
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .manual-kpi-input:focus {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
+  }
+</style>
+
 </head>
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -336,7 +348,7 @@ function effectiveKpiCategory(ev) {
   return ev.manualKpiCategory || ev.kpiCategoryAuto || ev.kpiCategory || 'Uncategorized';
 }
 
-function setManualKpiCategory(eventId, value) {
+function setManualKpiCategory(eventId, value, options = {}) {
   state.manualKpiOverrides = state.manualKpiOverrides || loadManualKpiOverrides();
   const clean = String(value || '').trim();
 
@@ -350,10 +362,13 @@ function setManualKpiCategory(eventId, value) {
   }
 
   saveManualKpiOverrides();
-  populateFileters();
-  applyFileters();
-  renderSummary();
-  renderMap();
+
+  if (!options.deferRender) {
+    populateFileters();
+    applyFileters();
+    renderSummary();
+    renderMap();
+  }
 }
 
 function conditionMatches(ev, field, operator, value) {
@@ -888,8 +903,9 @@ function renderEventsTable() {
     <td>${escapeHtml(e.dateISO || e.day)} ${escapeHtml(e.time || '')}</td>
     <td>${escapeHtml(e.country)}</td>
     <td>${escapeHtml(e.system)}</td>
-    <td title="Auto: ${escapeHtml(e.kpiCategoryAuto || e.kpiCategory || 'Uncategorized')}">${escapeHtml(e.kpiCategory || 'Uncategorized')}</td>
-      <td><input class="manual-kpi-input" data-event-id="${escapeHtml(e.eventId || '')}" value="${escapeHtml(e.manualKpiCategory || '')}" placeholder="optional override"></td>
+    <td data-final-kpi-cell data-auto-kpi="${escapeHtml(e.kpiCategoryAuto || 'Uncategorized')}" title="Auto: ${escapeHtml(e.kpiCategoryAuto || 'Uncategorized')}">${escapeHtml(e.kpiCategory || 'Uncategorized')}</td>
+      <td data-kpi-source-cell>${e.manualKpiCategory ? 'Manual' : 'Auto'}</td>
+      <td><input class="manual-kpi-input" data-event-id="${escapeHtml(e.eventId || '')}" value="${escapeHtml(e.manualKpiCategory || '')}" placeholder="type manual KPI and press Enter or click away"></td>
     <td class="critical-${escapeHtml(e.critical)}" title="${escapeHtml(criticalScoreDescription(e.critical))}">${escapeHtml(e.critical ?? '')}</td>
     <td>${escapeHtml(e.road)}</td>
     <td>${e.gpsValid ? `${e.latitude.toFixed(5)}, ${e.longitude.toFixed(5)}${e.gpsRepaired ? ' *' : ''}` : ''}</td>
@@ -897,15 +913,9 @@ function renderEventsTable() {
     <td>${escapeHtml(e.fileName)}</td>
   </tr>`).join('');
   document.getElementById('eventsPanel').innerHTML = `<p class="small">Showing ${Math.min(state.filtered.length,1000)} of ${state.filtered.length} filtered events. * means the coordinate was probably repaired.</p>
-    <table><thead><tr><th>Date/time</th><th>Country</th><th>System</th><th>KPI category</th><th>Manual KPI override</th><th title="Hover a score to see the scale description">Critical</th><th>Road</th><th>GPS</th><th>Comment</th><th>File</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table><thead><tr><th>Date/time</th><th>Country</th><th>System</th><th>KPI category</th><th>KPI source</th><th>Manual KPI override</th><th title="Hover a score to see the scale description">Critical</th><th>Road</th><th>GPS</th><th>Comment</th><th>File</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-
-  document.querySelectorAll('.manual-kpi-input').forEach(input => {
-    input.addEventListener('change', () => setManualKpiCategory(input.dataset.eventId, input.value));
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') input.blur();
-    });
-  });
+});
 
 
 
@@ -937,13 +947,13 @@ function renderKpiMapping() {
 
   const categories = countsBy(state.events, e => e.kpiCategory || 'Uncategorized');
   const categoryTable = categories.length ? `<h3>Current KPI category counts</h3>
-    <table><thead><tr><th>KPI category</th><th>Manual KPI override</th><th>Events</th></tr></thead><tbody>${categories.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>` : '';
+    <table><thead><tr><th>KPI category</th><th>KPI source</th><th>Manual KPI override</th><th>Events</th></tr></thead><tbody>${categories.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>` : '';
 
   document.getElementById('kpiPanel').innerHTML = `
     <h2>KPI Mapping</h2>
     <p class="muted"><b>System normalization:</b> ACC is displayed as HWA, and ALC is displayed as HWA+. The raw CSV files are not modified.</p>
     <p class="small">
-      Compound rules are evaluated from lowest priority number to highest. The first matching rule assigns the event's automatic KPI category. A manual KPI override in the Events table always takes precedence.
+      Compound rules are evaluated from lowest priority number to highest. The first matching rule assigns the event's automatic KPI category. A manual KPI override in the Events table always takes precedence. Manual overrides are applied as soon as you type; press Enter or click outside the field to refresh filters, map, and summaries.
       Rule format: <b>(Field + Operator + Value) [AND / OR / NOT] (Field + Operator + Value) → KPI category</b>.
       If the logic field is empty, only the first condition is used. <b>NOT</b> means: first condition matches and the second condition does not match.
     </p>
@@ -970,7 +980,7 @@ function renderKpiMapping() {
           <th>Field 2</th>
           <th>Operator 2</th>
           <th>Value 2</th>
-          <th>KPI category</th><th>Manual KPI override</th>
+          <th>KPI category</th><th>KPI source</th><th>Manual KPI override</th>
           <th></th>
         </tr>
       </thead>
@@ -1136,6 +1146,40 @@ function runStartupSelfTest() {
     console.info('Startup self-test OK: KPI mapping and manual override functions are available.');
   }
 }
+
+
+document.addEventListener('input', (e) => {
+  const input = e.target.closest && e.target.closest('.manual-kpi-input');
+  if (!input) return;
+
+  setManualKpiCategory(input.dataset.eventId, input.value, { deferRender: true });
+
+  const row = input.closest('tr');
+  if (row) {
+    const finalCell = row.querySelector('[data-final-kpi-cell]');
+    const sourceCell = row.querySelector('[data-kpi-source-cell]');
+    const clean = String(input.value || '').trim();
+    if (finalCell) finalCell.textContent = clean || finalCell.dataset.autoKpi || 'Uncategorized';
+    if (sourceCell) sourceCell.textContent = clean ? 'Manual' : 'Auto';
+  }
+});
+
+document.addEventListener('change', (e) => {
+  const input = e.target.closest && e.target.closest('.manual-kpi-input');
+  if (!input) return;
+
+  setManualKpiCategory(input.dataset.eventId, input.value);
+});
+
+document.addEventListener('keydown', (e) => {
+  const input = e.target.closest && e.target.closest('.manual-kpi-input');
+  if (!input) return;
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    input.blur();
+  }
+});
 
 runStartupSelfTest();
 renderKpiMapping();
