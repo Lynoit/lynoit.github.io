@@ -51,7 +51,7 @@ th{background:#f3f4f6;text-align:left;position:sticky;top:0;z-index:1}
 <body>
 <header>
   <h1>CC 2026 Q-test Analysis</h1>
-  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+.</div>
+  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported.</div>
 </header>
 
 <div class="layout">
@@ -329,7 +329,7 @@ function normalizeEvent(row, fileName, rowIndex){
     latitude: gps.lat, longitude: gps.lon, gpsValid: gps.valid, gpsRepaired: gps.repaired
   };
   ev.eventId = eventStableId(ev);
-  ev.manualKpiCategory = state.manualKpiOverrides[ev.eventId] || '';
+  ev.manualKpiCategory = getManualKpiOverrideForEvent(ev);
   return ev;
 }
 
@@ -348,6 +348,86 @@ function isIssue(ev){
   if (positive.some(p => text.includes(p))) return false;
   const negative = ['too late','too early','late braking','harsh braking','phantom braking','wrong','incorrect','failed','fails','does not work','not working','uncomfortable','dangerous','scary','missed','false warning','false alarm','not detected','detected incorrectly','jerky','unstable'];
   return negative.some(p => text.includes(p));
+}
+
+
+function trimFixedNumber(value, digits=5){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value ?? '');
+  return n.toFixed(digits).replace(/\.?0+$/,'');
+}
+
+function countryAliases(country){
+  const c = String(country || '');
+  const aliases = new Set([c]);
+  if (c === 'Czech Republic') aliases.add('Czech');
+  if (c === 'Czech') aliases.add('Czech Republic');
+  return Array.from(aliases);
+}
+
+function timeAliases(timeISO){
+  const t = String(timeISO || '');
+  const aliases = new Set([t]);
+  if (/^\d{2}:\d{2}$/.test(t)) aliases.add(t + ':00');
+  if (/^\d{2}:\d{2}:00$/.test(t)) aliases.add(t.slice(0,5));
+  return Array.from(aliases);
+}
+
+function coordinateAliases(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return [String(value ?? '')];
+  return Array.from(new Set([
+    n.toFixed(5),
+    trimFixedNumber(n, 5),
+    n.toFixed(4),
+    trimFixedNumber(n, 4)
+  ]));
+}
+
+function legacyManualOverrideKeys(ev){
+  const keys = new Set();
+  const dates = [ev.dateISO || ''];
+  const times = timeAliases(ev.timeISO || '');
+  const countries = countryAliases(ev.country || '');
+  const systems = [ev.system || ''];
+  const rawSystems = [ev.rawSystem || ''];
+  const criticals = [ev.critical || ''];
+  const roads = [ev.road || ''];
+  const lats = coordinateAliases(ev.latitude);
+  const lons = coordinateAliases(ev.longitude);
+  const comments = [ev.comment || ''];
+  const files = [ev.fileName || ''];
+
+  for (const date of dates)
+  for (const time of times)
+  for (const country of countries)
+  for (const system of systems)
+  for (const rawSystem of rawSystems)
+  for (const critical of criticals)
+  for (const road of roads)
+  for (const lat of lats)
+  for (const lon of lons)
+  for (const comment of comments) {
+    // New clean rebuild key, file-independent.
+    keys.add([date,time,country,system,rawSystem,critical,road,lat,lon,comment].join('|'));
+
+    // Legacy key from previous tool versions, file-dependent.
+    for (const file of files) {
+      keys.add([date,time,country,system,rawSystem,critical,road,lat,lon,comment,file].join('|'));
+    }
+  }
+
+  return Array.from(keys);
+}
+
+function getManualKpiOverrideForEvent(ev){
+  const overrides = state.manualKpiOverrides || {};
+  for (const key of legacyManualOverrideKeys(ev)) {
+    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+      return overrides[key] || '';
+    }
+  }
+  return '';
 }
 
 function loadKpiRules(){
@@ -423,7 +503,7 @@ function applyKpiMapping(){
   const rules = sanitizeKpiRules(state.kpiRules).filter(r => r.enabled).sort((a,b) => a.priority - b.priority);
   for (const ev of state.events) {
     ev.eventId = ev.eventId || eventStableId(ev);
-    ev.manualKpiCategory = state.manualKpiOverrides[ev.eventId] || ev.manualKpiCategory || '';
+    ev.manualKpiCategory = getManualKpiOverrideForEvent(ev) || ev.manualKpiCategory || '';
     const match = rules.find(r => kpiRuleMatches(ev, r));
     ev.kpiCategoryAuto = match ? match.category : 'Uncategorized';
     ev.kpiCategory = ev.manualKpiCategory || ev.kpiCategoryAuto || 'Uncategorized';
@@ -737,9 +817,28 @@ function exportSummaryJson(){
 }
 
 function exportRules(){ readKpiRulesFromTable(); downloadText('kpi_rules.json', JSON.stringify(state.kpiRules,null,2), 'application/json'); }
-async function importRules(file){ if (!file) return; state.kpiRules = sanitizeKpiRules(JSON.parse(await file.text()).rules || JSON.parse(await file.text())); saveKpiRules(); applyKpiMapping(); populateFilters(); applyFilters(); }
-function exportManual(){ downloadText('manual_kpi_overrides.json', JSON.stringify({exportedAt:new Date().toISOString(), overrides:state.manualKpiOverrides},null,2), 'application/json'); }
-async function importManual(file){ if (!file) return; const parsed = JSON.parse(await file.text()); state.manualKpiOverrides = parsed.overrides || parsed; saveManualKpiOverrides(); applyKpiMapping(); populateFilters(); applyFilters(); }
+async function importRules(file){
+  if (!file) return;
+  const parsed = JSON.parse(await file.text());
+  state.kpiRules = sanitizeKpiRules(parsed.rules || parsed);
+  saveKpiRules();
+  applyKpiMapping();
+  populateFilters();
+  applyFilters();
+  alert('KPI rules imported.');
+}
+function exportManual(){ downloadText('manual_kpi_overrides.json', JSON.stringify({exportedAt:new Date().toISOString(), note:'Manual KPI overrides. This tool supports both current file-independent keys and legacy file-dependent keys.', overrides:state.manualKpiOverrides},null,2), 'application/json'); }
+async function importManual(file){
+  if (!file) return;
+  const parsed = JSON.parse(await file.text());
+  const incoming = parsed.overrides || parsed;
+  state.manualKpiOverrides = Object.assign({}, state.manualKpiOverrides || {}, incoming || {});
+  saveManualKpiOverrides();
+  applyKpiMapping();
+  populateFilters();
+  applyFilters();
+  alert('Manual KPI overrides imported. Legacy keys are supported.');
+}
 
 document.addEventListener('click', e => {
   const tab = e.target.closest('.tab');
