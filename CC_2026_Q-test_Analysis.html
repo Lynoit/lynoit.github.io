@@ -51,7 +51,7 @@ th{background:#f3f4f6;text-align:left;position:sticky;top:0;z-index:1}
 <body>
 <header>
   <h1>CC 2026 Q-test Analysis</h1>
-  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported.</div>
+  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported. KPI counts include Events / 1000 km.</div>
 </header>
 
 <div class="layout">
@@ -537,6 +537,92 @@ function optionHtml(options, selected){
   }).join('');
 }
 
+
+function parseKmFromText(text){
+  const s = String(text || '');
+  const nums = s.match(/-?\d+(?:[.,]\d+)?/g) || [];
+  const values = nums.map(x => Number(x.replace(',', '.'))).filter(Number.isFinite);
+  if (!values.length) return NaN;
+  // Route rows often contain several numbers. The most useful km value is usually the largest reasonable number.
+  const reasonable = values.filter(v => v > 0 && v < 5000);
+  return reasonable.length ? Math.max(...reasonable) : NaN;
+}
+
+function routeRowCountry(row){
+  const t = `${row.fileName || ''} ${row.sheet || ''} ${row.rowText || ''}`.toLowerCase();
+  if (t.includes('spain')) return 'Spain';
+  if (t.includes('switzerland')) return 'Switzerland';
+  if (t.includes('czech')) return 'Czech Republic';
+  if (t.includes('austria')) return 'Austria';
+  if (t.includes('slovakia')) return 'Slovakia';
+  return '';
+}
+
+function routeRowRoad(row){
+  const t = `${row.sheet || ''} ${row.rowText || ''}`.toLowerCase();
+  if (t.includes('urban') || t.includes('city')) return 'Urban';
+  if (t.includes('interurban')) return 'Interurban';
+  if (t.includes('highway')) return 'Highway';
+  if (t.includes('night')) return 'Night';
+  if (t.includes('total')) return 'Total';
+  return '';
+}
+
+function getFilteredDistanceKm(){
+  if (!state.routeRows || !state.routeRows.length || !state.filtered || !state.filtered.length) return NaN;
+
+  const countries = new Set(state.filtered.map(e => e.country).filter(Boolean));
+  const roads = new Set(state.filtered.map(e => e.road).filter(Boolean));
+
+  // Prefer rows that look like per-country total route distance.
+  let candidateRows = state.routeRows.filter(r => {
+    const country = routeRowCountry(r);
+    const road = routeRowRoad(r);
+    return country && countries.has(country) && (road === 'Total' || /total route/i.test(r.rowText || ''));
+  });
+
+  // If only one road type is filtered, prefer matching road rows when available.
+  if (roads.size === 1) {
+    const onlyRoad = Array.from(roads)[0];
+    const roadRows = state.routeRows.filter(r => {
+      const country = routeRowCountry(r);
+      const road = routeRowRoad(r);
+      return country && countries.has(country) && road === onlyRoad;
+    });
+    if (roadRows.length) candidateRows = roadRows;
+  }
+
+  // Fallback: use any country-matching rows with km-like values, but avoid Night when not explicitly filtered.
+  if (!candidateRows.length) {
+    candidateRows = state.routeRows.filter(r => {
+      const country = routeRowCountry(r);
+      const road = routeRowRoad(r);
+      if (!country || !countries.has(country)) return false;
+      if (road === 'Night' && !roads.has('Night')) return false;
+      return true;
+    });
+  }
+
+  const byCountry = new Map();
+  for (const row of candidateRows) {
+    const country = routeRowCountry(row);
+    const km = parseKmFromText(row.rowText);
+    if (!country || !Number.isFinite(km)) continue;
+
+    // Keep the largest matching value per country to avoid summing duplicate rows from multiple Excel versions.
+    const prev = byCountry.get(country) || 0;
+    if (km > prev) byCountry.set(country, km);
+  }
+
+  const total = Array.from(byCountry.values()).reduce((a,b) => a + b, 0);
+  return total > 0 ? total : NaN;
+}
+
+function formatEventsPer1000Km(count, km){
+  if (!Number.isFinite(km) || km <= 0) return 'n/a';
+  return ((count / km) * 1000).toFixed(2);
+}
+
 function countsBy(items, fn){
   const m = new Map();
   for (const item of items) {
@@ -641,6 +727,7 @@ function renderKpiMapping(refreshCounts=true){
     <td><button data-delete-rule="${i}">Delete</button></td>
   </tr>`).join('');
   const counts = countsBy(state.filtered || [], e => e.kpiCategory || 'Uncategorized');
+  const filteredDistanceKm = getFilteredDistanceKm();
   $('kpiPanel').innerHTML = `
     <h2>KPI Mapping</h2>
     <p class="small">Rules are evaluated from lowest priority to highest. First matching rule wins. Manual KPI overrides in the Events table take precedence.</p>
@@ -657,7 +744,9 @@ function renderKpiMapping(refreshCounts=true){
     </div>
     <table class="kpi-table"><thead><tr><th>On</th><th>Priority</th><th>Field 1</th><th>Operator 1</th><th>Value 1</th><th>Logic</th><th>Field 2</th><th>Operator 2</th><th>Value 2</th><th>KPI category</th><th></th></tr></thead><tbody id="kpiRulesBody">${rows}</tbody></table>
     <h3>Current filtered KPI category counts</h3>
-    <table><thead><tr><th>KPI category</th><th>Events</th></tr></thead><tbody>${counts.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>
+    <p class="small">Filtered distance denominator: ${Number.isFinite(filteredDistanceKm) ? filteredDistanceKm.toFixed(2) + ' km' : 'n/a'}</p>
+    <p class="small">Events per 1000 km uses the currently filtered route distance from the Excel route data when available. If no usable distance is found, the value is shown as n/a.</p>
+    <table><thead><tr><th>KPI category</th><th>Events</th><th>Events / 1000 km</th></tr></thead><tbody>${counts.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td><td>${formatEventsPer1000Km(v, filteredDistanceKm)}</td></tr>`).join('')}</tbody></table>
   `;
 }
 
