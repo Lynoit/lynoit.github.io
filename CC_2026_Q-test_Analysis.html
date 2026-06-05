@@ -103,11 +103,21 @@
   }
 </style>
 
+<style>
+.map-render-note {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid #f59e0b;
+  background: #fffbeb;
+  border-radius: 8px;
+  font-size: 13px;
+}
+</style>
 </head>
 <body>
 <header>
   <h1>Route & Event Analyzer - standalone HTML/JavaScript</h1>
-  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. Filter-driven summary v4 with safe reset and visible error reporting. Fixed KPI filter version.</div>
+  <div class="sub">Select the folder containing the Excel and CSV files. The analysis runs locally in your browser. System normalization v2: ACC → HWA, ALC → HWA+. Compound KPI mapping enabled. Manual KPI override enabled. Fixed optionHtml dropdown helper, r-scope sanitizer bug, and missing readKpiRulesFromTable, and manual KPI live update handling, and syntax error fix v2. No-freeze v1: map rendering is manual/limited and event table is capped for performance. Fixed KPI filter version.</div>
 </header>
 <div class="wrap">
   <aside>
@@ -115,6 +125,7 @@
       <h2>1. Load files</h2>
       <input id="fileInput" type="file" multiple webkitdirectory directory accept=".csv,.xlsx,.xls" />
       <button id="analyzeBtn">Analyze</button>
+      <button id="renderMapBtn" type="button">Render map</button>
       <button id="clearBtn" class="secondary">Clear</button>
       <p class="small">Tip: In Chrome/Edge you can select a whole folder. In other browsers, select multiple files manually if folder selection is not supported.</p>
       <div id="log" class="log">No data loaded yet.</div>
@@ -168,7 +179,8 @@
         <button class="tab" data-tab="routesPanel">Excel/routes</button>
         <button class="tab" data-tab="filesPanel">Files</button>
       </div>
-      <div id="mapPanel" class="panel active"><div id="map"></div></div>
+      <div id="mapPanel" class="panel active"><div id="mapRenderStatus" class="map-render-note">Map rendering is paused until you click Render map, unless the filtered dataset is small.</div>
+      <div id="map"></div></div>
       <div id="eventsPanel" class="panel"></div>
       <div id="kpiPanel" class="panel"></div>
       <div id="summaryPanel" class="panel"></div>
@@ -843,7 +855,7 @@ function applyFileters() {
     if (search && ![e.comment,e.system,e.road,e.country,e.weather,e.light,e.eventCode].join(' ').toLowerCase().includes(search)) return false;
     return true;
   });
-  renderAll();
+  renderAll({ forceMap: false });
 }
 function initMap() {
   if (state.map) return;
@@ -860,34 +872,50 @@ function initMap() {
   legend.addTo(state.map);
 }
 function renderMap() {
-  initMap();
-  state.eventLayer.clearLayers();
-  state.lineLayer.clearLayers();
-  const points = state.filtered.filter(e => e.gpsValid && Number.isFinite(e.latitude) && Number.isFinite(e.longitude));
-  for (const e of points) {
-    const m = L.circleMarker([e.latitude, e.longitude], {
-      radius: e.issue ? 7 : 5,
-      color: markerColor(e), fillColor: markerColor(e), fillOpacity: e.issue ? 0.85 : 0.55, weight: e.issue ? 2 : 1
-    });
-    m.bindPopup(`<b>${escapeHtml(e.country)} - ${escapeHtml(e.system)}</b><br>` +
-      `Date: ${escapeHtml(e.day)} ${escapeHtml(e.time)}<br>` +
-      `KPI category: ${escapeHtml(e.kpiCategory || 'Uncategorized')}<br>` +
-      `Critical: ${escapeHtml(e.critical ?? '')} - ${escapeHtml(criticalScoreDescription(e.critical))}<br>` +
-      `Road: ${escapeHtml(e.road)}<br>` +
-      `Weather/light: ${escapeHtml(e.weather)} / ${escapeHtml(e.light)}<br>` +
-      `GPS: ${e.latitude?.toFixed(5)}, ${e.longitude?.toFixed(5)} ${e.gpsRepaired ? '(repaired)' : ''}<hr>` +
-      `<div style="max-width:320px">${escapeHtml(e.comment)}</div><br>` +
-      `<small>${escapeHtml(e.fileName)}</small>`);
-    m.addTo(state.eventLayer);
+  if (!state.map || !state.markersLayer || !state.linesLayer) return;
+
+  state.markersLayer.clearLayers();
+  state.linesLayer.clearLayers();
+
+  const eventsWithGps = (state.filtered || []).filter(e => e.gpsValid);
+  const limit = 2000;
+  const pointsToDraw = eventsWithGps.slice(0, limit);
+  const bounds = [];
+
+  const noteHost = document.getElementById('mapRenderStatus');
+  if (noteHost) {
+    noteHost.textContent = eventsWithGps.length > limit
+      ? `Map shows ${limit} of ${eventsWithGps.length} GPS events for performance. Narrow filters to see more specific points.`
+      : `Map shows ${eventsWithGps.length} GPS events.`;
   }
-  if (document.getElementById('drawLines').checked) {
-    const byCountry = groupBy(points, e => e.country);
-    Object.entries(byCountry).forEach(([country, arr]) => {
-      const coords = arr.sort((a,b)=>String(a.sortKey).localeCompare(String(b.sortKey))).map(e => [e.latitude, e.longitude]);
-      if (coords.length > 1) L.polyline(coords, {weight:2, opacity:.35}).addTo(state.lineLayer).bindPopup(`Driving track: ${escapeHtml(country)} (${coords.length} points)`);
-    });
+
+  for (const ev of pointsToDraw) {
+    const lat = Number(ev.latitude);
+    const lon = Number(ev.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    bounds.push([lat, lon]);
+
+    const popup = `
+      <b>${escapeHtml(ev.system || '')}</b><br>
+      <b>KPI:</b> ${escapeHtml(ev.kpiCategory || 'Uncategorized')}<br>
+      <b>Critical:</b> ${escapeHtml(ev.critical || '')} — ${escapeHtml(scoreDescription(ev.critical))}<br>
+      <b>Country:</b> ${escapeHtml(ev.country || '')}<br>
+      <b>Road:</b> ${escapeHtml(ev.road || '')}<br>
+      <b>Comment:</b> ${escapeHtml(ev.comment || '')}
+    `;
+
+    L.circleMarker([lat, lon], {
+      radius: 5,
+      weight: 1,
+      opacity: 0.9,
+      fillOpacity: 0.7
+    }).bindPopup(popup).addTo(state.markersLayer);
   }
-  if (points.length) state.map.fitBounds(L.latLngBounds(points.map(e => [e.latitude, e.longitude])).pad(0.15));
+
+  if (bounds.length) {
+    state.map.fitBounds(bounds, { padding: [20, 20] });
+  }
 }
 function groupBy(arr, fn) {
   return arr.reduce((acc,x) => { const k = fn(x); (acc[k] ||= []).push(x); return acc; }, {});
@@ -908,20 +936,26 @@ function renderMetrics() {
   document.getElementById('topPills').innerHTML = `<div class="small">Country</div>${topCountries}<div class="small" style="margin-top:6px">System</div>${topSystems}<div class="small" style="margin-top:6px">KPI category</div>${topKpis}`;
 }
 function renderEventsTable() {
-  const rows = state.filtered.slice(0,1000).map(e => `<tr>
-    <td>${escapeHtml(e.dateISO || e.day)} ${escapeHtml(e.time || '')}</td>
-    <td>${escapeHtml(e.country)}</td>
-    <td>${escapeHtml(e.system)}</td>
-    <td data-final-kpi-cell data-auto-kpi="${escapeHtml(e.kpiCategoryAuto || 'Uncategorized')}" title="Auto: ${escapeHtml(e.kpiCategoryAuto || 'Uncategorized')}">${escapeHtml(e.kpiCategory || 'Uncategorized')}</td>
-      <td data-kpi-source-cell>${e.manualKpiCategory ? 'Manual' : 'Auto'}</td>
-      <td><input class="manual-kpi-input" data-event-id="${escapeHtml(e.eventId || '')}" value="${escapeHtml(e.manualKpiCategory || '')}" placeholder="type manual KPI and press Enter or click away"></td>
-    <td class="critical-${escapeHtml(e.critical)}" title="${escapeHtml(criticalScoreDescription(e.critical))}">${escapeHtml(e.critical ?? '')}</td>
-    <td>${escapeHtml(e.road)}</td>
-    <td>${e.gpsValid ? `${e.latitude.toFixed(5)}, ${e.longitude.toFixed(5)}${e.gpsRepaired ? ' *' : ''}` : ''}</td>
-    <td>${escapeHtml(e.comment)}</td>
-    <td>${escapeHtml(e.fileName)}</td>
+  const filtered = state.filtered || [];
+  const rowsToShow = filtered.slice(0, 500);
+  const rows = rowsToShow.map(ev => `<tr>
+    <td>${escapeHtml((ev.dateISO || '') + ' ' + (ev.timeISO || ''))}</td>
+    <td>${escapeHtml(ev.country || '')}</td>
+    <td>${escapeHtml(ev.system || '')}</td>
+    <td data-final-kpi-cell data-auto-kpi="${escapeHtml(ev.kpiCategoryAuto || 'Uncategorized')}" title="Auto: ${escapeHtml(ev.kpiCategoryAuto || 'Uncategorized')}">${escapeHtml(ev.kpiCategory || 'Uncategorized')}</td>
+    <td data-kpi-source-cell>${ev.manualKpiCategory ? 'Manual' : 'Auto'}</td>
+    <td><input class="manual-kpi-input" data-event-id="${escapeHtml(ev.eventId || '')}" value="${escapeHtml(ev.manualKpiCategory || '')}" placeholder="type manual KPI and press Enter or click away"></td>
+    <td title="${escapeHtml(scoreDescription(ev.critical))}">${escapeHtml(ev.critical || '')}</td>
+    <td>${escapeHtml(ev.road || '')}</td>
+    <td>${ev.gpsValid ? `${Number(ev.latitude).toFixed(5)}, ${Number(ev.longitude).toFixed(5)}${ev.gpsRepaired ? ' *' : ''}` : ''}</td>
+    <td>${escapeHtml(ev.comment || '')}</td>
+    <td>${escapeHtml(ev.fileName || '')}</td>
   </tr>`).join('');
-  document.getElementById('eventsPanel').innerHTML = `<p class="small">Showing ${Math.min(state.filtered.length,1000)} of ${state.filtered.length} filtered events. * means the coordinate was probably repaired.</p>
+
+  const panel = document.getElementById('eventsPanel');
+  if (!panel) return;
+
+  panel.innerHTML = `<p class="small">Showing ${rowsToShow.length} of ${filtered.length} filtered events. * means the coordinate was probably repaired. The table is capped at 500 rows for browser performance; exports still include the filtered dataset.</p>
     <table><thead><tr><th>Date/time</th><th>Country</th><th>System</th><th>KPI category</th><th>KPI source</th><th>Manual KPI override</th><th title="Hover a score to see the scale description">Critical</th><th>Road</th><th>GPS</th><th>Comment</th><th>File</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -1080,14 +1114,20 @@ function renderFilees() {
   const rows = state.fileReports.map(f => `<tr><td>${escapeHtml(f.fileName)}</td><td>${escapeHtml(f.type)}</td><td>${f.rows}</td><td>${f.events}</td><td>${escapeHtml(f.note)}</td></tr>`).join('');
   document.getElementById('filesPanel').innerHTML = `<table><thead><tr><th>File</th><th>Type</th><th>Rows</th><th>Events</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-function renderAll() {
-  renderMetrics();
-  renderMap();
+function renderAll(options = {}) {
   renderEventsTable();
-  renderKpiMapping();
   renderSummary();
-  renderRoutes();
-  renderFilees();
+
+  const shouldRenderMap = options.forceMap === true || state.mapAutoRender === true || (state.filtered && state.filtered.length <= state.maxInitialMarkers);
+  if (shouldRenderMap) {
+    renderMap();
+  } else {
+    const noteHost = document.getElementById('mapRenderStatus');
+    if (noteHost) {
+      const visible = state.filtered ? state.filtered.length : 0;
+      noteHost.innerHTML = `Map rendering is paused for ${visible} filtered events to keep the page responsive. Click <b>Render map</b> to draw markers.`;
+    }
+  }
 }
 function makeCleanCsv() {
   const cols = ['country','dateISO','time','critical','system','kpiCategory','road','weather','light','latitude','longitude','gpsValid','gpsRepaired','issue','eventCode','odometer','comment','fileName'];
@@ -1231,6 +1271,15 @@ document.addEventListener('keydown', (e) => {
     input.blur();
   }
 });
+
+
+const renderMapBtn = document.getElementById('renderMapBtn');
+if (renderMapBtn) {
+  renderMapBtn.addEventListener('click', () => {
+    state.mapAutoRender = true;
+    renderMap();
+  });
+}
 
 runStartupSelfTest();
 renderKpiMapping();</script>
