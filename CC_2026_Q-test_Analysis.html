@@ -51,7 +51,7 @@ th{background:#f3f4f6;text-align:left;position:sticky;top:0;z-index:1}
 <body>
 <header>
   <h1>CC 2026 Q-test Analysis</h1>
-  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported. KPI counts include Events / 1000 km using distance filtered only by Country and Road type.</div>
+  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported. KPI counts include Events / 1000 km using distance filtered only by Country and Road type. Robust Europe-wide country detection added. Robust Europe-wide country detection added.</div>
 </header>
 
 <div class="layout">
@@ -213,15 +213,104 @@ function pick(row, names){
   return '';
 }
 
+
+const EUROPE_COUNTRY_ALIASES = [
+  ['Albania', ['albania']],
+  ['Andorra', ['andorra']],
+  ['Austria', ['austria', 'osterreich', 'österreich']],
+  ['Belarus', ['belarus']],
+  ['Belgium', ['belgium', 'belgie', 'belgië', 'belgique']],
+  ['Bosnia and Herzegovina', ['bosnia and herzegovina', 'bosnia', 'herzegovina', 'bih']],
+  ['Bulgaria', ['bulgaria']],
+  ['Croatia', ['croatia', 'hrvatska']],
+  ['Cyprus', ['cyprus']],
+  ['Czech Republic', ['czech republic', 'czechia', 'czech', 'cesko', 'česko']],
+  ['Denmark', ['denmark', 'danmark']],
+  ['Estonia', ['estonia', 'eesti']],
+  ['Finland', ['finland', 'suomi']],
+  ['France', ['france']],
+  ['Germany', ['germany', 'deutschland']],
+  ['Greece', ['greece', 'hellas']],
+  ['Hungary', ['hungary', 'magyarorszag', 'magyarország']],
+  ['Iceland', ['iceland', 'island', 'ísland']],
+  ['Ireland', ['ireland', 'eire', 'éire']],
+  ['Italy', ['italy', 'italia']],
+  ['Kosovo', ['kosovo']],
+  ['Latvia', ['latvia', 'latvija']],
+  ['Liechtenstein', ['liechtenstein']],
+  ['Lithuania', ['lithuania', 'lietuva']],
+  ['Luxembourg', ['luxembourg']],
+  ['Malta', ['malta']],
+  ['Moldova', ['moldova']],
+  ['Monaco', ['monaco']],
+  ['Montenegro', ['montenegro']],
+  ['Netherlands', ['netherlands', 'holland', 'nederland']],
+  ['North Macedonia', ['north macedonia', 'macedonia']],
+  ['Norway', ['norway', 'norge']],
+  ['Poland', ['poland', 'polska']],
+  ['Portugal', ['portugal']],
+  ['Romania', ['romania', 'românia']],
+  ['Russia', ['russia']],
+  ['San Marino', ['san marino']],
+  ['Serbia', ['serbia', 'srbija']],
+  ['Slovakia', ['slovakia', 'slovensko']],
+  ['Slovenia', ['slovenia', 'slovenija']],
+  ['Spain', ['spain', 'espana', 'españa']],
+  ['Sweden', ['sweden', 'sverige']],
+  ['Switzerland', ['switzerland', 'schweiz', 'suisse', 'svizzera']],
+  ['Turkey', ['turkey', 'turkiye', 'türkiye']],
+  ['Ukraine', ['ukraine']],
+  ['United Kingdom', ['united kingdom', 'great britain', 'britain', 'england', 'scotland', 'wales', 'uk', 'u k']],
+  ['Vatican City', ['vatican', 'vatican city']]
+];
+
+function normalizeCountrySearchText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[_\-./\\()[\]{}]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function detectEuropeanCountryFromText(text) {
+  const normalized = ` ${normalizeCountrySearchText(text)} `;
+
+  // Prefer longest aliases first so "north macedonia" wins over "macedonia",
+  // and "czech republic" wins before "czech".
+  const aliases = [];
+  for (const [country, names] of EUROPE_COUNTRY_ALIASES) {
+    for (const name of names) {
+      aliases.push([country, normalizeCountrySearchText(name)]);
+    }
+  }
+  aliases.sort((a, b) => b[1].length - a[1].length);
+
+  for (const [country, alias] of aliases) {
+    if (!alias) continue;
+    const pattern = new RegExp(`(^|[^a-z])${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z]|$)`, 'i');
+    if (pattern.test(normalized)) return country;
+  }
+
+  return '';
+}
+
 function detectCountry(fileName, row){
   const explicit = pick(row, ['Country','Land']);
-  if (explicit) return String(explicit).trim();
-  const f = String(fileName || '').toLowerCase();
-  if (f.includes('spain')) return 'Spain';
-  if (f.includes('switzerland')) return 'Switzerland';
-  if (f.includes('czech')) return 'Czech Republic';
-  if (f.includes('austria')) return 'Austria';
-  if (f.includes('slovakia')) return 'Slovakia';
+  if (explicit) {
+    const explicitCountry = detectEuropeanCountryFromText(explicit) || String(explicit).trim();
+    if (explicitCountry) return explicitCountry;
+  }
+
+  const fromFile = detectEuropeanCountryFromText(fileName);
+  if (fromFile) return fromFile;
+
+  // Last fallback: sometimes the sheet/row content contains country names.
+  const rowText = Object.values(row || {}).join(' ');
+  const fromRow = detectEuropeanCountryFromText(rowText);
+  if (fromRow) return fromRow;
+
   return 'Unknown';
 }
 
@@ -358,11 +447,21 @@ function trimFixedNumber(value, digits=5){
 }
 
 function countryAliases(country){
-  const c = String(country || '');
+  const c = String(country || '').trim();
   const aliases = new Set([c]);
+
+  for (const [canonical, names] of EUROPE_COUNTRY_ALIASES) {
+    if (canonical === c || names.map(normalizeCountrySearchText).includes(normalizeCountrySearchText(c))) {
+      aliases.add(canonical);
+      for (const name of names) aliases.add(name);
+    }
+  }
+
+  // Backward compatibility with old manual override JSONs.
   if (c === 'Czech Republic') aliases.add('Czech');
   if (c === 'Czech') aliases.add('Czech Republic');
-  return Array.from(aliases);
+
+  return Array.from(aliases).filter(Boolean);
 }
 
 function timeAliases(timeISO){
@@ -549,13 +648,8 @@ function parseKmFromText(text){
 }
 
 function routeRowCountry(row){
-  const t = `${row.fileName || ''} ${row.sheet || ''} ${row.rowText || ''}`.toLowerCase();
-  if (t.includes('spain')) return 'Spain';
-  if (t.includes('switzerland')) return 'Switzerland';
-  if (t.includes('czech')) return 'Czech Republic';
-  if (t.includes('austria')) return 'Austria';
-  if (t.includes('slovakia')) return 'Slovakia';
-  return '';
+  const text = `${row.fileName || ''} ${row.sheet || ''} ${row.rowText || ''}`;
+  return detectEuropeanCountryFromText(text);
 }
 
 function routeRowRoad(row){
