@@ -51,7 +51,7 @@ th{background:#f3f4f6;text-align:left;position:sticky;top:0;z-index:1}
 <body>
 <header>
   <h1>CC 2026 Q-test Analysis</h1>
-  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported. KPI counts include Events / 1000 km.</div>
+  <div class="sub">Clean standalone rebuild. Runs locally in the browser. System normalization: ACC → HWA, ALC → HWA+. Legacy manual KPI override JSON supported. KPI counts include Events / 1000 km using distance filtered only by Country and Road type.</div>
 </header>
 
 <div class="layout">
@@ -569,47 +569,62 @@ function routeRowRoad(row){
 }
 
 function getFilteredDistanceKm(){
-  if (!state.routeRows || !state.routeRows.length || !state.filtered || !state.filtered.length) return NaN;
+  if (!state.routeRows || !state.routeRows.length) return NaN;
 
-  const countries = new Set(state.filtered.map(e => e.country).filter(Boolean));
-  const roads = new Set(state.filtered.map(e => e.road).filter(Boolean));
+  // Distance denominator follows ONLY:
+  // - Country filter
+  // - Road type filter
+  //
+  // It intentionally ignores:
+  // - System filter
+  // - KPI category filter
+  // - Critical score filter
+  // - Search text
+  // - Issues only
+  const selectedCountry = $('countryFilter') ? $('countryFilter').value : '';
+  const selectedRoad = $('roadFilter') ? $('roadFilter').value : '';
 
-  // Prefer rows that look like per-country total route distance.
+  const countries = selectedCountry
+    ? new Set([selectedCountry])
+    : new Set(state.events.map(e => e.country).filter(Boolean));
+
+  // No road selected = use Total route distance.
+  // Road selected = use that road type distance.
+  const targetRoad = selectedRoad || 'Total';
+
   let candidateRows = state.routeRows.filter(r => {
     const country = routeRowCountry(r);
     const road = routeRowRoad(r);
-    return country && countries.has(country) && (road === 'Total' || /total route/i.test(r.rowText || ''));
+    if (!country || !countries.has(country)) return false;
+
+    if (targetRoad === 'Total') {
+      return road === 'Total' || /total route/i.test(r.rowText || '');
+    }
+
+    return road === targetRoad;
   });
 
-  // If only one road type is filtered, prefer matching road rows when available.
-  if (roads.size === 1) {
-    const onlyRoad = Array.from(roads)[0];
-    const roadRows = state.routeRows.filter(r => {
-      const country = routeRowCountry(r);
-      const road = routeRowRoad(r);
-      return country && countries.has(country) && road === onlyRoad;
-    });
-    if (roadRows.length) candidateRows = roadRows;
-  }
-
-  // Fallback: use any country-matching rows with km-like values, but avoid Night when not explicitly filtered.
+  // Fallback if route rows are not detected perfectly.
+  // Still only use Country and Road type logic.
   if (!candidateRows.length) {
     candidateRows = state.routeRows.filter(r => {
       const country = routeRowCountry(r);
       const road = routeRowRoad(r);
       if (!country || !countries.has(country)) return false;
-      if (road === 'Night' && !roads.has('Night')) return false;
-      return true;
+      if (selectedRoad) return road === selectedRoad;
+      return road !== 'Night';
     });
   }
 
   const byCountry = new Map();
+
   for (const row of candidateRows) {
     const country = routeRowCountry(row);
     const km = parseKmFromText(row.rowText);
     if (!country || !Number.isFinite(km)) continue;
 
-    // Keep the largest matching value per country to avoid summing duplicate rows from multiple Excel versions.
+    // Keep largest matching value per country to avoid double-counting
+    // duplicate rows from multiple Excel versions.
     const prev = byCountry.get(country) || 0;
     if (km > prev) byCountry.set(country, km);
   }
@@ -744,8 +759,8 @@ function renderKpiMapping(refreshCounts=true){
     </div>
     <table class="kpi-table"><thead><tr><th>On</th><th>Priority</th><th>Field 1</th><th>Operator 1</th><th>Value 1</th><th>Logic</th><th>Field 2</th><th>Operator 2</th><th>Value 2</th><th>KPI category</th><th></th></tr></thead><tbody id="kpiRulesBody">${rows}</tbody></table>
     <h3>Current filtered KPI category counts</h3>
-    <p class="small">Filtered distance denominator: ${Number.isFinite(filteredDistanceKm) ? filteredDistanceKm.toFixed(2) + ' km' : 'n/a'}</p>
-    <p class="small">Events per 1000 km uses the currently filtered route distance from the Excel route data when available. If no usable distance is found, the value is shown as n/a.</p>
+    <p class="small">Distance denominator, using Country + Road type filters only: ${Number.isFinite(filteredDistanceKm) ? filteredDistanceKm.toFixed(2) + ' km' : 'n/a'}</p>
+    <p class="small">Events per 1000 km uses Excel route distance filtered only by Country and Road type. System, KPI category, Critical score, Search, and Issues-only filters do not reduce the km denominator. If no usable distance is found, the value is shown as n/a.</p>
     <table><thead><tr><th>KPI category</th><th>Events</th><th>Events / 1000 km</th></tr></thead><tbody>${counts.map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td><td>${formatEventsPer1000Km(v, filteredDistanceKm)}</td></tr>`).join('')}</tbody></table>
   `;
 }
