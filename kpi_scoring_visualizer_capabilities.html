@@ -232,6 +232,8 @@ let KPI_CATALOG = [];       // read from KPI_buttons.csv; rows with cssClass=red
 let SELECTED_FEATURE_KEYS = new Set();
 let FEATURE_FILTER_READY = false;
 
+let SHOW_ONLY_BEST_CC = true;
+  
 const SCORE_FONTS = { number:13, label:11, range:10 };
 
 const GREEN = '#0a9910', YELLOW = '#ffd000', RED = '#d43b3b';
@@ -420,7 +422,33 @@ function setupFeatureControls(parsed){
   noneBtn.className = 'mini-btn'; noneBtn.type = 'button'; noneBtn.textContent = 'None';
   noneBtn.onclick = () => { SELECTED_FEATURE_KEYS = new Set(); setupFeatureControls(parsed); renderCharts(parsed); };
   actions.appendChild(allBtn); actions.appendChild(noneBtn); host.appendChild(actions);
+
+    // Second row: CC display option
+  const ccRow = document.createElement('div');
+  ccRow.style.flexBasis = '100%';
+  ccRow.style.display = 'flex';
+  ccRow.style.alignItems = 'center';
+  ccRow.style.gap = '8px';
+  ccRow.style.paddingTop = '2px';
+
+  const ccLab = document.createElement('label');
+  ccLab.className = 'feature-chip';
+
+  const ccCb = document.createElement('input');
+  ccCb.type = 'checkbox';
+  ccCb.checked = SHOW_ONLY_BEST_CC;
+
+  ccCb.addEventListener('change', () => {
+    SHOW_ONLY_BEST_CC = ccCb.checked;
+    if (LAST_PARSED) renderCharts(LAST_PARSED);
+  });
+
+  ccLab.appendChild(ccCb);
+  ccLab.appendChild(document.createTextNode('Show only best CC'));
+  ccRow.appendChild(ccLab);
+  host.appendChild(ccRow);  
 }
+  
 function softwareHasAllSelectedFeatures(parsed, swLabel, active){
   const caps = parsed.capabilities?.[swLabel];
 
@@ -436,6 +464,71 @@ function softwareHasAllSelectedFeatures(parsed, swLabel, active){
   return true;
 }
 
+function applyBestCCFilter(parsed){
+  if (!SHOW_ONLY_BEST_CC || !parsed || !parsed.software) return parsed;
+
+  const T = getThresholds();
+
+  const ccSoftwares = parsed.software.filter(sw => /^CC\b/i.test(sw.base));
+  if (ccSoftwares.length <= 1) return parsed;
+
+  const scoreRows = ccSoftwares.map(sw => {
+    const vals = parsed.entries
+      .map(e => e.values[sw.label])
+      .filter(v => v != null && !Number.isNaN(v));
+
+    const sumVals = vals.length ? d3.sum(vals.map(v => Math.min(v, 1000))) : 0;
+    const denom = denominatorForSoftware(parsed, sw.label, vals.length);
+    const avg = denom ? (sumVals / denom) : null;
+    const score = avg == null ? null : scoreFromAvg(avg, T);
+
+    return { sw, avg, score };
+  }).filter(r => r.avg != null && r.score != null);
+
+  if (!scoreRows.length) return parsed;
+
+  // Best = highest score. Tie-breaker = lowest average. Then latest date if available.
+  scoreRows.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    if (a.avg !== b.avg) return a.avg - b.avg;
+
+    const da = a.sw.date || '';
+    const db = b.sw.date || '';
+    return db.localeCompare(da);
+  });
+
+  const bestCC = scoreRows[0].sw;
+  const keepLabels = new Set(
+    parsed.software
+      .filter(sw => !/^CC\b/i.test(sw.base) || sw.label === bestCC.label)
+      .map(sw => sw.label)
+  );
+
+  const filteredSoftware = parsed.software.filter(sw => keepLabels.has(sw.label));
+
+  const filteredEntries = parsed.entries.map(e => {
+    const values = {};
+    filteredSoftware.forEach(sw => {
+      values[sw.label] = e.values[sw.label];
+    });
+    return { ...e, values };
+  });
+
+  const filteredKpiCountBySoftware = {};
+  Object.keys(parsed.kpiCountBySoftware || {}).forEach(label => {
+    if (keepLabels.has(label)) {
+      filteredKpiCountBySoftware[label] = parsed.kpiCountBySoftware[label];
+    }
+  });
+
+  return {
+    ...parsed,
+    software: filteredSoftware,
+    entries: filteredEntries,
+    kpiCountBySoftware: filteredKpiCountBySoftware
+  };
+}  
+ 
 function makeParsedViewForSelectedFeatures(parsed){
   const softwareAll = parsed.software || [];
   const active = SELECTED_FEATURE_KEYS instanceof Set
@@ -1955,7 +2048,8 @@ function renderSoftwareCards(container, parsed){
 
 /* ==================== Main renderer ==================== */
 function renderCharts(parsedFull){
-  const parsed = makeParsedViewForSelectedFeatures(parsedFull);
+  const parsedSelected = makeParsedViewForSelectedFeatures(parsedFull);
+  const parsed = applyBestCCFilter(parsedSelected);
   const container = d3.select('#charts').html('');
   if (!parsed || !parsed.entries || !parsed.entries.length || !parsed.software || !parsed.software.length){
     container.append('div').attr('class','small').text('No valid cars/software for the selected KPI groups.');
