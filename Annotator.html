@@ -589,7 +589,7 @@ form.addEventListener('submit', async e => {
      border: 1px solid #444;
      padding: 6px 8px;
      text-align: center;
-   }
+   }.speedSign
  #snapshotTableContainer table {
   width: 100%;
   border-collapse: collapse;
@@ -613,26 +613,37 @@ form.addEventListener('submit', async e => {
 .speedSign{
   width: 46px;
   height: 46px;
-  border: 4px solid red;   /* red rim */
+  border: 4px solid red;
   border-radius: 50%;
-  background: #fff;        /* white face */
-  color: #000;             /* black digits */
+  background: #fff;
+  color: #000;
   display: flex;
   align-items: center;
   justify-content: center;
   font: bold 14px/1 Arial, sans-serif;
-  margin: 6px 0;
+  margin: 0;
 }
 
 .speedLimitRow{
-  display:flex;
-  align-items:center;   /* vertical centring */
-  gap:6px;              /* space between label and sign */
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.speedSignBlock{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
 }
 
 .speedLabel{
-  font-weight: normal;
-  font-size: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: #e0e0e0;
 }
 
 /* --- GitHub-like button styles mapped onto your existing classes --- */
@@ -861,10 +872,17 @@ form.addEventListener('submit', async e => {
     <p id="location"></p>
     <p id="roadType">Road type: N/A</p>
     <p id="speed">Speed: N/A</p>
-    <div class="speedLimitRow">
-      <span class="speedLabel">Speed&nbsp;limit:</span>
-      <div id="legalSpeed" class="speedSign">–</div>
-    </div>   
+<div class="speedLimitRow">
+  <div class="speedSignBlock">
+    <div class="speedLabel">OSM</div>
+    <div id="legalSpeed" class="speedSign" title="OSM speed limit">–</div>
+  </div>
+
+  <div class="speedSignBlock">
+    <div class="speedLabel">HERE</div>
+    <div id="hereLegalSpeed" class="speedSign" title="HERE speed limit">–</div>
+  </div>
+</div>
     <div class="distanceContainer">
       <p id="totalDistance">Distance: 0.0 km</p>
       <p id="xlsxAgo">Last upload: never</p>
@@ -1189,6 +1207,11 @@ const textBox   = document.getElementById('textBox');
 const showAccelMonitorsCb = document.getElementById('showAccelMonitors');
 const accelMonitorSection = document.getElementById('accelMonitorSection');
 
+const usedButtonSetups = new Set();
+
+let batteryStartText = 'Unavailable';
+let batteryEndText   = 'Unavailable';    
+
 if (showAccelMonitorsCb && accelMonitorSection) {
   showAccelMonitorsCb.addEventListener('change', () => {
     accelMonitorSection.style.display = showAccelMonitorsCb.checked ? 'block' : 'none';
@@ -1281,6 +1304,7 @@ textBox.addEventListener('input', () => {
     const UPLOAD_THROTTLE = 5 * 60 * 1000
     const citySet = new Set();   // unique city names encountered
     const legalSpeedEl = document.getElementById('legalSpeed');
+    const hereLegalSpeedEl = document.getElementById('hereLegalSpeed');
     const samplingTable = [];
 
 // --- Toggle system ---
@@ -1398,6 +1422,21 @@ function updateToggleDistanceTable() {
     let currentLegalSpeed = null;
     let currentRoadType   = 'Unknown';  // ← track latest road type for sampling
 
+    // --- HERE speed-limit lookup ---
+const HERE_API_KEY = 'jnavQ5CNmbXxtm2u9y8HeSBSrk2OCXw5HU14UJYAa6M';
+
+let currentHereLegalSpeed = null;
+
+let hereLookupSeq = 0;
+let lastHereLookupMs = 0;
+let lastHereLookupPos = null;
+
+const HERE_MIN_INTERVAL_MS = 500;
+const HERE_MIN_DISTANCE_M  = 10;
+
+const hereTracePoints = [];
+const HERE_TRACE_MAX_POINTS = 6;
+
     let sessionEnded = false;
 
    let geoWatchId            = null;
@@ -1463,6 +1502,151 @@ function applyExcelPercentFormat(ws, percentColIndex = 2) {
       cell.z = '0.0%';
     }
   }
+}
+
+function shouldLookupHere(lat, lon) {
+  const now = Date.now();
+
+  if (!HERE_API_KEY || HERE_API_KEY === 'YOUR_HERE_API_KEY_HERE') {
+    return false;
+  }
+
+  if (now - lastHereLookupMs < HERE_MIN_INTERVAL_MS) {
+    return false;
+  }
+
+  if (lastHereLookupPos) {
+    const d = calculateDistance(
+      lastHereLookupPos.lat,
+      lastHereLookupPos.lon,
+      lat,
+      lon
+    );
+
+    if (d < HERE_MIN_DISTANCE_M) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function addHereTracePoint(lat, lon, gpsTs) {
+  hereTracePoints.push({
+    lat,
+    lon,
+    ts: new Date(gpsTs || Date.now()).toISOString()
+  });
+
+  while (hereTracePoints.length > HERE_TRACE_MAX_POINTS) {
+    hereTracePoints.shift();
+  }
+}
+
+function buildHereGpx(points) {
+  const trkpts = points.map(p =>
+    `<trkpt lat="${p.lat}" lon="${p.lon}"><time>${p.ts}</time></trkpt>`
+  ).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Annotator">
+  <trk><name>annotator-live-trace</name><trkseg>${trkpts}</trkseg></trk>
+</gpx>`;
+}
+
+function extractHereSpeedLimitKmh(json) {
+  const candidates = [];
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+
+    // HERE speed-limit layer fields
+    const fromRef = node.FROM_REF_SPEED_LIMIT ?? node.fromRefSpeedLimit;
+    const toRef   = node.TO_REF_SPEED_LIMIT   ?? node.toRefSpeedLimit;
+    const unit    = String(node.UNIT ?? node.unit ?? 'K').toUpperCase();
+
+    [fromRef, toRef].forEach(v => {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) {
+        candidates.push(unit === 'M' ? Math.round(n * 1.60934) : Math.round(n));
+      }
+    });
+
+    // Fallback for possible normalized response names
+    for (const [k, v] of Object.entries(node)) {
+      if (/speed.*limit/i.test(k)) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 0) {
+          candidates.push(Math.round(n));
+        }
+      }
+
+      if (v && typeof v === 'object') {
+        walk(v);
+      }
+    }
+  }
+
+  walk(json);
+
+  // Use the last candidate because the latest route link is usually the current one.
+  return candidates.length ? candidates[candidates.length - 1] : null;
+}
+
+async function updateHereSpeedLimit(lat, lon, gpsTs) {
+  addHereTracePoint(lat, lon, gpsTs);
+
+  // Route matching needs a trace, not just one standalone point.
+  if (hereTracePoints.length < 2) return;
+
+  lastHereLookupMs = Date.now();
+  lastHereLookupPos = { lat, lon };
+
+  const seq = ++hereLookupSeq;
+
+  const url =
+    `https://routematching.hereapi.com/v8/match/routelinks` +
+    `?routeMatch=1` +
+    `&mode=fastest;car` +
+    `&attributes=SPEED_LIMITS_FCn(FROM_REF_SPEED_LIMIT,TO_REF_SPEED_LIMIT,UNIT),LINK_ATTRIBUTE_FCn(*)` +
+    `&apiKey=${encodeURIComponent(HERE_API_KEY)}`;
+
+  const gpx = buildHereGpx(hereTracePoints);
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/binary'
+    },
+    body: gpx
+  });
+
+  if (!resp.ok) {
+    throw new Error(`HERE HTTP ${resp.status}`);
+  }
+
+  const data = await resp.json();
+
+  // Ignore stale slow responses.
+  if (seq !== hereLookupSeq) return;
+
+const speed = extractHereSpeedLimitKmh(data);
+
+if (speed != null) {
+  currentHereLegalSpeed = speed;
+
+  if (hereLegalSpeedEl) {
+    hereLegalSpeedEl.textContent = String(speed);
+    hereLegalSpeedEl.title = 'HERE speed limit';
+  }
+}
+
+const hereRoadType = extractHereRoadType(data);
+
+if (hereRoadType) {
+  currentHereRoadType = hereRoadType;
+}
+  
 }    
 
 async function runCloudUploads(reason = 'auto') {
@@ -1574,6 +1758,8 @@ const PHASE_HYST_MS = 2 * 60 * 1000; // require 2 minutes stable before logging
     // near other globals
 let uploadsEnabled = false;
 
+let currentHereRoadType = '';
+    
 function checkUploadEligibility() {
   uploadsEnabled = (totalDist >= 100) || (logTable.length > 0); // totalDist is meters
   const btn = document.getElementById('uploadNowButton');
@@ -1642,6 +1828,50 @@ function updateUploadAgo() {
       startApp();
     });
 };
+
+function extractHereRoadType(json) {
+  const candidates = [];
+
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+
+    const functionalClass =
+      node.FUNCTIONAL_CLASS ??
+      node.functionalClass ??
+      node.FC ??
+      node.fc;
+
+    const controlledAccess =
+      node.CONTROLLED_ACCESS ??
+      node.controlledAccess;
+
+    const ramp =
+      node.RAMP ??
+      node.ramp;
+
+    if (functionalClass != null) {
+      let label = `FC${functionalClass}`;
+
+      if (String(controlledAccess).toUpperCase() === 'Y' || controlledAccess === true) {
+        label += ' controlled-access';
+      }
+
+      if (String(ramp).toUpperCase() === 'Y' || ramp === true) {
+        label += ' ramp';
+      }
+
+      candidates.push(label);
+    }
+
+    for (const v of Object.values(node)) {
+      if (v && typeof v === 'object') walk(v);
+    }
+  }
+
+  walk(json);
+
+  return candidates.length ? candidates[candidates.length - 1] : '';
+}    
 
   async function requestWakeLock() {
     if ('wakeLock' in navigator) {
@@ -1731,6 +1961,10 @@ async function stopTesting() {
     try { if (typeof recognizer !== 'undefined' && recognizer) recognizer.stopContinuousRecognitionAsync(); } catch {}
     try { if (typeof releaseWakeLock === 'function') await releaseWakeLock(); } catch {}
 
+    try {
+      batteryEndText = await getBatteryStatusText();
+    } catch {}
+
     // 5) Final table refresh (guard if elements were removed)
     try { if (typeof displayLogTable     === 'function') displayLogTable(); } catch {}
     try { if (typeof renderLatestSnapshots === 'function') renderLatestSnapshots(5); } catch {}
@@ -1797,11 +2031,34 @@ async function stopTesting() {
     console.log('✔ Session ended and shutdown completed');
   }
 }
+
+async function getBatteryStatusText() {
+  try {
+    if (!navigator.getBattery) {
+      return 'Unavailable';
+    }
+
+    const battery = await navigator.getBattery();
+    const levelPct = Math.round((battery.level ?? 0) * 100);
+
+    let stateText = 'Unknown';
+    if (battery.charging === true) stateText = 'Charging';
+    else if (battery.charging === false) stateText = 'Not charging';
+
+    return `${levelPct}% (${stateText})`;
+  } catch (err) {
+    console.warn('Battery status fetch failed:', err);
+    return 'Unavailable';
+  }
+}    
     
 async function startApp() {
   requestWakeLock();
   await ensureMotionAccess();
   initAccelMonitorUi();
+  
+  batteryStartText = await getBatteryStatusText();
+  updateStatsTable();
     
   loadCorrections()
     .then(() => console.log('Corrections loaded:', corrections))
@@ -2197,9 +2454,434 @@ recognizer.recognizing = (_, e) => {
   recognizer.startContinuousRecognitionAsync();
 }
 
- function parseMaxSpeed(tag){
-  const m = /(\d+)/.exec(tag);        // first number in the tag
-  return m ? m[1] : null;             // e.g. "80"  (null if none)
+/* ─────────────────────────────────────────────
+   OSM / speed-limit helpers
+   ───────────────────────────────────────────── */
+
+let osmLookupSeq = 0;
+let lastOsmLookupMs = 0;
+let lastOsmLookupPos = null;
+
+const OSM_MIN_INTERVAL_MS = 1000; // avoid hammering Nominatim
+const OSM_MIN_DISTANCE_M  = 10;   // avoid repeated lookup at same place
+
+const osmCache = new Map();
+
+let acceptedLegalSpeed = null;
+let candidateLegalSpeed = null;
+let candidateLegalSpeedSince = 0;
+let candidateLegalSpeedStartDist = 0;
+
+const SPEED_LIMIT_HYST_MS = 2500; // require stable new limit for 8 s
+const SPEED_LIMIT_HYST_M  = 30;   // or after 80 m of travel
+
+function roundedCoordKey(lat, lon, decimals = 4) {
+  // 4 decimals ≈ 11 m latitude, enough to reduce duplicate lookups
+  return `${lat.toFixed(decimals)},${lon.toFixed(decimals)}`;
+}
+
+function shouldLookupOsm(lat, lon) {
+  const now = Date.now();
+
+  if (now - lastOsmLookupMs < OSM_MIN_INTERVAL_MS) {
+    return false;
+  }
+
+  if (lastOsmLookupPos) {
+    const d = calculateDistance(
+      lastOsmLookupPos.lat,
+      lastOsmLookupPos.lon,
+      lat,
+      lon
+    );
+
+    if (d < OSM_MIN_DISTANCE_M) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function updateOsmContext(lat, lon, gpsTs) {
+  lastOsmLookupMs = Date.now();
+  lastOsmLookupPos = { lat, lon };
+
+  const key = roundedCoordKey(lat, lon);
+
+  let data = osmCache.get(key);
+  const seq = ++osmLookupSeq;
+
+  if (!data) {
+    const url =
+      `https://nominatim.openstreetmap.org/reverse` +
+      `?format=jsonv2` +
+      `&addressdetails=1` +
+      `&extratags=1` +
+      `&zoom=18` +
+      `&lat=${encodeURIComponent(lat)}` +
+      `&lon=${encodeURIComponent(lon)}`;
+
+    const resp = await fetch(url, { cache: 'force-cache' });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+
+    data = await resp.json();
+    osmCache.set(key, data);
+  }
+
+  // Ignore older slow responses that arrive after a newer lookup
+  if (seq !== osmLookupSeq) {
+    return;
+  }
+
+  applyOsmContext(data, lat, lon, gpsTs);
+}
+
+function getCandidateMaxSpeedTag(tags) {
+  if (!tags) {
+    return {
+      raw: null,
+      source: 'missing',
+      directional: false
+    };
+  }
+
+  if (tags.maxspeed) {
+    return {
+      raw: tags.maxspeed,
+      source: 'maxspeed',
+      directional: false
+    };
+  }
+
+  const fwd = tags['maxspeed:forward'];
+  const bwd = tags['maxspeed:backward'];
+
+  if (fwd && bwd && fwd === bwd) {
+    return {
+      raw: fwd,
+      source: 'maxspeed:forward/backward equal',
+      directional: false
+    };
+  }
+
+  if (fwd || bwd) {
+    return {
+      raw: null,
+      source: 'directional maxspeed present, but direction unknown',
+      directional: true,
+      forward: fwd || null,
+      backward: bwd || null
+    };
+  }
+
+  if (tags['maxspeed:conditional']) {
+    return {
+      raw: null,
+      source: 'conditional maxspeed present',
+      conditional: tags['maxspeed:conditional']
+    };
+  }
+
+  return {
+    raw: null,
+    source: 'missing',
+    directional: false
+  };
+}
+
+function implicitSpeedLimitKmh(tag, countryCode = '') {
+  const t = String(tag || '').toLowerCase();
+
+  // Conservative initial defaults. Extend only where you are confident.
+  const table = {
+    'se:urban': 50,
+    'se:rural': 70
+  };
+
+  return table[t] ?? null;
+}
+
+function parseMaxSpeedTag(raw, countryCode = '') {
+  if (!raw) {
+    return {
+      valueKmh: null,
+      raw: '',
+      confidence: 'none',
+      reason: 'missing'
+    };
+  }
+
+  const tag = String(raw).trim().toLowerCase();
+
+  if (tag === 'none') {
+    return {
+      valueKmh: null,
+      raw,
+      confidence: 'known',
+      reason: 'no fixed limit'
+    };
+  }
+
+  if (tag === 'signals' || tag === 'variable') {
+    return {
+      valueKmh: null,
+      raw,
+      confidence: 'variable',
+      reason: 'variable/signals'
+    };
+  }
+
+  if (tag === 'walk') {
+    return {
+      valueKmh: 7,
+      raw,
+      confidence: 'estimated',
+      reason: 'walk speed estimate'
+    };
+  }
+
+  // Example: "50 mph"
+  let m = tag.match(/^(\d+(?:\.\d+)?)\s*mph$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1]) * 1.60934),
+      raw,
+      confidence: 'converted',
+      reason: 'mph converted to km/h'
+    };
+  }
+
+  // Example: "20 knots"
+  m = tag.match(/^(\d+(?:\.\d+)?)\s*knots?$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1]) * 1.852),
+      raw,
+      confidence: 'converted',
+      reason: 'knots converted to km/h'
+    };
+  }
+
+  // Example: "50", "50 km/h", "50kmh"
+  m = tag.match(/^(\d+(?:\.\d+)?)(?:\s*km\/?h)?$/);
+  if (m) {
+    return {
+      valueKmh: Math.round(Number(m[1])),
+      raw,
+      confidence: 'explicit',
+      reason: 'numeric'
+    };
+  }
+
+  // Example: "SE:urban"
+  const implicit = implicitSpeedLimitKmh(tag, countryCode);
+  if (implicit != null) {
+    return {
+      valueKmh: implicit,
+      raw,
+      confidence: 'implicit',
+      reason: 'country/context default'
+    };
+  }
+
+  return {
+    valueKmh: null,
+    raw,
+    confidence: 'unknown',
+    reason: 'unparsed'
+  };
+}
+
+function updateLegalSpeedWithHysteresis(parsed) {
+  const proposed = parsed.valueKmh;
+  const now = Date.now();
+
+  // Do not immediately clear the sign because one lookup missed maxspeed.
+  if (proposed == null) {
+    if (legalSpeedEl) {
+      legalSpeedEl.title =
+        `${parsed.raw || 'missing'} | ${parsed.confidence}: ${parsed.reason}`;
+    }
+    return;
+  }
+
+  if (acceptedLegalSpeed === null) {
+    acceptedLegalSpeed = proposed;
+    currentLegalSpeed = proposed;
+    legalSpeedEl.textContent = String(proposed);
+    lastLimit = proposed;
+    return;
+  }
+
+  if (proposed === acceptedLegalSpeed) {
+    candidateLegalSpeed = null;
+    candidateLegalSpeedSince = 0;
+    candidateLegalSpeedStartDist = 0;
+    return;
+  }
+
+  if (candidateLegalSpeed !== proposed) {
+    candidateLegalSpeed = proposed;
+    candidateLegalSpeedSince = now;
+    candidateLegalSpeedStartDist = totalDist;
+    return;
+  }
+
+  const stableLongEnough =
+    now - candidateLegalSpeedSince >= SPEED_LIMIT_HYST_MS;
+
+  const movedEnough =
+    totalDist - candidateLegalSpeedStartDist >= SPEED_LIMIT_HYST_M;
+
+  if (stableLongEnough || movedEnough) {
+    acceptedLegalSpeed = proposed;
+    currentLegalSpeed = proposed;
+    legalSpeedEl.textContent = String(proposed);
+
+    if (lastLimit !== null && proposed !== lastLimit) {
+      limitChanges++;
+    }
+
+    lastLimit = proposed;
+
+    candidateLegalSpeed = null;
+    candidateLegalSpeedSince = 0;
+    candidateLegalSpeedStartDist = 0;
+  }
+}
+
+function applyOsmContext(data, lat, lon, gpsTs) {
+  const tags = data.extratags || {};
+
+  const rawRt =
+    tags.highway ||
+    data.type ||
+    'unknown';
+
+  const displayRt =
+    allowedRoadTypes.has(rawRt)
+      ? rawRt
+      : 'Other';
+
+  currentRoadType = displayRt;
+
+  const isBridge = tags.bridge === 'yes';
+
+  const isRoundabout =
+    tags.junction === 'roundabout' ||
+    tags.highway === 'mini_roundabout';
+
+  const isTrafficLight =
+    tags.highway === 'traffic_signals';
+
+  const isTunnel =
+    tags.tunnel === 'yes';
+
+  if (isRoundabout && !lastWasRoundabout) {
+    roundaboutCount++;
+  }
+
+  if (isTrafficLight && !lastWasTrafficLight) {
+    trafficLightCount++;
+  }
+
+  if (isTunnel && !lastWasTunnel) {
+    tunnelCount++;
+  }
+
+  lastWasRoundabout = isRoundabout;
+  lastWasTrafficLight = isTrafficLight;
+  lastWasBridge = isBridge;
+  lastWasTunnel = isTunnel;
+
+  if (tags.bridge === 'yes') {
+    bridgeStreak++;
+    if (bridgeStreak === 8) {
+      bridgeCount++;
+    }
+  } else {
+    bridgeStreak = 0;
+  }
+
+  const speedCandidate = getCandidateMaxSpeedTag(tags);
+
+  const parsedSpeed = parseMaxSpeedTag(
+    speedCandidate.raw,
+    data.address?.country_code
+  );
+
+  updateLegalSpeedWithHysteresis(parsedSpeed);
+
+  if (legalSpeedEl) {
+    legalSpeedEl.title =
+      `${speedCandidate.source || 'unknown'} | ` +
+      `${parsedSpeed.raw || 'missing'} | ` +
+      `${parsedSpeed.confidence}: ${parsedSpeed.reason}`;
+  }
+
+  roadTypeEl.textContent = `Road type: ${displayRt}`;
+
+  if (allowedRoadTypes.has(rawRt)) {
+    roadTypes.add(rawRt);
+  }
+
+  const street =
+    data.address?.road ||
+    data.address?.pedestrian ||
+    data.address?.footway ||
+    'Unknown street';
+
+  const city =
+    data.address?.city ||
+    data.address?.town ||
+    data.address?.village ||
+    'Unknown city';
+
+  const country =
+    data.address?.country ||
+    'Unknown country';
+
+  if (initialCountry === null && country) {
+    initialCountry = country;
+  }
+
+  streetCityEl.innerHTML =
+    `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
+
+  if (lastCountry === null) {
+    lastCountry = country;
+    pendingCountry = null;
+    pendingCountryStartDist = 0;
+  } else if (country === lastCountry) {
+    pendingCountry = null;
+    pendingCountryStartDist = 0;
+  } else {
+    if (pendingCountry !== country) {
+      pendingCountry = country;
+      pendingCountryStartDist = totalDist;
+    } else {
+      const deltaM = totalDist - pendingCountryStartDist;
+
+      if (deltaM >= COUNTRY_HYST_M) {
+        logButton(`Entered ${country}`, false);
+        lastCountry = country;
+        pendingCountry = null;
+        pendingCountryStartDist = 0;
+      }
+    }
+  }
+
+  if (city !== lastCity) {
+    lastCity = city;
+    citySet.add(city);
+    getWeather(city);
+  }
+
+  maybeUpdateTables();
 }
     
   function initMap () {
@@ -2477,114 +3159,25 @@ if (acceptedForDistance) {
     lastPhaseUpdate = now;
   }
 
-  // Reverse geocode
-  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&extratags=1&lat=${lat}&lon=${lon}`)
-    .then(r => r.json())
-    .then(data => {
-      const rawRt = data.extratags?.highway || data.type || 'unknown';
-      const displayRt = allowedRoadTypes.has(rawRt) ? rawRt : 'Other';
-      const tags = data.extratags || {};
-      currentRoadType = displayRt;
-
-      const isBridge = tags.bridge === 'yes';
-      const isRoundabout =
-        tags.junction === 'roundabout' ||
-        tags.highway === 'mini_roundabout';
-      const isTrafficLight = tags.highway === 'traffic_signals';
-      const isTunnel = tags.tunnel === 'yes';
-
-      if (isRoundabout && !lastWasRoundabout) roundaboutCount++;
-      if (isTrafficLight && !lastWasTrafficLight) trafficLightCount++;
-      if (isTunnel && !lastWasTunnel) tunnelCount++;
-
-      lastWasRoundabout = isRoundabout;
-      lastWasTrafficLight = isTrafficLight;
-      lastWasBridge = isBridge;
-      lastWasTunnel = isTunnel;
-
-      if (tags.bridge === 'yes') {
-        bridgeStreak++;
-        if (bridgeStreak === 8) bridgeCount++;
-      } else {
-        bridgeStreak = 0;
-      }
-
-      const maxTag =
-        data.extratags?.maxspeed ||
-        data.extratags?.['maxspeed:forward'] ||
-        data.extratags?.['maxspeed:backward'];
-
-      const limit = maxTag ? parseMaxSpeed(maxTag) : null;
-      legalSpeedEl.textContent = limit ?? '–';
-      currentLegalSpeed = limit !== null ? Number(limit) : null;
-
-      if (limit !== null && limit !== lastLimit) {
-        if (lastLimit !== null) limitChanges++;
-        lastLimit = limit;
-      }
-
-      roadTypeEl.textContent = `Road type: ${displayRt}`;
-      if (allowedRoadTypes.has(rawRt)) roadTypes.add(rawRt);
-
-      const street =
-        data.address.road ||
-        data.address.pedestrian ||
-        data.address.footway ||
-        'Unknown street';
-
-      const city =
-        data.address.city ||
-        data.address.town ||
-        data.address.village ||
-        'Unknown city';
-
-      const country = data.address.country || 'Unknown country';
-
-if (initialCountry === null && country) {
-  initialCountry = country;
+// OSM context lookup: throttled, cached, and stale-response safe
+if (shouldLookupOsm(lat, lon)) {
+  updateOsmContext(lat, lon, ts).catch(err => {
+    streetCityEl.textContent = 'OSM error: ' + err.message;
+    console.error('OSM lookup error', err);
+  });
 }
 
-      streetCityEl.innerHTML = `Street: ${street}<br>City: ${city}<br>Country: ${country}`;
+// HERE speed-limit lookup
+if (shouldLookupHere(lat, lon)) {
+  updateHereSpeedLimit(lat, lon, ts).catch(err => {
+    console.warn('HERE speed-limit lookup error:', err);
+  });
+}
 
-      if (lastCountry === null) {
-        lastCountry = country;
-        pendingCountry = null;
-        pendingCountryStartDist = 0;
-      } else if (country === lastCountry) {
-        pendingCountry = null;
-        pendingCountryStartDist = 0;
-      } else {
-        if (pendingCountry !== country) {
-          pendingCountry = country;
-          pendingCountryStartDist = totalDist;
-        } else {
-          const deltaM = totalDist - pendingCountryStartDist;
-          if (deltaM >= COUNTRY_HYST_M) {
-            logButton(`Entered ${country}`, false);
-            lastCountry = country;
-            pendingCountry = null;
-            pendingCountryStartDist = 0;
-          }
-        }
-      }
-
-      if (city !== lastCity) {
-        lastCity = city;
-        citySet.add(city);
-        getWeather(city);
-      }
-
-      maybeUpdateTables();
-    })
-    .catch(err => {
-      streetCityEl.textContent = 'Error: ' + err.message;
-      console.error('Reverse geocode error', err);
-    });
-
-  if (map2) {
-    map2.setView([lat, lon], 20);
-    currentPosMarker2.setLatLng([lat, lon]);
-  }
+if (map2) {
+  map2.setView([lat, lon], 20);
+  currentPosMarker2.setLatLng([lat, lon]);
+}
 }
     
     function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -2658,13 +3251,43 @@ function formatAzureOffsetForStats(offsetMs) {
   return `${sign}${seconds} s (${dir})`;
 }  
 
-function updateStatsTable () {
-  const totalMs   = startTime ? (lastPos.ts - startTime) : 0;
-  const timeStr   = new Date(totalMs).toISOString().substring(11, 19);
+function getPlatformName() {
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
 
-  const km        = (totalDist / 1000).toFixed(1);
-  const hrs       = totalMs / 3_600_000;
-  const meanSpd   = hrs > 0 ? (km / hrs).toFixed(1) : '—';
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'iOS';
+  if (/Android/i.test(ua)) return 'Android';
+  if (/Win/i.test(platform)) return 'Windows';
+  if (/Mac/i.test(platform)) return 'macOS';
+  if (/Linux/i.test(platform)) return 'Linux';
+
+  return 'Unknown';
+}
+
+function getBrowserNameVersion() {
+  const ua = navigator.userAgent || '';
+  let m;
+
+  if ((m = ua.match(/Edg\/(\d+(\.\d+)?)/))) return `Edge ${m[1]}`;
+  if ((m = ua.match(/OPR\/(\d+(\.\d+)?)/))) return `Opera ${m[1]}`;
+  if ((m = ua.match(/CriOS\/(\d+(\.\d+)?)/))) return `Chrome iOS ${m[1]}`;
+  if ((m = ua.match(/FxiOS\/(\d+(\.\d+)?)/))) return `Firefox iOS ${m[1]}`;
+  if ((m = ua.match(/Chrome\/(\d+(\.\d+)?)/)) && !/Edg|OPR/.test(ua)) return `Chrome ${m[1]}`;
+  if ((m = ua.match(/Firefox\/(\d+(\.\d+)?)/))) return `Firefox ${m[1]}`;
+  if ((m = ua.match(/Version\/(\d+(\.\d+)?).*Safari/)) && !/Chrome|CriOS|FxiOS|Edg|OPR/.test(ua)) return `Safari ${m[1]}`;
+
+  return 'Unknown';
+}
+  
+function updateStatsTable () {
+  const totalMs = (startTime && lastPos) ? (lastPos.ts - startTime) : 0;
+  const timeStr = totalMs > 0
+    ? new Date(totalMs).toISOString().substring(11, 19)
+    : '00:00:00';
+
+  const km = (totalDist / 1000).toFixed(1);
+  const hrs = totalMs / 3_600_000;
+  const meanSpd = hrs > 0 ? ((totalDist / 1000) / hrs).toFixed(1) : '—';
 
   const citiesList = Array.from(citySet).join(' - ') || '—';
 
@@ -2672,21 +3295,33 @@ function updateStatsTable () {
   const countriesList = Object.keys(countryDistancesFromSampling).join(' - ') || '—';
 
   const clockOffsetText = formatAzureOffsetForStats(azureClockOffsetMs);
+  const platformText = getPlatformName();
+  const browserText = getBrowserNameVersion();
+
+  const showKpiButtonsChecked = document.getElementById('showButtons')?.checked;
+  const buttonSetupText = showKpiButtonsChecked
+    ? (Array.from(usedButtonSetups).join(' - ') || '—')
+    : '';
 
   document.getElementById('statsTable').innerHTML = `
     <tr><th>Metric</th><th>Value</th></tr>
-    <tr><td>Total test time</td>            <td>${timeStr}</td></tr>
-    <tr><td>Clock offset vs Azure</td>      <td>${clockOffsetText}</td></tr>
-    <tr><td>Total test distance</td>        <td>${km} km</td></tr>
-    <tr><td>Max speed</td>                  <td>${maxSpeed.toFixed(1)} km/h</td></tr>
-    <tr><td>Mean speed</td>                 <td>${meanSpd} km/h</td></tr>
-    <tr><td>Speed limit changes</td>        <td>${limitChanges}</td></tr>
-    <tr><td>Roundabouts</td>                <td>${roundaboutCount}</td></tr>
-    <tr><td>Traffic-light junctions</td>    <td>${trafficLightCount}</td></tr>
-    <tr><td>Bridges</td>                    <td>${bridgeCount}</td></tr>
-    <tr><td>Tunnels</td>                    <td>${tunnelCount}</td></tr>
-    <tr><td>Cities</td>                     <td>${citiesList}</td></tr>
-    <tr><td>Countries</td>                  <td>${countriesList}</td></tr>`;
+    <tr><td>Total test time</td><td>${timeStr}</td></tr>
+    <tr><td>Device clock offset vs Azure</td><td>${clockOffsetText}</td></tr>
+    <tr><td>Device battery at session start</td><td>${batteryStartText}</td></tr>
+    <tr><td>Device battery at session end</td><td>${batteryEndText}</td></tr>
+    <tr><td>Device platform</td><td>${platformText}</td></tr>
+    <tr><td>Device browser</td><td>${browserText}</td></tr>
+    <tr><td>Button setups used</td><td>${buttonSetupText}</td></tr>
+    <tr><td>Total test distance</td><td>${km} km</td></tr>
+    <tr><td>Max speed</td><td>${maxSpeed.toFixed(1)} km/h</td></tr>
+    <tr><td>Mean speed</td><td>${meanSpd} km/h</td></tr>
+    <tr><td>Speed limit changes</td><td>${limitChanges}</td></tr>
+    <tr><td>Roundabouts</td><td>${roundaboutCount}</td></tr>
+    <tr><td>Traffic-light junctions</td><td>${trafficLightCount}</td></tr>
+    <tr><td>Bridges</td><td>${bridgeCount}</td></tr>
+    <tr><td>Tunnels</td><td>${tunnelCount}</td></tr>
+    <tr><td>Cities</td><td>${citiesList}</td></tr>
+    <tr><td>Countries</td><td>${countriesList}</td></tr>`;
 }
     
  function resetDistance(){totalDist=0;lastPos=null;positions=[];roadTypes.clear();distEl.textContent='Distance: 0.0 km';speedEl.textContent='Speed: N/A';roadTypeEl.textContent = 'Road type: N/A';timeData=[];distData=[];speedData=[];trackLine.setLatLngs([]);map.setView([0,0],2);updateStreetTable();updateCountTable();}
@@ -2740,7 +3375,9 @@ function recordSample(issueText = '', dt = new Date()) {
   const distanceKm = (totalDist / 1000).toFixed(3);
   const speed      = lastSpeedKmh.toFixed(1);
   const maxSpd     = maxSpeed.toFixed(1);
-  const legalSpd   = (currentLegalSpeed ?? '');
+const legalSpd = currentLegalSpeed != null ? currentLegalSpeed : '';
+const hereLegalSpd = currentHereLegalSpeed != null ? currentHereLegalSpeed : '';
+  const hereRoadType = currentHereRoadType || '';
 
   const toggleSnapshot = {};
   toggleDefs.forEach(def => {
@@ -2760,8 +3397,10 @@ function recordSample(issueText = '', dt = new Date()) {
     distance:   distanceKm,
     speed:      speed,
     maxspeed:   maxSpd,
-    legalSpeed: legalSpd,
-    roadType:   currentRoadType || 'Unknown',
+    legalSpeed:     legalSpd,
+    hereLegalSpeed: hereLegalSpd,
+    roadType:       currentRoadType || 'Unknown',
+    hereRoadType,
     country:    lastCountry || 'Unknown',
     issue:      issueText || '',
     toggles:    toggleSnapshot
@@ -3286,6 +3925,9 @@ function registerKpiUsage(groupKey, logName) {
     
 // Build buttons from CSV using fetch + PapaParse
 function buildButtons(csvFile = 'KPI_buttons.csv') {
+  // Track every button setup used during this session
+  usedButtonSetups.add(csvFile);
+
   const buttonGroups = document.getElementById('buttonGroups');
   buttonGroups.innerHTML = '';
   toggleDefs = []; // reset on rebuild
@@ -3320,22 +3962,22 @@ function buildButtons(csvFile = 'KPI_buttons.csv') {
 
         if (!groupKey || !label) return;
 
-        // one column per group (header item will be just another row in the group)
-if (!groups[groupKey]) {
-  const wrap = document.createElement('div');
-  wrap.className = 'button-group';
-  wrap.dataset.groupKey = groupKey;
-  wrap.dataset.originalOrder = String(groupOriginalOrder++);
-  groups[groupKey] = wrap;
-  buttonGroups.appendChild(wrap);
+        // one column per group
+        if (!groups[groupKey]) {
+          const wrap = document.createElement('div');
+          wrap.className = 'button-group';
+          wrap.dataset.groupKey = groupKey;
+          wrap.dataset.originalOrder = String(groupOriginalOrder++);
+          groups[groupKey] = wrap;
+          buttonGroups.appendChild(wrap);
 
-  if (!(groupKey in groupUsageCounts)) {
-    groupUsageCounts[groupKey] = 0;
-  }
-}
+          if (!(groupKey in groupUsageCounts)) {
+            groupUsageCounts[groupKey] = 0;
+          }
+        }
 
         // ─────────────────────────────────────────────
-        // 2-STATE TOGGLE  (BACKWARDS-COMPATIBLE)
+        // 2-STATE TOGGLE
         // ─────────────────────────────────────────────
         if (type === 'toggle' && signal) {
           const isOn =
@@ -3363,6 +4005,7 @@ if (!groups[groupKey]) {
             const current = on ? onValue : offValue;
             text.textContent = `${label}: ${current}`;
           };
+
           const flip = () => {
             const on = btn.getAttribute('aria-checked') === 'true';
             btn.setAttribute('aria-checked', String(!on));
@@ -3370,10 +4013,14 @@ if (!groups[groupKey]) {
             if (toggleState[signal] === onValue) setToggleDistanceEnabled();
             render();
           };
+
           render();
           btn.addEventListener('click', flip);
           btn.addEventListener('keydown', e => {
-            if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); flip(); }
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault();
+              flip();
+            }
           });
 
           groups[groupKey].appendChild(btn);
@@ -3381,201 +4028,193 @@ if (!groups[groupKey]) {
         }
 
         // ─────────────────────────────────────────────
-// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
-// ─────────────────────────────────────────────
-// ─────────────────────────────────────────────
-// 3-STATE TOGGLE  (NEW: type = toggle3 / tri-toggle / tristate)
-// ─────────────────────────────────────────────
-if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
-  const states = ['Not tested', 'No', 'Yes'];
+        // 3-STATE TOGGLE
+        // ─────────────────────────────────────────────
+        if ((type === 'toggle3' || type === 'tri-toggle' || type === 'tristate') && signal) {
+          const states = ['Not tested', 'No', 'Yes'];
 
-  let defaultIndex = 0;
-  const d = def.toLowerCase();
-  if (d === 'no'  || d === '0')                 defaultIndex = 1;
-  if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
+          let defaultIndex = 0;
+          const d = def.toLowerCase();
+          if (d === 'no' || d === '0') defaultIndex = 1;
+          if (d === 'yes' || d === '1' || d === 'true') defaultIndex = 2;
 
-  let stateIndex = defaultIndex;
-  toggleState[signal] = states[stateIndex];
+          let stateIndex = defaultIndex;
+          toggleState[signal] = states[stateIndex];
 
-  toggleDefs.push({
-    signal,
-    label,
-    kind: 'tri',
-    states
-  });
+          toggleDefs.push({
+            signal,
+            label,
+            kind: 'tri',
+            states
+          });
 
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = `toggleButton bigButton ${cssClass}`.trim();
-  btn.setAttribute('role', 'button');
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = `toggleButton bigButton ${cssClass}`.trim();
+          btn.setAttribute('role', 'button');
 
-  btn.dataset.toggleKind = 'tri';
-  btn.dataset.signal     = signal;
-  btn.dataset.order      = String(triToggleSerial++);
+          btn.dataset.toggleKind = 'tri';
+          btn.dataset.signal     = signal;
+          btn.dataset.order      = String(triToggleSerial++);
 
-  const text = document.createElement('span');
-  btn.appendChild(text);
+          const text = document.createElement('span');
+          btn.appendChild(text);
 
-  const render = () => {
-    const state = states[stateIndex];
-    const note  = toggleNotes[signal];
-    text.textContent = note
-      ? `${label}: ${state} 📝`
-      : `${label}: ${state}`;
+          const render = () => {
+            const state = states[stateIndex];
+            const note  = toggleNotes[signal];
+            text.textContent = note
+              ? `${label}: ${state} 📝`
+              : `${label}: ${state}`;
 
-    if (state === 'Yes') {
-      btn.style.backgroundColor = '#2e7d32';
-    } else if (state === 'No') {
-      btn.style.backgroundColor = '#8b0000';
-    } else {
-      btn.style.backgroundColor = '#2a2a2a';
-    }
-  };
+            if (state === 'Yes') {
+              btn.style.backgroundColor = '#2e7d32';
+            } else if (state === 'No') {
+              btn.style.backgroundColor = '#8b0000';
+            } else {
+              btn.style.backgroundColor = '#2a2a2a';
+            }
+          };
 
-  function openNotePrompt() {
-    const prev = toggleNotes[signal] || '';
-    const next = prompt(`Custom annotation for "${label}":`, prev);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (trimmed) {
-      toggleNotes[signal] = trimmed;
-    } else {
-      delete toggleNotes[signal];
-    }
-    render();
-  }
+          function openNotePrompt() {
+            const prev = toggleNotes[signal] || '';
+            const next = prompt(`Custom annotation for "${label}":`, prev);
+            if (next === null) return;
+            const trimmed = next.trim();
+            if (trimmed) {
+              toggleNotes[signal] = trimmed;
+            } else {
+              delete toggleNotes[signal];
+            }
+            render();
+          }
 
-  // 📱 / 💻 note trigger wiring
-  let longPressTimer = null;
-  let longPressTriggered = false;
+          let longPressTimer = null;
+          let longPressTriggered = false;
 
-  // Desktop: right-click only if NOT touch
-  if (!isTouchDevice) {
-    btn.addEventListener('contextmenu', e => {
-      e.preventDefault();
-      e.stopPropagation();
-      openNotePrompt();
-    });
-  }
+          if (!isTouchDevice) {
+            btn.addEventListener('contextmenu', e => {
+              e.preventDefault();
+              e.stopPropagation();
+              openNotePrompt();
+            });
+          }
 
-  // Touch: long-press
-  function startLongPress(e) {
-    if (e.type === 'touchstart') {
-      longPressTriggered = false;
-      longPressTimer = setTimeout(() => {
-        longPressTriggered = true;
-        openNotePrompt();
-      }, 600);
-    }
-  }
+          function startLongPress(e) {
+            if (e.type === 'touchstart') {
+              longPressTriggered = false;
+              longPressTimer = setTimeout(() => {
+                longPressTriggered = true;
+                openNotePrompt();
+              }, 600);
+            }
+          }
 
-  function cancelLongPress() {
-    if (longPressTimer) {
-      clearTimeout(longPressTimer);
-      longPressTimer = null;
-    }
-  }
+          function cancelLongPress() {
+            if (longPressTimer) {
+              clearTimeout(longPressTimer);
+              longPressTimer = null;
+            }
+          }
 
-  btn.addEventListener('touchstart', startLongPress, { passive: true });
-  btn.addEventListener('touchend',   cancelLongPress);
-  btn.addEventListener('touchmove',  cancelLongPress);
-  btn.addEventListener('touchcancel',cancelLongPress);
+          btn.addEventListener('touchstart', startLongPress, { passive: true });
+          btn.addEventListener('touchend', cancelLongPress);
+          btn.addEventListener('touchmove', cancelLongPress);
+          btn.addEventListener('touchcancel', cancelLongPress);
 
-  const cycle = () => {
-    // remember index before the click
-    const prevIndex = stateIndex;
+          const cycle = () => {
+            const prevIndex = stateIndex;
 
-    // advance state
-    stateIndex = (stateIndex + 1) % states.length;
-    toggleState[signal] = states[stateIndex];
+            stateIndex = (stateIndex + 1) % states.length;
+            toggleState[signal] = states[stateIndex];
 
-    if (toggleState[signal] === 'Yes') setToggleDistanceEnabled();
+            if (toggleState[signal] === 'Yes') setToggleDistanceEnabled();
 
-    // mark this tri-toggle as "touched" once it ever leaves its default state
-    if (stateIndex !== defaultIndex || prevIndex !== defaultIndex) {
-      triToggleTouched[signal] = true;
-    }
+            if (stateIndex !== defaultIndex || prevIndex !== defaultIndex) {
+              triToggleTouched[signal] = true;
+            }
 
-    render();
-  };
+            render();
+          };
 
-  render();
+          render();
 
-  btn.addEventListener('click', e => {
-    if (longPressTriggered) {
-      longPressTriggered = false; // swallow click after long-press
-      return;
-    }
-    cycle();
-  });
+          btn.addEventListener('click', () => {
+            if (longPressTriggered) {
+              longPressTriggered = false;
+              return;
+            }
+            cycle();
+          });
 
-  btn.addEventListener('keydown', e => {
-    if (e.key === ' ' || e.key === 'Enter') {
-      e.preventDefault();
-      cycle();
-    }
-  });
+          btn.addEventListener('keydown', e => {
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault();
+              cycle();
+            }
+          });
 
-  groups[groupKey].appendChild(btn);
-  return;
-}
+          groups[groupKey].appendChild(btn);
+          return;
+        }
 
-// ─────────────────────────────────────────────
-// Normal press-to-log buttons (including grey headers)
-// ─────────────────────────────────────────────
-const btn = document.createElement('button');
-btn.type = 'button';
-btn.className = `bigButton ${cssClass}`.trim();
-btn.dataset.baseLabel = label;
+        // ─────────────────────────────────────────────
+        // Normal press-to-log buttons (including grey headers)
+        // ─────────────────────────────────────────────
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `bigButton ${cssClass}`.trim();
+        btn.dataset.baseLabel = label;
 
-// treat a grey row matching the group name as the header
-const isHeaderLike =
-  cssClass.includes('greyButton') &&
-  !type &&
-  !signal &&
-  label === groupKey;
+        const isHeaderLike =
+          cssClass.includes('greyButton') &&
+          !type &&
+          !signal &&
+          label === groupKey;
 
-if (isHeaderLike) {
-  btn.classList.add('group-header');
-  btn.dataset.baseLabel = label;
-  btn.textContent = `${label} (${groupUsageCounts[groupKey] || 0})`;
-  btn.disabled = true;
-  groups[groupKey].appendChild(btn);
-  return;
-}
+        if (isHeaderLike) {
+          btn.classList.add('group-header');
+          btn.dataset.baseLabel = label;
+          btn.textContent = `${label} (${groupUsageCounts[groupKey] || 0})`;
+          btn.disabled = true;
+          groups[groupKey].appendChild(btn);
+          return;
+        }
 
-const isRed = btn.classList.contains('redButton');
-const usageTracked = isSortableKpiButton(btn);
+        const isRed = btn.classList.contains('redButton');
+        const usageTracked = isSortableKpiButton(btn);
 
-btn.dataset.groupKey = groupKey;
-btn.dataset.logName = logName;
+        btn.dataset.groupKey = groupKey;
+        btn.dataset.logName = logName;
 
-if (usageTracked) {
-  btn.dataset.usageSortable = '1';
-  btn.dataset.originalOrder = String(buttonOriginalOrder++);
+        if (usageTracked) {
+          btn.dataset.usageSortable = '1';
+          btn.dataset.originalOrder = String(buttonOriginalOrder++);
 
-  const key = getButtonCountKey(groupKey, logName);
-  if (!(key in buttonUsageCounts)) {
-    buttonUsageCounts[key] = 0;
-  }
+          const key = getButtonCountKey(groupKey, logName);
+          if (!(key in buttonUsageCounts)) {
+            buttonUsageCounts[key] = 0;
+          }
 
-  btn.textContent = `${label} (${buttonUsageCounts[key] || 0})`;
-} else {
-  btn.textContent = label;
-}
+          btn.textContent = `${label} (${buttonUsageCounts[key] || 0})`;
+        } else {
+          btn.textContent = label;
+        }
 
-btn.addEventListener('click', () => {
-  logButton(logName, isRed);
+        btn.addEventListener('click', () => {
+          logButton(logName, isRed);
 
-  if (usageTracked) {
-    registerKpiUsage(groupKey, logName);
-  }
-});
+          if (usageTracked) {
+            registerKpiUsage(groupKey, logName);
+          }
+        });
 
-groups[groupKey].appendChild(btn);
+        groups[groupKey].appendChild(btn);
       });
+
       updateKpiUsageLabels();
       sortKpiGroups();
+      updateStatsTable(); // refresh stats so "Button setups used" updates immediately
     })
     .catch(err => console.error('Error building buttons:', err));
 }
@@ -3938,26 +4577,32 @@ if (['Road types', 'Country', 'Weather', 'Phase'].includes(name)) {
 
 const samplingHeader = [
   "No","Timestamp","Latitude","Longitude",
-  "Distance (km)","Speed (km/h)","Legal Speed (km/h)",
-  "Road type","Country","Issue"
+  "Distance (km)","Speed (km/h)",
+  "OSM Speed Limit (km/h)",
+  "HERE Speed Limit (km/h)",
+  "OSM Road type",
+  "HERE Road type",
+  "Country","Issue"
 ];
 toggleDefs.forEach(def => samplingHeader.push(def.signal));
 
   const samplingAoA = [samplingHeader];
 
   samplingTable.forEach(entry => {
-    const row = [
-      entry.no,
-      entry.timestamp,
-      entry.lat,
-      entry.lon,
-      entry.distance,
-      entry.speed,
-      entry.legalSpeed,
-      entry.roadType || '',
-      entry.country || '',
-      entry.issue || ''
-    ];
+const row = [
+  entry.no,
+  entry.timestamp,
+  entry.lat,
+  entry.lon,
+  entry.distance,
+  entry.speed,
+  entry.legalSpeed,
+  entry.hereLegalSpeed,
+  entry.roadType || '',
+  entry.hereRoadType || '',
+  entry.country || '',
+  entry.issue || ''
+];
 
     toggleDefs.forEach(def => {
       const valFromEntry = entry.toggles?.[def.signal];
