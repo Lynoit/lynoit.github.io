@@ -124,6 +124,29 @@
   margin-left: 40px;
 }
 
+.skill-matrix-table td.skill-yes,
+.skill-matrix-table td.skill-no{
+  text-align: center;
+  font-weight: 800;
+  min-width: 56px;
+  border-left: 1px solid #eef1fb;
+}
+
+.skill-matrix-table td.skill-yes{
+  background: #e8f7ec;
+  color: #0a7a1f;
+}
+
+.skill-matrix-table td.skill-no{
+  background: #f1f3f8;
+  color: #999;
+}
+
+.skill-matrix-table th.software{
+  text-align: center;
+  min-width: 56px;
+}    
+
 /* Nudge radar, table, and scoring boxes to the right equally */
 .chart-card svg,
 .chart-card .kpi-table-wrap,
@@ -1223,6 +1246,80 @@ function measureTextWidthCal(texts, fontSize=11, fontWeight=600){
   tmp.remove(); return Math.ceil(max);
 }
 
+function renderSkillMatrix(container, parsed){
+  const softwares = parsed.software || [];
+  const capsBySoftware = parsed.capabilities || {};
+
+  if (!softwares.length || !Object.keys(capsBySoftware).length) return;
+
+  const featureOpts = getFeatureOptions(parsed);
+  if (!featureOpts.length) return;
+
+  const card = container.append('div').attr('class', 'chart-card');
+
+  card.append('div')
+    .attr('class','matrix-title')
+    .text('Skill matrix');
+
+  card.append('div')
+    .attr('class','matrix-sub')
+    .text('Capability availability by car/software');
+
+  const wrap = card.append('div').attr('class','matrix-wrap');
+  const table = wrap.append('table').attr('class','matrix-table skill-matrix-table');
+
+  const thead = table.append('thead').append('tr');
+
+  thead.append('th')
+    .attr('class','freeze-1')
+    .text('Software');
+
+  featureOpts.forEach(f => {
+    const selected = SELECTED_FEATURE_KEYS.has(f.key);
+
+    thead.append('th')
+      .attr('class','software')
+      .style('opacity', selected ? 1 : 0.4)
+      .text(f.label)
+      .append('title')
+      .text(selected ? 'Included in current KPI scope' : 'Not included in current KPI scope');
+  });
+
+  const tbody = table.append('tbody');
+
+  softwares.forEach(sw => {
+    const caps = capsBySoftware[sw.label] || {};
+    const tr = tbody.append('tr');
+
+    tr.append('td')
+      .attr('class','freeze-1')
+      .text(sw.date ? `${sw.label} (${sw.date})` : sw.label);
+
+    featureOpts.forEach(f => {
+      const selected = SELECTED_FEATURE_KEYS.has(f.key);
+      const hasExplicitCapability = Object.prototype.hasOwnProperty.call(caps, f.key);
+      const available = caps[f.key] === true;
+
+      const td = tr.append('td')
+        .attr('class', available ? 'skill-yes' : 'skill-no')
+        .style('opacity', selected ? 1 : 0.4)
+        .attr(
+          'title',
+          `${sw.label}\n${f.label}: ${
+            hasExplicitCapability
+              ? (available ? 'Available' : 'Not available')
+              : 'No capability value'
+          }`
+        );
+
+      td.text(available ? '✓' : '–');
+    });
+  });
+
+  setFrozenOneColWidth(wrap.node());
+  window.addEventListener('resize', () => setFrozenOneColWidth(wrap.node()));
+}  
+
 function renderCCMatrix(container, parsed){
   const ccSoftwares = (parsed.software || []).filter(sw => /^CC\b/i.test(sw.base));
   if (!ccSoftwares.length) return;
@@ -1268,6 +1365,24 @@ window.addEventListener('resize', () => setFrozenColWidths(wrap.node()));
   // === Heatmap sourced from this table data ===
   renderCCMatrixHeatmap(card, kpiNames, ccSoftwares.map(s=>s.label), matrixVals);
 }
+
+function setFrozenOneColWidth(wrapperEl){
+  const table = wrapperEl.querySelector('table');
+  if (!table || !table.tHead || !table.tHead.rows.length) return;
+
+  const th1 = table.tHead.rows[0].cells[0];
+  if (!th1) return;
+
+  const c1 = th1.offsetWidth;
+  wrapperEl.style.setProperty('--c1', c1 + 'px');
+
+  for (const row of table.rows){
+    const c0 = row.cells[0];
+    if (c0){
+      c0.style.width = c0.style.minWidth = c0.style.maxWidth = c1 + 'px';
+    }
+  }
+}  
 
 function setFrozenColWidths(wrapperEl){
   const table = wrapperEl.querySelector('table');
@@ -2052,18 +2167,26 @@ function renderSoftwareCards(container, parsed){
 function renderCharts(parsedFull){
   const parsedSelected = makeParsedViewForSelectedFeatures(parsedFull);
   const parsed = applyBestCCFilter(parsedSelected);
+
   const container = d3.select('#charts').html('');
-  if (!parsed || !parsed.entries || !parsed.entries.length || !parsed.software || !parsed.software.length){
-    container.append('div').attr('class','small').text('No valid cars/software for the selected KPI groups.');
+
+  if (!parsed || !parsed.software || !parsed.software.length){
+    container.append('div')
+      .attr('class','small')
+      .text('No valid cars/software for the selected KPI groups.');
     return;
   }
 
   renderSummary(container, parsed);
 
-  // Stand-alone CC timeline cards remain disabled; the timeline is rendered inside the summary card.
-  // renderCCTimeline(container, parsed);
-  // renderCCTimelineCard(container, parsed);
-  // renderCCTimelineBar(container, parsed);
+  renderSkillMatrix(container, parsed);
+
+  if (!parsed.entries || !parsed.entries.length){
+    container.append('div')
+      .attr('class','small')
+      .text('No KPI entries for the selected KPI groups.');
+    return;
+  }
 
   renderCCMatrix(container, parsed);
   renderNonCCPlusLatestCCMatrix(container, parsed);
@@ -2071,7 +2194,6 @@ function renderCharts(parsedFull){
   // Per-software radar cards are optional; uncomment if you want them shown.
   // renderSoftwareCards(container, parsed);
 }
-
 
 /* ==================== Loader ==================== */
 async function loadCsvAndRender(){
