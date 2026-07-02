@@ -271,6 +271,7 @@
 const defs = [
   {id:'speed', name:'Approach speed', unit:'km/h', min:50, max:130, step:1, val:100, hint:'Vehicle speed before lane change starts.'},
   {id:'zoneLength', name:'Usable off-ramp lane-change zone', unit:'m', min:50, max:350, step:5, val:120, hint:'Distance where it is legal and physically possible to move into the ramp lane.'},
+  {id:'preRampHistory', name:'Visible highway history before ramp', unit:'m', min:0, max:600, step:10, val:300, hint:'Extra upstream road shown before the off-ramp zone starts, useful for visualizing early planning and speed shaping.'},
   {id:'lcTime', name:'Lane-change duration', unit:'s', min:2.5, max:6.0, step:0.1, val:3.5, hint:'Time from real lateral motion start until the vehicle is established in the ramp lane.'},
   {id:'delay', name:'Decision/actuation delay', unit:'s', min:0.0, max:2.0, step:0.1, val:0.5, hint:'Delay from trigger decision to meaningful lateral motion.'},
   {id:'guard', name:'Desired guard margin', unit:'m', min:0, max:50, step:1, val:15, hint:'Margin kept before the end of the zone/gore area.'},
@@ -310,10 +311,10 @@ function makeControls(){
 
 function setPreset(name){
   const presets = {
-    base:{speed:100,zoneLength:120,lcTime:3.5,delay:0.5,guard:15,mapStartErr:3,mapEndErr:3,locErr:2,lcPredictionErr:6,laneWidth:3.5,vehicleWidth:2.2,lateralErr:0.2,curvatureRadius:250},
-    slow:{speed:80,zoneLength:120,lcTime:3.5,delay:0.5,guard:15,mapStartErr:3,mapEndErr:3,locErr:2,lcPredictionErr:6,laneWidth:3.5,vehicleWidth:2.2,lateralErr:0.2,curvatureRadius:250},
-    short:{speed:110,zoneLength:100,lcTime:4.0,delay:0.7,guard:15,mapStartErr:5,mapEndErr:5,locErr:3,lcPredictionErr:10,laneWidth:3.25,vehicleWidth:2.25,lateralErr:0.3,curvatureRadius:120},
-    long:{speed:100,zoneLength:220,lcTime:3.8,delay:0.5,guard:20,mapStartErr:2,mapEndErr:2,locErr:1.5,lcPredictionErr:5,laneWidth:3.75,vehicleWidth:2.2,lateralErr:0.15,curvatureRadius:400}
+    base:{speed:100,zoneLength:120,preRampHistory:300,lcTime:3.5,delay:0.5,guard:15,mapStartErr:3,mapEndErr:3,locErr:2,lcPredictionErr:6,laneWidth:3.5,vehicleWidth:2.2,lateralErr:0.2,curvatureRadius:250},
+    slow:{speed:80,zoneLength:120,preRampHistory:300,lcTime:3.5,delay:0.5,guard:15,mapStartErr:3,mapEndErr:3,locErr:2,lcPredictionErr:6,laneWidth:3.5,vehicleWidth:2.2,lateralErr:0.2,curvatureRadius:250},
+    short:{speed:110,zoneLength:100,preRampHistory:250,lcTime:4.0,delay:0.7,guard:15,mapStartErr:5,mapEndErr:5,locErr:3,lcPredictionErr:10,laneWidth:3.25,vehicleWidth:2.25,lateralErr:0.3,curvatureRadius:120},
+    long:{speed:100,zoneLength:220,preRampHistory:400,lcTime:3.8,delay:0.5,guard:20,mapStartErr:2,mapEndErr:2,locErr:1.5,lcPredictionErr:5,laneWidth:3.75,vehicleWidth:2.2,lateralErr:0.15,curvatureRadius:400}
   };
   Object.assign(state, presets[name]);
   defs.forEach(d => {
@@ -422,26 +423,32 @@ function draw(r){
   const pad = 70;
   const roadY = 160;
   const laneH = 52;
-  const maxLen = Math.max(state.zoneLength + 120, r.distanceNeeded + r.longitudinalUncertainty + state.guard + 120, 260);
+  const pre = state.preRampHistory || 0;
+  const post = 130;
+  const maxLen = Math.max(pre + state.zoneLength + post, pre + r.distanceNeeded + r.longitudinalUncertainty + state.guard + post, 320);
   const scale = (W - 2*pad) / maxLen;
-  function x(m){ return pad + m*scale; }
+  function xAbs(m){ return pad + (m + pre) * scale; } // m=0 is ramp-zone start
+  function xDist(m){ return pad + m * scale; }       // absolute plot distance from left edge
 
-  const zoneStartX = x(0);
-  const zoneEndX = x(state.zoneLength);
-  const exitY0 = roadY + laneH * 0.5;
+  const zoneStartX = xAbs(0);
+  const zoneEndX = xAbs(state.zoneLength);
   const exitY1 = roadY + laneH * 2.65;
 
-  // Main highway
+  // Main highway including upstream history
   ctx.fillStyle = '#1f2937';
   ctx.fillRect(pad, roadY-laneH*1.5, W-2*pad, laneH*3);
+
+  // Upstream planning/history shading
+  ctx.fillStyle = 'rgba(167,139,250,.10)';
+  ctx.fillRect(pad, roadY-laneH*1.5, pre*scale, laneH*3);
 
   // Right-side off-ramp diverging lane
   ctx.beginPath();
   ctx.moveTo(zoneStartX, roadY + laneH*0.5);
-  ctx.bezierCurveTo(x(state.zoneLength*0.25), roadY + laneH*0.75, x(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
+  ctx.bezierCurveTo(xAbs(state.zoneLength*0.25), roadY + laneH*0.75, xAbs(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
   ctx.lineTo(W-pad, exitY1);
   ctx.lineTo(W-pad, exitY1 + laneH);
-  ctx.bezierCurveTo(x(state.zoneLength*0.62), exitY1 + laneH, x(state.zoneLength*0.25), roadY + laneH*1.75, zoneStartX, roadY + laneH*1.5);
+  ctx.bezierCurveTo(xAbs(state.zoneLength*0.62), exitY1 + laneH, xAbs(state.zoneLength*0.25), roadY + laneH*1.75, zoneStartX, roadY + laneH*1.5);
   ctx.closePath();
   ctx.fillStyle = '#243244';
   ctx.fill();
@@ -463,13 +470,13 @@ function draw(r){
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(zoneStartX, roadY + laneH*0.5);
-  ctx.bezierCurveTo(x(state.zoneLength*0.25), roadY + laneH*0.75, x(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
+  ctx.bezierCurveTo(xAbs(state.zoneLength*0.25), roadY + laneH*0.75, xAbs(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
   ctx.lineTo(W-pad, exitY1);
   ctx.stroke();
 
   ctx.beginPath();
   ctx.moveTo(zoneStartX, roadY + laneH*1.5);
-  ctx.bezierCurveTo(x(state.zoneLength*0.25), roadY + laneH*1.75, x(state.zoneLength*0.62), exitY1 + laneH, zoneEndX, exitY1 + laneH);
+  ctx.bezierCurveTo(xAbs(state.zoneLength*0.25), roadY + laneH*1.75, xAbs(state.zoneLength*0.62), exitY1 + laneH, zoneEndX, exitY1 + laneH);
   ctx.lineTo(W-pad, exitY1 + laneH);
   ctx.stroke();
 
@@ -479,7 +486,7 @@ function draw(r){
   ctx.setLineDash([14,12]);
   ctx.beginPath();
   ctx.moveTo(zoneStartX, roadY + laneH*0.5);
-  ctx.bezierCurveTo(x(state.zoneLength*0.25), roadY + laneH*0.75, x(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
+  ctx.bezierCurveTo(xAbs(state.zoneLength*0.25), roadY + laneH*0.75, xAbs(state.zoneLength*0.62), roadY + laneH*1.65, zoneEndX, exitY1);
   ctx.stroke();
   ctx.setLineDash([]);
 
@@ -494,11 +501,11 @@ function draw(r){
   const effectiveStart = r.longitudinalUncertainty/2;
   const effectiveLen = Math.max(0, r.effectiveZone);
   ctx.fillStyle = 'rgba(34,197,94,.16)';
-  ctx.fillRect(x(effectiveStart), roadY-laneH*1.2, effectiveLen*scale, laneH*2.45);
+  ctx.fillRect(xAbs(effectiveStart), roadY-laneH*1.2, effectiveLen*scale, laneH*2.45);
 
   // End guard/gore/too-late zone
   ctx.fillStyle = 'rgba(239,68,68,.20)';
-  ctx.fillRect(x(state.zoneLength-state.guard-state.mapEndErr), roadY-laneH*1.5, (state.guard+state.mapEndErr)*scale, laneH*4.4);
+  ctx.fillRect(xAbs(state.zoneLength-state.guard-state.mapEndErr), roadY-laneH*1.5, (state.guard+state.mapEndErr)*scale, laneH*4.4);
 
   // Gore triangle
   ctx.beginPath();
@@ -512,19 +519,49 @@ function draw(r){
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Ego lane-change trajectory: clearly to the right/down into the off-ramp
+  // Planning marker: point where NOA should already know this ramp is coming
+  const planX = Math.max(pad + 8, xAbs(-Math.min(pre, 250)));
+  ctx.strokeStyle = '#a78bfa';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6,8]);
+  ctx.beginPath();
+  ctx.moveTo(planX, roadY-laneH*1.55);
+  ctx.lineTo(planX, roadY+laneH*1.55);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Speed shaping arrow in upstream history
+  if(pre > 0){
+    ctx.strokeStyle = '#a78bfa';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(Math.max(pad+20, xAbs(-Math.min(pre, 240))), roadY-laneH*.85);
+    ctx.lineTo(Math.max(pad+60, xAbs(-30)), roadY-laneH*.85);
+    ctx.stroke();
+    ctx.fillStyle = '#a78bfa';
+    const ax = Math.max(pad+60, xAbs(-30));
+    const ay = roadY-laneH*.85;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax-16, ay-9);
+    ctx.lineTo(ax-16, ay+9);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Ego lane-change trajectory: starts at ramp zone start, exits right/down
   const maneuverColor = r.margin >= 0 ? '#22c55e' : '#ef4444';
   const startY = roadY + laneH*0.05;
   const endY = roadY + laneH*2.95;
   ctx.strokeStyle = maneuverColor;
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(x(0), startY);
-  ctx.bezierCurveTo(x(r.distanceNeeded*.25), startY, x(r.distanceNeeded*.58), roadY + laneH*1.9, x(r.distanceNeeded), endY);
+  ctx.moveTo(xAbs(0), startY);
+  ctx.bezierCurveTo(xAbs(r.distanceNeeded*.25), startY, xAbs(r.distanceNeeded*.58), roadY + laneH*1.9, xAbs(r.distanceNeeded), endY);
   ctx.stroke();
 
   // Arrow head at end of ego path
-  const arrowX = x(r.distanceNeeded);
+  const arrowX = xAbs(r.distanceNeeded);
   ctx.fillStyle = maneuverColor;
   ctx.beginPath();
   ctx.moveTo(arrowX, endY);
@@ -533,12 +570,12 @@ function draw(r){
   ctx.closePath();
   ctx.fill();
 
-  // Delay part before LC starts
+  // Delay part before LC starts, now shown just before ramp-zone start if there is visible history
   ctx.strokeStyle = '#f59e0b';
   ctx.lineWidth = 7;
   ctx.beginPath();
-  ctx.moveTo(x(0), roadY - laneH*.55);
-  ctx.lineTo(x(r.delayDist), roadY - laneH*.55);
+  ctx.moveTo(xAbs(-r.delayDist), roadY - laneH*.55);
+  ctx.lineTo(xAbs(0), roadY - laneH*.55);
   ctx.stroke();
 
   // Vehicle icon in ramp lane
@@ -554,14 +591,18 @@ function draw(r){
   // Labels
   ctx.fillStyle = '#e5e7eb';
   ctx.font = '18px system-ui';
-  ctx.fillText('Right-side off-ramp lane-change zone: '+fmt(state.zoneLength,0)+' m', pad, 38);
+  ctx.fillText('Approach history + right-side off-ramp lane-change zone', pad, 38);
 
   ctx.font = '14px system-ui';
   ctx.fillStyle = '#d1d5db';
   ctx.fillText('Highway through lanes', pad, roadY-laneH*1.7);
 
+  ctx.fillStyle = '#c4b5fd';
+  ctx.fillText('Visible approach history: '+fmt(pre,0)+' m', pad+8, roadY+laneH*1.35);
+  ctx.fillText('Early planning / speed shaping area', Math.max(pad+16, planX+8), roadY-laneH*1.1);
+
   ctx.fillStyle = '#38bdf8';
-  ctx.fillText('Usable zone starts here', zoneStartX+8, roadY-laneH*1.15);
+  ctx.fillText('Ramp zone starts here', zoneStartX+8, roadY-laneH*1.15);
   ctx.beginPath();
   ctx.moveTo(zoneStartX+28, roadY-laneH*.95);
   ctx.lineTo(zoneStartX+2, roadY-laneH*.55);
@@ -570,21 +611,21 @@ function draw(r){
   ctx.stroke();
 
   ctx.fillStyle = '#86efac';
-  ctx.fillText('Effective safe zone after uncertainty: '+fmt(r.effectiveZone,0)+' m', x(effectiveStart)+8, roadY+laneH*1.35);
+  ctx.fillText('Effective safe zone after uncertainty: '+fmt(r.effectiveZone,0)+' m', xAbs(effectiveStart)+8, roadY+laneH*1.35);
 
   ctx.fillStyle = '#fbbf24';
-  ctx.fillText('Trigger delay distance: '+fmt(r.delayDist,0)+' m', x(2), roadY-laneH*.82);
+  ctx.fillText('Trigger/actuation delay before lateral motion: '+fmt(r.delayDist,0)+' m', Math.max(pad+8, xAbs(-r.delayDist)+8), roadY-laneH*.82);
 
   ctx.fillStyle = maneuverColor;
-  ctx.fillText('Ego vehicle exits RIGHT onto off-ramp | LC total needed: '+fmt(r.distanceNeeded,0)+' m', x(r.delayDist)+8, roadY+laneH*2.28);
+  ctx.fillText('Ego exits RIGHT onto off-ramp | LC total needed: '+fmt(r.distanceNeeded,0)+' m', xAbs(Math.max(0,r.delayDist*.2))+8, roadY+laneH*2.28);
 
   ctx.fillStyle = '#fecaca';
-  ctx.fillText('Too late / guard / gore area', Math.max(x(state.zoneLength-state.guard-state.mapEndErr)+4, pad+8), roadY+laneH*3.0);
+  ctx.fillText('Too late / guard / gore area', Math.max(xAbs(state.zoneLength-state.guard-state.mapEndErr)+4, pad+8), roadY+laneH*3.0);
 
   ctx.fillStyle = '#cbd5e1';
   ctx.fillText('Off-ramp', Math.min(zoneEndX+28, W-pad-90), exitY1+laneH*.65);
 
-  // distance ruler
+  // distance ruler: relative to ramp start, with negative upstream labels
   ctx.strokeStyle = '#9ca3af';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -594,12 +635,17 @@ function draw(r){
 
   ctx.fillStyle = '#9ca3af';
   ctx.font = '12px system-ui';
-  for(let m=0; m<=maxLen; m+=50){
+  const startTick = -Math.ceil(pre/50)*50;
+  const endTick = Math.ceil((maxLen-pre)/50)*50;
+  for(let m=startTick; m<=endTick; m+=50){
+    const xx = xAbs(m);
+    if(xx < pad-1 || xx > W-pad+1) continue;
     ctx.beginPath();
-    ctx.moveTo(x(m), H-60);
-    ctx.lineTo(x(m), H-50);
+    ctx.moveTo(xx, H-60);
+    ctx.lineTo(xx, H-50);
     ctx.stroke();
-    ctx.fillText(m+' m', x(m)-10, H-32);
+    const label = m === 0 ? 'Ramp start' : (m > 0 ? '+'+m+' m' : m+' m');
+    ctx.fillText(label, xx-24, H-32);
   }
 
   ctx.font = '22px system-ui';
@@ -608,7 +654,7 @@ function draw(r){
 
   ctx.font = '13px system-ui';
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillText('Blue = nominal off-ramp zone, green = effective safe zone, red = end guard/gore/too-late area.', pad, H-75);
+  ctx.fillText('Purple = upstream approach/planning history, blue = nominal ramp zone, green = effective safe zone, red = end guard/gore/too-late area.', pad, H-75);
 }
 
 makeControls();
