@@ -140,7 +140,7 @@
   }
   canvas{
     width:100%;
-    height:430px;
+    height:460px;
     display:block;
     background:#07111f;
     border:1px solid var(--line);
@@ -244,7 +244,7 @@
       <div class="metric"><div class="name">Remaining margin</div><div><span class="value" id="margin">-</span><span class="unit">m</span></div></div>
       <div class="metric"><div class="name">Max feasible speed</div><div><span class="value" id="maxSpeed">-</span><span class="unit">km/h</span></div></div>
     </div>
-    <div class="viz-wrap"><canvas id="canvas" width="1100" height="430"></canvas></div>
+    <div class="viz-wrap"><canvas id="canvas" width="1100" height="460"></canvas></div>
     <div class="tables">
       <div>
         <table>
@@ -428,11 +428,15 @@ function draw(r){
   const maxLen = Math.max(pre + state.zoneLength + post, pre + r.distanceNeeded + r.longitudinalUncertainty + state.guard + post, 320);
   const scale = (W - 2*pad) / maxLen;
   function xAbs(m){ return pad + (m + pre) * scale; } // m=0 is ramp-zone start
-  function xDist(m){ return pad + m * scale; }       // absolute plot distance from left edge
 
   const zoneStartX = xAbs(0);
   const zoneEndX = xAbs(state.zoneLength);
   const exitY1 = roadY + laneH * 2.65;
+
+  // Lane center definitions.
+  // Y increases downward. The ego starts in the rightmost through lane center.
+  const egoStartLaneCenterY = roadY + laneH * 0.5;
+  const egoRampLaneCenterY = roadY + laneH * 2.95;
 
   // Main highway including upstream history
   ctx.fillStyle = '#1f2937';
@@ -549,38 +553,62 @@ function draw(r){
     ctx.fill();
   }
 
-  // Ego lane-change trajectory: starts at ramp zone start, exits right/down
-  const maneuverColor = r.margin >= 0 ? '#22c55e' : '#ef4444';
-  const startY = roadY + laneH*0.05;
-  const endY = roadY + laneH*2.95;
-  ctx.strokeStyle = maneuverColor;
+  // Ego trajectory: starts lane centered, then exits right/down into off-ramp.
+  // The color is green if feasible, red if not robust/marginal failure.
+  const trajectoryColor = r.margin >= 0 ? '#22c55e' : '#ef4444';
+
+  // Draw ego approach history centered in the rightmost through lane.
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([10,10]);
+  ctx.beginPath();
+  ctx.moveTo(Math.max(pad+10, xAbs(-Math.min(pre, 220))), egoStartLaneCenterY);
+  ctx.lineTo(xAbs(0), egoStartLaneCenterY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw lane-change trajectory from lane center to off-ramp lane center.
+  ctx.strokeStyle = trajectoryColor;
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(xAbs(0), startY);
-  ctx.bezierCurveTo(xAbs(r.distanceNeeded*.25), startY, xAbs(r.distanceNeeded*.58), roadY + laneH*1.9, xAbs(r.distanceNeeded), endY);
+  ctx.moveTo(xAbs(0), egoStartLaneCenterY);
+  ctx.bezierCurveTo(
+    xAbs(r.distanceNeeded*.28), egoStartLaneCenterY,
+    xAbs(r.distanceNeeded*.62), roadY + laneH*1.95,
+    xAbs(r.distanceNeeded), egoRampLaneCenterY
+  );
   ctx.stroke();
 
   // Arrow head at end of ego path
   const arrowX = xAbs(r.distanceNeeded);
-  ctx.fillStyle = maneuverColor;
+  ctx.fillStyle = trajectoryColor;
   ctx.beginPath();
-  ctx.moveTo(arrowX, endY);
-  ctx.lineTo(arrowX-18, endY-10);
-  ctx.lineTo(arrowX-9, endY+14);
+  ctx.moveTo(arrowX, egoRampLaneCenterY);
+  ctx.lineTo(arrowX-18, egoRampLaneCenterY-10);
+  ctx.lineTo(arrowX-9, egoRampLaneCenterY+14);
   ctx.closePath();
   ctx.fill();
 
-  // Delay part before LC starts, now shown just before ramp-zone start if there is visible history
+  // Delay part before LC starts, centered in same ego lane
   ctx.strokeStyle = '#f59e0b';
   ctx.lineWidth = 7;
   ctx.beginPath();
-  ctx.moveTo(xAbs(-r.delayDist), roadY - laneH*.55);
-  ctx.lineTo(xAbs(0), roadY - laneH*.55);
+  ctx.moveTo(xAbs(-r.delayDist), egoStartLaneCenterY - laneH*.35);
+  ctx.lineTo(xAbs(0), egoStartLaneCenterY - laneH*.35);
   ctx.stroke();
 
-  // Vehicle icon in ramp lane
+  // Vehicle icon at lane-change start
   ctx.save();
-  ctx.translate(arrowX, endY);
+  ctx.translate(xAbs(0), egoStartLaneCenterY);
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(-18, -10, 36, 20);
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillRect(2, -7, 10, 14);
+  ctx.restore();
+
+  // Vehicle icon in ramp lane at predicted completion
+  ctx.save();
+  ctx.translate(arrowX, egoRampLaneCenterY);
   ctx.rotate(0.18);
   ctx.fillStyle = '#e5e7eb';
   ctx.fillRect(-18, -10, 36, 20);
@@ -614,10 +642,10 @@ function draw(r){
   ctx.fillText('Effective safe zone after uncertainty: '+fmt(r.effectiveZone,0)+' m', xAbs(effectiveStart)+8, roadY+laneH*1.35);
 
   ctx.fillStyle = '#fbbf24';
-  ctx.fillText('Trigger/actuation delay before lateral motion: '+fmt(r.delayDist,0)+' m', Math.max(pad+8, xAbs(-r.delayDist)+8), roadY-laneH*.82);
+  ctx.fillText('Trigger/actuation delay before lateral motion: '+fmt(r.delayDist,0)+' m', Math.max(pad+8, xAbs(-r.delayDist)+8), egoStartLaneCenterY-laneH*.55);
 
-  ctx.fillStyle = maneuverColor;
-  ctx.fillText('Ego exits RIGHT onto off-ramp | LC total needed: '+fmt(r.distanceNeeded,0)+' m', xAbs(Math.max(0,r.delayDist*.2))+8, roadY+laneH*2.28);
+  ctx.fillStyle = trajectoryColor;
+  ctx.fillText('Ego trajectory: starts lane-centered, exits RIGHT onto off-ramp | LC total needed: '+fmt(r.distanceNeeded,0)+' m', xAbs(Math.max(0,r.delayDist*.2))+8, roadY+laneH*2.28);
 
   ctx.fillStyle = '#fecaca';
   ctx.fillText('Too late / guard / gore area', Math.max(xAbs(state.zoneLength-state.guard-state.mapEndErr)+4, pad+8), roadY+laneH*3.0);
@@ -654,7 +682,7 @@ function draw(r){
 
   ctx.font = '13px system-ui';
   ctx.fillStyle = '#cbd5e1';
-  ctx.fillText('Purple = upstream approach/planning history, blue = nominal ramp zone, green = effective safe zone, red = end guard/gore/too-late area.', pad, H-75);
+  ctx.fillText('Grey dashed = ego approach centered in highway lane. Red/green = ego lane-change trajectory. Purple = upstream planning, blue = ramp zone, green = effective safe zone, red = end guard/gore.', pad, H-75);
 }
 
 makeControls();
