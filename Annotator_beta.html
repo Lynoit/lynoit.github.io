@@ -1661,6 +1661,20 @@ async function runCloudUploads(reason = 'auto') {
 
   uploadInFlight = true;
   try {
+    // 1) Upload lightweight JSON first, so the downstream tool can read it quickly
+    const jsonResult = await Promise.allSettled([
+      uploadMinimalJsonToAzure()
+    ]);
+
+    jsonResult.forEach(result => {
+      if (result.status === 'fulfilled') {
+        console.log(`✔ minimal JSON uploaded (${reason})`);
+      } else {
+        console.error(`✖ minimal JSON upload failed (${reason}):`, result.reason);
+      }
+    });
+
+    // 2) Then continue with the existing heavier uploads
     const results = await Promise.allSettled([
       uploadWorkbookToAzure(),
       uploadSnapshotsZip()
@@ -1977,24 +1991,24 @@ async function stopTesting() {
     try { if (typeof updatePhaseTable    === 'function') updatePhaseTable(); } catch {}
 
     // 6) Final uploads (log errors but keep going)
-    try {
-      if (typeof uploadWorkbookToAzure === 'function') {
-        await uploadWorkbookToAzure();
-        // stamp "last upload" time if you use the sidebar label
-        if (typeof lastXlsxUploadMs !== 'undefined') lastXlsxUploadMs = Date.now();
-        if (typeof updateUploadAgo === 'function') updateUploadAgo();
-      }
-    } catch (e) {
-      console.error('Final XLSX upload failed:', e);
-    }
+try {
+  if (typeof uploadMinimalJsonToAzure === 'function') {
+    await uploadMinimalJsonToAzure();
+  }
+} catch (e) {
+  console.error('Final JSON upload failed:', e);
+}
 
-    try {
-      if (typeof uploadSnapshotsZip === 'function') {
-        await uploadSnapshotsZip();
-      }
-    } catch (e) {
-      console.error('Final snapshots ZIP upload failed:', e);
-    }
+try {
+  if (typeof uploadWorkbookToAzure === 'function') {
+    await uploadWorkbookToAzure();
+    // stamp "last upload" time if you use the sidebar label
+    if (typeof lastXlsxUploadMs !== 'undefined') lastXlsxUploadMs = Date.now();
+    if (typeof updateUploadAgo === 'function') updateUploadAgo();
+  }
+} catch (e) {
+  console.error('Final XLSX upload failed:', e);
+}
 
     // optionally:
     // try { if (typeof exportPDFToAzure === 'function') await exportPDFToAzure(); } catch(e){ console.error(e); }
@@ -4513,6 +4527,83 @@ const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
 
   console.log(`✔ Uploaded ${blobName}`);
 }
+
+function buildMinimalReportJson() {
+  const testDetails = Object.entries(window.metaAnswers || {}).map(
+    ([question, answer]) => ({
+      question,
+      answer
+    })
+  );
+
+  const issues = logTable.map((row, i) => ({
+    no: i + 1,
+    issue: row.issue ?? '',
+    date: row.date ?? '',
+    time: row.time ?? '',
+    phase: row.phase ?? '',
+    temp: row.temp ?? '',
+    weather: row.condition ?? '',
+    lat: row.lat ?? '',
+    lon: row.lon ?? '',
+    distanceKm: row.dist ?? '',
+    speedKmh: row.speed ?? '',
+    road: row.roadType ?? '',
+    comment: row.comment ?? '',
+    isRed: !!row.isRed,
+    country: row.country ?? ''
+  }));
+
+  return {
+    schemaVersion: 1,
+    reportBaseName,
+    createdAt: new Date().toISOString(),
+    source: 'Annotator',
+    sheets: {
+      'Test details': testDetails,
+      'Issues': issues
+    }
+  };
+}
+
+async function uploadMinimalJsonToAzure() {
+  const payload = buildMinimalReportJson();
+
+  const jsonText = JSON.stringify(payload);
+  const blob = new Blob([jsonText], {
+    type: 'application/json'
+  });
+
+  const blobName = `${reportBaseName}_SMtrig.json`;
+
+  const [rawBaseUrl, token] = containerSasUrl.split('?');
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
+  const uploadUrl = `${baseUrl}/${BLOB_CONTAINER}/${blobName}?${token}`;
+
+  try {
+    if (!navigator.onLine) {
+      throw new Error('Offline - skipping JSON cloud upload');
+    }
+
+    const resp = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'x-ms-blob-type': 'BlockBlob',
+        'Content-Type': 'application/json'
+      },
+      body: blob
+    });
+
+    if (!resp.ok) {
+      throw new Error(`JSON upload failed: ${resp.status} ${resp.statusText}`);
+    }
+
+    console.log(`✔ Uploaded minimal JSON: ${blobName}`);
+  } catch (err) {
+    console.error('Cloud JSON upload failed, saving locally instead:', err);
+    saveBlobLocally(blob, blobName);
+  }
+}    
 
 async function uploadWorkbookToAzure() {
   const wb = XLSX.utils.book_new();
