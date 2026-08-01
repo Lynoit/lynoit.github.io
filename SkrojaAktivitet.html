@@ -119,7 +119,7 @@
       display:grid;
       gap:12px;
     }
-    button,input[type=text]{
+    button,input[type=text],input[type=number]{
       font-family:var(--sans);
     }
     .btn,.btn-soft,.btn-accent{
@@ -158,7 +158,7 @@
       font-size:.98rem;
       color:#7b6652;
     }
-    input[type=text]{
+    input[type=text],input[type=number]{
       width:100%;
       border-radius:10px;
       border:2px solid #dac9b1;
@@ -168,6 +168,19 @@
       color:var(--ink);
       box-shadow:inset 0 1px 3px rgba(116,86,51,.08);
     }
+    .session-total{
+      width:min(100%,246px);
+      margin:0 auto 14px;
+      padding:10px 12px;
+      border-radius:10px;
+      background:rgba(249,243,232,.82);
+      border:2px solid rgba(154,124,91,.14);
+      box-shadow:0 8px 16px rgba(85,60,35,.07);
+      text-align:center;
+      font-family:var(--sans);
+      line-height:1.35;
+    }
+    .session-total strong{display:block;font-size:1.12rem;margin-top:2px}
     .prompt-card,.summary{
       width:min(100%,246px);
       margin:0 auto;
@@ -300,6 +313,10 @@
         <section id="step-activity" class="step">
           <h1>Vad gör du?</h1>
           <div class="rule"></div>
+          <div class="session-total" id="session-total" hidden>
+            Uttagen lera denna session
+            <strong id="session-total-value">0 kg</strong>
+          </div>
           <div class="stack" id="activity-buttons"></div>
           <div class="textblock">
             <label for="custom-activity">Annan aktivitet</label>
@@ -308,6 +325,20 @@
           <div class="stack">
             <button class="btn-accent" id="activity-continue">Fortsätt</button>
             <button class="btn-soft" id="activity-back">Tillbaka</button>
+          </div>
+        </section>
+
+
+        <section id="step-weight" class="step">
+          <h1>Hur mycket vägde keramiken?</h1>
+          <div class="rule"></div>
+          <div class="textblock">
+            <label for="ceramic-weight">Vikt i kg</label>
+            <input id="ceramic-weight" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Till exempel 2,5" />
+          </div>
+          <div class="stack">
+            <button class="btn-accent" id="weight-continue">Fortsätt</button>
+            <button class="btn-soft" id="weight-back">Tillbaka</button>
           </div>
         </section>
 
@@ -334,6 +365,7 @@
             <div class="summary-title">Arbetskort</div>
             <div class="row"><strong>Namn</strong><span id="summary-user"></span></div>
             <div class="row"><strong>Aktivitet</strong><span id="summary-activity"></span></div>
+            <div class="row" id="summary-weight-row" hidden><strong>Vikt</strong><span id="summary-weight"></span></div>
             <div class="row"><strong>Tid</strong><span id="summary-time"></span></div>
             <div class="row"><strong>Bild</strong><span id="summary-image-text"></span></div>
             <div class="preview" id="preview-wrap"><span>Ingen bild vald</span></div>
@@ -372,7 +404,8 @@
     { name: 'Checka in', color: 'coral' },
     { name: 'Glasering', color: 'yellow' },
     { name: 'Torkning', color: 'yellow' },
-    { name: 'Bränning', color: 'coral' }
+    { name: 'Bränning', color: 'coral' },
+    { name: 'Hämta ut keramik', color: 'green' }
   ];
 
   // Aktiviteter som INTE ska fråga efter bild
@@ -384,11 +417,13 @@
     sasToken: 'sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2028-01-01T18:27:36Z&st=2026-04-04T09:12:36Z&spr=https&sig=rjDd4VzH1nXMrw%2B6jUMUl3xALkh%2BD7D%2FJkgrcJtr4Zc%3D'
   };
 
-  const state = { member:'', activity:'', photoFile:null, photoDataUrl:'', timestampIso:'' };
+  const state = { member:'', activity:'', weightKg:null, photoFile:null, photoDataUrl:'', timestampIso:'' };
+  const sessionTotals = loadSessionTotals();
 
   const steps = {
     user: document.getElementById('step-user'),
     activity: document.getElementById('step-activity'),
+    weight: document.getElementById('step-weight'),
     photo: document.getElementById('step-photo'),
     summary: document.getElementById('step-summary'),
     result: document.getElementById('step-result')
@@ -397,8 +432,37 @@
   const userButtons = document.getElementById('user-buttons');
   const activityButtons = document.getElementById('activity-buttons');
   const customActivityInput = document.getElementById('custom-activity');
+  const ceramicWeightInput = document.getElementById('ceramic-weight');
   const cameraInput = document.getElementById('camera-input');
   const previewWrap = document.getElementById('preview-wrap');
+  const sessionTotalBox = document.getElementById('session-total');
+  const sessionTotalValue = document.getElementById('session-total-value');
+
+  function loadSessionTotals(){
+    try {
+      return JSON.parse(sessionStorage.getItem('skrojaClaySessionTotals')) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveSessionTotals(){
+    sessionStorage.setItem('skrojaClaySessionTotals', JSON.stringify(sessionTotals));
+  }
+
+  function formatKg(value){
+    return `${value.toLocaleString('sv-SE', { maximumFractionDigits: 2 })} kg`;
+  }
+
+  function updateSessionTotalDisplay(){
+    if (!state.member) {
+      sessionTotalBox.hidden = true;
+      return;
+    }
+    const total = Number(sessionTotals[state.member] || 0);
+    sessionTotalValue.textContent = formatKg(total);
+    sessionTotalBox.hidden = false;
+  }
 
   function showStep(name){
     Object.values(steps).forEach(step => step.classList.remove('active'));
@@ -411,6 +475,12 @@
   }
 
   function goToNextStepAfterActivity() {
+    if (state.activity === 'Hämta ut keramik' && state.weightKg === null) {
+      showStep('weight');
+      ceramicWeightInput.focus();
+      return;
+    }
+
     // Rensa eventuell tidigare bild om aktiviteten inte ska ha bild
     if (shouldSkipPhoto(state.activity)) {
       state.photoFile = null;
@@ -432,6 +502,7 @@
       button.textContent = member.name;
       button.addEventListener('click', () => {
         state.member = member.name;
+        updateSessionTotalDisplay();
         showStep('activity');
       });
       userButtons.appendChild(button);
@@ -443,6 +514,8 @@
       button.textContent = activity.name;
       button.addEventListener('click', () => {
         state.activity = activity.name;
+        state.weightKg = null;
+        ceramicWeightInput.value = '';
         customActivityInput.value = '';
         goToNextStepAfterActivity();
       });
@@ -460,10 +533,12 @@
   function resetState(){
     state.member = '';
     state.activity = '';
+    state.weightKg = null;
     state.photoFile = null;
     state.photoDataUrl = '';
     state.timestampIso = '';
     customActivityInput.value = '';
+    ceramicWeightInput.value = '';
     cameraInput.value = '';
     previewWrap.innerHTML = '<span>Ingen bild vald</span>';
     showStep('user');
@@ -487,6 +562,12 @@
     const hasImage = Boolean(state.photoFile);
     document.getElementById('summary-user').textContent = state.member;
     document.getElementById('summary-activity').textContent = state.activity;
+    const weightRow = document.getElementById('summary-weight-row');
+    const hasWeight = state.activity === 'Hämta ut keramik' && state.weightKg !== null;
+    weightRow.hidden = !hasWeight;
+    document.getElementById('summary-weight').textContent = hasWeight
+      ? `${String(state.weightKg).replace('.', ',')} kg`
+      : '';
     document.getElementById('summary-time').textContent = formatSwedish(state.timestampIso);
     document.getElementById('summary-image-text').textContent = hasImage ? 'Bild vald' : 'Ingen bild';
     previewWrap.innerHTML = (hasImage && state.photoDataUrl)
@@ -510,6 +591,7 @@
       timestamp: state.timestampIso,
       member: state.member,
       activity: state.activity,
+      weightKg: state.activity === 'Hämta ut keramik' ? state.weightKg : null,
       hasImage: Boolean(state.photoFile),
       imageFileName: state.photoFile ? jpgName : null,
       jsonFileName: jsonName,
@@ -553,7 +635,11 @@
 
   document.getElementById('activity-continue').addEventListener('click', () => {
     const manualText = customActivityInput.value.trim();
-    if (manualText) state.activity = manualText;
+    if (manualText) {
+      state.activity = manualText;
+      state.weightKg = null;
+      ceramicWeightInput.value = '';
+    }
 
     if (!state.activity) {
       alert('Välj eller skriv en aktivitet först.');
@@ -564,7 +650,33 @@
   });
 
   document.getElementById('activity-back').addEventListener('click', () => showStep('user'));
-  document.getElementById('photo-back').addEventListener('click', () => showStep('activity'));
+
+  document.getElementById('weight-continue').addEventListener('click', () => {
+    const normalized = ceramicWeightInput.value.trim().replace(',', '.');
+    const weight = Number(normalized);
+
+    if (!Number.isFinite(weight) || weight <= 0) {
+      alert('Ange en giltig vikt som är större än 0 kg.');
+      ceramicWeightInput.focus();
+      return;
+    }
+
+    state.weightKg = Math.round(weight * 100) / 100;
+    goToNextStepAfterActivity();
+  });
+
+  document.getElementById('weight-back').addEventListener('click', () => {
+    state.weightKg = null;
+    showStep('activity');
+  });
+
+  document.getElementById('photo-back').addEventListener('click', () => {
+    if (state.activity === 'Hämta ut keramik') {
+      showStep('weight');
+    } else {
+      showStep('activity');
+    }
+  });
   document.getElementById('photo-yes').addEventListener('click', () => cameraInput.click());
 
   document.getElementById('photo-no').addEventListener('click', () => {
@@ -598,9 +710,19 @@
     try {
       setResult('Skickar...', 'Uppladdning pågår.', 'Lämna sidan öppen tills uppladdningen är klar.');
       const result = await uploadToAzure();
+
+      let sessionMessage = '';
+      if (state.activity === 'Hämta ut keramik' && state.weightKg !== null) {
+        const currentTotal = Number(sessionTotals[state.member] || 0);
+        sessionTotals[state.member] = Math.round((currentTotal + state.weightKg) * 100) / 100;
+        saveSessionTotals();
+        updateSessionTotalDisplay();
+        sessionMessage = ` Totalt uttaget denna session: ${formatKg(sessionTotals[state.member])}.`;
+      }
+
       setResult(
         'Klart',
-        `Registreringen skickades till anslagstavlan.${result.jpgName ? ' Bilden följde med.' : ''}`,
+        `Registreringen skickades till anslagstavlan.${result.jpgName ? ' Bilden följde med.' : ''}${sessionMessage}`,
         `JSON: ${result.jsonName}${result.jpgName ? ` | Bild: ${result.jpgName}` : ''}`
       );
     } catch (error) {
