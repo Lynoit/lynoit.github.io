@@ -302,7 +302,7 @@
   <div class="phone">
     <div class="screen">
       <div class="content">
-        <div class="note">Skroja anslagstavla</div>
+        <div class="note">Skroja Aktivitet</div>
 
         <section id="step-user" class="step active">
           <h1>Vem är du?</h1>
@@ -418,7 +418,11 @@
   };
 
   const state = { member:'', activity:'', weightKg:null, photoFile:null, photoDataUrl:'', timestampIso:'' };
+  const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+  const SESSION_TOTALS_KEY = 'skrojaClaySessionTotals';
+  const LAST_ACTIVITY_KEY = 'skrojaClayLastActivity';
   const sessionTotals = loadSessionTotals();
+  let inactivityTimer = null;
 
   const steps = {
     user: document.getElementById('step-user'),
@@ -440,14 +444,67 @@
 
   function loadSessionTotals(){
     try {
-      return JSON.parse(sessionStorage.getItem('skrojaClaySessionTotals')) || {};
+      return JSON.parse(sessionStorage.getItem(SESSION_TOTALS_KEY)) || {};
     } catch {
       return {};
     }
   }
 
   function saveSessionTotals(){
-    sessionStorage.setItem('skrojaClaySessionTotals', JSON.stringify(sessionTotals));
+    sessionStorage.setItem(SESSION_TOTALS_KEY, JSON.stringify(sessionTotals));
+  }
+
+  function clearSessionTotals(){
+    Object.keys(sessionTotals).forEach(member => delete sessionTotals[member]);
+    sessionStorage.removeItem(SESSION_TOTALS_KEY);
+    updateSessionTotalDisplay();
+  }
+
+  function getLastActivity(){
+    return Number(sessionStorage.getItem(LAST_ACTIVITY_KEY) || 0);
+  }
+
+  function sessionHasExpired(){
+    const lastActivity = getLastActivity();
+    return lastActivity > 0 && Date.now() - lastActivity >= SESSION_TIMEOUT_MS;
+  }
+
+  function expireSession(){
+    clearTimeout(inactivityTimer);
+    inactivityTimer = null;
+    clearSessionTotals();
+    sessionStorage.removeItem(LAST_ACTIVITY_KEY);
+    resetState();
+  }
+
+  function scheduleSessionTimeout(){
+    clearTimeout(inactivityTimer);
+    const lastActivity = getLastActivity();
+    if (!lastActivity) return;
+
+    const remaining = SESSION_TIMEOUT_MS - (Date.now() - lastActivity);
+    if (remaining <= 0) {
+      expireSession();
+      return;
+    }
+
+    inactivityTimer = setTimeout(expireSession, remaining);
+  }
+
+  function registerUserActivity(){
+    if (sessionHasExpired()) {
+      expireSession();
+    }
+    sessionStorage.setItem(LAST_ACTIVITY_KEY, String(Date.now()));
+    scheduleSessionTimeout();
+  }
+
+  function checkSessionTimeout(){
+    if (sessionHasExpired()) {
+      expireSession();
+    } else {
+      scheduleSessionTimeout();
+    }
   }
 
   function formatKg(value){
@@ -732,6 +789,17 @@
   });
 
   document.getElementById('start-over').addEventListener('click', resetState);
+
+  ['pointerdown', 'keydown', 'input', 'change'].forEach(eventName => {
+    document.addEventListener(eventName, registerUserActivity, { passive: true });
+  });
+  window.addEventListener('focus', checkSessionTimeout);
+  window.addEventListener('pageshow', checkSessionTimeout);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkSessionTimeout();
+  });
+
+  checkSessionTimeout();
   renderButtons();
 </script>
 </body>
