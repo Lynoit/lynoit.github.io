@@ -92,7 +92,7 @@
       margin-right:4px;
     }
 
-    button, select{
+    button, select, input[type="date"]{
       border:none;
       outline:none;
       border-radius:10px;
@@ -119,7 +119,7 @@
       border-color:#6996ff;
     }
 
-    select{
+    select, input[type="date"]{
       background:var(--panel-2);
       color:var(--text);
       border:1px solid var(--border);
@@ -224,7 +224,7 @@
 
     .stats-grid{
       display:grid;
-      grid-template-columns:repeat(4, 1fr);
+      grid-template-columns:repeat(5, 1fr);
       gap:12px;
     }
 
@@ -455,6 +455,13 @@
       </div>
 
       <div class="filter-group">
+        <span class="filter-label">Keramikperiod:</span>
+        <input id="ceramicStartDate" type="date" aria-label="Keramikperiod från datum">
+        <span class="filter-label">till</span>
+        <input id="ceramicEndDate" type="date" aria-label="Keramikperiod till datum">
+      </div>
+
+      <div class="filter-group">
         <span class="filter-label">Översikt:</span>
         <button class="overview-btn active" data-overview="month">Månadsöversikt</button>
         <button class="overview-btn" data-overview="year">Årsöversikt</button>
@@ -504,6 +511,10 @@
               <div class="stat-label">Närvarodagar</div>
               <div class="stat-value" id="statPresenceDays">0</div>
             </div>
+            <div class="stat-card">
+              <div class="stat-label" id="statCeramicLabel">Uthämtad keramik</div>
+              <div class="stat-value" id="statCeramicWeight">0 kg</div>
+            </div>
           </div>
 
           <div class="charts-grid">
@@ -546,6 +557,8 @@ const state = {
   selectedUser: 'Alla',
   period: '7d',
   overview: 'month',
+  ceramicStartDate: '',
+  ceramicEndDate: '',
   summaryChart: null,
   lastLoadedAt: null
 };
@@ -596,6 +609,56 @@ const state = {
       return (record.activity || '').trim().toLowerCase() === 'checka in'
           || (record.activity || '').trim().toLowerCase() === 'checkade in'
           || (record.activity || '').trim().toLowerCase() === 'check-in';
+    }
+
+    function toDateInputValue(date) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    function setDefaultCeramicPeriod() {
+      const today = new Date();
+      const previousMonth15 = new Date(today.getFullYear(), today.getMonth() - 1, 15);
+      state.ceramicStartDate = toDateInputValue(previousMonth15);
+      state.ceramicEndDate = toDateInputValue(today);
+
+      document.getElementById('ceramicStartDate').value = state.ceramicStartDate;
+      document.getElementById('ceramicEndDate').value = state.ceramicEndDate;
+    }
+
+    function isCeramicPickup(record) {
+      return (record.activity || '').trim().toLowerCase() === 'hämta ut keramik';
+    }
+
+    function getCeramicWeightForSelectedUser() {
+      if (!state.ceramicStartDate || !state.ceramicEndDate) return 0;
+
+      const start = new Date(`${state.ceramicStartDate}T00:00:00`);
+      const end = new Date(`${state.ceramicEndDate}T23:59:59.999`);
+
+      return state.rawRecords
+        .filter(record => {
+          const timestamp = new Date(record.timestamp);
+          if (timestamp < start || timestamp > end) return false;
+          if (!isCeramicPickup(record)) return false;
+          if (state.selectedUser !== 'Alla' && record.member !== state.selectedUser) return false;
+          return true;
+        })
+        .reduce((sum, record) => sum + (Number(record.weightKg) || 0), 0);
+    }
+
+    function updateCeramicStat() {
+      const totalKg = getCeramicWeightForSelectedUser();
+      const formattedWeight = new Intl.NumberFormat('sv-SE', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2
+      }).format(totalKg);
+
+      const userText = state.selectedUser === 'Alla' ? 'alla användare' : state.selectedUser;
+      document.getElementById('statCeramicLabel').textContent = `Uthämtad keramik – ${userText}`;
+      document.getElementById('statCeramicWeight').textContent = `${formattedWeight} kg`;
     }
 
     function getBlobBaseUrl() {
@@ -798,7 +861,8 @@ function exportToExcel() {
         .map(r => ({
           timestamp: r.timestamp,
           member: r.member,
-          activity: r.activity || 'Okänd aktivitet'
+          activity: r.activity || 'Okänd aktivitet',
+          weightKg: Number(r.weightKg) || 0
         }))
         .filter(r => !Number.isNaN(new Date(r.timestamp).getTime()))
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -1211,6 +1275,7 @@ function countCheckinsForUserByDay(records, user) {
       const records = getFilteredRecords();
       renderLogTable(records);
       updateStats(records);
+      updateCeramicStat();
       renderCharts(records);
       renderOverview(records);
     }
@@ -1245,6 +1310,16 @@ function countCheckinsForUserByDay(records, user) {
         });  
       });
 
+      document.getElementById('ceramicStartDate').addEventListener('change', (e) => {
+        state.ceramicStartDate = e.target.value;
+        updateCeramicStat();
+      });
+
+      document.getElementById('ceramicEndDate').addEventListener('change', (e) => {
+        state.ceramicEndDate = e.target.value;
+        updateCeramicStat();
+      });
+
       document.getElementById('userSelect').addEventListener('change', (e) => {
         state.selectedUser = e.target.value;
         renderDashboard();
@@ -1252,6 +1327,7 @@ function countCheckinsForUserByDay(records, user) {
     }
 
     async function init() {
+      setDefaultCeramicPeriod();
       bindEvents();
 
       try {
