@@ -202,6 +202,34 @@
       background:rgba(255,255,255,.035);
     }
 
+    .delete-activity-btn{
+      opacity:0;
+      pointer-events:none;
+      padding:6px 10px;
+      border-color:rgba(255,123,123,.45);
+      background:rgba(255,123,123,.10);
+      color:#ff9c9c;
+      font-size:.82rem;
+      transition:opacity .16s ease, background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+
+    tbody tr:hover .delete-activity-btn,
+    .delete-activity-btn:focus-visible{
+      opacity:1;
+      pointer-events:auto;
+    }
+
+    .delete-activity-btn:hover{
+      background:rgba(255,123,123,.18);
+      border-color:rgba(255,123,123,.75);
+    }
+
+    .delete-activity-btn:disabled{
+      opacity:.55;
+      cursor:wait;
+      transform:none;
+    }
+
     .user-pill{
       display:inline-flex;
       align-items:center;
@@ -455,7 +483,7 @@
       </div>
 
       <div class="filter-group">
-        <span class="filter-label">Period för keramikuttag:</span>
+        <span class="filter-label">Keramikperiod:</span>
         <input id="ceramicStartDate" type="date" aria-label="Keramikperiod från datum">
         <span class="filter-label">till</span>
         <input id="ceramicEndDate" type="date" aria-label="Keramikperiod till datum">
@@ -485,6 +513,7 @@
                 <th style="width:180px;">Timestamp</th>
                 <th style="width:150px;">Användare</th>
                 <th>Aktivitet</th>
+                <th style="width:92px;"></th>
               </tr>
             </thead>
             <tbody id="logTableBody"></tbody>
@@ -856,13 +885,18 @@ function exportToExcel() {
       const records = await Promise.all(recentFiles.map(readJsonRecord));
 
       const cleaned = records
+        .map((r, index) => ({
+          ...r,
+          blobFileName: recentFiles[index]
+        }))
         .filter(r => r && r.member && r.timestamp)
         .filter(r => !hiddenActivities.includes(r.activity))
         .map(r => ({
           timestamp: r.timestamp,
           member: r.member,
           activity: r.activity || 'Okänd aktivitet',
-          weightKg: Number(r.weightKg) || 0
+          weightKg: Number(r.weightKg) || 0,
+          blobFileName: r.blobFileName
         }))
         .filter(r => !Number.isNaN(new Date(r.timestamp).getTime()))
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -1000,6 +1034,53 @@ function buildSummaryChartData(records) {
   };
 }
 
+    async function deleteActivity(record, button) {
+      if (!record.blobFileName) {
+        alert('Aktiviteten saknar filreferens och kan därför inte tas bort.');
+        return;
+      }
+
+      const confirmed = confirm(
+        `Vill du permanent ta bort "${record.activity}" för ${record.member}\n` +
+        `${formatDateTime(record.timestamp)}?\n\nDetta går inte att ångra.`
+      );
+
+      if (!confirmed) return;
+
+      const originalText = button?.textContent || 'Ta bort';
+      if (button) {
+        button.disabled = true;
+        button.textContent = 'Tar bort...';
+      }
+
+      try {
+        const query = azureConfig.sasToken.replace(/^\?/, '');
+        const url = `${getBlobBaseUrl()}/${encodeURIComponent(record.blobFileName)}?${query}`;
+
+        const response = await fetch(url, {
+          method: 'DELETE',
+          headers: {
+            'x-ms-delete-snapshots': 'include'
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Kunde inte ta bort aktiviteten (${response.status}).`);
+        }
+
+        setStatus('Aktiviteten togs bort. Uppdaterar data...');
+        await loadActivities();
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || 'Kunde inte ta bort aktiviteten.', true);
+        alert(error.message || 'Kunde inte ta bort aktiviteten.');
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
     function renderLogTable(records) {
       const tbody = document.getElementById('logTableBody');
       const logMeta = document.getElementById('logMeta');
@@ -1010,7 +1091,7 @@ function buildSummaryChartData(records) {
 
       if (!topRecords.length) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td colspan="3" style="color:var(--muted);">Ingen data för valt urval.</td>`;
+        tr.innerHTML = `<td colspan="4" style="color:var(--muted);">Ingen data för valt urval.</td>`;
         tbody.appendChild(tr);
         return;
       }
@@ -1021,7 +1102,12 @@ function buildSummaryChartData(records) {
           <td>${formatDateTime(record.timestamp)}</td>
           <td><span class="user-pill">${record.member}</span></td>
           <td>${record.activity}</td>
+          <td><button class="delete-activity-btn" type="button">Ta bort</button></td>
         `;
+
+        const deleteButton = tr.querySelector('.delete-activity-btn');
+        deleteButton.addEventListener('click', () => deleteActivity(record, deleteButton));
+
         tbody.appendChild(tr);
       });
     }
