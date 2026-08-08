@@ -390,6 +390,93 @@
       }
     }
 
+    .activities-card{
+      gap:0;
+    }
+
+    .activities-help{
+      color:var(--muted);
+      font-size:.84rem;
+      margin-bottom:12px;
+    }
+
+    .activities-list{
+      display:grid;
+      gap:8px;
+      margin-bottom:12px;
+    }
+
+    .activity-edit-row{
+      display:grid;
+      grid-template-columns:minmax(170px,1.5fr) 130px repeat(3,110px) auto;
+      gap:8px;
+      align-items:center;
+      padding:8px;
+      border:1px solid rgba(255,255,255,.06);
+      border-radius:10px;
+      background:rgba(0,0,0,.10);
+    }
+
+    .activity-edit-row input,
+    .activity-edit-row select,
+    .activity-add-row input,
+    .activity-add-row select{
+      width:100%;
+      min-width:0;
+      background:var(--panel-2);
+      color:var(--text);
+      border:1px solid var(--border);
+      border-radius:9px;
+      padding:9px 10px;
+      font:inherit;
+    }
+
+    .activity-add-row{
+      display:grid;
+      grid-template-columns:minmax(170px,1.5fr) 130px repeat(3,110px) auto;
+      gap:8px;
+      align-items:center;
+      margin-bottom:10px;
+    }
+
+    .activity-column-labels{
+      display:grid;
+      grid-template-columns:minmax(170px,1.5fr) 130px repeat(3,110px) auto;
+      gap:8px;
+      margin-bottom:5px;
+      padding:0 8px;
+      color:var(--muted);
+      font-size:.76rem;
+    }
+
+    .activity-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    .activity-delete-btn{
+      color:#ffd1d1;
+      border-color:rgba(255,123,123,.38);
+    }
+
+    @media (max-width:1100px){
+      .activity-edit-row,
+      .activity-add-row,
+      .activity-column-labels{
+        grid-template-columns:1fr 130px 100px 100px 100px auto;
+      }
+    }
+
+    @media (max-width:760px){
+      .activity-edit-row,
+      .activity-add-row{
+        grid-template-columns:1fr;
+      }
+      .activity-column-labels{ display:none; }
+    }
+
     .ceramic-card{
       gap:0;
     }
@@ -721,6 +808,34 @@
             </div>
           </div>
 
+          <div class="overview-card activities-card">
+            <h3>Aktiviteter</h3>
+            <div class="activities-help">
+              Aktiviteterna läses från <strong>Skroja_activities.csv</strong>. Här kan du ändra knapptext, färg och vilka steg aktiviteten ska använda. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+            </div>
+            <div class="activity-column-labels">
+              <span>Aktivitet</span><span>Färg</span><span>Ingen bild</span><span>Kräver vikt</span><span>Sessionssumma</span><span></span>
+            </div>
+            <div class="activities-list" id="activitiesList"></div>
+            <div class="activity-add-row">
+              <input id="newActivityName" type="text" placeholder="Aktivitet" aria-label="Ny aktivitet">
+              <select id="newActivityColor" aria-label="Färg för ny aktivitet">
+                <option value="blue">Blå</option>
+                <option value="green">Grön</option>
+                <option value="yellow">Gul</option>
+                <option value="coral">Korall/orange</option>
+              </select>
+              <select id="newActivityNoPhoto" aria-label="Hoppa över bild för ny aktivitet"><option value="nej">Nej</option><option value="ja">Ja</option></select>
+              <select id="newActivityRequiresWeight" aria-label="Kräver vikt för ny aktivitet"><option value="nej">Nej</option><option value="ja">Ja</option></select>
+              <select id="newActivityCountInSession" aria-label="Räkna vikt i sessionssumma för ny aktivitet"><option value="nej">Nej</option><option value="ja">Ja</option></select>
+              <button id="addActivityBtn" type="button">Lägg till</button>
+            </div>
+            <div class="activity-actions">
+              <button id="saveActivitiesCsvBtn" type="button">Spara CSV</button>
+              <span id="activitiesStatus" class="status-line"></span>
+            </div>
+          </div>
+
         </div>
       </section>
     </section>
@@ -740,6 +855,7 @@
 const state = {
   rawRecords: [],
   members: [],
+  activities: [],
   users: [],
   rightSideUsers: [],
   selectedUser: 'Alla',
@@ -764,6 +880,7 @@ const state = {
       yellow: 'Gul',
       coral: 'Korall/orange'
     };
+    const activitiesCsvFile = 'Skroja_activities.csv';
 
     function getUserColor(name, alpha = 1) {
       const colorName = state.members.find(member => member.name === name)?.color;
@@ -976,6 +1093,201 @@ const state = {
       anchor.remove();
       URL.revokeObjectURL(url);
       setMembersStatus(`Ny ${membersCsvFile} skapad. Ersätt filen i GitHub-repot.`);
+    }
+
+    function normalizeYesNo(value) {
+      return String(value || '').trim().toLowerCase() === 'ja' ? 'ja' : 'nej';
+    }
+
+    function parseActivitiesCsv(csvText) {
+      const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim());
+      if (!lines.length) return [];
+
+      const headers = lines[0].split(';').map(value => value.trim().toLowerCase());
+      const activityIndex = headers.indexOf('aktivitet');
+      const colorIndex = headers.indexOf('color');
+      const noPhotoIndex = headers.indexOf('nophoto');
+      const requiresWeightIndex = headers.indexOf('requiresweight');
+      const countInSessionIndex = headers.indexOf('countinsession');
+
+      if ([activityIndex, colorIndex, noPhotoIndex, requiresWeightIndex, countInSessionIndex].some(index => index < 0)) {
+        throw new Error('Aktivitetsfilen måste ha kolumnerna aktivitet;color;noPhoto;requiresWeight;countInSession.');
+      }
+
+      const allowedColors = new Set(Object.keys(memberColorPalette));
+      const seen = new Set();
+      const activities = [];
+
+      lines.slice(1).forEach(line => {
+        const cols = line.split(';').map(value => value.trim());
+        const name = cols[activityIndex] || '';
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        const color = (cols[colorIndex] || '').toLowerCase();
+        activities.push({
+          activity: name,
+          color: allowedColors.has(color) ? color : 'blue',
+          noPhoto: normalizeYesNo(cols[noPhotoIndex]),
+          requiresWeight: normalizeYesNo(cols[requiresWeightIndex]),
+          countInSession: normalizeYesNo(cols[countInSessionIndex])
+        });
+      });
+
+      return activities;
+    }
+
+    function serializeActivitiesCsv() {
+      const rows = ['aktivitet;color;noPhoto;requiresWeight;countInSession'];
+      state.activities.forEach(item => {
+        const safeName = String(item.activity || '').replace(/[;\r\n]/g, ' ').trim();
+        if (safeName) {
+          rows.push(`${safeName};${item.color};${item.noPhoto};${item.requiresWeight};${item.countInSession}`);
+        }
+      });
+      return rows.join('\n') + '\n';
+    }
+
+    async function loadConfiguredActivities() {
+      const response = await fetch(`${activitiesCsvFile}?v=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Kunde inte läsa ${activitiesCsvFile} (${response.status}).`);
+      state.activities = parseActivitiesCsv(await response.text());
+      renderActivityManager();
+      setActivitiesStatus(`${state.activities.length} aktiviteter lästa från CSV.`);
+    }
+
+    function setActivitiesStatus(message, isError = false) {
+      const el = document.getElementById('activitiesStatus');
+      if (!el) return;
+      el.textContent = message;
+      el.classList.toggle('error', isError);
+    }
+
+    function createYesNoSelect(value, ariaLabel, onChange) {
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', ariaLabel);
+      [['nej', 'Nej'], ['ja', 'Ja']].forEach(([optionValue, label]) => {
+        const option = document.createElement('option');
+        option.value = optionValue;
+        option.textContent = label;
+        select.appendChild(option);
+      });
+      select.value = value;
+      select.addEventListener('change', () => onChange(select.value));
+      return select;
+    }
+
+    function renderActivityManager() {
+      const list = document.getElementById('activitiesList');
+      if (!list) return;
+      list.innerHTML = '';
+
+      state.activities.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = 'activity-edit-row';
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.value = item.activity;
+        nameInput.setAttribute('aria-label', `Aktivitetsnamn för ${item.activity}`);
+        nameInput.addEventListener('change', () => {
+          const oldName = item.activity;
+          const newName = nameInput.value.trim();
+          if (!newName) {
+            nameInput.value = oldName;
+            setActivitiesStatus('Aktivitetsnamnet får inte vara tomt.', true);
+            return;
+          }
+          if (state.activities.some((other, otherIndex) => otherIndex !== index && other.activity === newName)) {
+            nameInput.value = oldName;
+            setActivitiesStatus('Det finns redan en aktivitet med det namnet.', true);
+            return;
+          }
+          item.activity = newName;
+          setActivitiesStatus('Ändringen används i aktivitetslistan. Spara CSV för att behålla den.');
+        });
+
+        const colorSelect = document.createElement('select');
+        colorSelect.setAttribute('aria-label', `Färg för ${item.activity}`);
+        Object.entries(memberColorLabels).forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          colorSelect.appendChild(option);
+        });
+        colorSelect.value = item.color;
+        colorSelect.addEventListener('change', () => {
+          item.color = colorSelect.value;
+          setActivitiesStatus('Färgen är ändrad. Spara CSV för att behålla den.');
+        });
+
+        const noPhotoSelect = createYesNoSelect(item.noPhoto, `Ingen bild för ${item.activity}`, value => {
+          item.noPhoto = value;
+          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+        });
+        const requiresWeightSelect = createYesNoSelect(item.requiresWeight, `Kräver vikt för ${item.activity}`, value => {
+          item.requiresWeight = value;
+          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+        });
+        const countInSessionSelect = createYesNoSelect(item.countInSession, `Sessionssumma för ${item.activity}`, value => {
+          item.countInSession = value;
+          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+        });
+
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'activity-delete-btn';
+        deleteButton.textContent = 'Ta bort';
+        deleteButton.addEventListener('click', () => {
+          if (!confirm(`Ta bort aktiviteten "${item.activity}" från aktivitetslistan?`)) return;
+          state.activities.splice(index, 1);
+          renderActivityManager();
+          setActivitiesStatus('Aktiviteten är borttagen på sidan. Spara CSV för att behålla ändringen.');
+        });
+
+        row.append(nameInput, colorSelect, noPhotoSelect, requiresWeightSelect, countInSessionSelect, deleteButton);
+        list.appendChild(row);
+      });
+
+      if (!state.activities.length) {
+        list.innerHTML = '<div class="status-line">Inga aktiviteter definierade.</div>';
+      }
+    }
+
+    function addActivity() {
+      const nameInput = document.getElementById('newActivityName');
+      const name = nameInput.value.trim();
+      if (!name) {
+        setActivitiesStatus('Skriv ett namn för den nya aktiviteten.', true);
+        return;
+      }
+      if (state.activities.some(item => item.activity === name)) {
+        setActivitiesStatus('Aktiviteten finns redan.', true);
+        return;
+      }
+
+      state.activities.push({
+        activity: name,
+        color: document.getElementById('newActivityColor').value,
+        noPhoto: document.getElementById('newActivityNoPhoto').value,
+        requiresWeight: document.getElementById('newActivityRequiresWeight').value,
+        countInSession: document.getElementById('newActivityCountInSession').value
+      });
+      nameInput.value = '';
+      renderActivityManager();
+      setActivitiesStatus('Aktiviteten är tillagd på sidan. Spara CSV för att behålla ändringen.');
+    }
+
+    function downloadActivitiesCsv() {
+      const blob = new Blob([serializeActivitiesCsv()], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = activitiesCsvFile;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setActivitiesStatus(`Ny ${activitiesCsvFile} skapad. Ersätt filen i GitHub-repot.`);
     }
 
     function toDateInputValue(date) {
@@ -1821,6 +2133,12 @@ function getCheckinUsersByDay(records, user) {
         if (e.key === 'Enter') addMember();
       });
       document.getElementById('saveMembersCsvBtn').addEventListener('click', downloadMembersCsv);
+
+      document.getElementById('addActivityBtn').addEventListener('click', addActivity);
+      document.getElementById('newActivityName').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addActivity();
+      });
+      document.getElementById('saveActivitiesCsvBtn').addEventListener('click', downloadActivitiesCsv);
     }
 
     async function init() {
@@ -1829,11 +2147,13 @@ function getCheckinUsersByDay(records, user) {
 
       try {
         await loadMembers();
+        await loadConfiguredActivities();
         await loadActivities();
       } catch (error) {
         console.error(error);
         setStatus(error.message || 'Kunde inte ladda data.', true);
         setMembersStatus(error.message || 'Kunde inte läsa medlemsfilen.', true);
+        setActivitiesStatus(error.message || 'Kunde inte läsa aktivitetsfilen.', true);
       }
 
       setInterval(async () => {
