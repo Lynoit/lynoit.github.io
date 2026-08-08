@@ -434,16 +434,57 @@
     }
   }
 
-  const activityOptions = [
-    { name: 'Checka in', color: 'coral' },
-    { name: 'Glasering', color: 'yellow' },
-    { name: 'Torkning', color: 'yellow' },
-    { name: 'Bränning', color: 'coral' },
-    { name: 'Hämta ut keramik', color: 'green' }
-  ];
+  let activityOptions = [];
 
-  // Aktiviteter som INTE ska fråga efter bild
-  const noPhotoActivities = ['Checka in'];
+  const activitiesConfig = {
+    csvUrl: 'Skroja_activities.csv',
+    fallbackColor: 'blue'
+  };
+
+  function parseCsvBoolean(value){
+    return ['1', 'true', 'ja', 'yes', 'x'].includes(String(value || '').trim().toLowerCase());
+  }
+
+  async function loadActivitiesFromCsv(){
+    const response = await fetch(`${activitiesConfig.csvUrl}?v=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Kunde inte läsa aktivitetsfilen (${response.status}).`);
+    }
+
+    const text = await response.text();
+    const lines = text
+      .replace(/^\uFEFF/, '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (!lines.length) {
+      throw new Error('Aktivitetsfilen är tom.');
+    }
+
+    const rows = lines.map(line => line.split(';').map(value => value.trim()));
+    const firstRow = rows[0].map(value => value.toLowerCase());
+    const hasHeader = firstRow.includes('name') || firstRow.includes('namn') || firstRow.includes('aktivitet');
+    const dataRows = hasHeader ? rows.slice(1) : rows;
+
+    activityOptions = dataRows
+      .filter(row => row[0])
+      .map((row, index) => ({
+        name: row[0],
+        color: row[1] || ['blue', 'green', 'yellow', 'coral'][index % 4] || activitiesConfig.fallbackColor,
+        noPhoto: parseCsvBoolean(row[2]),
+        requiresWeight: parseCsvBoolean(row[3]),
+        countInSession: parseCsvBoolean(row[4])
+      }));
+
+    if (!activityOptions.length) {
+      throw new Error('Inga giltiga aktiviteter hittades i aktivitetsfilen.');
+    }
+  }
+
+  function getActivityConfig(activityName){
+    return activityOptions.find(activity => activity.name === activityName) || null;
+  }
 
   const azureConfig = {
     accountName: 'skroja',
@@ -562,11 +603,11 @@
   }
 
   function shouldSkipPhoto(activityName) {
-    return noPhotoActivities.includes(activityName);
+    return Boolean(getActivityConfig(activityName)?.noPhoto);
   }
 
   function goToNextStepAfterActivity() {
-    if (state.activity === 'Hämta ut keramik' && state.weightKg === null) {
+    if (getActivityConfig(state.activity)?.requiresWeight && state.weightKg === null) {
       showStep('weight');
       ceramicWeightInput.focus();
       return;
@@ -654,7 +695,7 @@
     document.getElementById('summary-user').textContent = state.member;
     document.getElementById('summary-activity').textContent = state.activity;
     const weightRow = document.getElementById('summary-weight-row');
-    const hasWeight = state.activity === 'Hämta ut keramik' && state.weightKg !== null;
+    const hasWeight = Boolean(getActivityConfig(state.activity)?.requiresWeight) && state.weightKg !== null;
     weightRow.hidden = !hasWeight;
     document.getElementById('summary-weight').textContent = hasWeight
       ? `${String(state.weightKg).replace('.', ',')} kg`
@@ -682,7 +723,7 @@
       timestamp: state.timestampIso,
       member: state.member,
       activity: state.activity,
-      weightKg: state.activity === 'Hämta ut keramik' ? state.weightKg : null,
+      weightKg: getActivityConfig(state.activity)?.requiresWeight ? state.weightKg : null,
       hasImage: Boolean(state.photoFile),
       imageFileName: state.photoFile ? jpgName : null,
       jsonFileName: jsonName,
@@ -762,7 +803,7 @@
   });
 
   document.getElementById('photo-back').addEventListener('click', () => {
-    if (state.activity === 'Hämta ut keramik') {
+    if (getActivityConfig(state.activity)?.requiresWeight) {
       showStep('weight');
     } else {
       showStep('activity');
@@ -803,7 +844,7 @@
       const result = await uploadToAzure();
 
       let sessionMessage = '';
-      if (state.activity === 'Hämta ut keramik' && state.weightKg !== null) {
+      if (getActivityConfig(state.activity)?.countInSession && state.weightKg !== null) {
         const currentTotal = Number(sessionTotals[state.member] || 0);
         sessionTotals[state.member] = Math.round((currentTotal + state.weightKg) * 100) / 100;
         saveSessionTotals();
@@ -835,11 +876,12 @@
 
   checkSessionTimeout();
 
-  loadMembersFromCsv()
+  Promise.all([loadMembersFromCsv(), loadActivitiesFromCsv()])
     .then(renderButtons)
     .catch(error => {
       console.error(error);
-      userButtons.innerHTML = '<div class="prompt-card"><p>Kunde inte läsa Skroja_members.csv. Kontrollera att filen finns bredvid HTML-filen och har rätt format.</p></div>';
+      userButtons.innerHTML = '<div class="prompt-card"><p>Kunde inte läsa Skroja_members.csv eller Skroja_activities.csv. Kontrollera att båda filerna finns bredvid HTML-filen och har rätt format.</p></div>';
+      activityButtons.innerHTML = '';
     });
 </script>
 </body>
