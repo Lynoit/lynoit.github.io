@@ -607,8 +607,8 @@ const hiddenActivities = [
     const nightScreen = document.getElementById('night-screen');
     let pollTimer = null;
 
-    let lastSeenLatestFile = null;
-    let hasLoadedOnce = false;
+let lastSeenFileSignature = null;
+let hasLoadedOnce = false;
 
     function buildQrCode() {
       const qrWrap = document.getElementById('qrcode');
@@ -701,44 +701,82 @@ async function loadActivities(force = false) {
   if (pollStatus) pollStatus.textContent = '';
 
   const files = await listJsonBlobs();
+
   const sortedFiles = files
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
     .reverse();
 
-  const latestFile = sortedFiles[0]?.name || null;
+  // Dashboarden använder de 20 senaste filerna
+  const recentBlobInfo = sortedFiles.slice(0, 20);
 
-  // Första laddningen ska alltid ske
-  // Därefter bara om senaste filen ändrats, eller om force=true
-  if (!force && hasLoadedOnce && latestFile === lastSeenLatestFile) {
+  // Skapa en signatur av både filnamn och Last-Modified.
+  // Då upptäcks:
+  // - nya filer
+  // - borttagna filer
+  // - ändrade befintliga filer
+  const fileSignature = recentBlobInfo
+    .map(file => `${file.name}:${file.lastModified}`)
+    .join('|');
+
+  // Första laddningen ska alltid ske.
+  // Därefter laddar vi bara om när Azure-innehållet faktiskt ändrats,
+  // eller om force=true.
+  if (
+    !force &&
+    hasLoadedOnce &&
+    fileSignature === lastSeenFileSignature
+  ) {
     return;
   }
 
-  lastSeenLatestFile = latestFile;
+  lastSeenFileSignature = fileSignature;
   hasLoadedOnce = true;
 
-  const recentFiles = sortedFiles.slice(0, 20).map(file => file.name);
-  const records = await Promise.all(recentFiles.map(readJsonRecord));
+  const recentFiles = recentBlobInfo.map(file => file.name);
 
-  const cutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
-  const byUser = Object.fromEntries(users.map(user => [user.name, []]));
+  const records = await Promise.all(
+    recentFiles.map(readJsonRecord)
+  );
+
+  const cutoff =
+    Date.now() - (14 * 24 * 60 * 60 * 1000);
+
+  const byUser = Object.fromEntries(
+    users.map(user => [user.name, []])
+  );
 
   records
-    .filter(record => record && record.member && record.timestamp)
+    .filter(record =>
+      record &&
+      record.member &&
+      record.timestamp
+    )
     .filter(record => {
       const ts = new Date(record.timestamp).getTime();
       return Number.isFinite(ts) && ts >= cutoff;
     })
-    .filter(record => !hiddenActivities.includes(record.activity))
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .filter(record =>
+      !hiddenActivities.includes(record.activity)
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.timestamp) -
+        new Date(a.timestamp)
+    )
     .forEach(record => {
       if (!byUser[record.member]) return;
-      if (record.member === 'Lerverkstan' || byUser[record.member].length < 4) {
-           byUser[record.member].push(record);
+
+      if (
+        record.member === 'Lerverkstan' ||
+        byUser[record.member].length < 4
+      ) {
+        byUser[record.member].push(record);
       }
     });
 
   renderRows(byUser);
+
   if (pollStatus) pollStatus.textContent = '';
 }
 
