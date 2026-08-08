@@ -242,12 +242,12 @@
       white-space:nowrap;
     }
 
-.right-grid{
-  display:grid;
-  gap:16px;
-  padding:16px;
-  min-height:0;
-}
+    .right-grid{
+      display:grid;
+      gap:16px;
+      padding:16px;
+      min-height:0;
+    }
 
     .stats-grid{
       display:grid;
@@ -310,6 +310,84 @@
       gap:8px;
       margin-bottom:12px;
       flex-wrap:wrap;
+    }
+
+
+    .members-card{
+      gap:0;
+    }
+
+    .members-help{
+      color:var(--muted);
+      font-size:.84rem;
+      margin-bottom:12px;
+    }
+
+    .members-list{
+      display:grid;
+      gap:8px;
+      margin-bottom:12px;
+    }
+
+    .member-edit-row{
+      display:grid;
+      grid-template-columns:minmax(140px,1fr) 150px auto;
+      gap:8px;
+      align-items:center;
+      padding:8px;
+      border:1px solid rgba(255,255,255,.06);
+      border-radius:10px;
+      background:rgba(0,0,0,.10);
+    }
+
+    .member-edit-row input,
+    .member-edit-row select,
+    .member-add-row input,
+    .member-add-row select{
+      width:100%;
+      min-width:0;
+      background:var(--panel-2);
+      color:var(--text);
+      border:1px solid var(--border);
+      border-radius:9px;
+      padding:9px 10px;
+      font:inherit;
+    }
+
+    .member-add-row{
+      display:grid;
+      grid-template-columns:minmax(140px,1fr) 150px auto;
+      gap:8px;
+      align-items:center;
+      margin-bottom:10px;
+    }
+
+    .member-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    .member-color-dot{
+      width:10px;
+      height:10px;
+      border-radius:50%;
+      display:inline-block;
+      margin-right:7px;
+      vertical-align:middle;
+    }
+
+    .member-delete-btn{
+      color:#ffd1d1;
+      border-color:rgba(255,123,123,.38);
+    }
+
+    @media (max-width:760px){
+      .member-edit-row,
+      .member-add-row{
+        grid-template-columns:1fr;
+      }
     }
 
     .ceramic-card{
@@ -606,6 +684,29 @@
             <div class="overview-body" id="overviewBody"></div>
           </div>
 
+
+          <div class="overview-card members-card">
+            <h3>Medlemmar</h3>
+            <div class="members-help">
+              Medlemslistan och färgerna läses från <strong>Skroja_members.csv</strong>. Ändringar används direkt på sidan. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+            </div>
+            <div class="members-list" id="membersList"></div>
+            <div class="member-add-row">
+              <input id="newMemberName" type="text" placeholder="Namn" aria-label="Ny medlem">
+              <select id="newMemberColor" aria-label="Färg för ny medlem">
+                <option value="blue">Blå</option>
+                <option value="green">Grön</option>
+                <option value="yellow">Gul</option>
+                <option value="coral">Korall/orange</option>
+              </select>
+              <button id="addMemberBtn" type="button">Lägg till</button>
+            </div>
+            <div class="member-actions">
+              <button id="saveMembersCsvBtn" type="button">Spara CSV</button>
+              <span id="membersStatus" class="status-line"></span>
+            </div>
+          </div>
+
           <div class="overview-card ceramic-card">
             <h3>Keramikuttag</h3>
             <div class="ceramic-period-controls">
@@ -637,6 +738,7 @@
 
 const state = {
   rawRecords: [],
+  members: [],
   users: [],
   rightSideUsers: [],
   selectedUser: 'Alla',
@@ -648,15 +750,23 @@ const state = {
   lastLoadedAt: null
 };
 
-    const userColors = {
-      Camilla: '#5b8cff',
-      Christina: '#7bc96f',
-      Maria: '#f5a742',
-      Lerverkstan: '#c77dff'
+    const membersCsvFile = 'Skroja_members.csv';
+    const memberColorPalette = {
+      blue: '#5b8cff',
+      green: '#7bc96f',
+      yellow: '#f5b971',
+      coral: '#ff8a65'
+    };
+    const memberColorLabels = {
+      blue: 'Blå',
+      green: 'Grön',
+      yellow: 'Gul',
+      coral: 'Korall/orange'
     };
 
     function getUserColor(name, alpha = 1) {
-      const hex = userColors[name] || '#7fd1b9';
+      const colorName = state.members.find(member => member.name === name)?.color;
+      const hex = memberColorPalette[colorName] || '#7fd1b9';
       if (alpha === 1) return hex;
       const bigint = parseInt(hex.slice(1), 16);
       const r = (bigint >> 16) & 255;
@@ -694,6 +804,177 @@ const state = {
       return (record.activity || '').trim().toLowerCase() === 'checka in'
           || (record.activity || '').trim().toLowerCase() === 'checkade in'
           || (record.activity || '').trim().toLowerCase() === 'check-in';
+    }
+
+
+    function parseMembersCsv(csvText) {
+      const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim());
+      if (!lines.length) return [];
+
+      const headers = lines[0].split(';').map(value => value.trim().toLowerCase());
+      const nameIndex = headers.indexOf('namn');
+      const colorIndex = headers.indexOf('color');
+      if (nameIndex < 0 || colorIndex < 0) {
+        throw new Error('Medlemsfilen måste ha kolumnerna namn;color.');
+      }
+
+      const allowedColors = new Set(Object.keys(memberColorPalette));
+      const seen = new Set();
+      const members = [];
+
+      lines.slice(1).forEach(line => {
+        const cols = line.split(';').map(value => value.trim());
+        const name = cols[nameIndex] || '';
+        const color = (cols[colorIndex] || '').toLowerCase();
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        members.push({
+          name,
+          color: allowedColors.has(color) ? color : 'blue'
+        });
+      });
+
+      return members;
+    }
+
+    function serializeMembersCsv() {
+      const rows = ['namn;color'];
+      state.members.forEach(member => {
+        const safeName = String(member.name || '').replace(/[;\r\n]/g, ' ').trim();
+        if (safeName) rows.push(`${safeName};${member.color}`);
+      });
+      return rows.join('\n') + '\n';
+    }
+
+    function refreshConfiguredMembers() {
+      state.users = state.members.map(member => member.name);
+      state.rightSideUsers = state.users.filter(user => !excludedRightSideUsers.includes(user));
+
+      if (state.selectedUser !== 'Alla' && !state.rightSideUsers.includes(state.selectedUser)) {
+        state.selectedUser = 'Alla';
+      }
+
+      populateUserSelect();
+    }
+
+    async function loadMembers() {
+      const response = await fetch(`${membersCsvFile}?v=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Kunde inte läsa ${membersCsvFile} (${response.status}).`);
+      const csvText = await response.text();
+      state.members = parseMembersCsv(csvText);
+      refreshConfiguredMembers();
+      renderMemberManager();
+      setMembersStatus(`${state.members.length} medlemmar lästa från CSV.`);
+    }
+
+    function setMembersStatus(message, isError = false) {
+      const el = document.getElementById('membersStatus');
+      if (!el) return;
+      el.textContent = message;
+      el.classList.toggle('error', isError);
+    }
+
+    function renderMemberManager() {
+      const list = document.getElementById('membersList');
+      if (!list) return;
+      list.innerHTML = '';
+
+      state.members.forEach((member, index) => {
+        const row = document.createElement('div');
+        row.className = 'member-edit-row';
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.value = member.name;
+        nameInput.setAttribute('aria-label', `Namn för ${member.name}`);
+        nameInput.addEventListener('change', () => {
+          const oldName = member.name;
+          const newName = nameInput.value.trim();
+          if (!newName) {
+            nameInput.value = oldName;
+            setMembersStatus('Namnet får inte vara tomt.', true);
+            return;
+          }
+          if (state.members.some((item, itemIndex) => itemIndex !== index && item.name === newName)) {
+            nameInput.value = oldName;
+            setMembersStatus('Det finns redan en medlem med det namnet.', true);
+            return;
+          }
+          member.name = newName;
+          refreshConfiguredMembers();
+          renderDashboard();
+          setMembersStatus('Ändringen används på sidan. Spara CSV för att behålla den.');
+        });
+
+        const colorSelect = document.createElement('select');
+        colorSelect.setAttribute('aria-label', `Färg för ${member.name}`);
+        Object.entries(memberColorLabels).forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = label;
+          colorSelect.appendChild(option);
+        });
+        colorSelect.value = member.color;
+        colorSelect.addEventListener('change', () => {
+          member.color = colorSelect.value;
+          renderDashboard();
+          setMembersStatus('Färgen används på sidan. Spara CSV för att behålla den.');
+        });
+
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'member-delete-btn';
+        deleteButton.textContent = 'Ta bort';
+        deleteButton.addEventListener('click', () => {
+          if (!confirm(`Ta bort medlemmen "${member.name}" från medlemslistan?`)) return;
+          state.members.splice(index, 1);
+          refreshConfiguredMembers();
+          renderMemberManager();
+          renderDashboard();
+          setMembersStatus('Medlemmen är borttagen på sidan. Spara CSV för att behålla ändringen.');
+        });
+
+        row.append(nameInput, colorSelect, deleteButton);
+        list.appendChild(row);
+      });
+
+      if (!state.members.length) {
+        list.innerHTML = '<div class="status-line">Inga medlemmar definierade.</div>';
+      }
+    }
+
+    function addMember() {
+      const nameInput = document.getElementById('newMemberName');
+      const colorSelect = document.getElementById('newMemberColor');
+      const name = nameInput.value.trim();
+      if (!name) {
+        setMembersStatus('Skriv ett namn för den nya medlemmen.', true);
+        return;
+      }
+      if (state.members.some(member => member.name === name)) {
+        setMembersStatus('Medlemmen finns redan.', true);
+        return;
+      }
+
+      state.members.push({ name, color: colorSelect.value });
+      nameInput.value = '';
+      refreshConfiguredMembers();
+      renderMemberManager();
+      renderDashboard();
+      setMembersStatus('Medlemmen är tillagd på sidan. Spara CSV för att behålla ändringen.');
+    }
+
+    function downloadMembersCsv() {
+      const blob = new Blob([serializeMembersCsv()], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = membersCsvFile;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setMembersStatus(`Ny ${membersCsvFile} skapad. Ersätt filen i GitHub-repot.`);
     }
 
     function toDateInputValue(date) {
@@ -789,7 +1070,7 @@ const state = {
     }
 
 function getStatsForExport(records) {
-  const rightSideRecords = records.filter(r => !excludedRightSideUsers.includes(r.member));
+  const rightSideRecords = records.filter(r => state.rightSideUsers.includes(r.member));
   const checkins = getCheckinRecords(rightSideRecords);
   const uniqueUsers = new Set(rightSideRecords.map(r => r.member)).size;
   const presenceDays = new Set(
@@ -996,11 +1277,9 @@ function exportToExcel() {
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
 state.rawRecords = cleaned;
-state.users = [...new Set(cleaned.map(r => r.member))].sort((a, b) => a.localeCompare(b, 'sv'));
-state.rightSideUsers = state.users.filter(user => !excludedRightSideUsers.includes(user));
 state.lastLoadedAt = new Date();
 
-      populateUserSelect();
+      refreshConfiguredMembers();
       renderDashboard();
       setStatus(`Senast uppdaterad ${formatDateTime(state.lastLoadedAt.toISOString())}`);
     }
@@ -1078,7 +1357,7 @@ function getFilteredRecords() {
 
 function buildSummaryChartData(records) {
   const checkins = getCheckinRecords(records).filter(
-    record => !excludedRightSideUsers.includes(record.member)
+    record => state.rightSideUsers.includes(record.member)
   );
 
   if (state.selectedUser === 'Alla') {
@@ -1212,7 +1491,7 @@ function buildSummaryChartData(records) {
     }
 
 function updateStats(records) {
-  const rightSideRecords = records.filter(r => !excludedRightSideUsers.includes(r.member));
+  const rightSideRecords = records.filter(r => state.rightSideUsers.includes(r.member));
   const checkins = getCheckinRecords(rightSideRecords);
   const uniqueUsers = new Set(rightSideRecords.map(r => r.member)).size;
   const presenceDays = new Set(
@@ -1267,7 +1546,7 @@ function updateStats(records) {
 function countCheckinsForUserByDay(records, user) {
   const result = {};
   const checkins = getCheckinRecords(records).filter(r => {
-    if (excludedRightSideUsers.includes(r.member)) return false;
+    if (!state.rightSideUsers.includes(r.member)) return false;
     if (user !== 'Alla' && r.member !== user) return false;
     return true;
   });
@@ -1284,7 +1563,7 @@ function countCheckinsForUserByDay(records, user) {
 function getCheckinUsersByDay(records, user) {
   const result = {};
   const checkins = getCheckinRecords(records).filter(r => {
-    if (excludedRightSideUsers.includes(r.member)) return false;
+    if (!state.rightSideUsers.includes(r.member)) return false;
     if (user !== 'Alla' && r.member !== user) return false;
     return true;
   });
@@ -1535,6 +1814,12 @@ function getCheckinUsersByDay(records, user) {
         state.selectedUser = e.target.value;
         renderDashboard();
       });
+
+      document.getElementById('addMemberBtn').addEventListener('click', addMember);
+      document.getElementById('newMemberName').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') addMember();
+      });
+      document.getElementById('saveMembersCsvBtn').addEventListener('click', downloadMembersCsv);
     }
 
     async function init() {
@@ -1542,10 +1827,12 @@ function getCheckinUsersByDay(records, user) {
       bindEvents();
 
       try {
+        await loadMembers();
         await loadActivities();
       } catch (error) {
         console.error(error);
         setStatus(error.message || 'Kunde inte ladda data.', true);
+        setMembersStatus(error.message || 'Kunde inte läsa medlemsfilen.', true);
       }
 
       setInterval(async () => {
