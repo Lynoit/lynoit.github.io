@@ -520,21 +520,42 @@
       margin-top:8px;
     }
 
-    .ceramic-member-list{
-      display:grid;
-      gap:8px;
+    .ceramic-table-wrap{
+      overflow-x:auto;
     }
 
-    .ceramic-member-row{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:16px;
-      padding:10px 0;
+    .ceramic-table{
+      width:100%;
+      border-collapse:collapse;
+      min-width:620px;
+    }
+
+    .ceramic-table th,
+    .ceramic-table td{
+      padding:10px 12px;
       border-bottom:1px solid rgba(255,255,255,.06);
+      text-align:right;
+      white-space:nowrap;
     }
 
-    .ceramic-member-row:last-child{
+    .ceramic-table th{
+      color:var(--muted);
+      font-size:.78rem;
+      font-weight:600;
+    }
+
+    .ceramic-table th:first-child,
+    .ceramic-table td:first-child{
+      text-align:left;
+      padding-left:0;
+    }
+
+    .ceramic-table th:last-child,
+    .ceramic-table td:last-child{
+      padding-right:0;
+    }
+
+    .ceramic-table tbody tr:last-child td{
       border-bottom:none;
     }
 
@@ -542,9 +563,8 @@
       font-weight:600;
     }
 
-    .ceramic-member-weight{
+    .ceramic-number{
       font-weight:700;
-      white-space:nowrap;
     }
 
     .overview-body{
@@ -802,8 +822,19 @@
               <input id="ceramicEndDate" type="date" aria-label="Keramikperiod till datum">
             </div>
             <div class="ceramic-summary">
-              <div class="stat-label">Uthämtad keramik per medlem</div>
-              <div class="ceramic-member-list" id="ceramicMemberList"></div>
+              <div class="ceramic-table-wrap">
+                <table class="ceramic-table">
+                  <thead>
+                    <tr>
+                      <th>Medlem</th>
+                      <th>Uthämtad keramik</th>
+                      <th>Gäst vuxen</th>
+                      <th>Gäst barn</th>
+                    </tr>
+                  </thead>
+                  <tbody id="ceramicMemberList"></tbody>
+                </table>
+              </div>
             </div>
           </div>
 
@@ -1332,7 +1363,7 @@ const state = {
       return (record.activity || '').trim().toLowerCase() === 'hämta ut keramik';
     }
 
-    function getCeramicRecordsForPeriod() {
+    function getRecordsForCeramicPeriod() {
       if (!state.ceramicStartDate || !state.ceramicEndDate) return [];
 
       const start = new Date(`${state.ceramicStartDate}T00:00:00`);
@@ -1340,9 +1371,20 @@ const state = {
 
       return state.rawRecords.filter(record => {
         const timestamp = new Date(record.timestamp);
-        if (timestamp < start || timestamp > end) return false;
-        return isCeramicPickup(record);
+        return timestamp >= start && timestamp <= end;
       });
+    }
+
+    function getCeramicRecordsForPeriod() {
+      return getRecordsForCeramicPeriod().filter(isCeramicPickup);
+    }
+
+    function isGuestAdult(record) {
+      return (record.activity || '').trim().toLowerCase() === 'medföljande gäst vuxen';
+    }
+
+    function isGuestChild(record) {
+      return (record.activity || '').trim().toLowerCase() === 'medföljande gäst barn';
     }
 
     function getCeramicWeightForAllUsers() {
@@ -1370,7 +1412,7 @@ const state = {
       document.getElementById('statCeramicTopLabel').textContent = 'Uthämtad keramik';
       document.getElementById('statCeramicWeightAll').textContent = `${formatCeramicWeight(selectedKg)} kg`;
 
-      // Det nedre keramikkortet visar en separat summa per vald medlem.
+      // Det nedre keramikkortet visar keramikvikt och gästaktiviteter per vald medlem.
       const list = document.getElementById('ceramicMemberList');
       list.innerHTML = '';
 
@@ -1378,24 +1420,28 @@ const state = {
         ? state.rightSideUsers
         : [state.selectedUser];
 
-      const ceramicRecords = getCeramicRecordsForPeriod();
+      const periodRecords = getRecordsForCeramicPeriod();
 
       usersToShow.forEach(user => {
-        const totalKg = ceramicRecords
-          .filter(record => record.member === user)
+        const userRecords = periodRecords.filter(record => record.member === user);
+        const totalKg = userRecords
+          .filter(isCeramicPickup)
           .reduce((sum, record) => sum + (Number(record.weightKg) || 0), 0);
+        const adultGuests = userRecords.filter(isGuestAdult).length;
+        const childGuests = userRecords.filter(isGuestChild).length;
 
-        const row = document.createElement('div');
-        row.className = 'ceramic-member-row';
+        const row = document.createElement('tr');
         row.innerHTML = `
-          <span class="ceramic-member-name">${user}</span>
-          <span class="ceramic-member-weight">${formatCeramicWeight(totalKg)} kg</span>
+          <td class="ceramic-member-name">${user}</td>
+          <td class="ceramic-number">${formatCeramicWeight(totalKg)} kg</td>
+          <td class="ceramic-number">${adultGuests}</td>
+          <td class="ceramic-number">${childGuests}</td>
         `;
         list.appendChild(row);
       });
 
       if (!usersToShow.length) {
-        list.innerHTML = '<div class="status-line">Inga valda medlemmar.</div>';
+        list.innerHTML = '<tr><td colspan="4" class="status-line">Inga valda medlemmar.</td></tr>';
       }
     }
 
