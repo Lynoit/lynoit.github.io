@@ -482,8 +482,17 @@
     }
   }
 
+  function normalizeActivityName(value){
+    return String(value || '').trim().toLocaleLowerCase('sv-SE');
+  }
+
   function getActivityConfig(activityName){
-    return activityOptions.find(activity => activity.name === activityName) || null;
+    const normalized = normalizeActivityName(activityName);
+    return activityOptions.find(activity => normalizeActivityName(activity.name) === normalized) || null;
+  }
+
+  function currentActivityConfig(){
+    return state.activityConfig || getActivityConfig(state.activity);
   }
 
   const azureConfig = {
@@ -492,7 +501,7 @@
     sasToken: 'sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2028-01-01T18:27:36Z&st=2026-04-04T09:12:36Z&spr=https&sig=rjDd4VzH1nXMrw%2B6jUMUl3xALkh%2BD7D%2FJkgrcJtr4Zc%3D'
   };
 
-  const state = { member:'', activity:'', weightKg:null, photoFile:null, photoDataUrl:'', timestampIso:'' };
+  const state = { member:'', activity:'', activityConfig:null, weightKg:null, photoFile:null, photoDataUrl:'', timestampIso:'' };
   const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
   const SESSION_TOTALS_KEY = 'skrojaClaySessionTotals';
   const LAST_ACTIVITY_KEY = 'skrojaClayLastActivity';
@@ -603,11 +612,13 @@
   }
 
   function shouldSkipPhoto(activityName) {
-    return Boolean(getActivityConfig(activityName)?.noPhoto);
+    return Boolean((state.activityConfig && normalizeActivityName(state.activityConfig.name) === normalizeActivityName(activityName)
+      ? state.activityConfig
+      : getActivityConfig(activityName))?.noPhoto);
   }
 
   function goToNextStepAfterActivity() {
-    if (getActivityConfig(state.activity)?.requiresWeight && state.weightKg === null) {
+    if (currentActivityConfig()?.requiresWeight && state.weightKg === null) {
       showStep('weight');
       ceramicWeightInput.focus();
       return;
@@ -646,6 +657,7 @@
       button.textContent = activity.name;
       button.addEventListener('click', () => {
         state.activity = activity.name;
+        state.activityConfig = activity;
         state.weightKg = null;
         ceramicWeightInput.value = '';
         customActivityInput.value = '';
@@ -665,6 +677,7 @@
   function resetState(){
     state.member = '';
     state.activity = '';
+    state.activityConfig = null;
     state.weightKg = null;
     state.photoFile = null;
     state.photoDataUrl = '';
@@ -695,7 +708,7 @@
     document.getElementById('summary-user').textContent = state.member;
     document.getElementById('summary-activity').textContent = state.activity;
     const weightRow = document.getElementById('summary-weight-row');
-    const hasWeight = Boolean(getActivityConfig(state.activity)?.requiresWeight) && state.weightKg !== null;
+    const hasWeight = Boolean(currentActivityConfig()?.requiresWeight) && state.weightKg !== null;
     weightRow.hidden = !hasWeight;
     document.getElementById('summary-weight').textContent = hasWeight
       ? `${String(state.weightKg).replace('.', ',')} kg`
@@ -723,7 +736,7 @@
       timestamp: state.timestampIso,
       member: state.member,
       activity: state.activity,
-      weightKg: getActivityConfig(state.activity)?.requiresWeight ? state.weightKg : null,
+      weightKg: currentActivityConfig()?.requiresWeight ? state.weightKg : null,
       hasImage: Boolean(state.photoFile),
       imageFileName: state.photoFile ? jpgName : null,
       jsonFileName: jsonName,
@@ -769,6 +782,7 @@
     const manualText = customActivityInput.value.trim();
     if (manualText) {
       state.activity = manualText;
+      state.activityConfig = null;
       state.weightKg = null;
       ceramicWeightInput.value = '';
     }
@@ -803,7 +817,7 @@
   });
 
   document.getElementById('photo-back').addEventListener('click', () => {
-    if (getActivityConfig(state.activity)?.requiresWeight) {
+    if (currentActivityConfig()?.requiresWeight) {
       showStep('weight');
     } else {
       showStep('activity');
@@ -844,7 +858,7 @@
       const result = await uploadToAzure();
 
       let sessionMessage = '';
-      if (getActivityConfig(state.activity)?.countInSession && state.weightKg !== null) {
+      if (currentActivityConfig()?.countInSession && state.weightKg !== null) {
         const currentTotal = Number(sessionTotals[state.member] || 0);
         sessionTotals[state.member] = Math.round((currentTotal + state.weightKg) * 100) / 100;
         saveSessionTotals();
