@@ -427,6 +427,127 @@ body{
     0 1px 1px rgba(0,0,0,.28);
 }
 
+.calendar-panel{
+  margin-top:auto;
+  margin-left:auto;
+  margin-right:auto;
+  width:min(100%, 1100px);
+
+  padding:12px 16px 14px;
+
+  font-family:var(--sans);
+  color:#fff;
+
+  background:rgba(0,0,0,.52);
+  border-radius:10px;
+
+  box-shadow:
+    0 6px 18px rgba(0,0,0,.18),
+    inset 0 1px 0 rgba(255,255,255,.08);
+
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
+}
+
+.calendar-title{
+  text-align:center;
+  font-size:1.05rem;
+  font-weight:900;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  margin-bottom:9px;
+
+  color:#f3e3c7;
+
+  text-shadow:
+    0 1px 2px rgba(0,0,0,.7);
+}
+
+.calendar-weekdays{
+  display:grid;
+  grid-template-columns:repeat(7, 1fr);
+  gap:4px;
+  margin-bottom:4px;
+
+  font-size:.68rem;
+  font-weight:800;
+  text-transform:uppercase;
+  text-align:center;
+
+  color:rgba(255,255,255,.65);
+}
+
+.calendar-grid{
+  display:grid;
+  grid-template-columns:repeat(7, 1fr);
+  gap:4px;
+}
+
+.calendar-day{
+  min-height:52px;
+  padding:5px 6px;
+
+  position:relative;
+
+  border-radius:5px;
+
+  background:rgba(255,255,255,.055);
+  border:1px solid rgba(255,255,255,.07);
+}
+
+.calendar-day.other-month{
+  opacity:.25;
+}
+
+.calendar-day.today{
+  border-color:rgba(243,227,199,.75);
+
+  box-shadow:
+    inset 0 0 0 1px rgba(243,227,199,.25);
+}
+
+.calendar-date{
+  font-size:.68rem;
+  font-weight:800;
+  color:rgba(255,255,255,.75);
+  margin-bottom:3px;
+}
+
+.calendar-day.today .calendar-date{
+  color:#f3e3c7;
+}
+
+.calendar-event{
+  padding:3px 5px;
+  margin-top:2px;
+
+  border-radius:4px;
+
+  font-size:.68rem;
+  line-height:1.15;
+  font-weight:700;
+
+  background:rgba(243,227,199,.88);
+  color:#3c2a1d;
+
+  box-shadow:0 2px 4px rgba(0,0,0,.18);
+}
+
+.calendar-panel.no-events{
+  display:none;
+}
+
+@media (max-width:860px){
+  .calendar-day{
+    min-height:45px;
+    padding:4px;
+  }
+
+  .calendar-event{
+    font-size:.6rem;
+  }
+}    
+
 .footer-small::before,
 .footer-small::after{
   content:"";
@@ -572,8 +693,23 @@ body{
 </div>
       </div>
 
-      <div class="rows" id="rows"></div>
-      <div class="footer">
+<div class="rows" id="rows"></div>
+
+<div class="calendar-panel" id="calendar-panel">
+  <div class="calendar-title" id="calendar-title">Kalender</div>
+  <div class="calendar-weekdays">
+    <div>Mån</div>
+    <div>Tis</div>
+    <div>Ons</div>
+    <div>Tor</div>
+    <div>Fre</div>
+    <div>Lör</div>
+    <div>Sön</div>
+  </div>
+  <div class="calendar-grid" id="calendar-grid"></div>
+</div>
+
+<div class="footer">
   <span class="footer-small">Powered by</span>
   <span class="footer-brand">Lynoit Tech</span>
 </div>
@@ -606,6 +742,10 @@ const hiddenActivities = [
     const rowsContainer = document.getElementById('rows');
     const pollStatus = document.getElementById('poll-status');
 
+const calendarPanel = document.getElementById('calendar-panel');
+const calendarGrid = document.getElementById('calendar-grid');
+const calendarTitle = document.getElementById('calendar-title');    
+    
     const nightScreen = document.getElementById('night-screen');
     let pollTimer = null;
 
@@ -706,24 +846,26 @@ async function loadActivities(force = false) {
 
   const sortedFiles = files
     .slice()
-    .sort((a, b) => a.name.localeCompare(b.name))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name)
+    )
     .reverse();
 
-  // Dashboarden använder de 20 senaste filerna
-  const recentBlobInfo = sortedFiles.slice(0, 20);
-
-  // Skapa en signatur av både filnamn och Last-Modified.
-  // Då upptäcks:
-  // - nya filer
-  // - borttagna filer
-  // - ändrade befintliga filer
-  const fileSignature = recentBlobInfo
-    .map(file => `${file.name}:${file.lastModified}`)
+  /*
+   * Signaturen innehåller ALLA JSON-filer.
+   *
+   * Därmed märker dashboarden:
+   * - ny aktivitet
+   * - borttagen aktivitet
+   * - ändrad aktivitet
+   * - nytt/borttaget kalenderevent
+   */
+  const fileSignature = sortedFiles
+    .map(file =>
+      `${file.name}:${file.lastModified}`
+    )
     .join('|');
 
-  // Första laddningen ska alltid ske.
-  // Därefter laddar vi bara om när Azure-innehållet faktiskt ändrats,
-  // eller om force=true.
   if (
     !force &&
     hasLoadedOnce &&
@@ -735,14 +877,43 @@ async function loadActivities(force = false) {
   lastSeenFileSignature = fileSignature;
   hasLoadedOnce = true;
 
-  const recentFiles = recentBlobInfo.map(file => file.name);
+  /*
+   * Läs alla JSON-poster.
+   *
+   * Det behövs för kalendern eftersom ett framtida event
+   * kan ha skapats för länge sedan.
+   */
+  const allFiles =
+    sortedFiles.map(file => file.name);
 
   const records = await Promise.all(
-    recentFiles.map(readJsonRecord)
+    allFiles.map(readJsonRecord)
   );
 
+  /*
+   * --------------------------------
+   * KALENDER
+   * --------------------------------
+   */
+
+  const calendarEvents = records
+    .filter(record =>
+      record &&
+      record.activity === 'Kalenderevent' &&
+      record.eventDate
+    );
+
+  renderCalendar(calendarEvents);
+
+  /*
+   * --------------------------------
+   * VANLIGA AKTIVITETER
+   * --------------------------------
+   */
+
   const cutoff =
-    Date.now() - (14 * 24 * 60 * 60 * 1000);
+    Date.now() -
+    (14 * 24 * 60 * 60 * 1000);
 
   const byUser = Object.fromEntries(
     users.map(user => [user.name, []])
@@ -754,18 +925,37 @@ async function loadActivities(force = false) {
       record.member &&
       record.timestamp
     )
+
     .filter(record => {
-      const ts = new Date(record.timestamp).getTime();
-      return Number.isFinite(ts) && ts >= cutoff;
+      const ts =
+        new Date(record.timestamp).getTime();
+
+      return (
+        Number.isFinite(ts) &&
+        ts >= cutoff
+      );
     })
+
+    /*
+     * Kalenderevent ska INTE visas
+     * som vanliga aktivitetskort.
+     */
     .filter(record =>
-      !hiddenActivities.includes(record.activity)
+      record.activity !== 'Kalenderevent'
     )
+
+    .filter(record =>
+      !hiddenActivities.includes(
+        record.activity
+      )
+    )
+
     .sort(
       (a, b) =>
         new Date(b.timestamp) -
         new Date(a.timestamp)
     )
+
     .forEach(record => {
       if (!byUser[record.member]) return;
 
@@ -779,9 +969,179 @@ async function loadActivities(force = false) {
 
   renderRows(byUser);
 
-  if (pollStatus) pollStatus.textContent = '';
+  if (pollStatus) {
+    pollStatus.textContent = '';
+  }
 }
 
+function renderCalendar(events) {
+  if (!calendarPanel || !calendarGrid || !calendarTitle) return;
+
+  const validEvents = events
+    .filter(event =>
+      event &&
+      event.activity === 'Kalenderevent' &&
+      event.eventDate
+    )
+    .sort((a, b) =>
+      a.eventDate.localeCompare(b.eventDate)
+    );
+
+  if (!validEvents.length) {
+    calendarPanel.classList.add('no-events');
+    calendarGrid.innerHTML = '';
+    return;
+  }
+
+  calendarPanel.classList.remove('no-events');
+
+  const today = new Date();
+
+  /*
+   * Normalt visar vi innevarande månad.
+   *
+   * Om det inte finns några event denna månad väljer vi
+   * månaden för närmaste kommande event.
+   */
+  let displayYear = today.getFullYear();
+  let displayMonth = today.getMonth();
+
+  const eventsThisMonth = validEvents.filter(event => {
+    const [year, month] = event.eventDate
+      .split('-')
+      .map(Number);
+
+    return (
+      year === displayYear &&
+      month - 1 === displayMonth
+    );
+  });
+
+  if (!eventsThisMonth.length) {
+    const todayString = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, '0'),
+      String(today.getDate()).padStart(2, '0')
+    ].join('-');
+
+    const nextEvent =
+      validEvents.find(event =>
+        event.eventDate >= todayString
+      ) || validEvents[0];
+
+    const [year, month] = nextEvent.eventDate
+      .split('-')
+      .map(Number);
+
+    displayYear = year;
+    displayMonth = month - 1;
+  }
+
+  const monthName = new Intl.DateTimeFormat(
+    'sv-SE',
+    {
+      month: 'long',
+      year: 'numeric'
+    }
+  ).format(
+    new Date(displayYear, displayMonth, 1)
+  );
+
+  calendarTitle.textContent =
+    monthName.charAt(0).toUpperCase() +
+    monthName.slice(1);
+
+  calendarGrid.innerHTML = '';
+
+  /*
+   * JS:
+   * söndag = 0
+   * måndag = 1
+   *
+   * Vi gör måndag till kalenderns första dag.
+   */
+  const firstDay = new Date(
+    displayYear,
+    displayMonth,
+    1
+  );
+
+  const mondayIndex =
+    (firstDay.getDay() + 6) % 7;
+
+  /*
+   * Visa alltid 6 veckor.
+   * Det gör att kalenderns storlek inte hoppar mellan månader.
+   */
+  const calendarStart = new Date(
+    displayYear,
+    displayMonth,
+    1 - mondayIndex
+  );
+
+  for (let i = 0; i < 42; i++) {
+    const currentDate = new Date(calendarStart);
+    currentDate.setDate(
+      calendarStart.getDate() + i
+    );
+
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const day = currentDate.getDate();
+
+    const dateString = [
+      year,
+      String(month + 1).padStart(2, '0'),
+      String(day).padStart(2, '0')
+    ].join('-');
+
+    const dayElement =
+      document.createElement('div');
+
+    dayElement.className = 'calendar-day';
+
+    if (month !== displayMonth) {
+      dayElement.classList.add('other-month');
+    }
+
+    const isToday =
+      year === today.getFullYear() &&
+      month === today.getMonth() &&
+      day === today.getDate();
+
+    if (isToday) {
+      dayElement.classList.add('today');
+    }
+
+    const dateElement =
+      document.createElement('div');
+
+    dateElement.className = 'calendar-date';
+    dateElement.textContent = day;
+
+    dayElement.appendChild(dateElement);
+
+    const todaysEvents =
+      validEvents.filter(event =>
+        event.eventDate === dateString
+      );
+
+    todaysEvents.forEach(event => {
+      const eventElement =
+        document.createElement('div');
+
+      eventElement.className = 'calendar-event';
+
+      eventElement.textContent =
+        event.eventDescription ||
+        'Kalenderevent';
+
+      dayElement.appendChild(eventElement);
+    });
+
+    calendarGrid.appendChild(dayElement);
+  }
+}    
     function renderRows(byUser) {
       const query = azureConfig.sasToken.replace(/^\?/, '');
       const baseUrl = getBlobBaseUrl();
