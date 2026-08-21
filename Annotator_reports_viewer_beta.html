@@ -2182,17 +2182,35 @@ function openGroupSummaryPopup(groupLabel) {
   console.log('Group report filename:', `GROUP__${sanitizeGroupReportName(groupLabel)}.txt`);
 }    
 
-// Open fused PDF report belonging to the currently selected XLSX
+// --------------------------------------------------
+// Check if a blob exists in Azure
+// --------------------------------------------------
+async function blobExists(filename) {
+  const url = `${BASE_URL}/${encodeURIComponent(filename)}?${SAS_TOKEN}`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      cache: 'no-store'
+    });
+
+    return res.ok;
+  } catch (err) {
+    console.warn('Could not check report file:', filename, err);
+    return false;
+  }
+}
+
+
+// --------------------------------------------------
+// Open fused PDF report
+// --------------------------------------------------
 function openFusedReport() {
   if (!currentReportFileName) {
     alert('No report selected.');
     return;
   }
 
-  // Example:
-  // Annotator_report_2026-08-21_100401.xlsx
-  // ->
-  // Annotator_report_2026-08-21_100401_report.pdf
   const pdfName = currentReportFileName.replace(
     /\.(xlsx|xls)$/i,
     '_report.pdf'
@@ -2204,11 +2222,12 @@ function openFusedReport() {
 }
 
 
-// Add:
-// Generated report (basic) | Open report
-// Generated report (fused) | Open report
+// --------------------------------------------------
+// Add Basic + Fused report rows
+// --------------------------------------------------
 function addAiSummaryRow(testDetailsTableEl) {
   if (!testDetailsTableEl) return;
+  if (!currentReportFileName) return;
 
   const tbl   = testDetailsTableEl;
   const tbody = tbl.tBodies[0] || tbl;
@@ -2218,8 +2237,9 @@ function addAiSummaryRow(testDetailsTableEl) {
 
   const colCount = rows[0].cells.length || 2;
 
+
   // --------------------------------------------------
-  // Remove old report rows that may already exist
+  // Remove any old report rows
   // --------------------------------------------------
   Array.from(tbody.rows).forEach(row => {
     const c0 = row.cells[0];
@@ -2239,9 +2259,32 @@ function addAiSummaryRow(testDetailsTableEl) {
 
 
   // --------------------------------------------------
-  // Helper for creating report rows
+  // Determine expected report filenames
   // --------------------------------------------------
-  function createReportRow(label, clickHandler) {
+
+  // Basic report:
+  // Annotator_report_2026-08-21_100401.xlsx
+  // ->
+  // Annotator_report_2026-08-21_100401.txt
+  const basicReportName = currentReportFileName.replace(
+    /\.(xlsx|xls)$/i,
+    '.txt'
+  );
+
+  // Fused report:
+  // Annotator_report_2026-08-21_100401.xlsx
+  // ->
+  // Annotator_report_2026-08-21_100401_report.pdf
+  const fusedReportName = currentReportFileName.replace(
+    /\.(xlsx|xls)$/i,
+    '_report.pdf'
+  );
+
+
+  // --------------------------------------------------
+  // Helper for creating a report row
+  // --------------------------------------------------
+  function createReportRow(label, reportFilename, clickHandler) {
     const tr = document.createElement('tr');
 
     const labelTd = document.createElement('td');
@@ -2249,12 +2292,8 @@ function addAiSummaryRow(testDetailsTableEl) {
 
     const valueTd = document.createElement('td');
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = 'Open report';
-    btn.addEventListener('click', clickHandler);
-
-    valueTd.appendChild(btn);
+    // Temporary text while Azure is checked
+    valueTd.textContent = 'Checking...';
 
     if (colCount > 2) {
       valueTd.colSpan = colCount - 1;
@@ -2263,6 +2302,32 @@ function addAiSummaryRow(testDetailsTableEl) {
     tr.appendChild(labelTd);
     tr.appendChild(valueTd);
 
+
+    // Check asynchronously whether the file exists
+    blobExists(reportFilename).then(exists => {
+
+      // Clear "Checking..."
+      valueTd.textContent = '';
+
+      if (exists) {
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Open report';
+        btn.addEventListener('click', clickHandler);
+
+        valueTd.appendChild(btn);
+
+      } else {
+
+        const noReport = document.createElement('span');
+        noReport.textContent = 'No report generated';
+
+        valueTd.appendChild(noReport);
+      }
+    });
+
+
     return tr;
   }
 
@@ -2270,13 +2335,16 @@ function addAiSummaryRow(testDetailsTableEl) {
   // --------------------------------------------------
   // Create both rows
   // --------------------------------------------------
+
   const basicRow = createReportRow(
     'Generated report (basic)',
+    basicReportName,
     () => openAiSummaryPopup()
   );
 
   const fusedRow = createReportRow(
     'Generated report (fused)',
+    fusedReportName,
     () => openFusedReport()
   );
 
@@ -2303,14 +2371,22 @@ function addAiSummaryRow(testDetailsTableEl) {
   // Insert rows
   // --------------------------------------------------
   if (insertAfterRow) {
-    // Basic directly below Participant
-    insertAfterRow.insertAdjacentElement('afterend', basicRow);
 
-    // Fused directly below Basic
-    basicRow.insertAdjacentElement('afterend', fusedRow);
+    insertAfterRow.insertAdjacentElement(
+      'afterend',
+      basicRow
+    );
+
+    basicRow.insertAdjacentElement(
+      'afterend',
+      fusedRow
+    );
+
   } else {
+
     tbody.appendChild(basicRow);
     tbody.appendChild(fusedRow);
+
   }
 }
 
