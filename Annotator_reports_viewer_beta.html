@@ -2182,9 +2182,31 @@ function openGroupSummaryPopup(groupLabel) {
   console.log('Group report filename:', `GROUP__${sanitizeGroupReportName(groupLabel)}.txt`);
 }    
 
-// Add a row "Generated report | [Open report]" to the Test details table,
-// inserted directly below the "Participant" row if present.
-// If an old row labeled "AI summary" exists (from XLSX), rename it.
+// Open fused PDF report belonging to the currently selected XLSX
+function openFusedReport() {
+  if (!currentReportFileName) {
+    alert('No report selected.');
+    return;
+  }
+
+  // Example:
+  // Annotator_report_2026-08-21_100401.xlsx
+  // ->
+  // Annotator_report_2026-08-21_100401_report.pdf
+  const pdfName = currentReportFileName.replace(
+    /\.(xlsx|xls)$/i,
+    '_report.pdf'
+  );
+
+  const url = `${BASE_URL}/${encodeURIComponent(pdfName)}?${SAS_TOKEN}`;
+
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+
+// Add:
+// Generated report (basic) | Open report
+// Generated report (fused) | Open report
 function addAiSummaryRow(testDetailsTableEl) {
   if (!testDetailsTableEl) return;
 
@@ -2196,76 +2218,99 @@ function addAiSummaryRow(testDetailsTableEl) {
 
   const colCount = rows[0].cells.length || 2;
 
-  // 1) If there is already a row labeled "AI summary" or "Generated report",
-  //    just rename it and ensure it has the correct button.
-  for (const row of rows) {
+  // --------------------------------------------------
+  // Remove old report rows that may already exist
+  // --------------------------------------------------
+  Array.from(tbody.rows).forEach(row => {
     const c0 = row.cells[0];
-    if (!c0) continue;
+    if (!c0) return;
+
     const lbl = c0.textContent.trim().toLowerCase();
-    if (lbl === 'ai summary' || lbl === 'generated report') {
-      // Rename label
-      c0.textContent = 'Generated report';
 
-      // Ensure value cell with Open report button
-      let valueTd = row.cells[1];
-      if (!valueTd) {
-        valueTd = row.insertCell(1);
-      }
-      // Clear existing content and insert button if needed
-      if (!valueTd.querySelector('button')) {
-        valueTd.textContent = '';
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = 'Open report';
-        btn.addEventListener('click', () => openAiSummaryPopup());
-        valueTd.appendChild(btn);
-      }
-
-      // Span remaining columns if table has more than 2 columns
-      if (colCount > 2) {
-        valueTd.colSpan = colCount - 1;
-      }
-
-      return; // we're done
+    if (
+      lbl === 'ai summary' ||
+      lbl === 'generated report' ||
+      lbl === 'generated report (basic)' ||
+      lbl === 'generated report (fused)'
+    ) {
+      row.remove();
     }
+  });
+
+
+  // --------------------------------------------------
+  // Helper for creating report rows
+  // --------------------------------------------------
+  function createReportRow(label, clickHandler) {
+    const tr = document.createElement('tr');
+
+    const labelTd = document.createElement('td');
+    labelTd.textContent = label;
+
+    const valueTd = document.createElement('td');
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Open report';
+    btn.addEventListener('click', clickHandler);
+
+    valueTd.appendChild(btn);
+
+    if (colCount > 2) {
+      valueTd.colSpan = colCount - 1;
+    }
+
+    tr.appendChild(labelTd);
+    tr.appendChild(valueTd);
+
+    return tr;
   }
 
-  // 2) Otherwise, create a new row
-  const tr = document.createElement('tr');
 
-  const labelTd = document.createElement('td');
-  labelTd.textContent = 'Generated report';
+  // --------------------------------------------------
+  // Create both rows
+  // --------------------------------------------------
+  const basicRow = createReportRow(
+    'Generated report (basic)',
+    () => openAiSummaryPopup()
+  );
 
-  const valueTd = document.createElement('td');
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.textContent = 'Open report';
-  btn.addEventListener('click', () => openAiSummaryPopup());
-  valueTd.appendChild(btn);
+  const fusedRow = createReportRow(
+    'Generated report (fused)',
+    () => openFusedReport()
+  );
 
-  if (colCount > 2) {
-    valueTd.colSpan = colCount - 1;
-  }
 
-  tr.appendChild(labelTd);
-  tr.appendChild(valueTd);
-
-  // Insert below "Participant" row if present, else at end
+  // --------------------------------------------------
+  // Find Participant row
+  // --------------------------------------------------
   let insertAfterRow = null;
-  for (const row of rows) {
+
+  for (const row of Array.from(tbody.rows)) {
     const c0 = row.cells[0];
     if (!c0) continue;
+
     const lbl = c0.textContent.trim().toLowerCase();
+
     if (lbl === 'participant' || lbl.includes('participant')) {
       insertAfterRow = row;
       break;
     }
   }
 
-  if (insertAfterRow && insertAfterRow.nextSibling) {
-    tbody.insertBefore(tr, insertAfterRow.nextSibling);
+
+  // --------------------------------------------------
+  // Insert rows
+  // --------------------------------------------------
+  if (insertAfterRow) {
+    // Basic directly below Participant
+    insertAfterRow.insertAdjacentElement('afterend', basicRow);
+
+    // Fused directly below Basic
+    basicRow.insertAdjacentElement('afterend', fusedRow);
   } else {
-    tbody.appendChild(tr);
+    tbody.appendChild(basicRow);
+    tbody.appendChild(fusedRow);
   }
 }
 
