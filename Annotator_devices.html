@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Annotator Device Map</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; }
+    body { display: flex; flex-direction: column; background: #f7f7f7; color: #111; }
+
+    #topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 14px;
+      background: #fff;
+      border-bottom: 1px solid #ddd;
+      z-index: 1000;
+    }
+
+    #title { font-size: 18px; font-weight: 700; }
+    #status { font-size: 13px; color: #555; text-align: right; }
+    #status.error { color: #b00020; }
+
+    #map { flex: 1; min-height: 0; }
+
+    .device-label {
+      background: rgba(255,255,255,0.95);
+      border: 1px solid #333;
+      border-radius: 4px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.25);
+      color: #111;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 6px;
+      white-space: nowrap;
+    }
+
+    .device-popup { font-size: 13px; line-height: 1.45; }
+    .device-popup strong { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div id="title">Annotator device positions</div>
+    <div id="status">Starting…</div>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // ==========================================================
+    // CONFIG
+    // ==========================================================
+
+    // Extracted from the existing Annotator Reports Viewer.
+    const ACCOUNT   = 'annotationcsv';
+    const CONTAINER = 'csv';
+    const SAS_TOKEN = 'sv=2024-11-04&ss=bfqt&srt=co&sp=rwdlacupiytfx&se=2026-12-31T14:25:22Z&st=2026-01-02T06:10:22Z&spr=https&sig=EYJzJkVswHh9jljAsy506gTIQ7fQMGuF6kJUCSIx%2BZQ%3D';
+    const BASE_URL  = `https://${ACCOUNT}.blob.core.windows.net/${CONTAINER}`;
+
+    // CSV placed beside this HTML file.
+    const DEVICE_MAPPING_CSV = './Device_ID_mapping.csv';
+
+    // Search Excel files from the latest month.
+    const AGE_MONTHS = 1;
+
+    // Re-scan Azure every five minutes.
+    const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+    // ==========================================================
+    // STATE
+    // ==========================================================
+
+    const fileCache = new Map();
+    // filename -> { lastModifiedMs, deviceId, lat, lon, coordinateTimestamp, filename }
+
+    const map = L.map('map').setView([57.7, 12.0], 6);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const markerLayer = L.layerGroup().addTo(map);
+    let firstSuccessfulRender = true;
+    let refreshInProgress = false;
+
+    // ==========================================================
+    // HELPERS
+    // ==========================================================
+
+    function setStatus(text, isError = false) {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.classList.toggle('error', isError);
+    }
+
+    function nc(url) {
+      return url + (url.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function normalizeKey(value) {
+      return String(value ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_\-:]+/g, '');
+    }
+
+    function isValidCoordinate(lat, lon) {
+      return Number.isFinite(lat) && Number.isFinite(lon) &&
+             lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+             !(lat === 0 && lon === 0);
+    }
+
+    function getOneMonthCutoff() {
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - AGE_MONTHS);
+      return cutoff.getTime();
+    }
+
+    // Prefer the session date encoded in filenames such as
+    // Annotator_report_2026-08-21_100401.xlsx.
+    // Fall back to Azure Last-Modified if no date exists in the name.
+    function getSessionTimestampMs(blob) {
+      const m = String(blob.name || '').match(/(\d{4}-\d{2}-\d{2})(?:[_T](\d{2})(\d{2})(\d{2})?)?/);
+      if (m) {
+        const hh = m[2] || '00';
+        const mm = m[3] || '00';
+        const ss = m[4] || '00';
+        const parsed = Date.parse(`${m[1]}T${hh}:${mm}:${ss}`);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      return blob.lastModifiedMs || 0;
+    }
+
+    function formatDateTime(ms) {
+      if (!ms) return 'Unknown';
+      const d = new Date(ms);
+      return d.toLocaleString();
+    }
+
+    // ==========================================================
+    // DEVICE NAME CSV
+    // ==========================================================
+
+    async function loadDeviceMapping() {
+      const map = new Map();
+
+      try {
+        const res = await fetch(nc(DEVICE_MAPPING_CSV), { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const text = await res.text();
+        const wb = XLSX.read(text, { type: 'string' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false });
+
+        if (!rows.length) return map;
+
+        const headers = rows[0].map(normalizeKey);
+        let deviceIdx = headers.findIndex(h => ['deviceid', 'id', 'deviceidentifier'].includes(h));
+        let nameIdx   = headers.findIndex(h => ['name', 'devicename', 'friendlyname', 'displayname'].includes(h));
+
+        // If no recognized header exists, accept a simple 2-column CSV.
+        let startRow = 1;
+        if (deviceIdx < 0 || nameIdx < 0) {
+          deviceIdx = 0;
+          nameIdx = 1;
+          startRow = 0;
+        }
+
+        for (let r = startRow; r < rows.length; r++) {
+          const deviceId = String(rows[r]?.[deviceIdx] ?? '').trim();
+          const friendly = String(rows[r]?.[nameIdx] ?? '').trim();
+          if (deviceId && friendly) map.set(deviceId, friendly);
+        }
+      } catch (err) {
+        console.warn('Could not load device mapping CSV:', err);
+      }
+
+      return map;
+    }
+
+    // ==========================================================
+    // AZURE BLOB LISTING
+    // ==========================================================
+
+    async function listAllBlobs() {
+      const all = [];
+      let marker = '';
+
+      do {
+        let url = `${BASE_URL}?restype=container&comp=list&${SAS_TOKEN}`;
+        if (marker) url += `&marker=${encodeURIComponent(marker)}`;
+
+        const res = await fetch(nc(url), { cache: 'no-store' });
+        if (!res.ok) throw new Error(`Azure list failed: HTTP ${res.status}`);
+
+        const xml = await res.text();
+        const doc = new DOMParser().parseFromString(xml, 'application/xml');
+
+        const parserError = doc.querySelector('parsererror');
+        if (parserError) throw new Error('Could not parse Azure blob list XML');
+
+        for (const b of Array.from(doc.getElementsByTagName('Blob'))) {
+          const name = b.getElementsByTagName('Name')[0]?.textContent || '';
+          const lm = b.getElementsByTagName('Last-Modified')[0]?.textContent || '';
+          all.push({ name, lastModifiedMs: Date.parse(lm) || 0 });
+        }
+
+        marker = doc.getElementsByTagName('NextMarker')[0]?.textContent || '';
+      } while (marker);
+
+      return all;
+    }
+
+    // ==========================================================
+    // WORKBOOK EXTRACTION
+    // ==========================================================
+
+    function extractDeviceIdFromStatistics(wb) {
+      const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
+      if (!sheetName) return null;
+
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
+
+      const acceptedLabels = new Set([
+        'deviceid',
+        'deviceidentifier',
+        'deviceidentifierid'
+      ]);
+
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r] || [];
+
+        for (let c = 0; c < row.length; c++) {
+          const normalized = normalizeKey(row[c]);
+          if (!acceptedLabels.has(normalized)) continue;
+
+          // Most likely layout: label in one cell, value directly to the right.
+          for (let offset = 1; offset <= 3; offset++) {
+            const candidate = String(row[c + offset] ?? '').trim();
+            if (candidate) return candidate;
+          }
+
+          // Fallback: value directly below the label.
+          const below = String(rows[r + 1]?.[c] ?? '').trim();
+          if (below) return below;
+        }
+      }
+
+      return null;
+    }
+
+    function findColumn(headers, patterns) {
+      return headers.findIndex(header => patterns.some(p => p.test(header)));
+    }
+
+    function extractLatestGpsFromSampling(wb) {
+      const sheetName = wb.SheetNames.find(n => /^sampling$/i.test(n.trim())) ||
+                        wb.SheetNames.find(n => /sampling/i.test(n));
+      if (!sheetName) return null;
+
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
+      if (rows.length < 2) return null;
+
+      const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
+
+      const latIdx = findColumn(headers, [
+        /^lat$/, /latitude/, /gps.*lat/, /lat.*gps/
+      ]);
+
+      const lonIdx = findColumn(headers, [
+        /^lon$/, /^lng$/, /^long$/, /longitude/, /gps.*lon/, /lon.*gps/
+      ]);
+
+      const timeIdx = findColumn(headers, [
+        /^timestamp$/, /^time$/, /sampling.*time/, /timestamp/, /datetime/, /date.*time/
+      ]);
+
+      if (latIdx < 0 || lonIdx < 0) return null;
+
+      // Scan backwards so the first valid position found is the latest row.
+      for (let r = rows.length - 1; r >= 1; r--) {
+        const lat = parseFloat(String(rows[r][latIdx]).replace(',', '.'));
+        const lon = parseFloat(String(rows[r][lonIdx]).replace(',', '.'));
+        if (!isValidCoordinate(lat, lon)) continue;
+
+        let coordinateTimestamp = null;
+        if (timeIdx >= 0) {
+          const raw = rows[r][timeIdx];
+
+          if (raw instanceof Date) {
+            coordinateTimestamp = raw.getTime();
+          } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+            // Excel serial date.
+            const parsed = XLSX.SSF.parse_date_code(raw);
+            if (parsed) {
+              coordinateTimestamp = new Date(
+                parsed.y, parsed.m - 1, parsed.d,
+                parsed.H || 0, parsed.M || 0, parsed.S || 0
+              ).getTime();
+            }
+          } else {
+            const parsed = Date.parse(String(raw || ''));
+            if (!Number.isNaN(parsed)) coordinateTimestamp = parsed;
+          }
+        }
+
+        return { lat, lon, coordinateTimestamp };
+      }
+
+      return null;
+    }
+
+    async function readWorkbookInfo(blob) {
+      const cached = fileCache.get(blob.name);
+      if (cached && cached.lastModifiedMs === blob.lastModifiedMs) return cached;
+
+      const url = `${BASE_URL}/${encodeURIComponent(blob.name)}?${SAS_TOKEN}`;
+      const res = await fetch(nc(url), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${blob.name}: HTTP ${res.status}`);
+
+      const buffer = await res.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true });
+
+      const deviceId = extractDeviceIdFromStatistics(wb);
+      const gps = extractLatestGpsFromSampling(wb);
+
+      const info = {
+        filename: blob.name,
+        lastModifiedMs: blob.lastModifiedMs,
+        sessionTimestampMs: getSessionTimestampMs(blob),
+        deviceId,
+        lat: gps?.lat ?? null,
+        lon: gps?.lon ?? null,
+        coordinateTimestamp: gps?.coordinateTimestamp ?? null
+      };
+
+      fileCache.set(blob.name, info);
+      return info;
+    }
+
+    // ==========================================================
+    // MAP RENDERING
+    // ==========================================================
+
+    function chooseLatestPerDevice(records) {
+      const latest = new Map();
+
+      for (const record of records) {
+        if (!record.deviceId || !isValidCoordinate(record.lat, record.lon)) continue;
+
+        const effectiveTime = record.coordinateTimestamp || record.sessionTimestampMs || record.lastModifiedMs || 0;
+        const previous = latest.get(record.deviceId);
+        const previousTime = previous
+          ? (previous.coordinateTimestamp || previous.sessionTimestampMs || previous.lastModifiedMs || 0)
+          : -Infinity;
+
+        if (!previous || effectiveTime > previousTime) {
+          latest.set(record.deviceId, record);
+        }
+      }
+
+      return Array.from(latest.values());
+    }
+
+    function renderDevices(records, deviceNames) {
+      markerLayer.clearLayers();
+      const bounds = [];
+
+      for (const record of records) {
+        const friendlyName = deviceNames.get(record.deviceId) || 'Unregistered device';
+        const marker = L.marker([record.lat, record.lon]);
+
+        marker.bindTooltip(escapeHtml(friendlyName), {
+          permanent: true,
+          direction: 'top',
+          offset: [0, -10],
+          className: 'device-label'
+        });
+
+        marker.bindPopup(`
+          <div class="device-popup">
+            <strong>${escapeHtml(friendlyName)}</strong><br>
+            Device ID: ${escapeHtml(record.deviceId)}<br>
+            Position: ${record.lat.toFixed(6)}, ${record.lon.toFixed(6)}<br>
+            GPS time: ${escapeHtml(formatDateTime(record.coordinateTimestamp))}<br>
+            Session: ${escapeHtml(record.filename)}
+          </div>
+        `);
+
+        marker.addTo(markerLayer);
+        bounds.push([record.lat, record.lon]);
+      }
+
+      if (firstSuccessfulRender && bounds.length) {
+        if (bounds.length === 1) {
+          map.setView(bounds[0], 13);
+        } else {
+          map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+        }
+        firstSuccessfulRender = false;
+      }
+    }
+
+    // ==========================================================
+    // REFRESH LOOP
+    // ==========================================================
+
+    async function refresh() {
+      if (refreshInProgress) return;
+      refreshInProgress = true;
+
+      try {
+        setStatus('Scanning Azure…');
+
+        const [deviceNames, blobs] = await Promise.all([
+          loadDeviceMapping(),
+          listAllBlobs()
+        ]);
+
+        const cutoffMs = getOneMonthCutoff();
+        const recentExcel = blobs
+          .filter(b => /\.xlsx$/i.test(b.name))
+          .filter(b => getSessionTimestampMs(b) >= cutoffMs)
+          .sort((a, b) => getSessionTimestampMs(b) - getSessionTimestampMs(a));
+
+        if (!recentExcel.length) {
+          markerLayer.clearLayers();
+          setStatus('No Excel sessions found from the latest month.');
+          return;
+        }
+
+        setStatus(`Reading ${recentExcel.length} recent Excel file(s)…`);
+
+        const results = [];
+        const CONCURRENCY = 4;
+        let nextIndex = 0;
+
+        async function worker() {
+          while (true) {
+            const index = nextIndex++;
+            if (index >= recentExcel.length) break;
+
+            const blob = recentExcel[index];
+            try {
+              const info = await readWorkbookInfo(blob);
+              results.push(info);
+            } catch (err) {
+              console.warn('Workbook read failed:', blob.name, err);
+            }
+          }
+        }
+
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, recentExcel.length) }, worker));
+
+        const latestDevices = chooseLatestPerDevice(results);
+        renderDevices(latestDevices, deviceNames);
+
+        const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        setStatus(`${latestDevices.length} device(s) shown · ${recentExcel.length} sessions checked · Updated ${now}`);
+      } catch (err) {
+        console.error(err);
+        setStatus(`Update failed: ${err.message || err}`, true);
+      } finally {
+        refreshInProgress = false;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_INTERVAL_MS);
+  </script>
+</body>
+</html>
