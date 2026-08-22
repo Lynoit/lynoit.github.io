@@ -26,7 +26,82 @@
     #status { font-size: 13px; color: #555; text-align: right; }
     #status.error { color: #b00020; }
 
-    #map { flex: 1; min-height: 0; }
+    #main {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 620px;
+      gap: 0;
+    }
+
+    #map { min-height: 0; }
+
+    #device-panel {
+      min-width: 0;
+      overflow: auto;
+      background: #fff;
+      border-left: 1px solid #ddd;
+      padding: 14px;
+    }
+
+    #device-panel h2 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+
+    #device-summary {
+      margin-bottom: 10px;
+      color: #555;
+      font-size: 12px;
+    }
+
+    #device-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      background: #fff;
+    }
+
+    #device-table th, #device-table td {
+      border-bottom: 1px solid #e5e5e5;
+      padding: 8px 7px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    #device-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #f5f5f5;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    #device-table tbody tr { cursor: pointer; }
+    #device-table tbody tr:hover { background: #f3f7ff; }
+    #device-table tbody tr.selected { background: #dce9ff; }
+
+    .status-pill {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid rgba(0,0,0,.12);
+      white-space: nowrap;
+    }
+    .status-active { background: #dff5e4; color: #176b2c; }
+    .status-recent { background: #fff3cd; color: #7a5a00; }
+    .status-offline { background: #eee; color: #555; }
+    .status-nogps { background: #f8d7da; color: #842029; }
+
+    .muted { color: #777; }
+
+    @media (max-width: 1100px) {
+      #main { grid-template-columns: 1fr; grid-template-rows: minmax(420px, 58vh) auto; }
+      #device-panel { border-left: 0; border-top: 1px solid #ddd; }
+    }
 
     .device-label {
       background: rgba(255,255,255,0.95);
@@ -49,7 +124,26 @@
     <div id="title">Annotator device positions</div>
     <div id="status">Starting…</div>
   </div>
-  <div id="map"></div>
+  <div id="main">
+    <div id="map"></div>
+    <aside id="device-panel">
+      <h2>Device status</h2>
+      <div id="device-summary">No data loaded yet.</div>
+      <table id="device-table">
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Status</th>
+            <th>Last seen</th>
+            <th>City</th>
+            <th>Test purpose</th>
+            <th>Participants</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </aside>
+  </div>
 
   <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -89,8 +183,10 @@
     }).addTo(map);
 
     const markerLayer = L.layerGroup().addTo(map);
+    const markersByDevice = new Map();
     let firstSuccessfulRender = true;
     let refreshInProgress = false;
+    let selectedDeviceId = null;
 
     // ==========================================================
     // HELPERS
@@ -272,6 +368,82 @@
       return null;
     }
 
+    function extractValueFromSheetByLabel(wb, sheetRegex, acceptedLabels) {
+      const sheetName = wb.SheetNames.find(n => sheetRegex.test(n));
+      if (!sheetName) return null;
+
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
+
+      const labels = new Set(acceptedLabels.map(normalizeKey));
+      for (let r = 0; r < rows.length; r++) {
+        const row = rows[r] || [];
+        for (let c = 0; c < row.length; c++) {
+          if (!labels.has(normalizeKey(row[c]))) continue;
+
+          for (let offset = 1; offset <= 3; offset++) {
+            const candidate = String(row[c + offset] ?? '').trim();
+            if (candidate) return candidate;
+          }
+
+          const below = String(rows[r + 1]?.[c] ?? '').trim();
+          if (below) return below;
+        }
+      }
+      return null;
+    }
+
+    function extractCityFromStatistics(wb) {
+      const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
+      if (!sheetName) return null;
+
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
+
+      // There can be more than one City entry. Use the LAST one in the sheet.
+      for (let r = rows.length - 1; r >= 0; r--) {
+        const row = rows[r] || [];
+        for (let c = row.length - 1; c >= 0; c--) {
+          if (normalizeKey(row[c]) !== 'city') continue;
+
+          for (let offset = 1; offset <= 3; offset++) {
+            const candidate = String(row[c + offset] ?? '').trim();
+            if (candidate) return candidate;
+          }
+
+          const below = String(rows[r + 1]?.[c] ?? '').trim();
+          if (below) return below;
+        }
+      }
+      return null;
+    }
+
+    function extractTestDetails(wb) {
+      const details = {};
+      const sheetName = wb.SheetNames.find(n => /test\s*details/i.test(n));
+      if (!sheetName) return details;
+
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
+
+      for (const row of rows) {
+        if (!row || row.length < 2) continue;
+        const key = String(row[0] ?? '').trim().toLowerCase();
+        const value = String(row[1] ?? '').trim();
+        if (key && value) details[key] = value;
+      }
+      return details;
+    }
+
     function findColumn(headers, patterns) {
       return headers.findIndex(header => patterns.some(p => p.test(header)));
     }
@@ -349,13 +521,28 @@
       const wb = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true });
 
       const deviceId = extractDeviceIdFromStatistics(wb);
+      const city = extractCityFromStatistics(wb);
+      const details = extractTestDetails(wb);
       const gps = extractLatestGpsFromSampling(wb);
+
+      const testPurpose =
+        details['purpose'] ||
+        details['test purpose'] ||
+        null;
+
+      const participants =
+        details['participants'] ||
+        details['participant'] ||
+        null;
 
       const info = {
         filename: blob.name,
         lastModifiedMs: blob.lastModifiedMs,
         sessionTimestampMs: getSessionTimestampMs(blob),
         deviceId,
+        city,
+        testPurpose,
+        participants,
         lat: gps?.lat ?? null,
         lon: gps?.lon ?? null,
         coordinateTimestamp: gps?.coordinateTimestamp ?? null
@@ -389,12 +576,103 @@
       return Array.from(latest.values());
     }
 
+    function getEffectiveSeenTime(record) {
+      return record.coordinateTimestamp || record.sessionTimestampMs || record.lastModifiedMs || 0;
+    }
+
+    function getDeviceStatus(record) {
+      const seen = getEffectiveSeenTime(record);
+      if (!seen) return { label: 'No GPS', className: 'status-nogps' };
+
+      const ageMs = Date.now() - seen;
+      if (ageMs <= 15 * 60 * 1000) return { label: 'Active', className: 'status-active' };
+      if (ageMs <= 24 * 60 * 60 * 1000) return { label: 'Recent', className: 'status-recent' };
+      return { label: 'Offline', className: 'status-offline' };
+    }
+
+    function formatAge(ms) {
+      if (!ms) return 'Unknown';
+      const diff = Math.max(0, Date.now() - ms);
+      const min = Math.floor(diff / 60000);
+      if (min < 1) return 'Now';
+      if (min < 60) return `${min} min ago`;
+      const hours = Math.floor(min / 60);
+      if (hours < 24) return `${hours} h ago`;
+      const days = Math.floor(hours / 24);
+      return `${days} d ago`;
+    }
+
+    function selectDevice(deviceId, panToMarker = false) {
+      selectedDeviceId = deviceId;
+
+      document.querySelectorAll('#device-table tbody tr').forEach(tr => {
+        tr.classList.toggle('selected', tr.dataset.deviceId === deviceId);
+      });
+
+      const marker = markersByDevice.get(deviceId);
+      if (marker && panToMarker) {
+        map.setView(marker.getLatLng(), Math.max(map.getZoom(), 13));
+        marker.openPopup();
+      }
+    }
+
+    function renderDeviceTable(records, deviceNames) {
+      const tbody = document.querySelector('#device-table tbody');
+      const summary = document.getElementById('device-summary');
+      tbody.innerHTML = '';
+
+      const sorted = [...records].sort((a, b) => getEffectiveSeenTime(b) - getEffectiveSeenTime(a));
+      const counts = { Active: 0, Recent: 0, Offline: 0, 'No GPS': 0 };
+
+      for (const record of sorted) {
+        const friendlyName = deviceNames.get(record.deviceId) || 'Unregistered device';
+        const status = getDeviceStatus(record);
+        counts[status.label] = (counts[status.label] || 0) + 1;
+
+        const tr = document.createElement('tr');
+        tr.dataset.deviceId = record.deviceId;
+        if (selectedDeviceId === record.deviceId) tr.classList.add('selected');
+
+        const values = [
+          friendlyName,
+          null,
+          formatAge(getEffectiveSeenTime(record)),
+          record.city || '—',
+          record.testPurpose || '—',
+          record.participants || '—'
+        ];
+
+        values.forEach((value, index) => {
+          const td = document.createElement('td');
+          if (index === 1) {
+            const pill = document.createElement('span');
+            pill.className = `status-pill ${status.className}`;
+            pill.textContent = status.label;
+            td.appendChild(pill);
+          } else {
+            td.textContent = value;
+            if (value === '—') td.classList.add('muted');
+          }
+          tr.appendChild(td);
+        });
+
+        tr.title = `${friendlyName}\nLast seen: ${formatDateTime(getEffectiveSeenTime(record))}`;
+        tr.addEventListener('click', () => selectDevice(record.deviceId, true));
+        tbody.appendChild(tr);
+      }
+
+      summary.textContent =
+        `Devices: ${sorted.length} · Active: ${counts.Active} · Recent: ${counts.Recent} · Offline: ${counts.Offline}`;
+    }
+
     function renderDevices(records, deviceNames) {
       markerLayer.clearLayers();
+      markersByDevice.clear();
       const bounds = [];
 
       for (const record of records) {
         const friendlyName = deviceNames.get(record.deviceId) || 'Unregistered device';
+        const status = getDeviceStatus(record);
         const marker = L.marker([record.lat, record.lon]);
 
         marker.bindTooltip(escapeHtml(friendlyName), {
@@ -407,16 +685,22 @@
         marker.bindPopup(`
           <div class="device-popup">
             <strong>${escapeHtml(friendlyName)}</strong><br>
-            Device ID: ${escapeHtml(record.deviceId)}<br>
+            Status: ${escapeHtml(status.label)}<br>
+            City: ${escapeHtml(record.city || 'Unknown')}<br>
+            Test purpose: ${escapeHtml(record.testPurpose || 'Unknown')}<br>
+            Participants: ${escapeHtml(record.participants || 'Unknown')}<br>
             Position: ${record.lat.toFixed(6)}, ${record.lon.toFixed(6)}<br>
-            GPS time: ${escapeHtml(formatDateTime(record.coordinateTimestamp))}<br>
-            Session: ${escapeHtml(record.filename)}
+            GPS time: ${escapeHtml(formatDateTime(getEffectiveSeenTime(record)))}
           </div>
         `);
 
+        marker.on('click', () => selectDevice(record.deviceId, false));
         marker.addTo(markerLayer);
+        markersByDevice.set(record.deviceId, marker);
         bounds.push([record.lat, record.lon]);
       }
+
+      renderDeviceTable(records, deviceNames);
 
       if (firstSuccessfulRender && bounds.length) {
         if (bounds.length === 1) {
@@ -426,6 +710,8 @@
         }
         firstSuccessfulRender = false;
       }
+
+      setTimeout(() => map.invalidateSize(), 0);
     }
 
     // ==========================================================
