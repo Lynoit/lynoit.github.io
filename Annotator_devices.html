@@ -115,6 +115,25 @@
       white-space: nowrap;
     }
 
+    .active-direction-marker {
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+    }
+
+    .active-direction-arrow {
+      width: 0;
+      height: 0;
+      border-left: 9px solid transparent;
+      border-right: 9px solid transparent;
+      border-bottom: 24px solid #1565c0;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.5));
+      transform-origin: 50% 55%;
+    }
+
     .device-popup { font-size: 13px; line-height: 1.45; }
     .device-popup strong { font-size: 14px; }
   </style>
@@ -135,7 +154,7 @@
             <th>Device</th>
             <th>Status</th>
             <th>Last seen</th>
-            <th>City</th>
+            <th>Location</th>
             <th>Test purpose</th>
             <th>Participants</th>
           </tr>
@@ -396,39 +415,33 @@
       return null;
     }
 
-function extractCityFromStatistics(wb) {
-  const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
-  if (!sheetName) return null;
+    function extractCityFromStatistics(wb) {
+      const sheetName = wb.SheetNames.find(n => /statistics/i.test(n));
+      if (!sheetName) return null;
 
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
-    header: 1,
-    blankrows: false,
-    defval: ''
-  });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
+        header: 1,
+        blankrows: false,
+        defval: ''
+      });
 
-  // Search from bottom upwards and use the last City/Cities entry
-  for (let r = rows.length - 1; r >= 0; r--) {
-    const row = rows[r] || [];
+      // There can be more than one City entry. Use the LAST one in the sheet.
+      for (let r = rows.length - 1; r >= 0; r--) {
+        const row = rows[r] || [];
+        for (let c = row.length - 1; c >= 0; c--) {
+          if (normalizeKey(row[c]) !== 'city') continue;
 
-    for (let c = row.length - 1; c >= 0; c--) {
-      const key = normalizeKey(row[c]);
+          for (let offset = 1; offset <= 3; offset++) {
+            const candidate = String(row[c + offset] ?? '').trim();
+            if (candidate) return candidate;
+          }
 
-      if (key !== 'city' && key !== 'cities') continue;
-
-      // Normally the value is in the next cell
-      for (let offset = 1; offset <= 3; offset++) {
-        const candidate = String(row[c + offset] ?? '').trim();
-        if (candidate) return candidate;
+          const below = String(rows[r + 1]?.[c] ?? '').trim();
+          if (below) return below;
+        }
       }
-
-      // Fallback if value happens to be below the label
-      const below = String(rows[r + 1]?.[c] ?? '').trim();
-      if (below) return below;
+      return null;
     }
-  }
-
-  return null;
-}
 
     function extractTestDetails(wb) {
       const details = {};
@@ -454,65 +467,87 @@ function extractCityFromStatistics(wb) {
       return headers.findIndex(header => patterns.some(p => p.test(header)));
     }
 
+    function parseSamplingTimestamp(raw) {
+      if (raw instanceof Date) return raw.getTime();
+      if (typeof raw === 'number' && Number.isFinite(raw)) {
+        const parsed = XLSX.SSF.parse_date_code(raw);
+        if (parsed) {
+          return new Date(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, parsed.S || 0).getTime();
+        }
+      }
+      const parsed = Date.parse(String(raw || ''));
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+
     function extractLatestGpsFromSampling(wb) {
       const sheetName = wb.SheetNames.find(n => /^sampling$/i.test(n.trim())) ||
                         wb.SheetNames.find(n => /sampling/i.test(n));
       if (!sheetName) return null;
 
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {
-        header: 1,
-        blankrows: false,
-        defval: ''
+        header: 1, blankrows: false, defval: ''
       });
       if (rows.length < 2) return null;
 
       const headers = rows[0].map(v => String(v ?? '').trim().toLowerCase());
-
-      const latIdx = findColumn(headers, [
-        /^lat$/, /latitude/, /gps.*lat/, /lat.*gps/
-      ]);
-
-      const lonIdx = findColumn(headers, [
-        /^lon$/, /^lng$/, /^long$/, /longitude/, /gps.*lon/, /lon.*gps/
-      ]);
-
-      const timeIdx = findColumn(headers, [
-        /^timestamp$/, /^time$/, /sampling.*time/, /timestamp/, /datetime/, /date.*time/
-      ]);
-
+      const latIdx = findColumn(headers, [/^lat$/, /latitude/, /gps.*lat/, /lat.*gps/]);
+      const lonIdx = findColumn(headers, [/^lon$/, /^lng$/, /^long$/, /longitude/, /gps.*lon/, /lon.*gps/]);
+      const timeIdx = findColumn(headers, [/^timestamp$/, /^time$/, /sampling.*time/, /timestamp/, /datetime/, /date.*time/]);
+      const countryIdx = findColumn(headers, [/^country$/, /country/]);
       if (latIdx < 0 || lonIdx < 0) return null;
 
-      // Scan backwards so the first valid position found is the latest row.
-      for (let r = rows.length - 1; r >= 1; r--) {
+      const validPoints = [];
+      for (let r = 1; r < rows.length; r++) {
         const lat = parseFloat(String(rows[r][latIdx]).replace(',', '.'));
         const lon = parseFloat(String(rows[r][lonIdx]).replace(',', '.'));
         if (!isValidCoordinate(lat, lon)) continue;
-
-        let coordinateTimestamp = null;
-        if (timeIdx >= 0) {
-          const raw = rows[r][timeIdx];
-
-          if (raw instanceof Date) {
-            coordinateTimestamp = raw.getTime();
-          } else if (typeof raw === 'number' && Number.isFinite(raw)) {
-            // Excel serial date.
-            const parsed = XLSX.SSF.parse_date_code(raw);
-            if (parsed) {
-              coordinateTimestamp = new Date(
-                parsed.y, parsed.m - 1, parsed.d,
-                parsed.H || 0, parsed.M || 0, parsed.S || 0
-              ).getTime();
-            }
-          } else {
-            const parsed = Date.parse(String(raw || ''));
-            if (!Number.isNaN(parsed)) coordinateTimestamp = parsed;
-          }
-        }
-
-        return { lat, lon, coordinateTimestamp };
+        validPoints.push({
+          lat, lon,
+          timestamp: timeIdx >= 0 ? parseSamplingTimestamp(rows[r][timeIdx]) : null,
+          country: countryIdx >= 0 ? String(rows[r][countryIdx] ?? '').trim() : ''
+        });
       }
+      if (!validPoints.length) return null;
 
-      return null;
+      const latest = validPoints[validPoints.length - 1];
+      let trace = [];
+      if (latest.timestamp) {
+        const cutoff = latest.timestamp - 2 * 60 * 1000;
+        trace = validPoints.filter(p => p.timestamp && p.timestamp >= cutoff);
+      }
+      if (!trace.length) trace = validPoints.slice(-30);
+      if (trace.length > 30) trace = trace.slice(-30);
+
+      return {
+        lat: latest.lat,
+        lon: latest.lon,
+        coordinateTimestamp: latest.timestamp,
+        country: latest.country || null,
+        trace
+      };
+    }
+
+    function calculateBearing(lat1, lon1, lat2, lon2) {
+      const toRad = deg => deg * Math.PI / 180;
+      const toDeg = rad => rad * 180 / Math.PI;
+      const phi1 = toRad(lat1);
+      const phi2 = toRad(lat2);
+      const dLon = toRad(lon2 - lon1);
+      const y = Math.sin(dLon) * Math.cos(phi2);
+      const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+      return (toDeg(Math.atan2(y, x)) + 360) % 360;
+    }
+
+    function getTraceBearing(trace) {
+      if (!Array.isArray(trace) || trace.length < 2) return 0;
+      const last = trace[trace.length - 1];
+      for (let i = trace.length - 2; i >= 0; i--) {
+        const prev = trace[i];
+        if (Math.abs(last.lat - prev.lat) > 0.000001 || Math.abs(last.lon - prev.lon) > 0.000001) {
+          return calculateBearing(prev.lat, prev.lon, last.lat, last.lon);
+        }
+      }
+      return 0;
     }
 
     async function readWorkbookInfo(blob) {
@@ -547,6 +582,8 @@ function extractCityFromStatistics(wb) {
         sessionTimestampMs: getSessionTimestampMs(blob),
         deviceId,
         city,
+        country: gps?.country ?? null,
+        trace: gps?.trace ?? [],
         testPurpose,
         participants,
         lat: gps?.lat ?? null,
@@ -643,7 +680,7 @@ function extractCityFromStatistics(wb) {
           friendlyName,
           null,
           formatAge(getEffectiveSeenTime(record)),
-          record.city || '—',
+          [record.city, record.country].filter(Boolean).join(' / ') || '—',
           record.testPurpose || '—',
           record.participants || '—'
         ];
@@ -679,20 +716,46 @@ function extractCityFromStatistics(wb) {
       for (const record of records) {
         const friendlyName = deviceNames.get(record.deviceId) || 'Unregistered device';
         const status = getDeviceStatus(record);
-        const marker = L.marker([record.lat, record.lon]);
+        const locationText = [record.city, record.country].filter(Boolean).join(' / ') || 'Unknown';
+        let marker;
+
+        if (status.label === 'Active') {
+          const traceLatLngs = (record.trace || [])
+            .filter(p => isValidCoordinate(p.lat, p.lon))
+            .map(p => [p.lat, p.lon]);
+
+          if (traceLatLngs.length >= 2) {
+            L.polyline(traceLatLngs, {
+              weight: 5, opacity: 0.65, lineCap: 'round', lineJoin: 'round'
+            }).addTo(markerLayer);
+
+            traceLatLngs.slice(0, -1).forEach((ll, index) => {
+              const opacity = 0.18 + 0.55 * ((index + 1) / traceLatLngs.length);
+              L.circleMarker(ll, { radius: 3, weight: 0, fillOpacity: opacity }).addTo(markerLayer);
+            });
+          }
+
+          const bearing = getTraceBearing(record.trace || []);
+          const arrowIcon = L.divIcon({
+            className: '',
+            html: `<div class="active-direction-marker"><div class="active-direction-arrow" style="transform:rotate(${bearing}deg)"></div></div>`,
+            iconSize: [34, 34],
+            iconAnchor: [17, 17]
+          });
+          marker = L.marker([record.lat, record.lon], { icon: arrowIcon, zIndexOffset: 1000 });
+        } else {
+          marker = L.marker([record.lat, record.lon]);
+        }
 
         marker.bindTooltip(escapeHtml(friendlyName), {
-          permanent: true,
-          direction: 'top',
-          offset: [0, -10],
-          className: 'device-label'
+          permanent: true, direction: 'top', offset: [0, -10], className: 'device-label'
         });
 
         marker.bindPopup(`
           <div class="device-popup">
             <strong>${escapeHtml(friendlyName)}</strong><br>
             Status: ${escapeHtml(status.label)}<br>
-            City: ${escapeHtml(record.city || 'Unknown')}<br>
+            Location: ${escapeHtml(locationText)}<br>
             Test purpose: ${escapeHtml(record.testPurpose || 'Unknown')}<br>
             Participants: ${escapeHtml(record.participants || 'Unknown')}<br>
             Position: ${record.lat.toFixed(6)}, ${record.lon.toFixed(6)}<br>
@@ -709,11 +772,8 @@ function extractCityFromStatistics(wb) {
       renderDeviceTable(records, deviceNames);
 
       if (firstSuccessfulRender && bounds.length) {
-        if (bounds.length === 1) {
-          map.setView(bounds[0], 13);
-        } else {
-          map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
-        }
+        if (bounds.length === 1) map.setView(bounds[0], 13);
+        else map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
         firstSuccessfulRender = false;
       }
 
