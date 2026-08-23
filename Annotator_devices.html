@@ -87,8 +87,35 @@
     #refresh-now:hover:not(:disabled) { background: #f1f1f1; }
     #refresh-now:disabled { cursor: wait; opacity: .6; }
 
+    #status-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 5px;
+      min-width: 300px;
+    }
+
     #status { font-size: 13px; color: #555; text-align: right; }
     #status.error { color: #b00020; }
+
+    #read-progress {
+      width: 300px;
+      height: 7px;
+      background: #dedee1;
+      border-radius: 999px;
+      overflow: hidden;
+      display: none;
+    }
+
+    #read-progress.visible { display: block; }
+
+    #read-progress-fill {
+      width: 0%;
+      height: 100%;
+      background: #1565c0;
+      border-radius: inherit;
+      transition: width .18s ease;
+    }
 
     #main {
       flex: 1;
@@ -172,7 +199,13 @@
     @media (max-width: 700px) {
       #topbar { flex-direction: column; align-items: stretch; }
       #topbar-right { justify-content: space-between; align-items: center; }
+      #status-wrap {
+        align-items: flex-start;
+        min-width: 0;
+        width: 100%;
+      }
       #status { text-align: left; flex-basis: 100%; }
+      #read-progress { width: min(300px, 100%); }
     }
 
     .device-label {
@@ -229,7 +262,12 @@
         </label>
         <button id="refresh-now" type="button">Refresh now</button>
       </div>
-      <div id="status">Starting…</div>
+      <div id="status-wrap">
+        <div id="status">Starting…</div>
+        <div id="read-progress" role="progressbar" aria-label="Excel file reading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="read-progress-fill"></div>
+        </div>
+      </div>
     </div>
   </div>
   <div id="main">
@@ -305,6 +343,31 @@
       const el = document.getElementById('status');
       el.textContent = text;
       el.classList.toggle('error', isError);
+    }
+
+    function setReadProgress(done, total) {
+      const progress = document.getElementById('read-progress');
+      const fill = document.getElementById('read-progress-fill');
+      if (!progress || !fill) return;
+
+      const safeTotal = Math.max(1, Number(total) || 1);
+      const safeDone = Math.max(0, Math.min(safeTotal, Number(done) || 0));
+      const percent = (safeDone / safeTotal) * 100;
+
+      progress.classList.add('visible');
+      progress.setAttribute('aria-valuenow', String(Math.round(percent)));
+      fill.style.width = percent + '%';
+      setStatus(`Reading Excel files ${safeDone} / ${safeTotal}…`);
+    }
+
+    function hideReadProgress() {
+      const progress = document.getElementById('read-progress');
+      const fill = document.getElementById('read-progress-fill');
+      if (progress) {
+        progress.classList.remove('visible');
+        progress.setAttribute('aria-valuenow', '0');
+      }
+      if (fill) fill.style.width = '0%';
     }
 
     function nc(url) {
@@ -941,15 +1004,16 @@
           markersByDevice.clear();
           document.querySelector('#device-table tbody').innerHTML = '';
           document.getElementById('device-summary').textContent = 'No devices found for the selected period.';
+          hideReadProgress();
           setStatus(`No Excel sessions found from the latest ${getAgeFilterLabel()}.`);
           return;
         }
 
-        setStatus(`Reading ${recentExcel.length} Excel file(s) from the latest ${getAgeFilterLabel()}…`);
-
         const results = [];
         const CONCURRENCY = 4;
         let nextIndex = 0;
+        let completedCount = 0;
+        setReadProgress(0, recentExcel.length);
 
         async function worker() {
           while (true) {
@@ -962,11 +1026,16 @@
               results.push(info);
             } catch (err) {
               console.warn('Workbook read failed:', blob.name, err);
+            } finally {
+              completedCount++;
+              setReadProgress(completedCount, recentExcel.length);
             }
           }
         }
 
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, recentExcel.length) }, worker));
+
+        hideReadProgress();
 
         const latestDevices = chooseLatestPerDevice(results);
         renderDevices(latestDevices, deviceNames);
@@ -974,6 +1043,7 @@
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         setStatus(`${latestDevices.length} device(s) shown · ${recentExcel.length} sessions checked · Updated ${now}`);
       } catch (err) {
+        hideReadProgress();
         console.error(err);
         setStatus(`Update failed: ${err.message || err}`, true);
       } finally {
