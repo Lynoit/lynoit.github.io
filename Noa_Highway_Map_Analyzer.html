@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NOA Highway Availability Analyzer</title>
+  <title>NOA Highway Availability Analyzer - Directional</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -21,6 +21,8 @@
       --green: #24d26a;
       --red: #ff4d4d;
       --accent: #5aa9ff;
+      --blue: #66b2ff;
+      --orange: #ffb45c;
     }
 
     * { box-sizing: border-box; }
@@ -65,7 +67,7 @@
       border-bottom: 1px solid var(--border);
     }
 
-    .button, button {
+    .button, button, select {
       appearance: none;
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -77,8 +79,16 @@
       font-size: 13px;
     }
 
-    .button:hover, button:hover { border-color: var(--accent); }
+    .button:hover, button:hover, select:hover { border-color: var(--accent); }
     input[type="file"] { display: none; }
+
+    .control-label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+    }
 
     .file-info {
       color: var(--muted);
@@ -88,7 +98,7 @@
 
     .main {
       display: grid;
-      grid-template-columns: 330px 1fr;
+      grid-template-columns: 360px 1fr;
       min-height: 0;
     }
 
@@ -151,6 +161,26 @@
     .stat-row:last-child { border-bottom: 0; }
     .stat-row span:first-child { color: var(--muted); }
 
+    .direction-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .direction-chip {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+    }
+
+    .dir-a { background: var(--blue); }
+    .dir-b { background: var(--orange); }
+
     .legend-row {
       display: flex;
       align-items: center;
@@ -174,6 +204,13 @@
       color: var(--muted);
       font-size: 12px;
       line-height: 1.55;
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+      margin-top: 9px;
     }
 
     .file-list {
@@ -200,6 +237,22 @@
     .status.error { color: #ff8787; }
     .status.ok { color: #74e6a0; }
 
+    .popup-table {
+      border-collapse: collapse;
+      font-size: 12px;
+      min-width: 220px;
+    }
+
+    .popup-table td {
+      padding: 2px 5px;
+      vertical-align: top;
+    }
+
+    .popup-table td:first-child {
+      color: #69727d;
+      padding-left: 0;
+    }
+
     @media (max-width: 850px) {
       .app { height: auto; }
       .main { grid-template-columns: 1fr; }
@@ -213,7 +266,7 @@
 <div class="app">
   <header>
     <h1>NOA Highway Availability Analyzer</h1>
-    <div class="subtitle">Load a folder of Annotator Excel reports. Highway samples are shown as green/red dots based on NOA availability correctness.</div>
+    <div class="subtitle">Highway samples are separated by driving direction using a small map-only offset to the right of travel.</div>
   </header>
 
   <div class="controls">
@@ -222,6 +275,16 @@
 
     <label class="button" for="fileInput">Open Excel files</label>
     <input id="fileInput" type="file" multiple accept=".xlsx,.xls" />
+
+    <label class="control-label" for="offsetSelect">Directional separation
+      <select id="offsetSelect">
+        <option value="0">Off</option>
+        <option value="4">4 m</option>
+        <option value="7" selected>7 m</option>
+        <option value="10">10 m</option>
+        <option value="15">15 m</option>
+      </select>
+    </label>
 
     <button id="clearBtn" type="button">Clear</button>
     <span id="fileInfo" class="file-info">No files loaded</span>
@@ -246,9 +309,23 @@
       </div>
 
       <div class="card">
+        <h2>Opposite travel directions</h2>
+        <div class="direction-title"><span class="direction-chip dir-a"></span><span id="dirALabel">Direction A</span></div>
+        <div class="stat-row"><span>Samples</span><strong id="dirATotal">0</strong></div>
+        <div class="stat-row"><span>NOA correct</span><strong id="dirAPct">—</strong></div>
+
+        <div class="direction-title"><span class="direction-chip dir-b"></span><span id="dirBLabel">Direction B</span></div>
+        <div class="stat-row"><span>Samples</span><strong id="dirBTotal">0</strong></div>
+        <div class="stat-row"><span>NOA correct</span><strong id="dirBPct">—</strong></div>
+
+        <div class="note">Direction A/B are derived automatically from the dominant highway axis in the loaded data. Exact heading is also calculated for every plotted sample.</div>
+      </div>
+
+      <div class="card">
         <h2>Map legend</h2>
         <div class="legend-row"><span class="dot green"></span> NOA availability correct (= 1)</div>
         <div class="legend-row"><span class="dot red"></span> NOA availability incorrect (= 0)</div>
+        <div class="note">Each dot is shifted to the right of its calculated driving direction. Opposite traffic therefore appears on opposite sides of the road. This is only a visualization offset; original GPS coordinates are preserved.</div>
       </div>
 
       <div class="card">
@@ -282,10 +359,13 @@
   }).addTo(map);
 
   const pointLayer = L.layerGroup().addTo(map);
+  let loadedSamples = [];
+  let loadedTotals = null;
 
   const ui = {
     folderInput: document.getElementById('folderInput'),
     fileInput: document.getElementById('fileInput'),
+    offsetSelect: document.getElementById('offsetSelect'),
     clearBtn: document.getElementById('clearBtn'),
     fileInfo: document.getElementById('fileInfo'),
     status: document.getElementById('status'),
@@ -295,6 +375,12 @@
     greenCount: document.getElementById('greenCount'),
     redCount: document.getElementById('redCount'),
     invalidNoa: document.getElementById('invalidNoa'),
+    dirALabel: document.getElementById('dirALabel'),
+    dirATotal: document.getElementById('dirATotal'),
+    dirAPct: document.getElementById('dirAPct'),
+    dirBLabel: document.getElementById('dirBLabel'),
+    dirBTotal: document.getElementById('dirBTotal'),
+    dirBPct: document.getElementById('dirBPct'),
     fileList: document.getElementById('fileList')
   };
 
@@ -356,6 +442,184 @@
     return XLSX.read(buffer, { type: 'array', cellDates: false });
   }
 
+  function toRad(deg) { return deg * Math.PI / 180; }
+  function toDeg(rad) { return rad * 180 / Math.PI; }
+
+  function haversineMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371008.8;
+    const p1 = toRad(lat1);
+    const p2 = toRad(lat2);
+    const dp = toRad(lat2 - lat1);
+    const dl = toRad(lon2 - lon1);
+    const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function bearingDegrees(lat1, lon1, lat2, lon2) {
+    const p1 = toRad(lat1);
+    const p2 = toRad(lat2);
+    const dl = toRad(lon2 - lon1);
+    const y = Math.sin(dl) * Math.cos(p2);
+    const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+
+  function destinationPoint(lat, lon, bearingDeg, distanceMeters) {
+    if (!distanceMeters) return [lat, lon];
+    const R = 6371008.8;
+    const delta = distanceMeters / R;
+    const theta = toRad(bearingDeg);
+    const phi1 = toRad(lat);
+    const lambda1 = toRad(lon);
+
+    const sinPhi2 = Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta);
+    const phi2 = Math.asin(Math.max(-1, Math.min(1, sinPhi2)));
+    const y = Math.sin(theta) * Math.sin(delta) * Math.cos(phi1);
+    const x = Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2);
+    const lambda2 = lambda1 + Math.atan2(y, x);
+
+    return [toDeg(phi2), ((toDeg(lambda2) + 540) % 360) - 180];
+  }
+
+  // Heading for one sample is calculated from nearby chronological GPS samples.
+  // We intentionally reject very large jumps, which can occur between separate route pieces.
+  function calculateHeadings(points) {
+    const MAX_NEIGHBOR_DISTANCE_M = 300;
+    for (let i = 0; i < points.length; i++) {
+      const cur = points[i];
+      let heading = null;
+
+      if (i < points.length - 1) {
+        const next = points[i + 1];
+        const d = haversineMeters(cur.lat, cur.lon, next.lat, next.lon);
+        if (d >= 0.5 && d <= MAX_NEIGHBOR_DISTANCE_M) {
+          heading = bearingDegrees(cur.lat, cur.lon, next.lat, next.lon);
+        }
+      }
+
+      if (heading === null && i > 0) {
+        const prev = points[i - 1];
+        const d = haversineMeters(prev.lat, prev.lon, cur.lat, cur.lon);
+        if (d >= 0.5 && d <= MAX_NEIGHBOR_DISTANCE_M) {
+          heading = bearingDegrees(prev.lat, prev.lon, cur.lat, cur.lon);
+        }
+      }
+
+      cur.heading = heading;
+    }
+  }
+
+  // Estimate the dominant ROAD AXIS, ignoring direction, using doubled-angle circular statistics.
+  // This gives an axis in [0,180). Direction A travels broadly along that axis, Direction B opposite it.
+  function dominantAxis(samples) {
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (const s of samples) {
+      if (!Number.isFinite(s.heading)) continue;
+      const a = toRad(2 * s.heading);
+      sx += Math.cos(a);
+      sy += Math.sin(a);
+      n++;
+    }
+    if (!n) return null;
+    let axis = 0.5 * toDeg(Math.atan2(sy / n, sx / n));
+    axis = ((axis % 180) + 180) % 180;
+    return axis;
+  }
+
+  function angularDifference(a, b) {
+    let d = ((a - b + 540) % 360) - 180;
+    return Math.abs(d);
+  }
+
+  function assignDirections(samples, axis) {
+    if (!Number.isFinite(axis)) {
+      for (const s of samples) s.direction = null;
+      return;
+    }
+    const opposite = (axis + 180) % 360;
+    for (const s of samples) {
+      if (!Number.isFinite(s.heading)) {
+        s.direction = null;
+        continue;
+      }
+      s.direction = angularDifference(s.heading, axis) <= angularDifference(s.heading, opposite) ? 'A' : 'B';
+    }
+  }
+
+  function compassLabel(deg) {
+    if (!Number.isFinite(deg)) return 'unknown';
+    const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return names[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+  }
+
+  function directionStats(samples, direction) {
+    const arr = samples.filter(s => s.direction === direction);
+    const green = arr.filter(s => s.noa === 1).length;
+    const red = arr.filter(s => s.noa === 0).length;
+    const valid = green + red;
+    return {
+      total: arr.length,
+      green,
+      red,
+      pct: valid ? 100 * green / valid : null
+    };
+  }
+
+  function renderPoints(samples, fit = false) {
+    pointLayer.clearLayers();
+    const offsetMeters = Number(ui.offsetSelect.value) || 0;
+    const bounds = [];
+
+    for (const s of samples) {
+      if (s.noa === null) continue;
+
+      let displayLat = s.lat;
+      let displayLon = s.lon;
+      if (Number.isFinite(s.heading) && offsetMeters > 0) {
+        [displayLat, displayLon] = destinationPoint(s.lat, s.lon, (s.heading + 90) % 360, offsetMeters);
+      }
+
+      const color = s.noa === 1 ? '#24d26a' : '#ff4d4d';
+      const marker = L.circleMarker([displayLat, displayLon], {
+        radius: 3.3,
+        color,
+        fillColor: color,
+        fillOpacity: 0.84,
+        opacity: 0.95,
+        weight: 0.8,
+        interactive: true
+      });
+
+      const headingText = Number.isFinite(s.heading)
+        ? `${s.heading.toFixed(0)}° (${compassLabel(s.heading)})`
+        : 'Unavailable';
+      const directionText = s.direction ? `Direction ${s.direction}` : 'Unclassified';
+      const noaText = s.noa === 1 ? 'Correct / available' : 'Incorrect / unavailable';
+
+      marker.bindPopup(`
+        <table class="popup-table">
+          <tr><td>NOA</td><td><strong>${escapeHtml(noaText)}</strong></td></tr>
+          <tr><td>Direction</td><td>${escapeHtml(directionText)}</td></tr>
+          <tr><td>Heading</td><td>${escapeHtml(headingText)}</td></tr>
+          <tr><td>Speed limit</td><td>${escapeHtml(formatValue(s.speed))} km/h</td></tr>
+          <tr><td>Original GPS</td><td>${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}</td></tr>
+          <tr><td>Display offset</td><td>${offsetMeters} m right of travel</td></tr>
+          <tr><td>Source</td><td>${escapeHtml(s.fileName)}</td></tr>
+          <tr><td>Excel row</td><td>${s.rowNumber.toLocaleString()}</td></tr>
+        </table>
+      `);
+
+      marker.addTo(pointLayer);
+      bounds.push([displayLat, displayLon]);
+    }
+
+    if (fit && bounds.length) {
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
+    }
+  }
+
   async function analyzeFiles(fileList) {
     const files = Array.from(fileList).filter(f => /\.xlsx?$/i.test(f.name));
     if (!files.length) {
@@ -367,7 +631,7 @@
     setStatus(`Reading ${files.length} Excel file${files.length === 1 ? '' : 's'}…`);
 
     const totals = { highway: 0, green: 0, red: 0, invalid: 0 };
-    const bounds = [];
+    const allSamples = [];
     const processed = [];
     const warnings = [];
 
@@ -405,6 +669,24 @@
           continue;
         }
 
+        // First collect every valid GPS row, in chronological spreadsheet order, so heading
+        // can be derived from the route itself even when road classification changes briefly.
+        const routePoints = [];
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          const lat = Number(row[col.lat]);
+          const lon = Number(row[col.lon]);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+          routePoints.push({
+            rowIndex: i,
+            lat,
+            lon,
+            heading: null
+          });
+        }
+        calculateHeadings(routePoints);
+        const headingByRow = new Map(routePoints.map(p => [p.rowIndex, p.heading]));
+
         let fileHighway = 0;
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
@@ -421,20 +703,17 @@
           const lat = Number(row[col.lat]);
           const lon = Number(row[col.lon]);
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-          if (noa === null) continue;
 
-          const color = noa === 1 ? '#24d26a' : '#ff4d4d';
-          const marker = L.circleMarker([lat, lon], {
-            radius: 3.2,
-            color,
-            fillColor: color,
-            fillOpacity: 0.82,
-            opacity: 0.9,
-            weight: 0.7,
-            interactive: false
+          allSamples.push({
+            lat,
+            lon,
+            noa,
+            heading: headingByRow.get(i) ?? null,
+            direction: null,
+            speed: row[col.speed],
+            fileName: file.name,
+            rowNumber: i + 1
           });
-          marker.addTo(pointLayer);
-          bounds.push([lat, lon]);
         }
 
         processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway samples`);
@@ -442,17 +721,20 @@
         warnings.push(`${file.name}: ${err?.message || String(err)}`);
       }
 
-      // Let the browser repaint between large workbooks.
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
-    updateSummary(totals);
+    const axis = dominantAxis(allSamples);
+    assignDirections(allSamples, axis);
+
+    loadedSamples = allSamples;
+    loadedTotals = totals;
+
+    updateSummary(totals, allSamples, axis);
+    renderPoints(allSamples, true);
+
     ui.fileInfo.textContent = `${processed.length}/${files.length} files processed`;
     ui.fileList.innerHTML = processed.length ? processed.map(escapeHtml).join('<br>') : 'None';
-
-    if (bounds.length) {
-      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
-    }
 
     if (warnings.length) {
       setStatus(`Done with ${warnings.length} warning(s). ${warnings[0]}`, 'error');
@@ -462,7 +744,7 @@
     }
   }
 
-  function updateSummary(totals) {
+  function updateSummary(totals, samples = [], axis = null) {
     const pct = totals.highway > 0 ? (100 * totals.green / totals.highway) : null;
     ui.correctPct.textContent = pct === null ? '—' : `${pct.toFixed(1)}%`;
     ui.correctBar.style.width = pct === null ? '0%' : `${Math.max(0, Math.min(100, pct))}%`;
@@ -470,6 +752,27 @@
     ui.greenCount.textContent = totals.green.toLocaleString();
     ui.redCount.textContent = totals.red.toLocaleString();
     ui.invalidNoa.textContent = totals.invalid.toLocaleString();
+
+    const a = directionStats(samples, 'A');
+    const b = directionStats(samples, 'B');
+    const opposite = Number.isFinite(axis) ? (axis + 180) % 360 : null;
+
+    ui.dirALabel.textContent = Number.isFinite(axis)
+      ? `Direction A · ~${axis.toFixed(0)}° ${compassLabel(axis)}`
+      : 'Direction A';
+    ui.dirBLabel.textContent = Number.isFinite(opposite)
+      ? `Direction B · ~${opposite.toFixed(0)}° ${compassLabel(opposite)}`
+      : 'Direction B';
+
+    ui.dirATotal.textContent = a.total.toLocaleString();
+    ui.dirAPct.textContent = a.pct === null ? '—' : `${a.pct.toFixed(1)}%`;
+    ui.dirBTotal.textContent = b.total.toLocaleString();
+    ui.dirBPct.textContent = b.pct === null ? '—' : `${b.pct.toFixed(1)}%`;
+  }
+
+  function formatValue(v) {
+    if (v === null || v === undefined || v === '') return '—';
+    return String(v);
   }
 
   function setStatus(text, kind = '') {
@@ -479,7 +782,9 @@
 
   function resetResults(clearInputs = true) {
     pointLayer.clearLayers();
-    updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 });
+    loadedSamples = [];
+    loadedTotals = null;
+    updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 }, [], null);
     ui.fileInfo.textContent = 'No files loaded';
     ui.fileList.textContent = 'None';
     setStatus('Ready');
@@ -500,6 +805,9 @@
 
   ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
   ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
+  ui.offsetSelect.addEventListener('change', () => {
+    if (loadedSamples.length) renderPoints(loadedSamples, false);
+  });
   ui.clearBtn.addEventListener('click', () => resetResults(true));
 })();
 </script>
