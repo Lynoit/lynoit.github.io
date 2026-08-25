@@ -241,11 +241,96 @@
       line-height: 1.45;
     }
 
+    .right-pane {
+      display: grid;
+      grid-template-rows: minmax(390px, 1fr) 245px;
+      min-width: 0;
+      min-height: 0;
+      background: #14181e;
+    }
+
     #map {
       width: 100%;
       height: 100%;
-      min-height: 500px;
+      min-height: 390px;
       background: #252b33;
+    }
+
+    .issues-panel {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid var(--border);
+      background: #14181e;
+    }
+
+    .issues-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px 8px;
+      flex-wrap: wrap;
+    }
+
+    .issues-header h2 {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .issues-summary {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .issues-table-wrap {
+      min-height: 0;
+      overflow: auto;
+      border-top: 1px solid #252c35;
+    }
+
+    .issues-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .issues-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      text-align: left;
+      padding: 7px 9px;
+      background: #20252d;
+      color: #dfe6ee;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .issues-table td {
+      padding: 6px 9px;
+      border-bottom: 1px solid #252c35;
+      vertical-align: top;
+      color: #d9e0e8;
+    }
+
+    .issues-table td:nth-child(1) { color: var(--muted); white-space: nowrap; }
+    .issues-table td:nth-child(2) { width: 60px; white-space: nowrap; font-weight: 700; }
+    .issues-table td:nth-child(3) { min-width: 220px; }
+    .issues-table td:nth-child(4) { min-width: 260px; color: #b9c3cd; }
+
+    .issues-table tr.issue-row { cursor: pointer; }
+    .issues-table tr.issue-row:hover td { background: #1d232b; }
+    .issues-table tr.no-gps { cursor: default; opacity: 0.72; }
+
+    .issue-map-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #6da9ff;
+      border: 2px solid #ffffff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.75);
+      display: inline-block;
     }
 
     .status {
@@ -277,7 +362,8 @@
       .app { height: auto; }
       .main { grid-template-columns: 1fr; }
       .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
-      #map { height: 65vh; }
+      .right-pane { grid-template-rows: 520px 280px; }
+      #map { height: 100%; min-height: 0; }
       .status { width: 100%; margin-left: 0; }
     }
   </style>
@@ -327,6 +413,7 @@
         <div class="legend-row"><span class="dot green"></span> Same-direction sample: NOA available (= 1)</div>
         <div class="legend-row"><span class="dot red"></span> Same-direction sample: NOA unavailable (= 0)</div>
         <div class="legend-row"><span class="dot black"></span> Segment where opposite directions disagree</div>
+        <div class="legend-row"><span class="issue-map-dot"></span> Issue from the Issues tab</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--green);font-weight:900">↑</span> Arrow direction with NOA available</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--red);font-weight:900">↑</span> Arrow direction with NOA unavailable</div>
         <div class="note">All disagreement locations remain visible as small black dots. Red/green arrows are intentionally thinned so they do not overlap. Zoom in to automatically reveal more arrow pairs. The arrows keep a fixed visual offset from the road, so they remain clearly beside the markers.</div>
@@ -349,7 +436,25 @@
       </div>
     </aside>
 
-    <div id="map"></div>
+    <div class="right-pane">
+      <div id="map"></div>
+      <section class="issues-panel" aria-label="Issues">
+        <div class="issues-header">
+          <h2>Issues</h2>
+          <div id="issuesSummary" class="issues-summary">0 issues</div>
+        </div>
+        <div class="issues-table-wrap">
+          <table class="issues-table">
+            <thead>
+              <tr><th>File</th><th>No.</th><th>Issue</th><th>Comment</th></tr>
+            </thead>
+            <tbody id="issuesTableBody">
+              <tr><td colspan="4" style="color:#9aa5b1">No issues loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </div>
 </div>
 
@@ -364,7 +469,10 @@
 
   const pointLayer = L.layerGroup().addTo(map);
   const arrowLayer = L.layerGroup().addTo(map);
+  const issueLayer = L.layerGroup().addTo(map);
+  const issueMarkerById = new Map();
   let loadedSamples = [];
+  let loadedIssues = [];
   let loadedTotals = null;
   let currentDifferences = [];
 
@@ -383,7 +491,9 @@
     invalidNoa: document.getElementById('invalidNoa'),
     differenceSegments: document.getElementById('differenceSegments'),
     visibleArrowPairs: document.getElementById('visibleArrowPairs'),
-    fileList: document.getElementById('fileList')
+    fileList: document.getElementById('fileList'),
+    issuesSummary: document.getElementById('issuesSummary'),
+    issuesTableBody: document.getElementById('issuesTableBody')
   };
 
   const HEADER_ALIASES = {
@@ -392,6 +502,14 @@
     road: ['HERE Road type', 'HERE Road', 'HERE Road Type'],
     speed: ['HERE Speed Limit (km/h)', 'HERE Speed Limit   (km/h)', 'HERE Speed Limit'],
     noa: ['noa_availability_correct', 'noa_availability']
+  };
+
+  const ISSUE_HEADER_ALIASES = {
+    no: ['No.', 'No', 'Issue No.', 'Issue No'],
+    issue: ['Issue'],
+    comment: ['Comment'],
+    lat: ['Lat', 'Latitude', 'LAtitude'],
+    lon: ['Lon', 'Longitude', 'Longtidude']
   };
 
   function normalizeHeader(value) {
@@ -437,6 +555,10 @@
     const exact = workbook.SheetNames.find(n => n.toLowerCase() === 'sampling');
     if (exact) return exact;
     return workbook.SheetNames.find(n => n.toLowerCase().startsWith('samp')) || null;
+  }
+
+  function findIssuesSheet(workbook) {
+    return workbook.SheetNames.find(n => n.toLowerCase() === 'issues') || null;
   }
 
   async function readWorkbook(file) {
@@ -911,6 +1033,68 @@
     }
   }
 
+  function renderIssues(issues) {
+    issueLayer.clearLayers();
+    issueMarkerById.clear();
+
+    let withGps = 0;
+    for (const item of issues) {
+      if (!Number.isFinite(item.lat) || !Number.isFinite(item.lon)) continue;
+      withGps++;
+
+      const marker = L.circleMarker([item.lat, item.lon], {
+        radius: 6,
+        color: '#ffffff',
+        weight: 1.5,
+        fillColor: '#6da9ff',
+        fillOpacity: 0.96,
+        opacity: 1,
+        interactive: true
+      });
+
+      marker.bindPopup(`
+        <table class="popup-table">
+          <tr><td>Issue No.</td><td><strong>${escapeHtml(formatValue(item.no))}</strong></td></tr>
+          <tr><td>Issue</td><td>${escapeHtml(formatValue(item.issue))}</td></tr>
+          <tr><td>Comment</td><td>${escapeHtml(formatValue(item.comment)).replaceAll('\n', '<br>')}</td></tr>
+          <tr><td>GPS</td><td>${item.lat.toFixed(6)}, ${item.lon.toFixed(6)}</td></tr>
+          <tr><td>Source</td><td>${escapeHtml(item.fileName)}</td></tr>
+        </table>
+      `);
+      marker.addTo(issueLayer);
+      issueMarkerById.set(item.id, marker);
+    }
+
+    ui.issuesSummary.textContent = `${issues.length.toLocaleString()} issue${issues.length === 1 ? '' : 's'} · ${withGps.toLocaleString()} with GPS`;
+
+    if (!issues.length) {
+      ui.issuesTableBody.innerHTML = '<tr><td colspan="4" style="color:#9aa5b1">No issues loaded.</td></tr>';
+      return;
+    }
+
+    ui.issuesTableBody.innerHTML = issues.map(item => {
+      const hasGps = Number.isFinite(item.lat) && Number.isFinite(item.lon);
+      return `
+        <tr class="issue-row${hasGps ? '' : ' no-gps'}" data-issue-id="${escapeHtml(item.id)}" title="${hasGps ? 'Click to show this issue on the map' : 'No valid GPS coordinates for this issue'}">
+          <td>${escapeHtml(item.fileName)}</td>
+          <td>${escapeHtml(formatValue(item.no))}</td>
+          <td>${escapeHtml(formatValue(item.issue))}</td>
+          <td>${escapeHtml(formatValue(item.comment)).replaceAll('\n', '<br>')}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  function fitMapToData(samples, issues) {
+    const bounds = [];
+    for (const s of samples) {
+      if (Number.isFinite(s.lat) && Number.isFinite(s.lon)) bounds.push([s.lat, s.lon]);
+    }
+    for (const item of issues) {
+      if (Number.isFinite(item.lat) && Number.isFinite(item.lon)) bounds.push([item.lat, item.lon]);
+    }
+    if (bounds.length) map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
+  }
+
   async function analyzeFiles(fileList) {
     const files = Array.from(fileList).filter(f => /\.xlsx?$/i.test(f.name));
     if (!files.length) {
@@ -923,6 +1107,7 @@
 
     const totals = { highway: 0, green: 0, red: 0, invalid: 0 };
     const allSamples = [];
+    const allIssues = [];
     const processed = [];
     const warnings = [];
 
@@ -932,9 +1117,54 @@
 
       try {
         const wb = await readWorkbook(file);
+
+        let fileIssueCount = 0;
+        const issuesSheetName = findIssuesSheet(wb);
+        if (issuesSheetName) {
+          const issueWs = wb.Sheets[issuesSheetName];
+          const issueRows = XLSX.utils.sheet_to_json(issueWs, { header: 1, defval: null, raw: true });
+          if (issueRows.length >= 2) {
+            const issueHeaders = issueRows[0];
+            const issueCol = {
+              no: findHeader(issueHeaders, ISSUE_HEADER_ALIASES.no),
+              issue: findHeader(issueHeaders, ISSUE_HEADER_ALIASES.issue),
+              comment: findHeader(issueHeaders, ISSUE_HEADER_ALIASES.comment),
+              lat: findHeader(issueHeaders, ISSUE_HEADER_ALIASES.lat),
+              lon: findHeader(issueHeaders, ISSUE_HEADER_ALIASES.lon)
+            };
+
+            if (issueCol.no >= 0 && issueCol.issue >= 0) {
+              for (let i = 1; i < issueRows.length; i++) {
+                const row = issueRows[i];
+                const no = row[issueCol.no];
+                const issue = row[issueCol.issue];
+                const comment = issueCol.comment >= 0 ? row[issueCol.comment] : null;
+                if ((no === null || no === '') && (issue === null || issue === '') && (comment === null || comment === '')) continue;
+
+                const lat = issueCol.lat >= 0 ? Number(row[issueCol.lat]) : NaN;
+                const lon = issueCol.lon >= 0 ? Number(row[issueCol.lon]) : NaN;
+                allIssues.push({
+                  id: `${fIndex}-${i}`,
+                  no,
+                  issue,
+                  comment,
+                  lat: Number.isFinite(lat) ? lat : null,
+                  lon: Number.isFinite(lon) ? lon : null,
+                  fileName: file.name,
+                  rowNumber: i + 1
+                });
+                fileIssueCount++;
+              }
+            } else {
+              warnings.push(`${file.name}: Issues sheet missing No. or Issue column`);
+            }
+          }
+        }
+
         const sheetName = findSamplingSheet(wb);
         if (!sheetName) {
           warnings.push(`${file.name}: Sampling sheet not found`);
+          processed.push(`${file.name} — 0 Highway samples · ${fileIssueCount.toLocaleString()} issues`);
           continue;
         }
 
@@ -1007,7 +1237,7 @@
           });
         }
 
-        processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway samples`);
+        processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway samples · ${fileIssueCount.toLocaleString()} issues`);
       } catch (err) {
         warnings.push(`${file.name}: ${err?.message || String(err)}`);
       }
@@ -1019,10 +1249,13 @@
     assignDirections(allSamples, axis);
 
     loadedSamples = allSamples;
+    loadedIssues = allIssues;
     loadedTotals = totals;
 
     updateSummary(totals, allSamples, axis);
-    renderPoints(allSamples, true);
+    renderPoints(allSamples, false);
+    renderIssues(allIssues);
+    fitMapToData(allSamples, allIssues);
 
     ui.fileInfo.textContent = `${processed.length}/${files.length} files processed`;
     ui.fileList.innerHTML = processed.length ? processed.map(escapeHtml).join('<br>') : 'None';
@@ -1031,7 +1264,7 @@
       setStatus(`Done with ${warnings.length} warning(s). ${warnings[0]}`, 'error');
       console.warn('Analyzer warnings:', warnings);
     } else {
-      setStatus(`Done. ${totals.highway.toLocaleString()} Highway samples found.`, 'ok');
+      setStatus(`Done. ${totals.highway.toLocaleString()} Highway samples and ${allIssues.length.toLocaleString()} issues found.`, 'ok');
     }
   }
 
@@ -1061,12 +1294,17 @@
   function resetResults(clearInputs = true) {
     pointLayer.clearLayers();
     arrowLayer.clearLayers();
+    issueLayer.clearLayers();
+    issueMarkerById.clear();
     currentDifferences = [];
     loadedSamples = [];
+    loadedIssues = [];
     loadedTotals = null;
     updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 }, [], null);
     ui.fileInfo.textContent = 'No files loaded';
     ui.fileList.textContent = 'None';
+    ui.issuesSummary.textContent = '0 issues';
+    ui.issuesTableBody.innerHTML = '<tr><td colspan="4" style="color:#9aa5b1">No issues loaded.</td></tr>';
     setStatus('Ready');
     if (clearInputs) {
       ui.folderInput.value = '';
@@ -1088,6 +1326,16 @@
     // Re-space arrows for the new map scale. Black disagreement dots and the
     // underlying sample markers do not need to be redrawn.
     renderDifferenceArrows();
+  });
+
+  ui.issuesTableBody.addEventListener('click', e => {
+    const row = e.target.closest('tr[data-issue-id]');
+    if (!row) return;
+    const marker = issueMarkerById.get(row.dataset.issueId);
+    if (!marker) return;
+    const ll = marker.getLatLng();
+    map.setView(ll, Math.max(map.getZoom(), 16));
+    marker.openPopup();
   });
 
   ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
