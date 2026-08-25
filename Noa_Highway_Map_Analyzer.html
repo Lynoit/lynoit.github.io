@@ -201,19 +201,21 @@
     .black { background: #050505; border: 1px solid #b9c0c8; }
 
     .direction-arrow-icon {
-      width: 38px;
-      height: 38px;
+      width: 30px;
+      height: 48px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 36px;
-      font-weight: 900;
-      line-height: 1;
-      text-shadow:
-        0 1px 3px rgba(0,0,0,.95),
-        0 0 2px rgba(0,0,0,.95);
       pointer-events: none;
       transform-origin: 50% 50%;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,.95));
+    }
+
+    .direction-arrow-icon svg {
+      display: block;
+      width: 30px;
+      height: 48px;
+      overflow: visible;
     }
 
     .rules {
@@ -284,7 +286,7 @@
 <div class="app">
   <header>
     <h1>NOA Highway Availability Analyzer</h1>
-    <div class="subtitle">Highway samples are compared by driving direction. Direction-dependent availability differences are highlighted with black segment dots and red/green arrows positioned beside the road markers.</div>
+    <div class="subtitle">Highway samples are compared by driving direction. Direction-dependent differences are shown as black dots with sparse red/green direction arrows beside the road.</div>
   </header>
 
   <div class="controls">
@@ -294,7 +296,7 @@
     <label class="button" for="fileInput">Open Excel files</label>
     <input id="fileInput" type="file" multiple accept=".xlsx,.xls" />
 
-    <span class="control-label">Direction comparison segment: 25 m</span>
+    <span class="control-label">Direction comparison segment: 25 m · arrow density adapts to zoom</span>
 
     <button id="clearBtn" type="button">Clear</button>
     <span id="fileInfo" class="file-info">No files loaded</span>
@@ -317,6 +319,7 @@
         <div class="stat-row"><span>Red / NOA incorrect</span><strong id="redCount">0</strong></div>
         <div class="stat-row"><span>Invalid / missing NOA</span><strong id="invalidNoa">0</strong></div>
         <div class="stat-row"><span>Direction-difference segments</span><strong id="differenceSegments">0</strong></div>
+        <div class="stat-row"><span>Visible arrow pairs</span><strong id="visibleArrowPairs">0</strong></div>
       </div>
 
       <div class="card">
@@ -339,7 +342,7 @@
         <div class="legend-row"><span class="dot black"></span> Segment where opposite directions disagree</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--green);font-weight:900">↑</span> Arrow direction with NOA available</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--red);font-weight:900">↑</span> Arrow direction with NOA unavailable</div>
-        <div class="note">For each ~25 m highway segment, the analyzer compares the dominant NOA state in the two opposite travel directions. If they differ, raw colored samples in that segment are replaced by a black segment marker plus one green and one red heading arrow.</div>
+        <div class="note">All disagreement locations remain visible as small black dots. Red/green arrows are intentionally thinned so they do not overlap. Zoom in to automatically reveal more arrow pairs. The arrows keep a fixed visual offset from the road, so they remain clearly beside the markers.</div>
       </div>
 
       <div class="card">
@@ -373,8 +376,11 @@
   }).addTo(map);
 
   const pointLayer = L.layerGroup().addTo(map);
+  const arrowLayer = L.layerGroup().addTo(map);
   let loadedSamples = [];
   let loadedTotals = null;
+  let currentDifferences = [];
+
 
   const ui = {
     folderInput: document.getElementById('folderInput'),
@@ -389,6 +395,7 @@
     redCount: document.getElementById('redCount'),
     invalidNoa: document.getElementById('invalidNoa'),
     differenceSegments: document.getElementById('differenceSegments'),
+    visibleArrowPairs: document.getElementById('visibleArrowPairs'),
     dirALabel: document.getElementById('dirALabel'),
     dirATotal: document.getElementById('dirATotal'),
     dirAPct: document.getElementById('dirAPct'),
@@ -715,36 +722,137 @@
     return `${Math.floor(m.x / SEGMENT_SIZE_M)}:${Math.floor(m.y / SEGMENT_SIZE_M)}`;
   }
 
+  function offsetLatLngByPixels(lat, lon, heading, sidePixels) {
+    // Leaflet screen coordinates: +x = east/right, +y = south/down.
+    // For heading 0° (north), the right-hand side is east (+x).
+    const p = map.latLngToLayerPoint([lat, lon]);
+    const a = toRad(heading);
+    const rightX = Math.cos(a);
+    const rightY = Math.sin(a);
+    return map.layerPointToLatLng([
+      p.x + rightX * sidePixels,
+      p.y + rightY * sidePixels
+    ]);
+  }
+
   function addDirectionArrow(lat, lon, heading, state, popupHtml) {
     if (!Number.isFinite(heading)) return;
 
     const color = state === 1 ? '#24d26a' : '#ff4d4d';
 
-    // Put the arrow BESIDE the road marker rather than on top of it.
-    // We offset it to the right-hand side of the travel direction.
-    // Opposite travel directions therefore naturally place their arrows
-    // on opposite sides of the same road segment.
-    const ARROW_SIDE_OFFSET_M = 18;
-    const sideBearing = (heading + 90) % 360;
-    const [arrowLat, arrowLon] = destinationPoint(
-      lat, lon, sideBearing, ARROW_SIDE_OFFSET_M
-    );
+    // Fixed PIXEL offset instead of metres. This keeps the arrow visibly beside
+    // the road at both overview and close zoom levels.
+    const ARROW_SIDE_OFFSET_PX = 22;
+    const arrowPos = offsetLatLngByPixels(lat, lon, heading, ARROW_SIDE_OFFSET_PX);
+
+    // SVG arrow gives a much cleaner shape than a rotated text glyph.
+    // White outline + dark shadow keeps it visible on any map background.
+    const svg = `
+      <svg viewBox="0 0 30 48" aria-hidden="true">
+        <path d="M15 1 L28 17 L20 17 L20 46 L10 46 L10 17 L2 17 Z"
+              fill="${color}" stroke="#ffffff" stroke-width="2.2"
+              stroke-linejoin="round" />
+      </svg>`;
 
     const icon = L.divIcon({
       className: '',
-      html: `<div class="direction-arrow-icon" style="color:${color};transform:rotate(${heading.toFixed(1)}deg)">↑</div>`,
-      iconSize: [38, 38],
-      iconAnchor: [19, 19]
+      html: `<div class="direction-arrow-icon" style="transform:rotate(${heading.toFixed(1)}deg)">${svg}</div>`,
+      iconSize: [30, 48],
+      iconAnchor: [15, 24]
     });
 
-    const marker = L.marker([arrowLat, arrowLon], {
+    const marker = L.marker(arrowPos, {
       icon,
       interactive: true,
       keyboard: false,
-      zIndexOffset: 1000
+      zIndexOffset: 1500
     });
     marker.bindPopup(popupHtml);
-    marker.addTo(pointLayer);
+    marker.addTo(arrowLayer);
+  }
+
+  function arrowMinSpacingMeters() {
+    // At low zoom, only a few representative arrows are useful. As the user
+    // zooms in, progressively show more without returning to one arrow per dot.
+    const z = map.getZoom();
+    if (z <= 11) return 900;
+    if (z === 12) return 650;
+    if (z === 13) return 420;
+    if (z === 14) return 260;
+    if (z === 15) return 160;
+    if (z === 16) return 100;
+    return 70;
+  }
+
+  function chooseSparseArrowSegments(differences, minSpacingM) {
+    if (!differences.length) return [];
+
+    // Grid-based thinning: retain a representative disagreement marker only
+    // when another selected marker is not already nearby. This is fast even
+    // for many thousands of disagreement cells.
+    const cellSize = minSpacingM;
+    const occupied = new Map();
+    const selected = [];
+
+    for (const d of differences) {
+      const m = webMercatorMeters(d.lat, d.lon);
+      const gx = Math.floor(m.x / cellSize);
+      const gy = Math.floor(m.y / cellSize);
+      let tooClose = false;
+
+      for (let dx = -1; dx <= 1 && !tooClose; dx++) {
+        for (let dy = -1; dy <= 1 && !tooClose; dy++) {
+          const arr = occupied.get(`${gx + dx}:${gy + dy}`);
+          if (!arr) continue;
+          for (const prior of arr) {
+            if (Math.hypot(prior.x - m.x, prior.y - m.y) < minSpacingM) {
+              tooClose = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!tooClose) {
+        selected.push(d);
+        const key = `${gx}:${gy}`;
+        if (!occupied.has(key)) occupied.set(key, []);
+        occupied.get(key).push({ x: m.x, y: m.y });
+      }
+    }
+    return selected;
+  }
+
+  function differencePopup(d) {
+    const aText = d.aState === 1 ? 'Available' : 'Unavailable';
+    const bText = d.bState === 1 ? 'Available' : 'Unavailable';
+    return `
+      <table class="popup-table">
+        <tr><td>Segment</td><td><strong>Direction-dependent NOA difference</strong></td></tr>
+        <tr><td>Direction A</td><td>${escapeHtml(aText)} · ${d.aCount} samples · ${Number.isFinite(d.aHeading) ? d.aHeading.toFixed(0) + '° ' + compassLabel(d.aHeading) : 'heading unavailable'}</td></tr>
+        <tr><td>Direction B</td><td>${escapeHtml(bText)} · ${d.bCount} samples · ${Number.isFinite(d.bHeading) ? d.bHeading.toFixed(0) + '° ' + compassLabel(d.bHeading) : 'heading unavailable'}</td></tr>
+        <tr><td>Segment size</td><td>~${SEGMENT_SIZE_M} m</td></tr>
+        <tr><td>GPS center</td><td>${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}</td></tr>
+      </table>`;
+  }
+
+  function renderDifferenceArrows() {
+    arrowLayer.clearLayers();
+    if (!currentDifferences.length) {
+      ui.visibleArrowPairs.textContent = '0';
+      return;
+    }
+
+    const minSpacing = arrowMinSpacingMeters();
+    const selected = chooseSparseArrowSegments(currentDifferences, minSpacing);
+
+    for (const d of selected) {
+      const popup = differencePopup(d);
+      addDirectionArrow(d.lat, d.lon, d.aHeading, d.aState, popup);
+      addDirectionArrow(d.lat, d.lon, d.bHeading, d.bState, popup);
+    }
+
+    ui.visibleArrowPairs.textContent = selected.length.toLocaleString();
   }
 
   function renderPoints(samples, fit = false) {
@@ -794,38 +902,28 @@
       bounds.push([s.lat, s.lon]);
     }
 
-    // Disagreement segments: black location dot plus one arrow for each travel direction.
+    // Keep ALL disagreement locations as small black dots. Arrows are rendered
+    // separately and heavily thinned, otherwise long disagreement stretches
+    // turn into an unreadable wall of arrowheads.
     for (const d of differences) {
-      const aText = d.aState === 1 ? 'Available' : 'Unavailable';
-      const bText = d.bState === 1 ? 'Available' : 'Unavailable';
-      const popup = `
-        <table class="popup-table">
-          <tr><td>Segment</td><td><strong>Direction-dependent NOA difference</strong></td></tr>
-          <tr><td>Direction A</td><td>${escapeHtml(aText)} · ${d.aCount} samples · ${Number.isFinite(d.aHeading) ? d.aHeading.toFixed(0) + '° ' + compassLabel(d.aHeading) : 'heading unavailable'}</td></tr>
-          <tr><td>Direction B</td><td>${escapeHtml(bText)} · ${d.bCount} samples · ${Number.isFinite(d.bHeading) ? d.bHeading.toFixed(0) + '° ' + compassLabel(d.bHeading) : 'heading unavailable'}</td></tr>
-          <tr><td>Segment size</td><td>~${SEGMENT_SIZE_M} m</td></tr>
-          <tr><td>GPS center</td><td>${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}</td></tr>
-        </table>
-      `;
-
+      const popup = differencePopup(d);
       const blackDot = L.circleMarker([d.lat, d.lon], {
-        radius: 5.0,
-        color: '#d9dde2',
+        radius: 3.2,
+        color: '#ffffff',
         fillColor: '#050505',
-        fillOpacity: 1,
-        opacity: 1,
-        weight: 1.2,
+        fillOpacity: 0.92,
+        opacity: 0.85,
+        weight: 0.7,
         interactive: true
       });
       blackDot.bindPopup(popup);
       blackDot.addTo(pointLayer);
-
-      addDirectionArrow(d.lat, d.lon, d.aHeading, d.aState, popup);
-      addDirectionArrow(d.lat, d.lon, d.bHeading, d.bState, popup);
       bounds.push([d.lat, d.lon]);
     }
 
+    currentDifferences = differences;
     ui.differenceSegments.textContent = differences.length.toLocaleString();
+    renderDifferenceArrows();
 
     if (fit && bounds.length) {
       map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
@@ -965,6 +1063,7 @@
     ui.redCount.textContent = totals.red.toLocaleString();
     ui.invalidNoa.textContent = totals.invalid.toLocaleString();
     ui.differenceSegments.textContent = '0';
+    ui.visibleArrowPairs.textContent = '0';
 
     const a = directionStats(samples, 'A');
     const b = directionStats(samples, 'B');
@@ -995,6 +1094,8 @@
 
   function resetResults(clearInputs = true) {
     pointLayer.clearLayers();
+    arrowLayer.clearLayers();
+    currentDifferences = [];
     loadedSamples = [];
     loadedTotals = null;
     updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 }, [], null);
@@ -1015,6 +1116,13 @@
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#039;');
   }
+
+
+  map.on('zoomend', () => {
+    // Re-space arrows for the new map scale. Black disagreement dots and the
+    // underlying sample markers do not need to be redrawn.
+    renderDifferenceArrows();
+  });
 
   ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
   ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
