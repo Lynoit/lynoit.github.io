@@ -23,6 +23,7 @@
       --accent: #5aa9ff;
       --blue: #66b2ff;
       --orange: #ffb45c;
+      --black: #050505;
     }
 
     * { box-sizing: border-box; }
@@ -197,6 +198,21 @@
     }
     .green { background: var(--green); }
     .red { background: var(--red); }
+    .black { background: #050505; border: 1px solid #b9c0c8; }
+
+    .direction-arrow-icon {
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: 900;
+      line-height: 1;
+      text-shadow: 0 1px 3px rgba(0,0,0,.9);
+      pointer-events: none;
+      transform-origin: 50% 50%;
+    }
 
     .rules {
       margin: 0;
@@ -266,7 +282,7 @@
 <div class="app">
   <header>
     <h1>NOA Highway Availability Analyzer</h1>
-    <div class="subtitle">Highway samples are separated by driving direction using a small map-only offset to the right of travel.</div>
+    <div class="subtitle">Highway samples are compared by driving direction. Direction-dependent availability differences are highlighted with black segment dots and red/green arrows.</div>
   </header>
 
   <div class="controls">
@@ -276,15 +292,7 @@
     <label class="button" for="fileInput">Open Excel files</label>
     <input id="fileInput" type="file" multiple accept=".xlsx,.xls" />
 
-    <label class="control-label" for="offsetSelect">Directional separation
-      <select id="offsetSelect">
-        <option value="0">Off</option>
-        <option value="4">4 m</option>
-        <option value="7" selected>7 m</option>
-        <option value="10">10 m</option>
-        <option value="15">15 m</option>
-      </select>
-    </label>
+    <span class="control-label">Direction comparison segment: 25 m</span>
 
     <button id="clearBtn" type="button">Clear</button>
     <span id="fileInfo" class="file-info">No files loaded</span>
@@ -306,6 +314,7 @@
         <div class="stat-row"><span>Green / NOA correct</span><strong id="greenCount">0</strong></div>
         <div class="stat-row"><span>Red / NOA incorrect</span><strong id="redCount">0</strong></div>
         <div class="stat-row"><span>Invalid / missing NOA</span><strong id="invalidNoa">0</strong></div>
+        <div class="stat-row"><span>Direction-difference segments</span><strong id="differenceSegments">0</strong></div>
       </div>
 
       <div class="card">
@@ -323,9 +332,12 @@
 
       <div class="card">
         <h2>Map legend</h2>
-        <div class="legend-row"><span class="dot green"></span> NOA availability correct (= 1)</div>
-        <div class="legend-row"><span class="dot red"></span> NOA availability incorrect (= 0)</div>
-        <div class="note">Each dot is shifted to the right of its calculated driving direction. Opposite traffic therefore appears on opposite sides of the road. This is only a visualization offset; original GPS coordinates are preserved.</div>
+        <div class="legend-row"><span class="dot green"></span> Same-direction sample: NOA available (= 1)</div>
+        <div class="legend-row"><span class="dot red"></span> Same-direction sample: NOA unavailable (= 0)</div>
+        <div class="legend-row"><span class="dot black"></span> Segment where opposite directions disagree</div>
+        <div class="legend-row"><span style="font-size:20px;color:var(--green);font-weight:900">↑</span> Arrow direction with NOA available</div>
+        <div class="legend-row"><span style="font-size:20px;color:var(--red);font-weight:900">↑</span> Arrow direction with NOA unavailable</div>
+        <div class="note">For each ~25 m highway segment, the analyzer compares the dominant NOA state in the two opposite travel directions. If they differ, raw colored samples in that segment are replaced by a black segment marker plus one green and one red heading arrow.</div>
       </div>
 
       <div class="card">
@@ -365,7 +377,6 @@
   const ui = {
     folderInput: document.getElementById('folderInput'),
     fileInput: document.getElementById('fileInput'),
-    offsetSelect: document.getElementById('offsetSelect'),
     clearBtn: document.getElementById('clearBtn'),
     fileInfo: document.getElementById('fileInfo'),
     status: document.getElementById('status'),
@@ -375,6 +386,7 @@
     greenCount: document.getElementById('greenCount'),
     redCount: document.getElementById('redCount'),
     invalidNoa: document.getElementById('invalidNoa'),
+    differenceSegments: document.getElementById('differenceSegments'),
     dirALabel: document.getElementById('dirALabel'),
     dirATotal: document.getElementById('dirATotal'),
     dirAPct: document.getElementById('dirAPct'),
@@ -567,28 +579,177 @@
     };
   }
 
+  const SEGMENT_SIZE_M = 25;
+
+  function webMercatorMeters(lat, lon) {
+    const R = 6378137;
+    const safeLat = Math.max(-85, Math.min(85, lat));
+    return {
+      x: R * toRad(lon),
+      y: R * Math.log(Math.tan(Math.PI / 4 + toRad(safeLat) / 2))
+    };
+  }
+
+  function dominantNoa(arr) {
+    let available = 0;
+    let unavailable = 0;
+    for (const s of arr) {
+      if (s.noa === 1) available++;
+      else if (s.noa === 0) unavailable++;
+    }
+    if (available === unavailable) return null;
+    return available > unavailable ? 1 : 0;
+  }
+
+  function meanHeading(arr) {
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (const s of arr) {
+      if (!Number.isFinite(s.heading)) continue;
+      const a = toRad(s.heading);
+      sx += Math.sin(a);
+      sy += Math.cos(a);
+      n++;
+    }
+    if (!n) return null;
+    return (toDeg(Math.atan2(sx / n, sy / n)) + 360) % 360;
+  }
+
+  function buildDirectionDifferenceSegments(samples) {
+    const MATCH_RADIUS_M = 40;
+    const cells = new Map();
+
+    // Spatial cells are built from ORIGINAL GPS coordinates. A 40 m local
+    // neighborhood lets opposite carriageways match even when they fall on
+    // opposite sides of a 25 m grid boundary.
+    for (const s of samples) {
+      if (s.noa === null || !Number.isFinite(s.heading)) continue;
+      const m = webMercatorMeters(s.lat, s.lon);
+      const cx = Math.floor(m.x / SEGMENT_SIZE_M);
+      const cy = Math.floor(m.y / SEGMENT_SIZE_M);
+      const key = `${cx}:${cy}`;
+      let cell = cells.get(key);
+      if (!cell) {
+        cell = { key, cx, cy, samples: [], xSum: 0, ySum: 0, latSum: 0, lonSum: 0 };
+        cells.set(key, cell);
+      }
+      cell.samples.push(s);
+      cell.xSum += m.x;
+      cell.ySum += m.y;
+      cell.latSum += s.lat;
+      cell.lonSum += s.lon;
+    }
+
+    const candidates = [];
+    const differenceKeys = new Set();
+    const searchCells = Math.ceil(MATCH_RADIUS_M / SEGMENT_SIZE_M);
+
+    for (const cell of cells.values()) {
+      const centerX = cell.xSum / cell.samples.length;
+      const centerY = cell.ySum / cell.samples.length;
+      const nearby = [];
+
+      for (let dx = -searchCells; dx <= searchCells; dx++) {
+        for (let dy = -searchCells; dy <= searchCells; dy++) {
+          const other = cells.get(`${cell.cx + dx}:${cell.cy + dy}`);
+          if (!other) continue;
+          for (const s of other.samples) {
+            const m = webMercatorMeters(s.lat, s.lon);
+            if (Math.hypot(m.x - centerX, m.y - centerY) <= MATCH_RADIUS_M) nearby.push(s);
+          }
+        }
+      }
+
+      if (nearby.length < 2) continue;
+      const axis = dominantAxis(nearby);
+      if (!Number.isFinite(axis)) continue;
+      const opposite = (axis + 180) % 360;
+      const a = [];
+      const b = [];
+
+      for (const s of nearby) {
+        if (angularDifference(s.heading, axis) <= angularDifference(s.heading, opposite)) a.push(s);
+        else b.push(s);
+      }
+
+      // A local segment is only comparable if there is actual data travelling
+      // in both opposite directions.
+      if (!a.length || !b.length) continue;
+
+      const aState = dominantNoa(a);
+      const bState = dominantNoa(b);
+      if (aState === null || bState === null || aState === bState) continue;
+
+      differenceKeys.add(cell.key);
+      candidates.push({
+        key: cell.key,
+        x: centerX,
+        y: centerY,
+        lat: cell.latSum / cell.samples.length,
+        lon: cell.lonSum / cell.samples.length,
+        aState,
+        bState,
+        aHeading: meanHeading(a),
+        bHeading: meanHeading(b),
+        aCount: a.length,
+        bCount: b.length
+      });
+    }
+
+    // Neighboring carriageway cells can describe the same physical road
+    // segment. Collapse markers that are very close so the map stays readable.
+    const differences = [];
+    for (const c of candidates) {
+      const duplicate = differences.some(d => Math.hypot(d.x - c.x, d.y - c.y) < 18);
+      if (!duplicate) differences.push(c);
+    }
+
+    return { differences, differenceKeys };
+  }
+
+  function sampleSegmentKey(s) {
+    const m = webMercatorMeters(s.lat, s.lon);
+    return `${Math.floor(m.x / SEGMENT_SIZE_M)}:${Math.floor(m.y / SEGMENT_SIZE_M)}`;
+  }
+
+  function addDirectionArrow(lat, lon, heading, state, popupHtml) {
+    if (!Number.isFinite(heading)) return;
+    const color = state === 1 ? '#24d26a' : '#ff4d4d';
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="direction-arrow-icon" style="color:${color};transform:rotate(${heading.toFixed(1)}deg)">↑</div>`,
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+    const [arrowLat, arrowLon] = destinationPoint(lat, lon, heading, 10);
+    const marker = L.marker([arrowLat, arrowLon], { icon, interactive: true, keyboard: false });
+    marker.bindPopup(popupHtml);
+    marker.addTo(pointLayer);
+  }
+
   function renderPoints(samples, fit = false) {
     pointLayer.clearLayers();
-    const offsetMeters = Number(ui.offsetSelect.value) || 0;
     const bounds = [];
+    const { differences, differenceKeys } = buildDirectionDifferenceSegments(samples);
 
+    // Normal samples are still shown, except inside a segment where the two
+    // travel directions have different dominant NOA availability.
     for (const s of samples) {
       if (s.noa === null) continue;
-
-      let displayLat = s.lat;
-      let displayLon = s.lon;
-      if (Number.isFinite(s.heading) && offsetMeters > 0) {
-        [displayLat, displayLon] = destinationPoint(s.lat, s.lon, (s.heading + 90) % 360, offsetMeters);
+      if (differenceKeys.has(sampleSegmentKey(s))) {
+        bounds.push([s.lat, s.lon]);
+        continue;
       }
 
       const color = s.noa === 1 ? '#24d26a' : '#ff4d4d';
-      const marker = L.circleMarker([displayLat, displayLon], {
-        radius: 3.3,
+      const marker = L.circleMarker([s.lat, s.lon], {
+        radius: 3.0,
         color,
         fillColor: color,
-        fillOpacity: 0.84,
-        opacity: 0.95,
-        weight: 0.8,
+        fillOpacity: 0.78,
+        opacity: 0.9,
+        weight: 0.7,
         interactive: true
       });
 
@@ -596,7 +757,7 @@
         ? `${s.heading.toFixed(0)}° (${compassLabel(s.heading)})`
         : 'Unavailable';
       const directionText = s.direction ? `Direction ${s.direction}` : 'Unclassified';
-      const noaText = s.noa === 1 ? 'Correct / available' : 'Incorrect / unavailable';
+      const noaText = s.noa === 1 ? 'Available' : 'Unavailable';
 
       marker.bindPopup(`
         <table class="popup-table">
@@ -604,16 +765,48 @@
           <tr><td>Direction</td><td>${escapeHtml(directionText)}</td></tr>
           <tr><td>Heading</td><td>${escapeHtml(headingText)}</td></tr>
           <tr><td>Speed limit</td><td>${escapeHtml(formatValue(s.speed))} km/h</td></tr>
-          <tr><td>Original GPS</td><td>${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}</td></tr>
-          <tr><td>Display offset</td><td>${offsetMeters} m right of travel</td></tr>
+          <tr><td>GPS</td><td>${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}</td></tr>
           <tr><td>Source</td><td>${escapeHtml(s.fileName)}</td></tr>
           <tr><td>Excel row</td><td>${s.rowNumber.toLocaleString()}</td></tr>
         </table>
       `);
 
       marker.addTo(pointLayer);
-      bounds.push([displayLat, displayLon]);
+      bounds.push([s.lat, s.lon]);
     }
+
+    // Disagreement segments: black location dot plus one arrow for each travel direction.
+    for (const d of differences) {
+      const aText = d.aState === 1 ? 'Available' : 'Unavailable';
+      const bText = d.bState === 1 ? 'Available' : 'Unavailable';
+      const popup = `
+        <table class="popup-table">
+          <tr><td>Segment</td><td><strong>Direction-dependent NOA difference</strong></td></tr>
+          <tr><td>Direction A</td><td>${escapeHtml(aText)} · ${d.aCount} samples · ${Number.isFinite(d.aHeading) ? d.aHeading.toFixed(0) + '° ' + compassLabel(d.aHeading) : 'heading unavailable'}</td></tr>
+          <tr><td>Direction B</td><td>${escapeHtml(bText)} · ${d.bCount} samples · ${Number.isFinite(d.bHeading) ? d.bHeading.toFixed(0) + '° ' + compassLabel(d.bHeading) : 'heading unavailable'}</td></tr>
+          <tr><td>Segment size</td><td>~${SEGMENT_SIZE_M} m</td></tr>
+          <tr><td>GPS center</td><td>${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}</td></tr>
+        </table>
+      `;
+
+      const blackDot = L.circleMarker([d.lat, d.lon], {
+        radius: 5.0,
+        color: '#d9dde2',
+        fillColor: '#050505',
+        fillOpacity: 1,
+        opacity: 1,
+        weight: 1.2,
+        interactive: true
+      });
+      blackDot.bindPopup(popup);
+      blackDot.addTo(pointLayer);
+
+      addDirectionArrow(d.lat, d.lon, d.aHeading, d.aState, popup);
+      addDirectionArrow(d.lat, d.lon, d.bHeading, d.bState, popup);
+      bounds.push([d.lat, d.lon]);
+    }
+
+    ui.differenceSegments.textContent = differences.length.toLocaleString();
 
     if (fit && bounds.length) {
       map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
@@ -752,6 +945,7 @@
     ui.greenCount.textContent = totals.green.toLocaleString();
     ui.redCount.textContent = totals.red.toLocaleString();
     ui.invalidNoa.textContent = totals.invalid.toLocaleString();
+    ui.differenceSegments.textContent = '0';
 
     const a = directionStats(samples, 'A');
     const b = directionStats(samples, 'B');
@@ -805,9 +999,6 @@
 
   ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
   ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
-  ui.offsetSelect.addEventListener('change', () => {
-    if (loadedSamples.length) renderPoints(loadedSamples, false);
-  });
   ui.clearBtn.addEventListener('click', () => resetResults(true));
 })();
 </script>
