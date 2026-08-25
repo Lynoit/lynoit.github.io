@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NOA Highway Availability Analyzer</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --panel: #181c22;
+      --panel2: #20252d;
+      --text: #eef2f7;
+      --muted: #9aa5b1;
+      --border: #303844;
+      --green: #24d26a;
+      --red: #ff4d4d;
+      --accent: #5aa9ff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      height: 100vh;
+      min-height: 650px;
+    }
+
+    header {
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border);
+      background: #12161b;
+    }
+
+    h1 {
+      margin: 0 0 5px;
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 22px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .button, button {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 13px;
+      background: var(--panel2);
+      color: var(--text);
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .button:hover, button:hover { border-color: var(--accent); }
+    input[type="file"] { display: none; }
+
+    .file-info {
+      color: var(--muted);
+      font-size: 13px;
+      margin-left: 4px;
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: 330px 1fr;
+      min-height: 0;
+    }
+
+    .sidebar {
+      overflow: auto;
+      padding: 16px;
+      border-right: 1px solid var(--border);
+      background: #14181e;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+
+    .card h2 {
+      font-size: 14px;
+      margin: 0 0 12px;
+      color: #dfe6ee;
+    }
+
+    .big-kpi {
+      font-size: 34px;
+      font-weight: 750;
+      line-height: 1;
+      margin: 3px 0 8px;
+    }
+
+    .kpi-label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .bar {
+      height: 9px;
+      background: #3b2023;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 11px;
+    }
+
+    .bar > div {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 6px 0;
+      font-size: 13px;
+      border-bottom: 1px solid #282f39;
+    }
+
+    .stat-row:last-child { border-bottom: 0; }
+    .stat-row span:first-child { color: var(--muted); }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .green { background: var(--green); }
+    .red { background: var(--red); }
+
+    .rules {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .file-list {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      word-break: break-word;
+      line-height: 1.45;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      min-height: 500px;
+      background: #252b33;
+    }
+
+    .status {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .status.error { color: #ff8787; }
+    .status.ok { color: #74e6a0; }
+
+    @media (max-width: 850px) {
+      .app { height: auto; }
+      .main { grid-template-columns: 1fr; }
+      .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+      #map { height: 65vh; }
+      .status { width: 100%; margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>NOA Highway Availability Analyzer</h1>
+    <div class="subtitle">Load a folder of Annotator Excel reports. Highway samples are shown as green/red dots based on NOA availability correctness.</div>
+  </header>
+
+  <div class="controls">
+    <label class="button" for="folderInput">Open folder</label>
+    <input id="folderInput" type="file" webkitdirectory directory multiple accept=".xlsx,.xls" />
+
+    <label class="button" for="fileInput">Open Excel files</label>
+    <input id="fileInput" type="file" multiple accept=".xlsx,.xls" />
+
+    <button id="clearBtn" type="button">Clear</button>
+    <span id="fileInfo" class="file-info">No files loaded</span>
+    <span id="status" class="status">Ready</span>
+  </div>
+
+  <div class="main">
+    <aside class="sidebar">
+      <div class="card">
+        <h2>Highway NOA correctness</h2>
+        <div id="correctPct" class="big-kpi">—</div>
+        <div class="kpi-label">Green Highway samples / all Highway samples</div>
+        <div class="bar"><div id="correctBar"></div></div>
+      </div>
+
+      <div class="card">
+        <h2>Samples</h2>
+        <div class="stat-row"><span>Highway total</span><strong id="totalHighway">0</strong></div>
+        <div class="stat-row"><span>Green / NOA correct</span><strong id="greenCount">0</strong></div>
+        <div class="stat-row"><span>Red / NOA incorrect</span><strong id="redCount">0</strong></div>
+        <div class="stat-row"><span>Invalid / missing NOA</span><strong id="invalidNoa">0</strong></div>
+      </div>
+
+      <div class="card">
+        <h2>Map legend</h2>
+        <div class="legend-row"><span class="dot green"></span> NOA availability correct (= 1)</div>
+        <div class="legend-row"><span class="dot red"></span> NOA availability incorrect (= 0)</div>
+      </div>
+
+      <div class="card">
+        <h2>Road classification used</h2>
+        <ul class="rules">
+          <li>FC1 controlled-access → Highway</li>
+          <li>FC5 → City</li>
+          <li>FC3 / FC4 + speed ≤ 50 km/h → City</li>
+          <li>FC3 / FC4 + speed &gt; 50 km/h → Country</li>
+          <li>FC1 / FC2 → Country</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Processed files</h2>
+        <div id="fileList" class="file-list">None</div>
+      </div>
+    </aside>
+
+    <div id="map"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const map = L.map('map', { preferCanvas: true }).setView([57.7, 11.97], 10);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const pointLayer = L.layerGroup().addTo(map);
+
+  const ui = {
+    folderInput: document.getElementById('folderInput'),
+    fileInput: document.getElementById('fileInput'),
+    clearBtn: document.getElementById('clearBtn'),
+    fileInfo: document.getElementById('fileInfo'),
+    status: document.getElementById('status'),
+    correctPct: document.getElementById('correctPct'),
+    correctBar: document.getElementById('correctBar'),
+    totalHighway: document.getElementById('totalHighway'),
+    greenCount: document.getElementById('greenCount'),
+    redCount: document.getElementById('redCount'),
+    invalidNoa: document.getElementById('invalidNoa'),
+    fileList: document.getElementById('fileList')
+  };
+
+  const HEADER_ALIASES = {
+    lat: ['Latitude', 'LAtitude'],
+    lon: ['Longitude', 'Longtidude'],
+    road: ['HERE Road type', 'HERE Road', 'HERE Road Type'],
+    speed: ['HERE Speed Limit (km/h)', 'HERE Speed Limit   (km/h)', 'HERE Speed Limit'],
+    noa: ['noa_availability_correct', 'noa_availability']
+  };
+
+  function normalizeHeader(value) {
+    return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  function findHeader(headers, aliases) {
+    const normalized = headers.map(normalizeHeader);
+    for (const alias of aliases) {
+      const idx = normalized.indexOf(normalizeHeader(alias));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  }
+
+  function classifyRoad(hereRoadType, speedLimit) {
+    const road = String(hereRoadType ?? '').trim();
+
+    if (road === 'FC1 controlled-access') return 'Highway';
+    if (road === 'FC5') return 'City';
+
+    if (road === 'FC3' || road === 'FC4') {
+      const speed = Number(speedLimit);
+      if (!Number.isFinite(speed)) return null;
+      return speed <= 50 ? 'City' : 'Country';
+    }
+
+    if (road === 'FC1' || road === 'FC2') return 'Country';
+    return null;
+  }
+
+  function parseNoa(value) {
+    if (value === 1 || value === true) return 1;
+    if (value === 0 || value === false) return 0;
+
+    const s = String(value ?? '').trim().toLowerCase();
+    if (s === '1' || s === 'true') return 1;
+    if (s === '0' || s === 'false') return 0;
+    return null;
+  }
+
+  function findSamplingSheet(workbook) {
+    const exact = workbook.SheetNames.find(n => n.toLowerCase() === 'sampling');
+    if (exact) return exact;
+    return workbook.SheetNames.find(n => n.toLowerCase().startsWith('samp')) || null;
+  }
+
+  async function readWorkbook(file) {
+    const buffer = await file.arrayBuffer();
+    return XLSX.read(buffer, { type: 'array', cellDates: false });
+  }
+
+  async function analyzeFiles(fileList) {
+    const files = Array.from(fileList).filter(f => /\.xlsx?$/i.test(f.name));
+    if (!files.length) {
+      setStatus('No Excel files found.', 'error');
+      return;
+    }
+
+    resetResults(false);
+    setStatus(`Reading ${files.length} Excel file${files.length === 1 ? '' : 's'}…`);
+
+    const totals = { highway: 0, green: 0, red: 0, invalid: 0 };
+    const bounds = [];
+    const processed = [];
+    const warnings = [];
+
+    for (let fIndex = 0; fIndex < files.length; fIndex++) {
+      const file = files[fIndex];
+      setStatus(`Processing ${fIndex + 1}/${files.length}: ${file.name}`);
+
+      try {
+        const wb = await readWorkbook(file);
+        const sheetName = findSamplingSheet(wb);
+        if (!sheetName) {
+          warnings.push(`${file.name}: Sampling sheet not found`);
+          continue;
+        }
+
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
+        if (rows.length < 2) {
+          warnings.push(`${file.name}: Sampling sheet is empty`);
+          continue;
+        }
+
+        const headers = rows[0];
+        const col = {
+          lat: findHeader(headers, HEADER_ALIASES.lat),
+          lon: findHeader(headers, HEADER_ALIASES.lon),
+          road: findHeader(headers, HEADER_ALIASES.road),
+          speed: findHeader(headers, HEADER_ALIASES.speed),
+          noa: findHeader(headers, HEADER_ALIASES.noa)
+        };
+
+        const missing = Object.entries(col).filter(([, i]) => i < 0).map(([k]) => k);
+        if (missing.length) {
+          warnings.push(`${file.name}: missing ${missing.join(', ')} column(s)`);
+          continue;
+        }
+
+        let fileHighway = 0;
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          if (classifyRoad(row[col.road], row[col.speed]) !== 'Highway') continue;
+
+          totals.highway++;
+          fileHighway++;
+
+          const noa = parseNoa(row[col.noa]);
+          if (noa === 1) totals.green++;
+          else if (noa === 0) totals.red++;
+          else totals.invalid++;
+
+          const lat = Number(row[col.lat]);
+          const lon = Number(row[col.lon]);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+          if (noa === null) continue;
+
+          const color = noa === 1 ? '#24d26a' : '#ff4d4d';
+          const marker = L.circleMarker([lat, lon], {
+            radius: 3.2,
+            color,
+            fillColor: color,
+            fillOpacity: 0.82,
+            opacity: 0.9,
+            weight: 0.7,
+            interactive: false
+          });
+          marker.addTo(pointLayer);
+          bounds.push([lat, lon]);
+        }
+
+        processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway samples`);
+      } catch (err) {
+        warnings.push(`${file.name}: ${err?.message || String(err)}`);
+      }
+
+      // Let the browser repaint between large workbooks.
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    updateSummary(totals);
+    ui.fileInfo.textContent = `${processed.length}/${files.length} files processed`;
+    ui.fileList.innerHTML = processed.length ? processed.map(escapeHtml).join('<br>') : 'None';
+
+    if (bounds.length) {
+      map.fitBounds(bounds, { padding: [24, 24], maxZoom: 16 });
+    }
+
+    if (warnings.length) {
+      setStatus(`Done with ${warnings.length} warning(s). ${warnings[0]}`, 'error');
+      console.warn('Analyzer warnings:', warnings);
+    } else {
+      setStatus(`Done. ${totals.highway.toLocaleString()} Highway samples found.`, 'ok');
+    }
+  }
+
+  function updateSummary(totals) {
+    const pct = totals.highway > 0 ? (100 * totals.green / totals.highway) : null;
+    ui.correctPct.textContent = pct === null ? '—' : `${pct.toFixed(1)}%`;
+    ui.correctBar.style.width = pct === null ? '0%' : `${Math.max(0, Math.min(100, pct))}%`;
+    ui.totalHighway.textContent = totals.highway.toLocaleString();
+    ui.greenCount.textContent = totals.green.toLocaleString();
+    ui.redCount.textContent = totals.red.toLocaleString();
+    ui.invalidNoa.textContent = totals.invalid.toLocaleString();
+  }
+
+  function setStatus(text, kind = '') {
+    ui.status.textContent = text;
+    ui.status.className = `status ${kind}`.trim();
+  }
+
+  function resetResults(clearInputs = true) {
+    pointLayer.clearLayers();
+    updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 });
+    ui.fileInfo.textContent = 'No files loaded';
+    ui.fileList.textContent = 'None';
+    setStatus('Ready');
+    if (clearInputs) {
+      ui.folderInput.value = '';
+      ui.fileInput.value = '';
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+  }
+
+  ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
+  ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
+  ui.clearBtn.addEventListener('click', () => resetResults(true));
+})();
+</script>
+</body>
+</html>
