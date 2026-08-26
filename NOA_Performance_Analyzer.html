@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NOA Highway Availability Analyzer - Directional</title>
+  <title>NOA Road Availability Analyzer - Directional</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -89,6 +89,36 @@
       gap: 7px;
       color: var(--muted);
       font-size: 12px;
+    }
+
+    .road-filter {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel2);
+    }
+    .road-filter-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .road-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .road-check input {
+      accent-color: var(--accent);
+      width: 15px;
+      height: 15px;
+      cursor: pointer;
     }
 
     .file-info {
@@ -371,8 +401,8 @@
 <body>
 <div class="app">
   <header>
-    <h1>NOA Highway Availability Analyzer</h1>
-    <div class="subtitle">Highway samples are compared by driving direction. Direction-dependent differences are shown as black dots with sparse red/green direction arrows beside the road.</div>
+    <h1>NOA Road Availability Analyzer</h1>
+    <div class="subtitle">Selected Highway / Highway-like samples are compared by driving direction. Direction-dependent differences are shown as black dots with sparse red/green direction arrows beside the road.</div>
   </header>
 
   <div class="controls">
@@ -381,6 +411,12 @@
 
     <label class="button" for="fileInput">Open Excel files</label>
     <input id="fileInput" type="file" multiple accept=".xlsx,.xls" />
+
+    <div class="road-filter" aria-label="Road categories used in analysis">
+      <span class="road-filter-title">Analyze:</span>
+      <label class="road-check"><input id="useHighway" type="checkbox" checked /> Highway</label>
+      <label class="road-check"><input id="useHighwayLike" type="checkbox" /> Highway-like</label>
+    </div>
 
     <span class="control-label">Direction comparison segment: 25 m · arrow density adapts to zoom</span>
 
@@ -392,15 +428,15 @@
   <div class="main">
     <aside class="sidebar">
       <div class="card">
-        <h2>Highway NOA correctness</h2>
+        <h2>Selected-road NOA correctness</h2>
         <div id="correctPct" class="big-kpi">—</div>
-        <div class="kpi-label">Green Highway samples / all Highway samples</div>
+        <div class="kpi-label">Green selected samples / all selected samples</div>
         <div class="bar"><div id="correctBar"></div></div>
       </div>
 
       <div class="card">
         <h2>Samples</h2>
-        <div class="stat-row"><span>Highway total</span><strong id="totalHighway">0</strong></div>
+        <div class="stat-row"><span>Selected total</span><strong id="totalHighway">0</strong></div>
         <div class="stat-row"><span>Green / NOA correct</span><strong id="greenCount">0</strong></div>
         <div class="stat-row"><span>Red / NOA incorrect</span><strong id="redCount">0</strong></div>
         <div class="stat-row"><span>Invalid / missing NOA</span><strong id="invalidNoa">0</strong></div>
@@ -427,7 +463,8 @@
           <li>FC5 → City</li>
           <li>FC3 / FC4 + speed ≤ 50 km/h → City</li>
           <li>FC3 / FC4 + speed &gt; 50 km/h → Country</li>
-          <li>FC1 / FC2 → Country</li>
+          <li>FC1 / FC2 + speed ≥ 70 km/h + OSM road type trunk / primary / motorway / motorway_link → Highway-like</li>
+          <li>Other FC1 / FC2 → Country</li>
         </ul>
       </div>
 
@@ -489,6 +526,8 @@
   const ui = {
     folderInput: document.getElementById('folderInput'),
     fileInput: document.getElementById('fileInput'),
+    useHighway: document.getElementById('useHighway'),
+    useHighwayLike: document.getElementById('useHighwayLike'),
     clearBtn: document.getElementById('clearBtn'),
     fileInfo: document.getElementById('fileInfo'),
     status: document.getElementById('status'),
@@ -509,6 +548,7 @@
     lat: ['Latitude', 'LAtitude'],
     lon: ['Longitude', 'Longtidude'],
     road: ['HERE Road type', 'HERE Road', 'HERE Road Type'],
+    osmRoad: ['OSM Road type', 'OSM Road Type', 'OSM Highway', 'OSM highway'],
     speed: ['HERE Speed Limit (km/h)', 'HERE Speed Limit   (km/h)', 'HERE Speed Limit'],
     noa: ['noa_availability_correct', 'noa_availability']
   };
@@ -534,20 +574,70 @@
     return -1;
   }
 
-  function classifyRoad(hereRoadType, speedLimit) {
+  function classifyRoad(hereRoadType, speedLimit, osmRoadType) {
     const road = String(hereRoadType ?? '').trim();
+    const speed = Number(speedLimit);
+    const osmRoad = String(osmRoadType ?? '').trim().toLowerCase();
 
     if (road === 'FC1 controlled-access') return 'Highway';
     if (road === 'FC5') return 'City';
 
     if (road === 'FC3' || road === 'FC4') {
-      const speed = Number(speedLimit);
       if (!Number.isFinite(speed)) return null;
       return speed <= 50 ? 'City' : 'Country';
     }
 
-    if (road === 'FC1' || road === 'FC2') return 'Country';
+    if (road === 'FC1' || road === 'FC2') {
+      const highwayLikeOsm = new Set(['trunk', 'primary', 'motorway', 'motorway_link']);
+      if (Number.isFinite(speed) && speed >= 70 && highwayLikeOsm.has(osmRoad)) {
+        return 'Highway-like';
+      }
+      return 'Country';
+    }
+
     return null;
+  }
+
+  function selectedRoadClasses() {
+    const selected = new Set();
+    if (ui.useHighway.checked) selected.add('Highway');
+    if (ui.useHighwayLike.checked) selected.add('Highway-like');
+    return selected;
+  }
+
+  function totalsForSamples(samples) {
+    const totals = { highway: samples.length, green: 0, red: 0, invalid: 0 };
+    for (const s of samples) {
+      if (s.noa === 1) totals.green++;
+      else if (s.noa === 0) totals.red++;
+      else totals.invalid++;
+    }
+    return totals;
+  }
+
+  function applyRoadSelection(refit = false) {
+    const selected = selectedRoadClasses();
+    const samples = loadedSamples.filter(s => selected.has(s.roadClass));
+
+    if (!selected.size) {
+      pointLayer.clearLayers();
+      arrowLayer.clearLayers();
+      currentDifferences = [];
+      updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 }, [], null);
+      setStatus('Select Highway, Highway-like, or both.', 'error');
+      return;
+    }
+
+    const axis = dominantAxis(samples);
+    assignDirections(samples, axis);
+    const totals = totalsForSamples(samples);
+    loadedTotals = totals;
+    updateSummary(totals, samples, axis);
+    renderPoints(samples, false);
+    if (refit) fitMapToData(samples, loadedIssues, loadedTraces);
+
+    const labels = Array.from(selected).join(' + ');
+    setStatus(`Showing ${totals.highway.toLocaleString()} ${labels} sample${totals.highway === 1 ? '' : 's'}.`, 'ok');
   }
 
   function parseNoa(value) {
@@ -1019,6 +1109,8 @@
       marker.bindPopup(`
         <table class="popup-table">
           <tr><td>NOA</td><td><strong>${escapeHtml(noaText)}</strong></td></tr>
+          <tr><td>Road class</td><td>${escapeHtml(formatValue(s.roadClass))}</td></tr>
+          <tr><td>OSM road type</td><td>${escapeHtml(formatValue(s.osmRoad))}</td></tr>
           <tr><td>Direction</td><td>${escapeHtml(directionText)}</td></tr>
           <tr><td>Heading</td><td>${escapeHtml(headingText)}</td></tr>
           <tr><td>Speed limit</td><td>${escapeHtml(formatValue(s.speed))} km/h</td></tr>
@@ -1150,7 +1242,6 @@
     resetResults(false);
     setStatus(`Reading ${files.length} Excel file${files.length === 1 ? '' : 's'}…`);
 
-    const totals = { highway: 0, green: 0, red: 0, invalid: 0 };
     const allSamples = [];
     const allIssues = [];
     const allTraces = [];
@@ -1226,14 +1317,19 @@
           lat: findHeader(headers, HEADER_ALIASES.lat),
           lon: findHeader(headers, HEADER_ALIASES.lon),
           road: findHeader(headers, HEADER_ALIASES.road),
+          osmRoad: findHeader(headers, HEADER_ALIASES.osmRoad),
           speed: findHeader(headers, HEADER_ALIASES.speed),
           noa: findHeader(headers, HEADER_ALIASES.noa)
         };
 
-        const missing = Object.entries(col).filter(([, i]) => i < 0).map(([k]) => k);
+        const requiredCols = ['lat', 'lon', 'road', 'speed', 'noa'];
+        const missing = requiredCols.filter(k => col[k] < 0);
         if (missing.length) {
           warnings.push(`${file.name}: missing ${missing.join(', ')} column(s)`);
           continue;
+        }
+        if (col.osmRoad < 0) {
+          warnings.push(`${file.name}: OSM Road type column not found; Highway-like classification is unavailable for this file`);
         }
 
         // First collect every valid GPS row, in chronological spreadsheet order, so heading
@@ -1258,18 +1354,16 @@
         }
 
         let fileHighway = 0;
+        let fileHighwayLike = 0;
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
-          if (classifyRoad(row[col.road], row[col.speed]) !== 'Highway') continue;
+          const roadClass = classifyRoad(row[col.road], row[col.speed], row[col.osmRoad]);
+          if (roadClass !== 'Highway' && roadClass !== 'Highway-like') continue;
 
-          totals.highway++;
-          fileHighway++;
+          if (roadClass === 'Highway') fileHighway++;
+          else fileHighwayLike++;
 
           const noa = parseNoa(row[col.noa]);
-          if (noa === 1) totals.green++;
-          else if (noa === 0) totals.red++;
-          else totals.invalid++;
-
           const lat = Number(row[col.lat]);
           const lon = Number(row[col.lon]);
           if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
@@ -1280,13 +1374,16 @@
             noa,
             heading: headingByRow.get(i) ?? null,
             direction: null,
+            roadClass,
+            hereRoad: row[col.road],
+            osmRoad: row[col.osmRoad],
             speed: row[col.speed],
             fileName: file.name,
             rowNumber: i + 1
           });
         }
 
-        processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway samples · ${fileIssueCount.toLocaleString()} issues`);
+        processed.push(`${file.name} — ${fileHighway.toLocaleString()} Highway · ${fileHighwayLike.toLocaleString()} Highway-like · ${fileIssueCount.toLocaleString()} issues`);
       } catch (err) {
         warnings.push(`${file.name}: ${err?.message || String(err)}`);
       }
@@ -1294,19 +1391,17 @@
       await new Promise(resolve => setTimeout(resolve, 0));
     }
 
-    const axis = dominantAxis(allSamples);
-    assignDirections(allSamples, axis);
-
     loadedSamples = allSamples;
     loadedIssues = allIssues;
     loadedTraces = allTraces;
-    loadedTotals = totals;
+    loadedTotals = null;
 
-    updateSummary(totals, allSamples, axis);
     renderTraces(allTraces);
-    renderPoints(allSamples, false);
     renderIssues(allIssues);
-    fitMapToData(allSamples, allIssues, allTraces);
+    applyRoadSelection(false);
+    const selected = selectedRoadClasses();
+    const selectedSamples = allSamples.filter(s => selected.has(s.roadClass));
+    fitMapToData(selectedSamples, allIssues, allTraces);
 
     ui.fileInfo.textContent = `${processed.length}/${files.length} files processed`;
     ui.fileList.innerHTML = processed.length ? processed.map(escapeHtml).join('<br>') : 'None';
@@ -1315,7 +1410,9 @@
       setStatus(`Done with ${warnings.length} warning(s). ${warnings[0]}`, 'error');
       console.warn('Analyzer warnings:', warnings);
     } else {
-      setStatus(`Done. ${totals.highway.toLocaleString()} Highway samples and ${allIssues.length.toLocaleString()} issues found.`, 'ok');
+      const selected = selectedRoadClasses();
+      const selectedCount = allSamples.filter(s => selected.has(s.roadClass)).length;
+      setStatus(`Done. ${selectedCount.toLocaleString()} selected road samples and ${allIssues.length.toLocaleString()} issues found.`, 'ok');
     }
   }
 
@@ -1393,6 +1490,8 @@
 
   ui.folderInput.addEventListener('change', e => analyzeFiles(e.target.files));
   ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
+  ui.useHighway.addEventListener('change', () => { if (loadedSamples.length) applyRoadSelection(true); });
+  ui.useHighwayLike.addEventListener('change', () => { if (loadedSamples.length) applyRoadSelection(true); });
   ui.clearBtn.addEventListener('click', () => resetResults(true));
 })();
 </script>
