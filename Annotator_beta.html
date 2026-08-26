@@ -616,6 +616,20 @@
     #endSessionSteps { margin: 16px 0 0; padding-left: 22px; color: #c9d1d9; }
     #endSessionSteps li { margin: 7px 0; }
 
+    #endSessionConfirmActions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+
+    #endSessionConfirmActions .bigButton {
+      margin: 0;
+      width: auto;
+      min-width: 120px;
+    }
+
     table {
       width: 100%;
       margin: 10px 0;
@@ -1416,7 +1430,7 @@
     </div>
 
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
-      Ver 1.18 audio + device ID
+      Ver 1.21 audio + device ID + road category
       © Lynoit Tech 2025
     </footer>
   </div>
@@ -1948,6 +1962,11 @@
 
       const speed = extractHereSpeedLimitKmh(data);
 
+      // For road-category classification, missing must really mean missing in
+      // the latest HERE lookup. The existing speed-sign behaviour can still
+      // retain its last valid displayed value.
+      latestHereSpeedForRoadCategory = speed != null ? Number(speed) : null;
+
       if (speed != null) {
         currentHereLegalSpeed = speed;
 
@@ -1962,6 +1981,8 @@
       if (hereRoadType) {
         currentHereRoadType = hereRoadType;
       }
+
+      updateRoadCategoryDisplay();
 
     }
 
@@ -2089,6 +2110,93 @@
     let uploadsEnabled = false;
 
     let currentHereRoadType = '';
+
+    // --- Fused road category for sidebar: Highway / Country / City ---
+    // Keep the raw OSM/HERE road types separately for Sampling/export.
+    let currentOsmRoadTypeRaw = 'unknown';
+    let latestHereSpeedForRoadCategory = null;
+    let latestOsmSpeedForRoadCategory = null;
+    let currentRoadCategory = 'Unknown';
+
+    function normalizeHereFc(hereRoadType) {
+      const m = String(hereRoadType || '').match(/\bFC([1-5])\b/i);
+      return m ? `FC${m[1]}`.toUpperCase() : '';
+    }
+
+    function classifyRoadCategory() {
+      const hereType = String(currentHereRoadType || '');
+      const hereFc = normalizeHereFc(hereType);
+      const osmType = String(currentOsmRoadTypeRaw || '').toLowerCase();
+      const hereSpeed = Number.isFinite(latestHereSpeedForRoadCategory)
+        ? latestHereSpeedForRoadCategory
+        : null;
+      const osmSpeed = Number.isFinite(latestOsmSpeedForRoadCategory)
+        ? latestOsmSpeedForRoadCategory
+        : null;
+
+      // 1) HERE controlled-access always wins.
+      if (/controlled-access/i.test(hereType)) {
+        return 'Highway';
+      }
+
+      // 2) HERE speed available.
+      if (hereSpeed != null) {
+        if (hereSpeed <= 50) {
+          return 'City';
+        }
+
+        if (osmType === 'motorway' || osmType === 'motorway_link') {
+          return 'Highway';
+        }
+
+        if (
+          hereFc === 'FC1' &&
+          osmType === 'trunk' &&
+          [70, 80, 100].includes(Math.round(hereSpeed))
+        ) {
+          return 'Highway';
+        }
+
+        if (
+          hereFc === 'FC3' &&
+          osmType === 'trunk' &&
+          Math.round(hereSpeed) === 80
+        ) {
+          return 'Highway';
+        }
+
+        return 'Country';
+      }
+
+      // 3) HERE speed missing -> use OSM evidence.
+      if (osmType === 'motorway' || osmType === 'motorway_link') {
+        return 'Highway';
+      }
+
+      if (osmSpeed != null) {
+        return osmSpeed <= 50 ? 'City' : 'Country';
+      }
+
+      // Last fallback: HERE road type only.
+      // FC5 is the strongest city-class fallback; FC1-FC4 are treated as Country
+      // unless controlled-access was already detected above.
+      if (hereFc === 'FC5') return 'City';
+      if (['FC1', 'FC2', 'FC3', 'FC4'].includes(hereFc)) return 'Country';
+
+      return 'Unknown';
+    }
+
+    function updateRoadCategoryDisplay() {
+      currentRoadCategory = classifyRoadCategory();
+      if (roadTypeEl) {
+        roadTypeEl.textContent = `Road type: ${currentRoadCategory}`;
+        roadTypeEl.title =
+          `HERE: ${currentHereRoadType || 'missing'}, ` +
+          `HERE speed: ${latestHereSpeedForRoadCategory ?? 'missing'}, ` +
+          `OSM: ${currentOsmRoadTypeRaw || 'missing'}, ` +
+          `OSM speed: ${latestOsmSpeedForRoadCategory ?? 'missing'}`;
+      }
+    }
 
     function checkUploadEligibility() {
       uploadsEnabled = (totalDist >= 100) || (logTable.length > 0); // totalDist is meters
@@ -2247,10 +2355,13 @@
     async function stopTesting() {
       try {
         if (arguments?.[0]?.type === 'click') {
-          const ok = confirm('End test now? This will stop logging and do a final upload.');
+          const ok = await showEndSessionConfirmation();
           if (!ok) return;
         }
-      } catch { }
+      } catch (e) {
+        console.warn('End-session confirmation failed:', e);
+        return;
+      }
 
       if (typeof sessionEnded !== 'undefined' && sessionEnded) return;
       sessionEnded = true;
@@ -3471,6 +3582,7 @@
           : 'Other';
 
       currentRoadType = displayRt;
+      currentOsmRoadTypeRaw = rawRt;
 
       const isBridge = tags.bridge === 'yes';
 
@@ -3517,6 +3629,12 @@
         data.address?.country_code
       );
 
+      // Classification uses the actual speed found in this OSM lookup,
+      // not a stale accepted/displayed value from an earlier road segment.
+      latestOsmSpeedForRoadCategory = parsedSpeed.valueKmh != null
+        ? Number(parsedSpeed.valueKmh)
+        : null;
+
       updateLegalSpeedWithHysteresis(parsedSpeed);
 
       if (legalSpeedEl) {
@@ -3526,7 +3644,7 @@
           `${parsedSpeed.confidence}: ${parsedSpeed.reason}`;
       }
 
-      roadTypeEl.textContent = `Road type: ${displayRt}`;
+      updateRoadCategoryDisplay();
 
       if (allowedRoadTypes.has(rawRt)) {
         roadTypes.add(rawRt);
@@ -5832,6 +5950,53 @@
       } catch (err) {
         console.error('Custom PDF upload failed:', err);
       }
+    }
+
+    function showEndSessionConfirmation() {
+      return new Promise(resolve => {
+        // Remove any stale end-session overlay before showing the confirmation card.
+        const oldOverlay = document.getElementById('endSessionOverlay');
+        if (oldOverlay) oldOverlay.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'endSessionOverlay';
+        overlay.innerHTML = `
+          <div id="endSessionCard">
+            <h2>End test session?</h2>
+            <div id="endSessionStatus">This will stop logging and upload all remaining session data.</div>
+            <div id="endSessionDetail">The session will remain active if you cancel.</div>
+            <div id="endSessionConfirmActions">
+              <button id="cancelEndSessionBtn" type="button" class="bigButton blueButton">Cancel</button>
+              <button id="confirmEndSessionBtn" type="button" class="bigButton redButton">End test</button>
+            </div>
+          </div>`;
+
+        document.body.appendChild(overlay);
+
+        const cancelBtn = document.getElementById('cancelEndSessionBtn');
+        const confirmBtn = document.getElementById('confirmEndSessionBtn');
+        let resolved = false;
+
+        const finish = result => {
+          if (resolved) return;
+          resolved = true;
+          document.removeEventListener('keydown', onKeyDown);
+          overlay.remove();
+          resolve(result);
+        };
+
+        const onKeyDown = e => {
+          if (e.key === 'Escape') finish(false);
+          if (e.key === 'Enter') finish(true);
+        };
+
+        cancelBtn?.addEventListener('click', () => finish(false));
+        confirmBtn?.addEventListener('click', () => finish(true));
+        document.addEventListener('keydown', onKeyDown);
+
+        // Put focus on the safe choice by default.
+        setTimeout(() => cancelBtn?.focus(), 0);
+      });
     }
 
     function showEndSessionOverlay() {
