@@ -414,6 +414,7 @@
         <div class="legend-row"><span class="dot red"></span> Same-direction sample: NOA unavailable (= 0)</div>
         <div class="legend-row"><span class="dot black"></span> Segment where opposite directions disagree</div>
         <div class="legend-row"><span class="issue-map-dot"></span> Issue from the Issues tab</div>
+        <div class="legend-row"><span style="display:inline-block;width:18px;height:0;border-top:2px solid rgba(160,168,178,0.55);vertical-align:middle"></span> Weak grey trace of all GPS coordinates</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--green);font-weight:900">↑</span> Arrow direction with NOA available</div>
         <div class="legend-row"><span style="font-size:20px;color:var(--red);font-weight:900">↑</span> Arrow direction with NOA unavailable</div>
         <div class="note">All disagreement locations remain visible as small black dots. Red/green arrows are intentionally thinned so they do not overlap. Zoom in to automatically reveal more arrow pairs. The arrows keep a fixed visual offset from the road, so they remain clearly beside the markers.</div>
@@ -467,12 +468,14 @@
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
+  const traceLayer = L.layerGroup().addTo(map);
   const pointLayer = L.layerGroup().addTo(map);
   const arrowLayer = L.layerGroup().addTo(map);
   const issueLayer = L.layerGroup().addTo(map);
   const issueMarkerById = new Map();
   let loadedSamples = [];
   let loadedIssues = [];
+  let loadedTraces = [];
   let loadedTotals = null;
   let currentDifferences = [];
 
@@ -958,6 +961,21 @@
     ui.visibleArrowPairs.textContent = selected.length.toLocaleString();
   }
 
+
+  function renderTraces(traces) {
+    traceLayer.clearLayers();
+    for (const trace of traces) {
+      if (!trace || trace.length < 2) continue;
+      L.polyline(trace, {
+        color: '#a7afb8',
+        weight: 2,
+        opacity: 0.28,
+        smoothFactor: 1,
+        interactive: false
+      }).addTo(traceLayer);
+    }
+  }
+
   function renderPoints(samples, fit = false) {
     pointLayer.clearLayers();
     const bounds = [];
@@ -1097,8 +1115,13 @@
     }).join('');
   }
 
-  function fitMapToData(samples, issues) {
+  function fitMapToData(samples, issues, traces = []) {
     const bounds = [];
+    for (const trace of traces) {
+      for (const p of trace) {
+        if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) bounds.push([p[0], p[1]]);
+      }
+    }
     for (const s of samples) {
       if (Number.isFinite(s.lat) && Number.isFinite(s.lon)) bounds.push([s.lat, s.lon]);
     }
@@ -1220,6 +1243,9 @@
         }
         calculateHeadings(routePoints);
         const headingByRow = new Map(routePoints.map(p => [p.rowIndex, p.heading]));
+        if (routePoints.length >= 2) {
+          allTraces.push(routePoints.map(p => [p.lat, p.lon]));
+        }
 
         let fileHighway = 0;
         for (let i = 1; i < rows.length; i++) {
@@ -1263,12 +1289,14 @@
 
     loadedSamples = allSamples;
     loadedIssues = allIssues;
+    loadedTraces = allTraces;
     loadedTotals = totals;
 
     updateSummary(totals, allSamples, axis);
+    renderTraces(allTraces);
     renderPoints(allSamples, false);
     renderIssues(allIssues);
-    fitMapToData(allSamples, allIssues);
+    fitMapToData(allSamples, allIssues, allTraces);
 
     ui.fileInfo.textContent = `${processed.length}/${files.length} files processed`;
     ui.fileList.innerHTML = processed.length ? processed.map(escapeHtml).join('<br>') : 'None';
@@ -1305,6 +1333,7 @@
   }
 
   function resetResults(clearInputs = true) {
+    traceLayer.clearLayers();
     pointLayer.clearLayers();
     arrowLayer.clearLayers();
     issueLayer.clearLayers();
@@ -1312,6 +1341,7 @@
     currentDifferences = [];
     loadedSamples = [];
     loadedIssues = [];
+    loadedTraces = [];
     loadedTotals = null;
     updateSummary({ highway: 0, green: 0, red: 0, invalid: 0 }, [], null);
     ui.fileInfo.textContent = 'No files loaded';
