@@ -1036,6 +1036,42 @@
       flex-wrap: wrap;
     }
 
+    /* Fused road-type change warning */
+    #roadType {
+      display: inline-block;
+      padding: 3px 6px;
+      margin-left: -6px;
+      border-radius: 6px;
+      transition: background-color .2s ease, color .2s ease, transform .2s ease, box-shadow .2s ease;
+    }
+
+    #roadType.roadTypeWarningPulse {
+      animation: roadTypeWarningPulse .55s ease-in-out 8;
+    }
+
+    @keyframes roadTypeWarningPulse {
+      0%, 100% {
+        background-color: transparent;
+        color: inherit;
+        transform: scale(1);
+        box-shadow: none;
+      }
+      50% {
+        background-color: #9e6a03;
+        color: #fff;
+        transform: scale(1.20);
+        box-shadow: 0 0 0 3px rgba(158, 106, 3, .28);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #roadType.roadTypeWarningPulse {
+        animation: none;
+        background-color: #9e6a03;
+        color: #fff;
+      }
+    }
+
     @media print {
 
       /* reset page‐sizing so we don’t clip */
@@ -1238,6 +1274,9 @@
     align-items: center;
     gap: 6px;
   ">
+      <input type="checkbox" id="warnRoadTypeChanges">
+      <label for="warnRoadTypeChanges">Alert on road type change</label>
+
       <input type="checkbox" id="showAccelMonitors">
       <label for="showAccelMonitors">Show acceleration monitors</label>
     </div>
@@ -1430,7 +1469,7 @@
     </div>
 
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
-      Ver 1.21 audio + device ID + road category
+      Ver 1.25 audio + device ID + fused road type alert
       © Lynoit Tech 2025
     </footer>
   </div>
@@ -2117,6 +2156,8 @@
     let latestHereSpeedForRoadCategory = null;
     let latestOsmSpeedForRoadCategory = null;
     let currentRoadCategory = 'Unknown';
+    let lastObservedRoadCategory = null;
+    let roadTypeWarningTimer = null;
 
     function normalizeHereFc(hereRoadType) {
       const m = String(hereRoadType || '').match(/\bFC([1-5])\b/i);
@@ -2186,8 +2227,38 @@
       return 'Unknown';
     }
 
+    function triggerRoadTypeChangeWarning() {
+      const cb = document.getElementById('warnRoadTypeChanges');
+      if (!cb?.checked) return;
+
+      // Haptic feedback where supported (notably Android browsers).
+      try {
+        if (typeof navigator.vibrate === 'function') {
+          navigator.vibrate([250, 125, 250, 125, 250]);
+        }
+      } catch (e) {
+        console.warn('Road type vibration failed:', e);
+      }
+
+      // Restart the visual pulse even if another change happens quickly.
+      if (roadTypeEl) {
+        roadTypeEl.classList.remove('roadTypeWarningPulse');
+        void roadTypeEl.offsetWidth;
+        roadTypeEl.classList.add('roadTypeWarningPulse');
+
+        if (roadTypeWarningTimer) clearTimeout(roadTypeWarningTimer);
+        roadTypeWarningTimer = setTimeout(() => {
+          roadTypeEl?.classList.remove('roadTypeWarningPulse');
+        }, 4700);
+      }
+    }
+
     function updateRoadCategoryDisplay() {
-      currentRoadCategory = classifyRoadCategory();
+      const nextCategory = classifyRoadCategory();
+      const previousCategory = lastObservedRoadCategory;
+
+      currentRoadCategory = nextCategory;
+
       if (roadTypeEl) {
         roadTypeEl.textContent = `Road type: ${currentRoadCategory}`;
         roadTypeEl.title =
@@ -2195,6 +2266,18 @@
           `HERE speed: ${latestHereSpeedForRoadCategory ?? 'missing'}, ` +
           `OSM: ${currentOsmRoadTypeRaw || 'missing'}, ` +
           `OSM speed: ${latestOsmSpeedForRoadCategory ?? 'missing'}`;
+      }
+
+      // Establish the first valid category silently. After that, warn only
+      // when the fused Highway/Country/City category actually changes.
+      if (['Highway', 'Country', 'City'].includes(nextCategory)) {
+        if (
+          ['Highway', 'Country', 'City'].includes(previousCategory) &&
+          previousCategory !== nextCategory
+        ) {
+          triggerRoadTypeChangeWarning();
+        }
+        lastObservedRoadCategory = nextCategory;
       }
     }
 
@@ -4255,6 +4338,7 @@
         hereLegalSpeed: hereLegalSpd,
         roadType: currentRoadType || 'Unknown',
         hereRoadType,
+        fusedRoadType: currentRoadCategory || 'Unknown',
         country: lastCountry || 'Unknown',
         issue: issueText || '',
         toggles: toggleSnapshot
@@ -5517,6 +5601,7 @@
         "HERE Speed Limit (km/h)",
         "OSM Road type",
         "HERE Road type",
+        "Fused Road type",
         "Country", "Issue"
       ];
       toggleDefs.forEach(def => samplingHeader.push(def.signal));
@@ -5535,6 +5620,7 @@
           entry.hereLegalSpeed,
           entry.roadType || '',
           entry.hereRoadType || '',
+          entry.fusedRoadType || '',
           entry.country || '',
           entry.issue || ''
         ];
