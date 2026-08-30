@@ -125,6 +125,35 @@
       transition: width .18s ease;
     }
 
+    #auto-map-progress-wrap {
+      margin-top: 14px;
+      display: none;
+    }
+
+    #auto-map-progress-wrap.visible { display: block; }
+
+    #auto-map-progress-label {
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 5px;
+    }
+
+    #auto-map-progress {
+      width: 100%;
+      height: 8px;
+      background: #dedee1;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    #auto-map-progress-fill {
+      width: 0%;
+      height: 100%;
+      background: #1565c0;
+      border-radius: inherit;
+      transition: width .18s ease;
+    }
+
     #main {
       flex: 1;
       min-height: 0;
@@ -319,6 +348,13 @@
         </thead>
         <tbody></tbody>
       </table>
+
+      <div id="auto-map-progress-wrap">
+        <div id="auto-map-progress-label">Automatic mapping of devices</div>
+        <div id="auto-map-progress" role="progressbar" aria-label="Automatic mapping of devices" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="auto-map-progress-fill"></div>
+        </div>
+      </div>
     </aside>
   </div>
 
@@ -451,6 +487,51 @@
         progress.setAttribute('aria-valuenow', '0');
       }
       if (fill) fill.style.width = '0%';
+    }
+
+
+    function setAutoMapProgress(done, total) {
+      const wrap = document.getElementById('auto-map-progress-wrap');
+      const progress = document.getElementById('auto-map-progress');
+      const fill = document.getElementById('auto-map-progress-fill');
+      const label = document.getElementById('auto-map-progress-label');
+      if (!wrap || !progress || !fill || !label) return;
+
+      const safeTotal = Math.max(1, Number(total) || 1);
+      const safeDone = Math.max(0, Math.min(safeTotal, Number(done) || 0));
+      const percent = (safeDone / safeTotal) * 100;
+
+      wrap.classList.add('visible');
+      progress.setAttribute('aria-valuenow', String(Math.round(percent)));
+      fill.style.width = percent + '%';
+      label.textContent = `Automatic mapping of devices ${safeDone} / ${safeTotal}`;
+    }
+
+    function finishAutoMapProgress(total) {
+      const wrap = document.getElementById('auto-map-progress-wrap');
+      const progress = document.getElementById('auto-map-progress');
+      const fill = document.getElementById('auto-map-progress-fill');
+      const label = document.getElementById('auto-map-progress-label');
+      if (!wrap || !progress || !fill || !label) return;
+
+      const safeTotal = Math.max(0, Number(total) || 0);
+      wrap.classList.add('visible');
+      progress.setAttribute('aria-valuenow', '100');
+      fill.style.width = '100%';
+      label.textContent = safeTotal > 0
+        ? `Automatic mapping of devices complete (${safeTotal} test data files)`
+        : 'Automatic mapping of devices complete';
+    }
+
+    function hideAutoMapProgress() {
+      const wrap = document.getElementById('auto-map-progress-wrap');
+      const progress = document.getElementById('auto-map-progress');
+      const fill = document.getElementById('auto-map-progress-fill');
+      const label = document.getElementById('auto-map-progress-label');
+      if (wrap) wrap.classList.remove('visible');
+      if (progress) progress.setAttribute('aria-valuenow', '0');
+      if (fill) fill.style.width = '0%';
+      if (label) label.textContent = 'Automatic mapping of devices';
     }
 
     function nc(url) {
@@ -1020,6 +1101,9 @@
         // Do the additional reads only after the normal map/table has already
         // rendered. Files read during the main pass are reused immediately.
         const remaining = monthExcel.filter(blob => !recordsByFilename.has(blob.name));
+        let completedMappingFiles = monthExcel.length - remaining.length;
+        setAutoMapProgress(completedMappingFiles, monthExcel.length);
+
         let nextIndex = 0;
         const CONCURRENCY = 2; // deliberately light background load
 
@@ -1035,6 +1119,11 @@
               recordsByFilename.set(blob.name, info);
             } catch (err) {
               console.warn('Automatic device mapping read failed:', blob.name, err);
+            } finally {
+              completedMappingFiles++;
+              if (generation === refreshGeneration) {
+                setAutoMapProgress(completedMappingFiles, monthExcel.length);
+              }
             }
           }
         }
@@ -1063,6 +1152,7 @@
         ).length;
 
         if (generation === refreshGeneration) {
+          finishAutoMapProgress(monthExcel.length);
           setStatus(
             visibleAutoMapped > 0
               ? `${baseStatusText} · ${visibleAutoMapped} device(s) auto-mapped`
@@ -1071,7 +1161,10 @@
         }
       } catch (err) {
         console.warn('Automatic device mapping failed:', err);
-        if (generation === refreshGeneration) setStatus(baseStatusText);
+        if (generation === refreshGeneration) {
+          hideAutoMapProgress();
+          setStatus(baseStatusText);
+        }
       }
     }
 
@@ -1294,6 +1387,7 @@
     // ==========================================================
 
     async function refresh() {
+      hideAutoMapProgress();
       if (refreshInProgress) return;
       refreshInProgress = true;
       const generation = ++refreshGeneration;
