@@ -382,8 +382,11 @@
     const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
     // Automatic naming of devices that are not present in Device_ID_mapping.csv.
-    // This secondary analysis always looks one month back, independent of the
-    // user-selected period used by the main map/table view.
+    // The inferred mapping is cached as a CSV blob beside the Excel reports in Azure.
+    // Normally the viewer only reads this small CSV. A one-month rebuild is done
+    // only when the cache is missing or more than 24 hours older than the newest Excel.
+    const AUTO_MAPPING_CSV_BLOB = 'Automatic_Device_Mapping.csv';
+    const AUTO_MAPPING_MAX_LAG_MS = 24 * 60 * 60 * 1000;
     const AUTO_MAPPING_MIN_APPEARANCES = 3;
     const AUTO_MAPPING_MIN_WEIGHTED_SCORE = 2.0;
     const AUTO_MAPPING_MIN_DOMINANCE = 0.70;
@@ -1069,10 +1072,148 @@
       return inferred;
     }
 
-    async function runAutomaticDeviceMapping(blobs, alreadyReadRecords, latestDevices, manualDeviceNames, generation, baseStatusText) {
+    function combineDeviceNames(manualDeviceNames, automaticMapping) {
+      const combined = new Map(manualDeviceNames);
+      for (const [deviceId, info] of automaticMapping || []) {
+        if (!combined.has(deviceId)) {
+          const friendlyName = typeof info === 'string' ? info : info?.friendlyName;
+          if (friendlyName) combined.set(deviceId, friendlyName);
+        }
+      }
+      return combined;
+    }
+
+    function parseAutomaticMappingCsv(text) {
+      const mapping = new Map();
+      const wb = XLSX.read(String(text || ''), { type: 'string' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      if (!ws) return mapping;
+
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+      if (!rows.length) return mapping;
+
+      const headers = rows[0].map(normalizeKey);
+      const deviceIdx = headers.findIndex(h => ['deviceid', 'id', 'deviceidentifier'].includes(h));
+      const nameIdx = headers.findIndex(h => ['friendlyname', 'name', 'devicename', 'displayname'].includes(h));
+      const participantIdx = headers.findIndex(h => h === 'participant');
+      const appearancesIdx = headers.findIndex(h => h === 'appearances');
+      const soloIdx = headers.findIndex(h => h === 'soloappearances');
+      const scoreIdx = headers.findIndex(h => ['weightedscore', 'score'].includes(h));
+      const dominanceIdx = headers.findIndex(h => h === 'dominance');
+
+      if (deviceIdx < 0 || nameIdx < 0) return mapping;
+
+      for (let r = 1; r < rows.length; r++) {
+        const deviceId = String(rows[r]?.[deviceIdx] ?? '').trim();
+        const friendlyName = String(rows[r]?.[nameIdx] ?? '').trim();
+        if (!deviceId || !friendlyName) continue;
+
+        mapping.set(deviceId, {
+          friendlyName,
+          participant: participantIdx >= 0 ? String(rows[r]?.[participantIdx] ?? '').trim() : '',
+          appearances: appearancesIdx >= 0 ? Number(rows[r]?.[appearancesIdx]) || 0 : 0,
+          soloAppearances: soloIdx >= 0 ? Number(rows[r]?.[soloIdx]) || 0 : 0,
+          weightedScore: scoreIdx >= 0 ? Number(rows[r]?.[scoreIdx]) || 0 : 0,
+          dominance: dominanceIdx >= 0 ? Number(rows[r]?.[dominanceIdx]) || 0 : 0
+        });
+      }
+      return mapping;
+    }
+
+    async function loadAutomaticMappingFromAzure(cacheBlob) {
+      if (!cacheBlob) return new Map();
       try {
-        // Always use one calendar month for the inference history, even when
-        // the main page is displaying only one week of tests.
+        const url = `${BASE_URL}/${encodeURIComponent(AUTO_MAPPING_CSV_BLOB)}?${SAS_TOKEN}`;
+        const res = await fetch(nc(url), { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return parseAutomaticMappingCsv(await res.text());
+      } catch (err) {
+        console.warn('Could not load automatic device mapping CSV:', err);
+        return new Map();
+      }
+    }
+
+    function csvEscape(value) {
+      const text = String(value ?? '');
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    }
+
+    function buildAutomaticMappingCsv(inferred) {
+      const generatedUtc = new Date().toISOString();
+      const rows = [[
+        'Device ID',
+        'Friendly name',
+        'Participant',
+        'Appearances',
+        'Solo appearances',
+        'Weighted score',
+        'Dominance',
+        'Generated UTC'
+      ]];
+
+      for (const [deviceId, info] of Array.from(inferred.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+        rows.push([
+          deviceId,
+          info.friendlyName || '',
+          info.participant || '',
+          info.appearances ?? '',
+          info.soloAppearances ?? '',
+          Number(info.weightedScore || 0).toFixed(3),
+          Number(info.dominance || 0).toFixed(3),
+          generatedUtc
+        ]);
+      }
+
+      return rows.map(row => row.map(csvEscape).join(',')).join('\r\n') + '\r\n';
+    }
+
+    async function uploadAutomaticMappingToAzure(inferred) {
+      const url = `${BASE_URL}/${encodeURIComponent(AUTO_MAPPING_CSV_BLOB)}?${SAS_TOKEN}`;
+      const csv = buildAutomaticMappingCsv(inferred);
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          'x-ms-blob-type': 'BlockBlob',
+          'x-ms-version': '2023-11-03',
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Cache-Control': 'no-cache'
+        },
+        body: csv
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`Azure CSV upload failed: HTTP ${res.status}${detail ? ` - ${detail}` : ''}`);
+      }
+    }
+
+    function automaticMappingIsStale(blobs, cacheBlob) {
+      if (!cacheBlob?.lastModifiedMs) return true;
+
+      const newestExcelMs = blobs
+        .filter(b => /\.xlsx$/i.test(b.name))
+        .reduce((latest, b) => Math.max(latest, b.lastModifiedMs || 0), 0);
+
+      if (!newestExcelMs) return false;
+      return (newestExcelMs - cacheBlob.lastModifiedMs) > AUTO_MAPPING_MAX_LAG_MS;
+    }
+
+    function applyAutomaticMapping(latestDevices, manualDeviceNames, automaticMapping, baseStatusText) {
+      const combinedNames = combineDeviceNames(manualDeviceNames, automaticMapping);
+      renderDevices(latestDevices, combinedNames);
+
+      const visibleAutoMapped = latestDevices.filter(record =>
+        !manualDeviceNames.has(record.deviceId) && automaticMapping.has(record.deviceId)
+      ).length;
+
+      setStatus(
+        visibleAutoMapped > 0
+          ? `${baseStatusText} · ${visibleAutoMapped} device(s) auto-mapped`
+          : baseStatusText
+      );
+    }
+
+    async function rebuildAutomaticDeviceMapping(blobs, alreadyReadRecords, latestDevices, manualDeviceNames, generation, baseStatusText) {
+      try {
         const monthCutoff = new Date();
         monthCutoff.setMonth(monthCutoff.getMonth() - 1);
         const monthCutoffMs = monthCutoff.getTime();
@@ -1086,20 +1227,18 @@
           alreadyReadRecords.map(record => [record.filename, record])
         );
 
-        // Do the additional reads only after the normal map/table has already
-        // rendered. Files read during the main pass are reused immediately.
         const remaining = monthExcel.filter(blob => !recordsByFilename.has(blob.name));
         let completedMappingFiles = monthExcel.length - remaining.length;
         setAutoMapProgress(completedMappingFiles, monthExcel.length);
 
         let nextIndex = 0;
-        const CONCURRENCY = 2; // deliberately light background load
+        const CONCURRENCY = 2;
 
         async function worker() {
           while (true) {
             const index = nextIndex++;
             if (index >= remaining.length) break;
-            if (generation !== refreshGeneration) return; // a newer refresh won
+            if (generation !== refreshGeneration) return;
 
             const blob = remaining[index];
             try {
@@ -1126,33 +1265,21 @@
         const inferred = inferAutomaticDeviceNames(monthRecords, manualDeviceNames);
         if (generation !== refreshGeneration) return;
 
-        const combinedNames = new Map(manualDeviceNames);
-        for (const [deviceId, info] of inferred) {
-          if (!combinedNames.has(deviceId)) combinedNames.set(deviceId, info.friendlyName);
-        }
+        // Update what the user sees before uploading the cache. Even if Azure
+        // rejects the write (for example because of CORS), this page load still
+        // benefits from the newly calculated names.
+        applyAutomaticMapping(latestDevices, manualDeviceNames, inferred, baseStatusText);
 
-        // Re-render the already visible devices only. This changes their names
-        // without changing which tests/devices the selected time filter shows.
-        renderDevices(latestDevices, combinedNames);
-
-        const visibleAutoMapped = latestDevices.filter(record =>
-          !manualDeviceNames.has(record.deviceId) && inferred.has(record.deviceId)
-        ).length;
-
-        if (generation === refreshGeneration) {
-          finishAutoMapProgress(monthExcel.length);
-          setStatus(
-            visibleAutoMapped > 0
-              ? `${baseStatusText} · ${visibleAutoMapped} device(s) auto-mapped`
-              : baseStatusText
-          );
+        try {
+          await uploadAutomaticMappingToAzure(inferred);
+        } catch (uploadErr) {
+          console.warn('Automatic device mapping was calculated but the CSV cache could not be saved:', uploadErr);
         }
       } catch (err) {
         console.warn('Automatic device mapping failed:', err);
-        if (generation === refreshGeneration) {
-          hideAutoMapProgress();
-          setStatus(baseStatusText);
-        }
+        if (generation === refreshGeneration) setStatus(baseStatusText);
+      } finally {
+        if (generation === refreshGeneration) hideAutoMapProgress();
       }
     }
 
@@ -1394,6 +1521,10 @@
           listAllBlobs()
         ]);
 
+        const autoMappingCacheBlob = blobs.find(b => b.name === AUTO_MAPPING_CSV_BLOB) || null;
+        // Start the tiny cache download immediately while the Excel files are being read.
+        const cachedAutomaticMappingPromise = loadAutomaticMappingFromAzure(autoMappingCacheBlob);
+
         const cutoffMs = getAgeCutoffMs();
         const recentExcel = blobs
           .filter(b => /\.xlsx$/i.test(b.name))
@@ -1439,23 +1570,27 @@
         hideReadProgress();
 
         const latestDevices = chooseLatestPerDevice(results);
-        renderDevices(latestDevices, deviceNames);
+        const cachedAutomaticMapping = await cachedAutomaticMappingPromise;
 
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const baseStatusText = `${latestDevices.length} device(s) shown · ${recentExcel.length} sessions checked · Updated ${now}`;
-        setStatus(baseStatusText);
 
-        // Important: do NOT await this. The normal page is fully displayed first.
-        // The one-month participant/device analysis then runs as a secondary
-        // background phase and updates only inferred names when it finishes.
-        void runAutomaticDeviceMapping(
-          blobs,
-          results,
-          latestDevices,
-          deviceNames,
-          generation,
-          baseStatusText
-        );
+        // Manual Device_ID_mapping.csv always has priority over the automatic cache.
+        applyAutomaticMapping(latestDevices, deviceNames, cachedAutomaticMapping, baseStatusText);
+
+        // Only rebuild the expensive one-month mapping when the Azure cache is
+        // missing or more than 24 hours behind the newest Excel blob. The page
+        // is already fully usable before this background phase begins.
+        if (automaticMappingIsStale(blobs, autoMappingCacheBlob)) {
+          void rebuildAutomaticDeviceMapping(
+            blobs,
+            results,
+            latestDevices,
+            deviceNames,
+            generation,
+            baseStatusText
+          );
+        }
       } catch (err) {
         hideReadProgress();
         console.error(err);
