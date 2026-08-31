@@ -1469,7 +1469,7 @@
     </div>
 
     <footer style="text-align:center; padding:10px; font-size:12px; color:#666;">
-      Ver 1.25 audio + device ID + fused road type alert
+      Ver 1.26 audio + provisioned device ID + fused road type alert
       © Lynoit Tech 2025
     </footer>
   </div>
@@ -4172,29 +4172,48 @@
       const storageKey = 'annotatorDeviceId';
 
       try {
-        let deviceId = localStorage.getItem(storageKey);
+        // A device supplied in the URL always has highest priority.
+        // Example: Annotator.html?device=%231%20Tiger  ->  #1 Tiger
+        const params = new URLSearchParams(window.location.search);
+        const deviceFromUrl = (params.get('device') || '').trim();
 
-        if (!deviceId) {
-          if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-            deviceId = window.crypto.randomUUID();
-          } else {
-            // Fallback for older browsers without crypto.randomUUID().
-            deviceId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-              const r = Math.random() * 16 | 0;
-              const v = c === 'x' ? r : (r & 0x3 | 0x8);
-              return v.toString(16);
-            });
+        if (deviceFromUrl) {
+          // Keep the friendly name readable, but avoid accidental control characters
+          // and unreasonably long values in reports.
+          const normalizedDeviceId = deviceFromUrl
+            .replace(/[\u0000-\u001F\u007F]/g, '')
+            .slice(0, 80)
+            .trim();
+
+          if (normalizedDeviceId) {
+            localStorage.setItem(storageKey, normalizedDeviceId);
+            console.log('Device ID provisioned from URL:', normalizedDeviceId);
+            return normalizedDeviceId;
           }
-
-          localStorage.setItem(storageKey, deviceId);
-          console.log('Created persistent Annotator Device ID:', deviceId);
         }
 
-        return deviceId;
+        // Otherwise reuse the ID previously provisioned for this origin.
+        const storedDeviceId = (localStorage.getItem(storageKey) || '').trim();
+        if (storedDeviceId) {
+          return storedDeviceId;
+        }
+
+        // Never silently generate a new identity. This makes missing/cleared
+        // storage visible instead of making one physical tablet appear as a new device.
+        return 'Device not registered';
       } catch (err) {
         console.warn('Could not read/write persistent Device ID:', err);
-        return 'Unavailable';
+        return 'Device ID unavailable';
       }
+    }
+
+    function escapeHtmlText(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function getBrowserNameVersion() {
@@ -4228,7 +4247,7 @@
       const countriesList = Object.keys(countryDistancesFromSampling).join(' - ') || '—';
 
       const clockOffsetText = formatAzureOffsetForStats(azureClockOffsetMs);
-      const deviceIdText = getPersistentDeviceId();
+      const deviceIdText = escapeHtmlText(getPersistentDeviceId());
       const platformText = getPlatformName();
       const browserText = getBrowserNameVersion();
 
