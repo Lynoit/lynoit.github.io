@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NOA Performance Analyzer</title>
+  <title>NOA Road Availability Analyzer - Directional</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 
   <style>
     :root {
@@ -401,7 +402,7 @@
 <body>
 <div class="app">
   <header>
-    <h1>NOA Performance Analyzer</h1>
+    <h1>NOA Road Availability Analyzer</h1>
     <div class="subtitle">Selected Highway / Highway-like samples are compared by driving direction. Direction-dependent differences are shown as black dots with sparse red/green direction arrows beside the road.</div>
   </header>
 
@@ -420,6 +421,7 @@
 
     <span class="control-label">Direction comparison segment: 25 m · arrow density adapts to zoom</span>
 
+    <button id="exportBtn" class="export-button" type="button">Export PNG</button>
     <button id="clearBtn" type="button">Clear</button>
     <span id="fileInfo" class="file-info">No files loaded</span>
     <span id="status" class="status">Ready</span>
@@ -503,7 +505,8 @@
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors'
+    attribution: '&copy; OpenStreetMap contributors',
+    crossOrigin: true
   }).addTo(map);
 
   // Dedicated pane keeps the complete GPS trace above the map tiles but
@@ -1431,6 +1434,163 @@
     ui.status.className = `status ${kind}`.trim();
   }
 
+
+
+  function selectedRoadLabel() {
+    const labels = [];
+    if (ui.useHighway.checked) labels.push('Highway');
+    if (ui.useHighwayLike.checked) labels.push('Highway-like');
+    return labels.length ? labels.join(' + ') : 'No road category selected';
+  }
+
+  function issueRowsForExport() {
+    if (!loadedIssues.length) {
+      return '<div class="export-issues-empty">No issues loaded.</div>';
+    }
+    const rows = loadedIssues.map(item => `
+      <tr>
+        <td>${escapeHtml(item.fileName || '—')}</td>
+        <td>${escapeHtml(formatValue(item.no))}</td>
+        <td>${escapeHtml(formatValue(item.issue))}</td>
+        <td>${escapeHtml(formatValue(item.comment))}</td>
+      </tr>`).join('');
+    return `
+      <div class="export-issues-wrap">
+        <table class="export-issues-table">
+          <thead>
+            <tr><th>File</th><th>No.</th><th>Issue</th><th>Comment</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  async function captureMapDataUrl() {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const canvas = await html2canvas(document.getElementById('map'), {
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      allowTaint: false,
+      logging: false,
+      scale: 2,
+      imageTimeout: 15000
+    });
+    return canvas.toDataURL('image/png');
+  }
+
+  function buildExportReportHtml(mapDataUrl) {
+    const totals = loadedTotals || { highway: 0, green: 0, red: 0, invalid: 0 };
+    const selectedLabel = selectedRoadLabel();
+    const generated = new Date();
+    const timeLabel = generated.toLocaleString();
+    const legendCard = document.querySelector('.sidebar .card:nth-child(3)');
+    const legendHtml = legendCard ? legendCard.innerHTML.replace('<h2>Map legend</h2>', '') : '';
+    const pct = ui.correctPct.textContent || '—';
+    return `
+      <div class="export-sheet">
+        <h1>NOA Road Availability Analyzer</h1>
+        <div class="export-meta">Generated ${escapeHtml(timeLabel)} · Selection: ${escapeHtml(selectedLabel)} · ${escapeHtml(ui.fileInfo.textContent || '')}</div>
+
+        <div class="export-top-grid">
+          <div class="export-section">
+            <h2>Map</h2>
+            <div class="export-map-wrap"><img src="${mapDataUrl}" alt="Map export" /></div>
+          </div>
+
+          <div>
+            <div class="export-section">
+              <h2>Total availability</h2>
+              <div class="export-stats">
+                <div class="export-stat">
+                  <div class="label">Availability</div>
+                  <div class="value">${escapeHtml(pct)}</div>
+                  <div class="small">Green selected samples / all selected samples</div>
+                </div>
+                <div class="export-stat">
+                  <div class="label">Selected road types</div>
+                  <div class="value" style="font-size:18px">${escapeHtml(selectedLabel)}</div>
+                  <div class="small">Current analysis filter</div>
+                </div>
+                <div class="export-stat">
+                  <div class="label">Selected total</div>
+                  <div class="value">${Number(totals.highway || 0).toLocaleString()}</div>
+                </div>
+                <div class="export-stat">
+                  <div class="label">Green / NOA correct</div>
+                  <div class="value">${Number(totals.green || 0).toLocaleString()}</div>
+                </div>
+                <div class="export-stat">
+                  <div class="label">Red / NOA incorrect</div>
+                  <div class="value">${Number(totals.red || 0).toLocaleString()}</div>
+                </div>
+                <div class="export-stat">
+                  <div class="label">Direction-difference segments</div>
+                  <div class="value">${escapeHtml(ui.differenceSegments.textContent || '0')}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="export-section">
+              <h2>Legend</h2>
+              <div class="export-legend">${legendHtml}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="export-section">
+          <h2>Issues</h2>
+          ${issueRowsForExport()}
+        </div>
+      </div>`;
+  }
+
+  async function exportReportPng() {
+    if (!loadedSamples.length) {
+      setStatus('Load Excel files before exporting.', 'error');
+      return;
+    }
+    if (!selectedRoadClasses().size) {
+      setStatus('Select Highway, Highway-like, or both before exporting.', 'error');
+      return;
+    }
+    if (typeof html2canvas === 'undefined') {
+      setStatus('Export library could not be loaded.', 'error');
+      return;
+    }
+
+    const previousStatus = ui.status.textContent;
+    const previousClass = ui.status.className;
+    try {
+      setStatus('Preparing PNG export…', 'ok');
+      const mapDataUrl = await captureMapDataUrl();
+      const wrapper = document.createElement('div');
+      wrapper.className = 'export-capture-root';
+      wrapper.innerHTML = buildExportReportHtml(mapDataUrl);
+      document.body.appendChild(wrapper);
+      await document.fonts?.ready;
+      const canvas = await html2canvas(wrapper, {
+        backgroundColor: '#ffffff',
+        useCORS: true,
+        allowTaint: false,
+        logging: false,
+        scale: 2,
+        imageTimeout: 15000,
+        windowWidth: 1400
+      });
+      const ts = new Date();
+      const stamp = `${ts.getFullYear()}-${String(ts.getMonth()+1).padStart(2,'0')}-${String(ts.getDate()).padStart(2,'0')}_${String(ts.getHours()).padStart(2,'0')}${String(ts.getMinutes()).padStart(2,'0')}${String(ts.getSeconds()).padStart(2,'0')}`;
+      const link = document.createElement('a');
+      link.download = `NOA_export_${stamp}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      wrapper.remove();
+      setStatus('PNG export created.', 'ok');
+    } catch (err) {
+      console.error(err);
+      setStatus(`Export failed: ${err?.message || String(err)}`, 'error');
+    }
+  }
+
   function resetResults(clearInputs = true) {
     traceLayer.clearLayers();
     pointLayer.clearLayers();
@@ -1484,6 +1644,7 @@
   ui.fileInput.addEventListener('change', e => analyzeFiles(e.target.files));
   ui.useHighway.addEventListener('change', () => { if (loadedSamples.length) applyRoadSelection(true); });
   ui.useHighwayLike.addEventListener('change', () => { if (loadedSamples.length) applyRoadSelection(true); });
+  ui.exportBtn.addEventListener('click', exportReportPng);
   ui.clearBtn.addEventListener('click', () => resetResults(true));
 })();
 </script>
