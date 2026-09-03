@@ -331,7 +331,7 @@
 
     .member-edit-row{
       display:grid;
-      grid-template-columns:minmax(140px,1fr) 150px auto;
+      grid-template-columns:minmax(140px,1.2fr) 120px 130px 140px 140px 88px;
       gap:8px;
       align-items:center;
       padding:8px;
@@ -356,7 +356,7 @@
 
     .member-add-row{
       display:grid;
-      grid-template-columns:minmax(140px,1fr) 150px auto;
+      grid-template-columns:minmax(140px,1.2fr) 120px 130px 140px 140px 88px;
       gap:8px;
       align-items:center;
       margin-bottom:10px;
@@ -383,11 +383,40 @@
       border-color:rgba(255,123,123,.38);
     }
 
+    .member-column-labels{
+      display:grid;
+      grid-template-columns:minmax(140px,1.2fr) 120px 130px 140px 140px 88px;
+      gap:8px;
+      align-items:center;
+      margin-bottom:5px;
+      padding:0 8px;
+      color:var(--muted);
+      font-size:.76rem;
+    }
+
+    .member-column-labels span{
+      text-align:center;
+      min-width:0;
+    }
+
+    .member-column-labels span:first-child{
+      text-align:left;
+    }
+
+    @media (max-width:1100px){
+      .member-edit-row,
+      .member-add-row,
+      .member-column-labels{
+        grid-template-columns:minmax(140px,1.2fr) 110px 120px 125px 125px 82px;
+      }
+    }
+
     @media (max-width:760px){
       .member-edit-row,
       .member-add-row{
         grid-template-columns:1fr;
       }
+      .member-column-labels{ display:none; }
     }
 
     .activities-card{
@@ -915,7 +944,10 @@
           <div class="overview-card members-card">
             <h3>Medlemmar</h3>
             <div class="members-help">
-              Medlemslistan och färgerna läses från <strong>Skroja_members.csv</strong>. Ändringar används direkt på sidan. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+              Medlemsuppgifter läses från <strong>Skroja_members.csv</strong>. Här kan du ändra namn, färg, medlemsnivå, veckodag och tid. Ändringar används direkt på sidan. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+            </div>
+            <div class="member-column-labels">
+              <span>Namn</span><span>Färg</span><span>Medlemsnivå</span><span>Dag</span><span>Tid</span><span></span>
             </div>
             <div class="members-list" id="membersList"></div>
             <div class="member-add-row">
@@ -925,6 +957,17 @@
                 <option value="green">Grön</option>
                 <option value="yellow">Gul</option>
                 <option value="coral">Korall/orange</option>
+              </select>
+              <select id="newMemberLevel" aria-label="Medlemsnivå för ny medlem">
+                <option value="Alltid">Alltid</option>
+                <option value="Ofta">Ofta</option>
+              </select>
+              <select id="newMemberDay" aria-label="Dag för ny medlem">
+                <option value="Måndag">Måndag</option><option value="Tisdag">Tisdag</option><option value="Onsdag">Onsdag</option><option value="Torsdag">Torsdag</option><option value="Fredag">Fredag</option><option value="Lördag">Lördag</option><option value="Söndag">Söndag</option>
+              </select>
+              <select id="newMemberTime" aria-label="Tid för ny medlem">
+                <option value="Förmiddag">Förmiddag</option>
+                <option value="Eftermiddag">Eftermiddag</option>
               </select>
               <button id="addMemberBtn" type="button">Lägg till</button>
             </div>
@@ -1055,6 +1098,16 @@ const state = {
     }
 
 
+    const memberLevels = ['Alltid', 'Ofta'];
+    const memberDays = ['Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag'];
+    const memberTimes = ['Förmiddag', 'Eftermiddag'];
+
+    function normalizeMemberChoice(value, allowedValues) {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      return allowedValues.find(item => item.toLocaleLowerCase('sv-SE') === text.toLocaleLowerCase('sv-SE')) || '';
+    }
+
     function parseMembersCsv(csvText) {
       const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/).filter(line => line.trim());
       if (!lines.length) return [];
@@ -1062,8 +1115,12 @@ const state = {
       const headers = lines[0].split(';').map(value => value.trim().toLowerCase());
       const nameIndex = headers.indexOf('namn');
       const colorIndex = headers.indexOf('color');
+      const levelIndex = headers.findIndex(header => header === 'medlemsniva' || header === 'medlemsnivå');
+      const dayIndex = headers.indexOf('dag');
+      const timeIndex = headers.indexOf('tid');
+
       if (nameIndex < 0 || colorIndex < 0) {
-        throw new Error('Medlemsfilen måste ha kolumnerna namn;color.');
+        throw new Error('Medlemsfilen måste minst ha kolumnerna namn;color.');
       }
 
       const allowedColors = new Set(Object.keys(memberColorPalette));
@@ -1078,7 +1135,10 @@ const state = {
         seen.add(name);
         members.push({
           name,
-          color: allowedColors.has(color) ? color : 'blue'
+          color: allowedColors.has(color) ? color : 'blue',
+          memberLevel: levelIndex >= 0 ? normalizeMemberChoice(cols[levelIndex], memberLevels) : '',
+          day: dayIndex >= 0 ? normalizeMemberChoice(cols[dayIndex], memberDays) : '',
+          time: timeIndex >= 0 ? normalizeMemberChoice(cols[timeIndex], memberTimes) : ''
         });
       });
 
@@ -1086,10 +1146,18 @@ const state = {
     }
 
     function serializeMembersCsv() {
-      const rows = ['namn;color'];
+      const rows = ['namn;color;medlemsniva;dag;tid'];
       state.members.forEach(member => {
         const safeName = String(member.name || '').replace(/[;\r\n]/g, ' ').trim();
-        if (safeName) rows.push(`${safeName};${member.color}`);
+        if (safeName) {
+          rows.push([
+            safeName,
+            member.color || 'blue',
+            member.memberLevel || '',
+            member.day || '',
+            member.time || ''
+          ].join(';'));
+        }
       });
       return rows.join('\n') + '\n';
     }
@@ -1112,7 +1180,12 @@ const state = {
       state.members = parseMembersCsv(csvText);
       refreshConfiguredMembers();
       renderMemberManager();
-      setMembersStatus(`${state.members.length} medlemmar lästa från CSV.`);
+      const hasMissingDetails = state.members.some(member => !member.memberLevel || !member.day || !member.time);
+      setMembersStatus(
+        hasMissingDetails
+          ? `${state.members.length} medlemmar lästa. Fyll i medlemsnivå, dag och tid där uppgifter saknas.`
+          : `${state.members.length} medlemmar lästa från CSV.`
+      );
     }
 
     function setMembersStatus(message, isError = false) {
@@ -1120,6 +1193,29 @@ const state = {
       if (!el) return;
       el.textContent = message;
       el.classList.toggle('error', isError);
+    }
+
+    function createMemberSelect(values, currentValue, ariaLabel, onChange, allowEmpty = true) {
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', ariaLabel);
+
+      if (allowEmpty) {
+        const emptyOption = document.createElement('option');
+        emptyOption.value = '';
+        emptyOption.textContent = '— Välj —';
+        select.appendChild(emptyOption);
+      }
+
+      values.forEach(value => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      });
+
+      select.value = currentValue || '';
+      select.addEventListener('change', () => onChange(select.value));
+      return select;
     }
 
     function renderMemberManager() {
@@ -1169,6 +1265,36 @@ const state = {
           setMembersStatus('Färgen används på sidan. Spara CSV för att behålla den.');
         });
 
+        const levelSelect = createMemberSelect(
+          memberLevels,
+          member.memberLevel,
+          `Medlemsnivå för ${member.name}`,
+          value => {
+            member.memberLevel = value;
+            setMembersStatus('Medlemsnivån är ändrad. Spara CSV för att behålla den.');
+          }
+        );
+
+        const daySelect = createMemberSelect(
+          memberDays,
+          member.day,
+          `Dag för ${member.name}`,
+          value => {
+            member.day = value;
+            setMembersStatus('Dagen är ändrad. Spara CSV för att behålla den.');
+          }
+        );
+
+        const timeSelect = createMemberSelect(
+          memberTimes,
+          member.time,
+          `Tid för ${member.name}`,
+          value => {
+            member.time = value;
+            setMembersStatus('Tiden är ändrad. Spara CSV för att behålla den.');
+          }
+        );
+
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
         deleteButton.className = 'member-delete-btn';
@@ -1182,7 +1308,7 @@ const state = {
           setMembersStatus('Medlemmen är borttagen på sidan. Spara CSV för att behålla ändringen.');
         });
 
-        row.append(nameInput, colorSelect, deleteButton);
+        row.append(nameInput, colorSelect, levelSelect, daySelect, timeSelect, deleteButton);
         list.appendChild(row);
       });
 
@@ -1194,6 +1320,9 @@ const state = {
     function addMember() {
       const nameInput = document.getElementById('newMemberName');
       const colorSelect = document.getElementById('newMemberColor');
+      const memberLevelSelect = document.getElementById('newMemberLevel');
+      const daySelect = document.getElementById('newMemberDay');
+      const timeSelect = document.getElementById('newMemberTime');
       const name = nameInput.value.trim();
       if (!name) {
         setMembersStatus('Skriv ett namn för den nya medlemmen.', true);
@@ -1204,7 +1333,13 @@ const state = {
         return;
       }
 
-      state.members.push({ name, color: colorSelect.value });
+      state.members.push({
+        name,
+        color: colorSelect.value,
+        memberLevel: memberLevelSelect.value,
+        day: daySelect.value,
+        time: timeSelect.value
+      });
       nameInput.value = '';
       refreshConfiguredMembers();
       renderMemberManager();
