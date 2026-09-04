@@ -944,7 +944,7 @@
           <div class="overview-card members-card">
             <h3>Medlemmar</h3>
             <div class="members-help">
-              Medlemsuppgifter läses från <strong>Skroja_members.csv</strong>. Här kan du ändra namn, färg, medlemsnivå, veckodag och tid. Ändringar används direkt på sidan. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+              Medlemsuppgifter läses direkt från <strong>Skroja_members.csv</strong> i Azure-containern <strong>activities</strong>, bredvid aktivitetsfilerna. Här kan du ändra namn, färg, medlemsnivå, veckodag och tid. Klicka på <strong>Spara till Azure</strong> för att skriva ändringarna direkt till filen.
             </div>
             <div class="member-column-labels">
               <span>Namn</span><span>Färg</span><span>Medlemsnivå</span><span>Dag</span><span>Tid</span><span></span>
@@ -972,7 +972,7 @@
               <button id="addMemberBtn" type="button">Lägg till</button>
             </div>
             <div class="member-actions">
-              <button id="saveMembersCsvBtn" type="button">Spara CSV</button>
+              <button id="saveMembersCsvBtn" type="button">Spara till Azure</button>
               <span id="membersStatus" class="status-line"></span>
             </div>
           </div>
@@ -980,7 +980,7 @@
           <div class="overview-card activities-card">
             <h3>Aktiviteter</h3>
             <div class="activities-help">
-              Aktiviteterna läses från <strong>Skroja_activities.csv</strong>. Här kan du ändra knapptext, färg och vilka steg aktiviteten ska använda. Klicka på <strong>Spara CSV</strong> för att hämta den uppdaterade filen och ersätt sedan filen i GitHub-repot.
+              Aktiviteterna läses direkt från <strong>Skroja_activities.csv</strong> i Azure-containern <strong>activities</strong>, bredvid aktivitetsfilerna. Här kan du ändra knapptext, färg och vilka steg aktiviteten ska använda. Klicka på <strong>Spara till Azure</strong> för att skriva ändringarna direkt till filen.
             </div>
             <div class="activity-column-labels">
               <span>Aktivitet</span><span>Färg</span><span>Ingen bild</span><span>Kräver vikt</span><span>Sessionssumma</span><span></span>
@@ -1000,7 +1000,7 @@
               <button id="addActivityBtn" type="button">Lägg till</button>
             </div>
             <div class="activity-actions">
-              <button id="saveActivitiesCsvBtn" type="button">Spara CSV</button>
+              <button id="saveActivitiesCsvBtn" type="button">Spara till Azure</button>
               <span id="activitiesStatus" class="status-line"></span>
             </div>
           </div>
@@ -1173,9 +1173,26 @@ const state = {
       populateUserSelect();
     }
 
+    function getAzureBlobUrl(blobName) {
+      const query = azureConfig.sasToken.replace(/^\?/, '');
+      return `${getBlobBaseUrl()}/${encodeURIComponent(blobName)}?${query}`;
+    }
+
     async function loadMembers() {
-      const response = await fetch(`${membersCsvFile}?v=${Date.now()}`, { cache: 'no-store' });
-      if (!response.ok) throw new Error(`Kunde inte läsa ${membersCsvFile} (${response.status}).`);
+      const response = await fetch(`${getAzureBlobUrl(membersCsvFile)}&v=${Date.now()}`, { cache: 'no-store' });
+
+      if (response.status === 404) {
+        state.members = [];
+        refreshConfiguredMembers();
+        renderMemberManager();
+        setMembersStatus(`${membersCsvFile} finns inte ännu i Azure. Lägg till medlemmar här och klicka på Spara till Azure.`, true);
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Kunde inte läsa ${membersCsvFile} från Azure (${response.status}).`);
+      }
+
       const csvText = await response.text();
       state.members = parseMembersCsv(csvText);
       refreshConfiguredMembers();
@@ -1183,8 +1200,8 @@ const state = {
       const hasMissingDetails = state.members.some(member => !member.memberLevel || !member.day || !member.time);
       setMembersStatus(
         hasMissingDetails
-          ? `${state.members.length} medlemmar lästa. Fyll i medlemsnivå, dag och tid där uppgifter saknas.`
-          : `${state.members.length} medlemmar lästa från CSV.`
+          ? `${state.members.length} medlemmar lästa från Azure. Fyll i medlemsnivå, dag och tid där uppgifter saknas.`
+          : `${state.members.length} medlemmar lästa från Azure.`
       );
     }
 
@@ -1247,7 +1264,7 @@ const state = {
           member.name = newName;
           refreshConfiguredMembers();
           renderDashboard();
-          setMembersStatus('Ändringen används på sidan. Spara CSV för att behålla den.');
+          setMembersStatus('Ändringen används på sidan. Spara till Azure för att behålla den.');
         });
 
         const colorSelect = document.createElement('select');
@@ -1262,7 +1279,7 @@ const state = {
         colorSelect.addEventListener('change', () => {
           member.color = colorSelect.value;
           renderDashboard();
-          setMembersStatus('Färgen används på sidan. Spara CSV för att behålla den.');
+          setMembersStatus('Färgen används på sidan. Spara till Azure för att behålla den.');
         });
 
         const levelSelect = createMemberSelect(
@@ -1271,7 +1288,7 @@ const state = {
           `Medlemsnivå för ${member.name}`,
           value => {
             member.memberLevel = value;
-            setMembersStatus('Medlemsnivån är ändrad. Spara CSV för att behålla den.');
+            setMembersStatus('Medlemsnivån är ändrad. Spara till Azure för att behålla den.');
           }
         );
 
@@ -1281,7 +1298,7 @@ const state = {
           `Dag för ${member.name}`,
           value => {
             member.day = value;
-            setMembersStatus('Dagen är ändrad. Spara CSV för att behålla den.');
+            setMembersStatus('Dagen är ändrad. Spara till Azure för att behålla den.');
           }
         );
 
@@ -1291,7 +1308,7 @@ const state = {
           `Tid för ${member.name}`,
           value => {
             member.time = value;
-            setMembersStatus('Tiden är ändrad. Spara CSV för att behålla den.');
+            setMembersStatus('Tiden är ändrad. Spara till Azure för att behålla den.');
           }
         );
 
@@ -1305,7 +1322,7 @@ const state = {
           refreshConfiguredMembers();
           renderMemberManager();
           renderDashboard();
-          setMembersStatus('Medlemmen är borttagen på sidan. Spara CSV för att behålla ändringen.');
+          setMembersStatus('Medlemmen är borttagen på sidan. Spara till Azure för att behålla ändringen.');
         });
 
         row.append(nameInput, colorSelect, levelSelect, daySelect, timeSelect, deleteButton);
@@ -1344,20 +1361,48 @@ const state = {
       refreshConfiguredMembers();
       renderMemberManager();
       renderDashboard();
-      setMembersStatus('Medlemmen är tillagd på sidan. Spara CSV för att behålla ändringen.');
+      setMembersStatus('Medlemmen är tillagd på sidan. Spara till Azure för att behålla ändringen.');
     }
 
-    function downloadMembersCsv() {
-      const blob = new Blob([serializeMembersCsv()], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = membersCsvFile;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-      setMembersStatus(`Ny ${membersCsvFile} skapad. Ersätt filen i GitHub-repot.`);
+    async function saveMembersToAzure() {
+      const button = document.getElementById('saveMembersCsvBtn');
+      const originalText = button?.textContent || 'Spara till Azure';
+
+      if (button) {
+        button.disabled = true;
+        button.textContent = 'Sparar...';
+      }
+
+      setMembersStatus('Sparar medlemslistan till Azure...');
+
+      try {
+        const csvText = serializeMembersCsv();
+        const response = await fetch(getAzureBlobUrl(membersCsvFile), {
+          method: 'PUT',
+          headers: {
+            'x-ms-blob-type': 'BlockBlob',
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Cache-Control': 'no-cache'
+          },
+          body: csvText
+        });
+
+        if (!response.ok) {
+          throw new Error(`Kunde inte spara ${membersCsvFile} till Azure (${response.status}).`);
+        }
+
+        setMembersStatus(`${membersCsvFile} sparades till Azure.`);
+        await loadMembers();
+      } catch (error) {
+        console.error(error);
+        setMembersStatus(error.message || 'Kunde inte spara medlemslistan till Azure.', true);
+        alert(error.message || 'Kunde inte spara medlemslistan till Azure.');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
     }
 
     function normalizeYesNo(value) {
@@ -1413,11 +1458,22 @@ const state = {
     }
 
     async function loadConfiguredActivities() {
-      const response = await fetch(`${activitiesCsvFile}?v=${Date.now()}`, { cache: 'no-store' });
-      if (!response.ok) throw new Error(`Kunde inte läsa ${activitiesCsvFile} (${response.status}).`);
+      const response = await fetch(`${getAzureBlobUrl(activitiesCsvFile)}&v=${Date.now()}`, { cache: 'no-store' });
+
+      if (response.status === 404) {
+        state.activities = [];
+        renderActivityManager();
+        setActivitiesStatus(`${activitiesCsvFile} hittades inte i Azure. Ladda upp filen till containern activities.`, true);
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Kunde inte läsa ${activitiesCsvFile} från Azure (${response.status}).`);
+      }
+
       state.activities = parseActivitiesCsv(await response.text());
       renderActivityManager();
-      setActivitiesStatus(`${state.activities.length} aktiviteter lästa från CSV.`);
+      setActivitiesStatus(`${state.activities.length} aktiviteter lästa från Azure.`);
     }
 
     function setActivitiesStatus(message, isError = false) {
@@ -1468,7 +1524,7 @@ const state = {
             return;
           }
           item.activity = newName;
-          setActivitiesStatus('Ändringen används i aktivitetslistan. Spara CSV för att behålla den.');
+          setActivitiesStatus('Ändringen används i aktivitetslistan. Spara till Azure för att behålla den.');
         });
 
         const colorSelect = document.createElement('select');
@@ -1482,20 +1538,20 @@ const state = {
         colorSelect.value = item.color;
         colorSelect.addEventListener('change', () => {
           item.color = colorSelect.value;
-          setActivitiesStatus('Färgen är ändrad. Spara CSV för att behålla den.');
+          setActivitiesStatus('Färgen är ändrad. Spara till Azure för att behålla den.');
         });
 
         const noPhotoSelect = createYesNoSelect(item.noPhoto, `Ingen bild för ${item.activity}`, value => {
           item.noPhoto = value;
-          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+          setActivitiesStatus('Inställningen är ändrad. Spara till Azure för att behålla den.');
         });
         const requiresWeightSelect = createYesNoSelect(item.requiresWeight, `Kräver vikt för ${item.activity}`, value => {
           item.requiresWeight = value;
-          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+          setActivitiesStatus('Inställningen är ändrad. Spara till Azure för att behålla den.');
         });
         const countInSessionSelect = createYesNoSelect(item.countInSession, `Sessionssumma för ${item.activity}`, value => {
           item.countInSession = value;
-          setActivitiesStatus('Inställningen är ändrad. Spara CSV för att behålla den.');
+          setActivitiesStatus('Inställningen är ändrad. Spara till Azure för att behålla den.');
         });
 
         const deleteButton = document.createElement('button');
@@ -1506,7 +1562,7 @@ const state = {
           if (!confirm(`Ta bort aktiviteten "${item.activity}" från aktivitetslistan?`)) return;
           state.activities.splice(index, 1);
           renderActivityManager();
-          setActivitiesStatus('Aktiviteten är borttagen på sidan. Spara CSV för att behålla ändringen.');
+          setActivitiesStatus('Aktiviteten är borttagen på sidan. Spara till Azure för att behålla ändringen.');
         });
 
         row.append(nameInput, colorSelect, noPhotoSelect, requiresWeightSelect, countInSessionSelect, deleteButton);
@@ -1539,20 +1595,48 @@ const state = {
       });
       nameInput.value = '';
       renderActivityManager();
-      setActivitiesStatus('Aktiviteten är tillagd på sidan. Spara CSV för att behålla ändringen.');
+      setActivitiesStatus('Aktiviteten är tillagd på sidan. Spara till Azure för att behålla ändringen.');
     }
 
-    function downloadActivitiesCsv() {
-      const blob = new Blob([serializeActivitiesCsv()], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = activitiesCsvFile;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-      setActivitiesStatus(`Ny ${activitiesCsvFile} skapad. Ersätt filen i GitHub-repot.`);
+    async function saveActivitiesToAzure() {
+      const button = document.getElementById('saveActivitiesCsvBtn');
+      const originalText = button?.textContent || 'Spara till Azure';
+
+      if (button) {
+        button.disabled = true;
+        button.textContent = 'Sparar...';
+      }
+
+      setActivitiesStatus('Sparar aktivitetslistan till Azure...');
+
+      try {
+        const csvText = serializeActivitiesCsv();
+        const response = await fetch(getAzureBlobUrl(activitiesCsvFile), {
+          method: 'PUT',
+          headers: {
+            'x-ms-blob-type': 'BlockBlob',
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Cache-Control': 'no-cache'
+          },
+          body: csvText
+        });
+
+        if (!response.ok) {
+          throw new Error(`Kunde inte spara ${activitiesCsvFile} till Azure (${response.status}).`);
+        }
+
+        setActivitiesStatus(`${activitiesCsvFile} sparades till Azure.`);
+        await loadConfiguredActivities();
+      } catch (error) {
+        console.error(error);
+        setActivitiesStatus(error.message || 'Kunde inte spara aktivitetslistan till Azure.', true);
+        alert(error.message || 'Kunde inte spara aktivitetslistan till Azure.');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
     }
 
     function toDateInputValue(date) {
@@ -2466,13 +2550,13 @@ function getCheckinUsersByDay(records, user) {
       document.getElementById('newMemberName').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') addMember();
       });
-      document.getElementById('saveMembersCsvBtn').addEventListener('click', downloadMembersCsv);
+      document.getElementById('saveMembersCsvBtn').addEventListener('click', saveMembersToAzure);
 
       document.getElementById('addActivityBtn').addEventListener('click', addActivity);
       document.getElementById('newActivityName').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') addActivity();
       });
-      document.getElementById('saveActivitiesCsvBtn').addEventListener('click', downloadActivitiesCsv);
+      document.getElementById('saveActivitiesCsvBtn').addEventListener('click', saveActivitiesToAzure);
     }
 
     async function init() {
