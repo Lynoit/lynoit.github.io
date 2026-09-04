@@ -326,6 +326,10 @@ body{
   background:linear-gradient(180deg, #b9c57a, #aebb66);
 }
 
+.lane-yellow{
+  background:linear-gradient(180deg, #e1cb78, #ccb45d);
+}
+
 .card{
   min-height:68px;
   padding:8px 8px 6px;
@@ -2156,7 +2160,17 @@ async function loadWeeklySchedule() {
 
     const csvText = await response.text();
     const members = parseSemicolonCsv(csvText);
+
     renderWeeklySchedule(members);
+    updateDashboardUsersFromMembers(members);
+
+    /*
+     * Om medlemslistan har ändrats måste även Anslagstavlan byggas om,
+     * även om aktivitets-JSON-filerna är oförändrade.
+     */
+    if (hasLoadedOnce) {
+      await loadActivities(true);
+    }
   } catch (error) {
     console.error(error);
     weeklyScheduleGrid.innerHTML = '';
@@ -2296,12 +2310,58 @@ function configureDisplayForHardware() {
 
 configureDisplayForHardware();    
     
-    const users = [
-      { name: 'Lerverkstan', laneClass: 'lane-blue', featured: true },
-      { name: 'Camilla', laneClass: 'lane-green' },
-      { name: 'Christina', laneClass: 'lane-peach' },
-      { name: 'Maria', laneClass: 'lane-green' }
+    /*
+     * Anslagstavlans användare laddas dynamiskt från Skroja_members.csv.
+     * Lerverkstan finns som fallback tills CSV-filen har hunnit laddas.
+     */
+    let users = [
+      { name: 'Lerverkstan', laneClass: 'lane-blue', featured: true }
     ];
+
+    function laneClassFromMemberColor(color) {
+      const normalized = normalizeText(color).toLowerCase();
+
+      const colorMap = {
+        blue: 'lane-blue',
+        green: 'lane-green',
+        coral: 'lane-peach',
+        peach: 'lane-peach',
+        yellow: 'lane-yellow'
+      };
+
+      return colorMap[normalized] || 'lane-green';
+    }
+
+    function updateDashboardUsersFromMembers(members) {
+      const seen = new Set();
+      const dynamicUsers = [];
+
+      members.forEach(member => {
+        const name = normalizeText(member.namn);
+        if (!name) return;
+
+        const key = name.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        dynamicUsers.push({
+          name,
+          laneClass: laneClassFromMemberColor(member.color),
+          featured: key === 'lerverkstan'
+        });
+      });
+
+      /* Säkerställ att Lerverkstan alltid finns även om CSV-raden saknas. */
+      if (!seen.has('lerverkstan')) {
+        dynamicUsers.unshift({
+          name: 'Lerverkstan',
+          laneClass: 'lane-blue',
+          featured: true
+        });
+      }
+
+      users = dynamicUsers;
+    }
 
 const hiddenActivities = [
   'Checka in',
