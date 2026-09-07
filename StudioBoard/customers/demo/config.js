@@ -1,5 +1,5 @@
 window.APP_CONFIG = {
-  customerId: 'skroja',
+  customerId: 'demo',
   customerName: 'Demo',
   pageTitle: 'Demo Anslagstavla',
   fullscreenButtonText: 'Helskärm',
