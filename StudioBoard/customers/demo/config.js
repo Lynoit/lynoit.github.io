@@ -15,7 +15,7 @@ window.APP_CONFIG = {
   },
 
   branding: {
-    logo: 'customers/skroja/skroja-logo.png',
+    logo: 'customers/demo/demo-logo.png',
     logoAlt: 'Demo Lerverkstad',
     woodBackground: 'assets/wood.jpg',
     corkBackground: 'assets/cork.jpg',
