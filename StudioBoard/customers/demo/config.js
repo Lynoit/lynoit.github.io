@@ -1,7 +1,7 @@
 window.APP_CONFIG = {
   customerId: 'skroja',
-  customerName: 'Skröja',
-  pageTitle: 'Skröja Anslagstavla',
+  customerName: 'Demo',
+  pageTitle: 'Demo Anslagstavla',
   fullscreenButtonText: 'Helskärm',
 
   modules: {
@@ -16,7 +16,7 @@ window.APP_CONFIG = {
 
   branding: {
     logo: 'customers/skroja/skroja-logo.png',
-    logoAlt: 'Skröja Lerverkstad',
+    logoAlt: 'Demo Lerverkstad',
     woodBackground: 'assets/wood.jpg',
     corkBackground: 'assets/cork.jpg',
     footerLogo: 'assets/Lynoit_logo_plate_rusty_2.png',
@@ -31,8 +31,8 @@ window.APP_CONFIG = {
   },
 
   data: {
-    membersFile: 'Skroja_members.csv',
-    activitiesFile: 'Skroja_activities.csv',
+    membersFile: 'members.csv',
+    activitiesFile: 'activities.csv',
     calendarActivityName: 'Kalenderevent',
     hiddenActivities: [
       'Checka in',
@@ -52,19 +52,19 @@ window.APP_CONFIG = {
   weeklySchedule: {
     title: 'Veckoschema',
     blockedDays: [
-      { day: 'Onsdag', label: 'Skröja', offsetY: -22, rotationDeg: -2.2 }
+      { day: 'Onsdag', label: 'Demo', offsetY: -22, rotationDeg: -2.2 }
     ]
   },
 
   calendar: {
-    title: 'Detta händer på Skröja:'
+    title: 'Detta händer på Demo:'
   },
 
   phoneNote: {
     title: 'Telefonnummer:',
     lines: [
-      { label: 'Camilla', value: '0709-719091' },
-      { label: 'Christina', value: '0723-201585' }
+      { label: 'Ånke', value: '0709-719091' },
+      { label: 'Kålle', value: '0723-201585' }
     ]
   },
 
