@@ -31,76 +31,188 @@ function setModuleVisible(selector, visible) {
 }
 
 function applyCustomerConfig() {
-  document.title = config.pageTitle || `${config.customerName || 'Dashboard'} Anslagstavla`;
+  document.title =
+    config.pageTitle ||
+    `${config.customerName || 'Dashboard'} Anslagstavla`;
 
   document.documentElement.classList.toggle(
     'hide-colored-bands',
     !Boolean(activityConfig.showColoredBands)
   );
 
+  // Resolve all configured asset paths relative to index.html,
+  // not core/styles.css.
+  //
+  // This is important on GitHub Pages because CSS url() paths
+  // otherwise resolve relative to the stylesheet directory.
+  const resolveAssetUrl = (path) =>
+    path ? new URL(path, document.baseURI).href : '';
+
+  // Wood background
   if (brandingConfig.woodBackground) {
-    document.documentElement.style.setProperty('--wood-image', `url("${brandingConfig.woodBackground}")`);
+    const woodUrl =
+      resolveAssetUrl(brandingConfig.woodBackground);
+
+    document.documentElement.style.setProperty(
+      '--wood-image',
+      `url("${woodUrl}")`
+    );
   }
+
+  // Cork background
   if (brandingConfig.corkBackground) {
-    document.documentElement.style.setProperty('--cork-image', `url("${brandingConfig.corkBackground}")`);
+    const corkUrl =
+      resolveAssetUrl(brandingConfig.corkBackground);
+
+    document.documentElement.style.setProperty(
+      '--cork-image',
+      `url("${corkUrl}")`
+    );
   }
 
-  const logo = document.getElementById('customer-logo');
+  // Customer logo
+  const logo =
+    document.getElementById('customer-logo');
+
   if (logo) {
-    logo.src = brandingConfig.logo || '';
-    logo.alt = brandingConfig.logoAlt || config.customerName || '';
+    logo.src =
+      resolveAssetUrl(brandingConfig.logo);
+
+    logo.alt =
+      brandingConfig.logoAlt ||
+      config.customerName ||
+      '';
   }
 
-  const footerLogo = document.getElementById('footer-logo');
+  // Footer logo
+  const footerLogo =
+    document.getElementById('footer-logo');
+
   if (footerLogo) {
-    footerLogo.src = brandingConfig.footerLogo || '';
-    footerLogo.alt = brandingConfig.footerAlt || '';
+    footerLogo.src =
+      resolveAssetUrl(brandingConfig.footerLogo);
+
+    footerLogo.alt =
+      brandingConfig.footerAlt || '';
   }
 
-  const dashboardHeading = document.getElementById('dashboard-heading');
-  if (dashboardHeading) dashboardHeading.textContent = activityConfig.title || 'Anslagstavla';
+  const dashboardHeading =
+    document.getElementById('dashboard-heading');
 
-  const weeklyHeading = document.getElementById('weekly-schedule-heading');
-  if (weeklyHeading) weeklyHeading.textContent = weeklyConfig.title || 'Veckoschema';
+  if (dashboardHeading) {
+    dashboardHeading.textContent =
+      activityConfig.title || 'Anslagstavla';
+  }
 
-  const calendarHeading = document.getElementById('calendar-heading');
-  if (calendarHeading) calendarHeading.textContent = calendarConfig.title || 'Kalender';
+  const weeklyHeading =
+    document.getElementById('weekly-schedule-heading');
 
-  const qrTitle = document.getElementById('qr-title');
-  if (qrTitle) qrTitle.textContent = qrConfig.title || 'Scanna för att starta';
+  if (weeklyHeading) {
+    weeklyHeading.textContent =
+      weeklyConfig.title || 'Veckoschema';
+  }
 
-  const fullscreenButton = document.getElementById('fullscreen-btn');
-  if (fullscreenButton) fullscreenButton.textContent = config.fullscreenButtonText || 'Helskärm';
+  const calendarHeading =
+    document.getElementById('calendar-heading');
 
-  const phoneTitle = document.getElementById('phone-note-title');
-  if (phoneTitle) phoneTitle.textContent = phoneConfig.title || '';
-  const phoneRows = document.getElementById('phone-note-rows');
+  if (calendarHeading) {
+    calendarHeading.textContent =
+      calendarConfig.title || 'Kalender';
+  }
+
+  const qrTitle =
+    document.getElementById('qr-title');
+
+  if (qrTitle) {
+    qrTitle.textContent =
+      qrConfig.title || 'Scanna för att starta';
+  }
+
+  const fullscreenButton =
+    document.getElementById('fullscreen-btn');
+
+  if (fullscreenButton) {
+    fullscreenButton.textContent =
+      config.fullscreenButtonText || 'Helskärm';
+  }
+
+  const phoneTitle =
+    document.getElementById('phone-note-title');
+
+  if (phoneTitle) {
+    phoneTitle.textContent =
+      phoneConfig.title || '';
+  }
+
+  const phoneRows =
+    document.getElementById('phone-note-rows');
+
   if (phoneRows) {
     phoneRows.innerHTML = '';
+
     (phoneConfig.lines || []).forEach(line => {
-      const row = document.createElement('div');
-      row.className = 'kiosk-contact-row';
-      const left = document.createElement('span');
-      const right = document.createElement('span');
+      const row =
+        document.createElement('div');
+
+      row.className =
+        'kiosk-contact-row';
+
+      const left =
+        document.createElement('span');
+
+      const right =
+        document.createElement('span');
+
       if (typeof line === 'string') {
         left.textContent = line;
         right.textContent = '';
       } else {
-        left.textContent = line.label || '';
-        right.textContent = line.value || '';
+        left.textContent =
+          line.label || '';
+
+        right.textContent =
+          line.value || '';
       }
+
       row.append(left, right);
       phoneRows.appendChild(row);
     });
   }
 
-  setModuleVisible('.dashboard-section', moduleEnabled('activities'));
-  setModuleVisible('.weekly-schedule-section', moduleEnabled('weeklySchedule'));
-  setModuleVisible('.calendar-section', moduleEnabled('calendar'));
-  setModuleVisible('.kiosk-contact-note', moduleEnabled('phoneNote'));
-  setModuleVisible('.qr-note', moduleEnabled('qrCode'));
-  setModuleVisible('.kiosk-clock', moduleEnabled('clock'));
-  setModuleVisible('.footer', moduleEnabled('footer'));
+  setModuleVisible(
+    '.dashboard-section',
+    moduleEnabled('activities')
+  );
+
+  setModuleVisible(
+    '.weekly-schedule-section',
+    moduleEnabled('weeklySchedule')
+  );
+
+  setModuleVisible(
+    '.calendar-section',
+    moduleEnabled('calendar')
+  );
+
+  setModuleVisible(
+    '.kiosk-contact-note',
+    moduleEnabled('phoneNote')
+  );
+
+  setModuleVisible(
+    '.qr-note',
+    moduleEnabled('qrCode')
+  );
+
+  setModuleVisible(
+    '.kiosk-clock',
+    moduleEnabled('clock')
+  );
+
+  setModuleVisible(
+    '.footer',
+    moduleEnabled('footer')
+  );
 }
 
 applyCustomerConfig();
