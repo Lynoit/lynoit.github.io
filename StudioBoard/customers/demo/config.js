@@ -24,9 +24,10 @@ window.APP_CONFIG = {
   },
 
   azure: {
-    accountName: 'skroja',
-    containerName: 'activities',
-    sasToken: 'sv=2024-11-04&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2028-01-01T18:27:36Z&st=2026-04-04T09:12:36Z&spr=https&sig=rjDd4VzH1nXMrw%2B6jUMUl3xALkh%2BD7D%2FJkgrcJtr4Zc%3D'
+    accountName: 'studioboard',
+    containerName: 'studioboard',
+    customerPath: 'demo',
+    sasToken: 'sp=rcwdl&st=2026-09-07T14:30:45Z&se=2029-05-31T22:45:45Z&spr=https&sv=2026-02-06&sr=c&sig=FhQ5b0kRIqxE19ynQewfXhIUgq2CXrVOZ3PRu%2Bd3zDQ%3D'
   },
 
   data: {
