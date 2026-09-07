@@ -567,16 +567,18 @@ function updateSummary(){
   document.getElementById('activity-back').addEventListener('click', () => showStep('user'));
 
   document.getElementById('weight-continue').addEventListener('click', () => {
+    // User enters ceramic weight in grams. Convert immediately to kilograms
+    // so all stored data and all downstream calculations keep using weightKg.
     const normalized = ceramicWeightInput.value.trim().replace(',', '.');
-    const weight = Number(normalized);
+    const weightGrams = Number(normalized);
 
-    if (!Number.isFinite(weight) || weight <= 0) {
-      alert('Ange en giltig vikt som är större än 0 kg.');
+    if (!Number.isFinite(weightGrams) || weightGrams <= 0) {
+      alert('Ange en giltig vikt i gram som är större än 0.');
       ceramicWeightInput.focus();
       return;
     }
 
-    state.weightKg = Math.round(weight * 100) / 100;
+    state.weightKg = Math.round(weightGrams) / 1000;
     goToNextStepAfterActivity();
   });
 
