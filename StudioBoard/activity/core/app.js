@@ -122,11 +122,49 @@ function canMemberSeeActivity(memberName, activityName){
     return state.activityConfig || getActivityConfig(state.activity);
   }
 
-  function getAzureBlobUrl(blobName){
-    const { accountName, containerName, sasToken } = azureConfig;
-    const query = sasToken.replace(/^\?/, '');
-    return `https://${accountName}.blob.core.windows.net/${containerName}/${encodeURIComponent(blobName)}?${query}&v=${Date.now()}`;
+function getCustomerPath() {
+  return String(azureConfig.customerPath || '')
+    .trim()
+    .replace(/^\/+|\/+$/g, '');
+}
+
+function getContainerBaseUrl() {
+  return `https://${azureConfig.accountName}.blob.core.windows.net/${azureConfig.containerName}`;
+}
+
+function getBlobBaseUrl() {
+  const customerPath = getCustomerPath();
+
+  if (!customerPath) {
+    return getContainerBaseUrl();
   }
+
+  const encodedPath = customerPath
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/');
+
+  return `${getContainerBaseUrl()}/${encodedPath}`;
+}
+
+function encodeBlobPath(path) {
+  return String(path || '')
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/');
+}
+
+function getAzureBlobUrl(blobName) {
+  const query = azureConfig.sasToken.replace(/^\?/, '');
+
+  return (
+    `${getBlobBaseUrl()}/` +
+    `${encodeBlobPath(blobName)}` +
+    `?${query}&v=${Date.now()}`
+  );
+}
 
   const state = { member:'', activity:'', activityConfig:null, weightKg:null, eventDate:'', eventDescription:'', photoFile:null, photoDataUrl:'', timestampIso:'' };
   const SESSION_TIMEOUT_MS = Number(activityAppConfig.sessionTimeoutMs || 60 * 60 * 1000);
@@ -490,7 +528,7 @@ function updateSummary(){
     }
 
     const query = sasToken.replace(/^\?/, '');
-    const baseUrl = `https://${accountName}.blob.core.windows.net/${containerName}`;
+    const baseUrl = getBlobBaseUrl();
     const baseName = timestampBase();
     const jsonName = `${baseName}.json`;
     const jpgName = `${baseName}.jpg`;
@@ -508,15 +546,18 @@ function updateSummary(){
       source: activityAppConfig.sourceName || 'ActivityApp'
     };
 
-    const jsonResponse = await fetch(`${baseUrl}/${encodeURIComponent(jsonName)}?${query}`, {
-      method: 'PUT',
-      headers: {
-        'x-ms-blob-type': 'BlockBlob',
-        'x-ms-version': '2023-11-03',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload, null, 2)
-    });
+const jsonResponse = await fetch(
+  `${baseUrl}/${encodeBlobPath(jsonName)}?${query}`,
+  {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'x-ms-version': '2023-11-03',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload, null, 2)
+  }
+);
 
     if (!jsonResponse.ok) {
       const text = await jsonResponse.text().catch(() => '');
@@ -524,15 +565,18 @@ function updateSummary(){
     }
 
     if (state.photoFile) {
-      const imageResponse = await fetch(`${baseUrl}/${encodeURIComponent(jpgName)}?${query}`, {
-        method: 'PUT',
-        headers: {
-          'x-ms-blob-type': 'BlockBlob',
-          'x-ms-version': '2023-11-03',
-          'Content-Type': state.photoFile.type || 'image/jpeg'
-        },
-        body: state.photoFile
-      });
+const imageResponse = await fetch(
+  `${baseUrl}/${encodeBlobPath(jpgName)}?${query}`,
+  {
+    method: 'PUT',
+    headers: {
+      'x-ms-blob-type': 'BlockBlob',
+      'x-ms-version': '2023-11-03',
+      'Content-Type': state.photoFile.type || 'image/jpeg'
+    },
+    body: state.photoFile
+  }
+);
 
       if (!imageResponse.ok) {
         const text = await imageResponse.text().catch(() => '');
