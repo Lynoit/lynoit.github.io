@@ -83,26 +83,23 @@ window.APP_CONFIG = {
     reloadTime: '06:00'
   },
 
-  activityApp: {
-    pageTitle: 'Skroja Aktivitet',
-    noteTitle: 'Skroja Aktivitet',
-    sourceName: 'SkrojaAktivitet',
-    fallbackColor: 'blue',
-    sessionTimeoutMs: 3600000,
-    storageKeys: {
-      sessionTotals: 'skrojaClaySessionTotals',
-      lastActivity: 'skrojaClayLastActivity',
-      lastMember: 'skrojaLastMember'
-    },
-    restrictedActivities: {
-      kalenderevent: ['sophie', 'thomas']
-    },
-    modules: {
-      customActivity: true,
-      photos: true,
-      sessionTotal: true
-    }
+activityApp: {
+  pageTitle: 'Demo Aktivitet',
+  noteTitle: 'Demo Aktivitet',
+  sourceName: 'StudioBoardActivity',
+  fallbackColor: 'blue',
+  sessionTimeoutMs: 3600000,
+
+  restrictedActivities: {
+    kalenderevent: ['sophie', 'thomas']
   },
+
+  modules: {
+    customActivity: true,
+    photos: true,
+    sessionTotal: true
+  }
+},
 
   adminApp: {
     pageTitle: 'Skroja Admin',
