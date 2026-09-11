@@ -102,8 +102,8 @@ activityApp: {
 },
 
   adminApp: {
-    pageTitle: 'Skroja Admin',
-    title: 'Skroja Admin',
+    pageTitle: 'Demo Admin',
+    title: 'Demo Admin',
     pollIntervalMs: 5000,
     excludedUsers: ['Lerverkstan'],
     hiddenActivities: [],
