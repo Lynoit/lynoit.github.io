@@ -95,7 +95,7 @@ window.APP_CONFIG = {
       lastMember: 'skrojaLastMember'
     },
     restrictedActivities: {
-      kalenderevent: ['lerverkstan', 'camilla', 'cristina']
+      kalenderevent: ['sophie', 'thomas']
     },
     modules: {
       customActivity: true,
